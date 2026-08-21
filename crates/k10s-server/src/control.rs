@@ -11,13 +11,14 @@ use k10s_protocol::{
     ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResumeStatus,
     Retryability, ServerFrame, ServerKind, SessionId, Welcome, decode_client_frame,
 };
-use tokio::sync::{OwnedSemaphorePermit, mpsc};
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::auth::authenticate;
 use crate::config::ServerConfig;
-use crate::outbound::{Outbound, Priority};
+use crate::outbound::{EnqueueError, Priority, Scheduler};
 
 pub(crate) async fn serve_socket(
     socket: WebSocket,
@@ -25,24 +26,38 @@ pub(crate) async fn serve_socket(
     kernel: Arc<BackendKernel>,
     unauthenticated: OwnedSemaphorePermit,
     authenticated_slots: Arc<tokio::sync::Semaphore>,
+    shutdown: CancellationToken,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel(config.outbound_queue_capacity.max(1));
+    let outbound = Scheduler::new(
+        config.outbound_queue_capacity,
+        (config.outbound_queue_capacity / 4).max(1),
+    );
+    let writer_outbound = outbound.clone();
     let child = CancellationToken::new();
     let writer_cancel = child.clone();
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = writer_cancel.cancelled() => break,
-                message = rx.recv() => match message {
-                    Some(message) => if sink.send(message).await.is_err() { break; },
+                item = writer_outbound.recv() => match item {
+                    Some(item) => {
+                        if let Some(gap) = item.gap {
+                            let frame = ServerFrame { kind: ServerKind::ResyncRequired, request_id: None, subscription_id: None, sequence: Some(gap.actual), payload: serde_json::json!({"reason": format!("revision gap: expected {}, received {}", gap.expected, gap.actual)}) };
+                            let text = serde_json::to_string(&frame).expect("resync frame serializes");
+                            if sink.send(Message::Text(text.into())).await.is_err() { break; }
+                        }
+                        if sink.send(item.message).await.is_err() { break; }
+                    },
                     None => break,
                 }
             }
         }
     });
-    let outbound = Outbound::new(tx);
-    let first = tokio::time::timeout(config.hello_timeout, stream.next()).await;
+    let first = tokio::select! {
+        () = shutdown.cancelled() => return close_and_join(outbound, child, writer, "server shutdown").await,
+        first = tokio::time::timeout(config.hello_timeout, stream.next()) => first,
+    };
     let hello = match first {
         Ok(Some(Ok(Message::Text(text)))) => match decode_client_frame(&text) {
             Ok(frame) if frame.kind == ClientKind::Hello => match frame.decode_payload() {
@@ -65,6 +80,11 @@ pub(crate) async fn serve_socket(
     };
     drop(unauthenticated);
     let session_id = SessionId::new(format!("session-{}", kernel.server_instance_id()));
+    tracing::info!(
+        session_id = %session_id.as_str(),
+        queue_pressure = outbound.len(),
+        "control session authenticated"
+    );
     let welcome = Welcome {
         protocol: negotiated.protocol,
         capabilities: negotiated.capabilities,
@@ -89,7 +109,21 @@ pub(crate) async fn serve_socket(
     }
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
-    while let Some(Ok(message)) = stream.next().await {
+    let mut request_tasks = JoinSet::new();
+    loop {
+        let next = tokio::select! {
+            () = shutdown.cancelled() => {
+                let notice = ServerFrame { kind: ServerKind::ShutdownNotice, request_id: None, subscription_id: None, sequence: None, payload: serde_json::json!({"reason":"server shutdown"}) };
+                if send_frame(&outbound, notice, Priority::P0).is_err() { overload_close(&outbound); }
+                break;
+            }
+            next = stream.next() => next,
+            completed = request_tasks.join_next(), if !request_tasks.is_empty() => {
+                let _ = completed;
+                continue;
+            }
+        };
+        let Some(Ok(message)) = next else { break };
         let Message::Text(text) = message else {
             if matches!(message, Message::Close(_)) {
                 break;
@@ -100,7 +134,10 @@ pub(crate) async fn serve_socket(
         let frame = match decode_client_frame(&text) {
             Ok(frame) => frame,
             Err(error) => {
-                let _ = send_error(&outbound, None, error.code, error.message);
+                if send_error(&outbound, None, error.code, error.message).is_err() {
+                    overload_close(&outbound);
+                    break;
+                }
                 continue;
             }
         };
@@ -110,10 +147,21 @@ pub(crate) async fn serve_socket(
                     continue;
                 };
                 let request_cancel = child.child_token();
-                requests
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(request_id.clone(), request_cancel.clone());
+                {
+                    let mut active = requests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if active.len() >= config.outbound_queue_capacity.max(1) {
+                        drop(active);
+                        overload_close(&outbound);
+                        break;
+                    }
+                    if let Some(previous) =
+                        active.insert(request_id.clone(), request_cancel.clone())
+                    {
+                        previous.cancel();
+                    }
+                }
                 let task_kernel = kernel.clone();
                 let task_outbound = outbound.clone();
                 let task_requests = requests.clone();
@@ -125,7 +173,7 @@ pub(crate) async fn serve_socket(
                     correlation_id = %request_id.as_str(),
                     queue_capacity,
                 );
-                tokio::spawn(
+                request_tasks.spawn(
                     async move {
                         let query = async {
                             if request.request_kind == "bootstrap" {
@@ -154,13 +202,10 @@ pub(crate) async fn serve_socket(
                             }
                         };
                         if sent.is_err() {
-                            let _ = task_outbound.send(
-                                Message::Close(Some(CloseFrame {
-                                    code: 1013,
-                                    reason: "outbound overload".into(),
-                                })),
-                                Priority::P0,
-                            );
+                            task_outbound.overload_close(Message::Close(Some(CloseFrame {
+                                code: 1013,
+                                reason: "outbound overload".into(),
+                            })));
                         }
                         task_requests
                             .lock()
@@ -197,21 +242,31 @@ pub(crate) async fn serve_socket(
                                 payload: serde_json::json!({}),
                             };
                             if send_frame(&outbound, subscribed, Priority::P1).is_err() {
+                                overload_close(&outbound);
                                 break;
                             }
                         }
                         Err(error) => {
-                            let _ =
-                                send_error(&outbound, None, ErrorCode::Internal, error.to_string());
+                            if send_error(&outbound, None, ErrorCode::Internal, error.to_string())
+                                .is_err()
+                            {
+                                overload_close(&outbound);
+                                break;
+                            }
                         }
                     }
                 } else {
-                    let _ = send_error(
+                    if send_error(
                         &outbound,
                         None,
                         ErrorCode::UnsupportedMessage,
                         "unsupported subscription".into(),
-                    );
+                    )
+                    .is_err()
+                    {
+                        overload_close(&outbound);
+                        break;
+                    }
                 }
             }
             Ok(ClientPayload::Ping(_)) => {
@@ -223,19 +278,28 @@ pub(crate) async fn serve_socket(
                     payload: serde_json::json!({}),
                 };
                 if send_frame(&outbound, pong, Priority::P1).is_err() {
+                    overload_close(&outbound);
                     break;
                 }
             }
             Ok(_) => {
-                let _ = send_error(
+                if send_error(
                     &outbound,
                     frame.request_id,
                     ErrorCode::UnsupportedMessage,
                     "unsupported behavior".into(),
-                );
+                )
+                .is_err()
+                {
+                    overload_close(&outbound);
+                    break;
+                }
             }
             Err(error) => {
-                let _ = send_error(&outbound, frame.request_id, error.code, error.message);
+                if send_error(&outbound, frame.request_id, error.code, error.message).is_err() {
+                    overload_close(&outbound);
+                    break;
+                }
             }
         }
     }
@@ -246,27 +310,39 @@ pub(crate) async fn serve_socket(
     {
         token.cancel();
     }
+    while request_tasks.join_next().await.is_some() {}
     drop(authenticated);
-    child.cancel();
-    drop(outbound);
+    outbound.close();
     let _ = writer.await;
+    child.cancel();
+}
+
+fn overload_close(outbound: &Scheduler) {
+    tracing::warn!(
+        queue_pressure = outbound.len(),
+        "closing overloaded control session"
+    );
+    outbound.overload_close(Message::Close(Some(CloseFrame {
+        code: 1013,
+        reason: "outbound overload".into(),
+    })));
 }
 
 fn send_frame(
-    outbound: &Outbound,
+    outbound: &Scheduler,
     frame: ServerFrame,
     priority: Priority,
-) -> Result<(), &'static str> {
+) -> Result<(), EnqueueError> {
     let text = serde_json::to_string(&frame).expect("server frame serializes");
-    outbound.send(Message::Text(text.into()), priority)
+    outbound.enqueue(priority, Message::Text(text.into()))
 }
 
 fn send_error(
-    outbound: &Outbound,
+    outbound: &Scheduler,
     request_id: Option<RequestId>,
     code: ErrorCode,
     message: String,
-) -> Result<(), &'static str> {
+) -> Result<(), EnqueueError> {
     let correlation = request_id.as_ref().map_or("session", RequestId::as_str);
     let error = ErrorFrame::new(
         code,
@@ -293,10 +369,10 @@ fn send_error(
 }
 
 fn send_backend_error(
-    outbound: &Outbound,
+    outbound: &Scheduler,
     request_id: RequestId,
     error: BackendError,
-) -> Result<(), &'static str> {
+) -> Result<(), EnqueueError> {
     let code = match error {
         BackendError::Timeout => ErrorCode::Timeout,
         BackendError::Cancelled => ErrorCode::Cancelled,
@@ -307,19 +383,19 @@ fn send_backend_error(
 }
 
 async fn close_and_join(
-    outbound: Outbound,
+    outbound: Scheduler,
     child: CancellationToken,
     writer: tokio::task::JoinHandle<()>,
     reason: &'static str,
 ) {
-    let _ = outbound.send(
+    let _ = outbound.enqueue(
+        Priority::P0,
         Message::Close(Some(CloseFrame {
             code: 1008,
             reason: reason.into(),
         })),
-        Priority::P0,
     );
-    drop(outbound);
+    outbound.close();
     let _ = writer.await;
     child.cancel();
 }

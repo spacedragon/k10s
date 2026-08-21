@@ -22,6 +22,7 @@ struct AppState {
     kernel: Arc<BackendKernel>,
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
+    shutdown: CancellationToken,
 }
 
 /// Handle for an embeddable loopback server.
@@ -71,6 +72,7 @@ pub async fn run(
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
         config: Arc::new(config),
         kernel: Arc::new(kernel),
+        shutdown: cancel.clone(),
     };
     let app = Router::new()
         .route(k10s_protocol::CONTROL_PATH, get(control_upgrade))
@@ -98,8 +100,9 @@ async fn control_upgrade(
     let config = state.config.clone();
     let kernel = state.kernel.clone();
     let auth = state.authenticated.clone();
+    let shutdown = state.shutdown.clone();
     Ok(ws
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
-        .on_upgrade(move |socket| serve_socket(socket, config, kernel, permit, auth)))
+        .on_upgrade(move |socket| serve_socket(socket, config, kernel, permit, auth, shutdown)))
 }

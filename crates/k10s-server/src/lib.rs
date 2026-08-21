@@ -8,4 +8,4 @@ mod outbound;
 
 pub use config::ServerConfig;
 pub use lifecycle::{ServerHandle, run, spawn_loopback};
-pub use outbound::Priority;
+pub use outbound::{EnqueueError, Priority, RevisionGap, ScheduledItem, Scheduler};
