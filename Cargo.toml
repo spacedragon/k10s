@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/k10s-protocol",
+    "crates/k10s-backend",
+    "crates/k10s-server",
+    "crates/k10s-ui",
+    "apps/k10s-desktop",
+    "apps/k10s-web",
+    "apps/k10s-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "deny"
+unused_must_use = "deny"

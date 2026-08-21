@@ -1,0 +1,9 @@
+[package]
+name = "k10s-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
