@@ -1,6 +1,6 @@
 # k10s Runtime Architecture and Technology Stack Design
 
-Status: Review-ready; architecture decisions approved on 2026-08-21, awaiting final document approval
+Status: Approved on 2026-08-21
 
 Date: 2026-08-21
 
