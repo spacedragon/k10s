@@ -22,6 +22,23 @@ pub struct ServerInfo {
     pub version: String,
 }
 
+/// Safe context metadata exposed to the UI.
+///
+/// Never exposes credentials or raw kubeconfig.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Context {
+    /// Context name.
+    pub name: String,
+    /// Cluster name.
+    pub cluster: String,
+    /// Default namespace, if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Whether this is the current context.
+    pub is_current: bool,
+}
+
 /// The bootstrap response payload returned in a `response` frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +50,9 @@ pub struct BootstrapResponse {
     /// Server identification, added in protocol v1.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerInfo>,
+    /// Safe context metadata, added in protocol v1.1.
+    #[serde(default)]
+    pub contexts: Vec<Context>,
 }
 
 impl BootstrapResponse {
@@ -46,6 +66,20 @@ impl BootstrapResponse {
                 instance_id: "instance-1".into(),
                 version: "0.1.0".into(),
             }),
+            contexts: vec![
+                Context {
+                    name: "dev-local".into(),
+                    cluster: "dev-cluster".into(),
+                    namespace: Some("default".into()),
+                    is_current: true,
+                },
+                Context {
+                    name: "prod-readonly".into(),
+                    cluster: "prod-cluster".into(),
+                    namespace: Some("default".into()),
+                    is_current: false,
+                },
+            ],
         }
     }
 }

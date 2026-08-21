@@ -13,6 +13,20 @@
     "server": {
       "instanceId": "instance-1",
       "version": "0.1.0"
-    }
+    },
+    "contexts": [
+      {
+        "name": "dev-local",
+        "cluster": "dev-cluster",
+        "namespace": "default",
+        "isCurrent": true
+      },
+      {
+        "name": "prod-readonly",
+        "cluster": "prod-cluster",
+        "namespace": "default",
+        "isCurrent": false
+      }
+    ]
   }
 }

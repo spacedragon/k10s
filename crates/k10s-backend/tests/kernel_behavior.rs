@@ -111,6 +111,41 @@ async fn bootstrap_wire_payload_decodes_through_protocol_validator() {
 }
 
 #[tokio::test]
+async fn bootstrap_wire_payload_carries_contexts_through_server_frame_round_trip() {
+    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let result = kernel.query(Query::Bootstrap).await.unwrap();
+
+    // Build the server response frame exactly as the server would.
+    let wire = result.wire_payload();
+    let frame = ServerFrame::response(RequestId::from("req-1"), wire);
+
+    // Serialize the frame to JSON and decode it back through the protocol
+    // validator, proving both contexts survive the wire round trip.
+    let frame_json = serde_json::to_value(&frame).unwrap();
+    let decoded = decode_server_frame(frame_json).unwrap();
+    assert_eq!(decoded.kind, ServerKind::Response);
+    let bootstrap = validate_bootstrap_response(&decoded.payload).unwrap();
+
+    assert_eq!(
+        bootstrap.contexts,
+        vec![
+            k10s_protocol::Context {
+                name: "dev-local".into(),
+                cluster: "dev-cluster".into(),
+                namespace: Some("default".into()),
+                is_current: true,
+            },
+            k10s_protocol::Context {
+                name: "prod-readonly".into(),
+                cluster: "prod-cluster".into(),
+                namespace: Some("default".into()),
+                is_current: false,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn distinct_kernels_get_distinct_instance_ids() {
     let a = BackendKernel::new(FakeKubernetes::standard());
     let b = BackendKernel::new(FakeKubernetes::standard());

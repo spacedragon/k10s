@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use k10s_protocol::{BootstrapResponse, ProtocolVersion, ServerInfo};
+use k10s_protocol::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
 use uuid::Uuid;
 
 use crate::port::{
@@ -176,6 +176,7 @@ impl BootstrapResult {
                     instance_id: server_instance_id,
                     version: "0.1.0".into(),
                 }),
+                contexts: Vec::new(),
             },
             contexts: info.contexts,
         }
@@ -188,10 +189,21 @@ impl BootstrapResult {
     }
 
     /// Return the wire payload: the exact `BootstrapResponse` the server
-    /// sends in a `response` frame.
+    /// sends in a `response` frame, including safe context metadata.
     #[must_use]
     pub fn wire_payload(&self) -> BootstrapResponse {
-        self.protocol.clone()
+        let mut payload = self.protocol.clone();
+        payload.contexts = self
+            .contexts
+            .iter()
+            .map(|c| Context {
+                name: c.name.clone(),
+                cluster: c.cluster.clone(),
+                namespace: c.namespace.clone(),
+                is_current: c.is_current,
+            })
+            .collect();
+        payload
     }
 
     /// Serialize the wire payload to a JSON string.
@@ -199,6 +211,6 @@ impl BootstrapResult {
     /// Never includes credentials or tokens.
     #[must_use]
     pub fn serialized(&self) -> String {
-        serde_json::to_string(&self.protocol).expect("BootstrapResponse must serialize")
+        serde_json::to_string(&self.wire_payload()).expect("BootstrapResponse must serialize")
     }
 }
