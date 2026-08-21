@@ -24,7 +24,7 @@
 
 **Files:** modify `k10s-server/src/{outbound,config,control,logs,exec}.rs`, modify UI client inbox, create `crates/k10s-server/tests/backpressure.rs`, create `crates/k10s-server/tests/budget_config.rs`.
 
-- [ ] Write failing tests for P0/P1/P2 ordering, same-resource P2 coalescing, non-droppable terminal operation events, snapshot chunk limits, separate control frame/assembled-message limits including fragmented oversize input, an undrained ewebsock callback burst with no hidden receiver queue, log/exec frame limits, full client inbox, subscription/session limits, and slow-client close reason.
+- [ ] Write failing tests for P0/P1/P2 ordering, same-resource P2 coalescing, non-droppable terminal operation events, snapshot chunk limits, separate frame/assembled-message limits on control, Logs, and Exec routes—including fragmented oversized `Hello`, Exec input, and resize/control messages—an undrained ewebsock callback burst with no hidden receiver queue, full client inbox, subscription/session limits, and slow-client close reason.
 - [ ] Run focused tests; expect pressure-policy or configuration gaps in the bounds introduced alongside each feature.
 - [ ] Fuzz, tune, and centralize the already-bounded queues, semaphores, chunker, coalescer, and explicit overload closure. Make every default configurable and validated at startup; reject zero/impossible budgets. This task must not be the first point at which any queue becomes bounded.
 - [ ] Run backpressure tests under Tokio paused time and leak/task-count assertions; expect PASS.

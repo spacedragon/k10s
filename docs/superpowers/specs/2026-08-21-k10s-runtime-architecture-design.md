@@ -584,7 +584,7 @@ Tokens, kubeconfig, YAML bodies, terminal input/output, and log contents are exc
 - Major/minor negotiation and unknown field/message behavior.
 - Property tests for duplicated, reordered, cancelled, gapped, expired, and retried messages.
 - Binary stream frame round trips and malformed-frame rejection.
-- Fragmented oversized-message rejection and an undrained transport burst proving that no hidden client receive queue grows without bound.
+- Fragmented oversized-message rejection on control, Logs, and Exec sockets—including fragmented `Hello`, Exec input, and resize/control messages—and an undrained transport burst proving that no hidden client receive queue grows without bound.
 
 ### Module-interface tests
 
