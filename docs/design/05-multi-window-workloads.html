@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k10s Multi-window Workloads</title>
+<link rel="stylesheet" href="assets/design-frame.css"><script src="assets/design-frame.js" defer></script>
+<style>
+  :root{--canvas:#141414;--panel:#1b1b1b;--line:#414141;--text:#c4c4c4;--muted:#8d8d8d;--blue:#55aef5;--bluebg:#17678e;--green:#58b883;--yellow:#d9ac55;--red:#e36b6b}
+  .intro,.mock-wrap,.behavior{max-width:1180px;margin:0 auto 22px}.screen{height:680px;overflow:hidden;border:1px solid #4a4a4a;border-radius:10px;background:#111;color:var(--text);box-shadow:0 16px 38px #0008;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .menu{height:35px;box-sizing:border-box;display:flex;align-items:center;gap:18px;padding:0 11px;background:#191919;border-bottom:1px solid var(--line)}.grow{flex:1}.connected{color:var(--green)}
+  .combo,.btn,.input{display:inline-flex;align-items:center;box-sizing:border-box;min-height:24px;border:1px solid #4d4d4d;border-radius:3px;background:#2b2b2b;color:#d3d3d3;padding:2px 8px}.btn{background:#363636}.btn.plus{min-width:20px;min-height:20px;padding:0;justify-content:center;font-size:15px}.input{background:#0d0d0d;color:#888}
+  .workspace{display:flex;height:645px}.side{flex:0 0 206px;box-sizing:border-box;padding:13px 9px;background:#1c1c1c;border-right:1px solid var(--line)}.brand{font:700 21px ui-sans-serif,system-ui;color:#eee;padding:1px 7px 14px}.brand small{display:block;margin-top:4px;color:#777;font:10px ui-monospace,monospace;font-weight:400}.label{color:#7f7f7f;font-size:10px;letter-spacing:.12em;padding:6px 7px 3px}
+  .item,.group-head{display:flex;align-items:center;gap:7px;min-height:28px;padding:0 6px;border-radius:3px;color:#aaa}.group-head{color:#d0d0d0;font-weight:600}.item.child{padding-left:23px}.item.on{background:var(--bluebg);color:#e1f4fd}.item-name{flex:1}.count{display:inline-grid;place-items:center;min-width:18px;height:18px;border-radius:9px;background:#0d4058;color:#d9f1fc;font-size:10px}.item.on .btn.plus{border-color:#5e99b4;background:#21566e}.group-rule{margin:6px 7px;border-top:1px solid #373737}.side-foot{margin:17px 7px 0;border-top:1px solid #373737;padding-top:10px;color:#777;font-size:11px;line-height:1.75}
+  .canvas{position:relative;flex:1;background:var(--canvas);background-image:radial-gradient(#242424 .7px,transparent .7px);background-size:16px 16px;overflow:hidden}.window{position:absolute;background:var(--panel);border:1px solid #505050;border-radius:6px;overflow:hidden;box-shadow:8px 12px 19px #060606a8}.titlebar{height:33px;display:flex;align-items:center;border-bottom:1px solid #454545;padding:0 9px;font-size:15px;color:#bbb}.titlebar .title{flex:1;text-align:center}.close{font:20px ui-sans-serif;color:#aaa}.content{padding:11px 12px 13px}.toolbar{display:flex;align-items:center;gap:7px;min-height:27px;margin-bottom:10px}.toolbar .input{flex:1}.updated{margin-left:auto;color:#777;font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:12px}th{color:#8f8f8f;font-weight:400;text-align:left;padding:7px 8px;border-bottom:1px solid #494949;background:#202020}td{padding:7px 8px;border-bottom:1px solid #303030;white-space:nowrap}tr.selected td{background:#174c66;color:#deeff8}tr:last-child td{border-bottom:0}.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.details{margin-top:8px;padding-top:8px;border-top:1px solid #3c3c3c;color:#a7a7a7}
+  .payments{left:38px;top:35px;width:650px}.observability{left:190px;top:255px;width:675px}.behind{opacity:.82}.resize{position:absolute;right:3px;bottom:2px;color:#666;font-size:14px;transform:rotate(-45deg)}
+  .behavior{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.rule{border:1px solid #3e3e3e;border-radius:5px;background:#1d1d1d;padding:12px}.rule b{display:block;color:#ccc;margin-bottom:5px}.rule span{color:#888;font-size:12px}
+</style>
+</head><body><main class="design-page">
+
+<div class="intro"><h2>Multi-instance Workloads · revised side panel</h2><p class="subtitle">No checkboxes. Highlight indicates that at least one instance is open; the badge shows how many; the compact ＋ creates another window.</p></div>
+
+<div class="mock-wrap">
+  <div class="screen">
+    <div class="menu"><span>File</span><span>View</span><span>Help</span><span class="grow"></span><span class="connected">● Connected</span><span class="btn">↻</span><span class="combo">⎈ prod-us-east-1 ▾</span></div>
+    <div class="workspace">
+      <aside class="side">
+        <div class="brand">⬡ k10s<small>Kubernetes console</small></div><div class="label">WINDOWS</div>
+        <div class="item"><span class="item-name">Overview</span></div>
+        <div class="group-head">▼ Workloads</div>
+        <div class="item child"><span class="item-name">Deployments</span><span class="btn plus">＋</span></div>
+        <div class="item child on"><span class="item-name">Pods</span><span class="count">2</span><span class="btn plus">＋</span></div>
+        <div class="item child"><span class="item-name">StatefulSets</span><span class="btn plus">＋</span></div>
+        <div class="item child"><span class="item-name">DaemonSets</span><span class="btn plus">＋</span></div>
+        <div class="item child"><span class="item-name">Jobs</span><span class="btn plus">＋</span></div>
+        <div class="item child"><span class="item-name">CronJobs</span><span class="btn plus">＋</span></div>
+        <div class="item child"><span class="item-name">Custom Resources…</span><span class="btn plus">＋</span></div>
+        <div class="group-rule"></div><div class="item"><span class="item-name">Nodes</span></div><div class="item"><span class="item-name">Storage</span></div>
+        <div class="side-foot"><b style="color:#aaa">Pods · 2 windows</b><br>Click row → focus latest<br>Click ＋ → open another<br>Close last → clear highlight</div>
+      </aside>
+      <main class="canvas">
+        <section class="window payments behind"><div class="titlebar"><span>▼</span><span class="title">⬡ Pods · payments</span><span class="close">×</span></div><div class="content"><div class="toolbar"><span class="combo">Namespace: payments ▾</span><span class="combo">Status: all ▾</span><span class="input">⌕ Search pods…</span><span class="btn">↻</span></div><table><thead><tr><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Node</th><th>Age</th></tr></thead><tbody><tr><td>api-7bc9b8fd8-f7q2x</td><td>2/2</td><td class="ok">● Running</td><td>0</td><td>ip-10-0-12-41</td><td>2d</td></tr><tr class="selected"><td>worker-7f498f8b6c-x2psq</td><td>1/2</td><td class="bad">● CrashLoopBackOff</td><td>7</td><td>ip-10-0-24-17</td><td>18m</td></tr><tr><td>worker-7f498f8b6c-r9n7w</td><td>2/2</td><td class="ok">● Running</td><td>0</td><td>ip-10-0-18-93</td><td>2d</td></tr></tbody></table><div class="details">▶ Selected pod details · containers · conditions · events</div></div><span class="resize">⌟</span></section>
+        <section class="window observability"><div class="titlebar"><span>▼</span><span class="title">⬡ Pods · observability</span><span class="close">×</span></div><div class="content"><div class="toolbar"><span class="combo">Namespace: observability ▾</span><span class="combo">Status: all ▾</span><span class="input">⌕ Search pods…</span><span class="btn">↻</span></div><table><thead><tr><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Node</th><th>Age</th></tr></thead><tbody><tr><td>grafana-7cb877d9f8-mk8xz</td><td>1/1</td><td class="ok">● Running</td><td>0</td><td>ip-10-0-29-52</td><td>31d</td></tr><tr class="selected"><td>loki-write-2</td><td>0/1</td><td class="warn">● Pending</td><td>0</td><td>—</td><td>4m</td></tr><tr><td>prometheus-0</td><td>2/2</td><td class="ok">● Running</td><td>1</td><td>ip-10-0-12-41</td><td>31d</td></tr></tbody></table><div class="details">▼ Selected pod&nbsp;&nbsp; <span class="warn">Unschedulable: insufficient memory</span></div></div><span class="resize">⌟</span></section>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="behavior"><div class="rule"><b>Row click</b><span>Focuses and raises the most recently used window of that resource type.</span></div><div class="rule"><b>＋ button</b><span>Creates a new independent window with its own namespace and filters.</span></div><div class="rule"><b>Badge + highlight</b><span>Communicates instance count without checkbox semantics.</span></div></div>
+</main></body></html>
