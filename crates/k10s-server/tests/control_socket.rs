@@ -626,6 +626,67 @@ async fn internal_backend_diagnostics_never_reach_query_or_subscription_errors()
             .to_string()
             .contains("super-secret")
     );
+    assert_eq!(
+        subscription_error
+            .subscription_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "internal-subscription"
+    );
+    assert_eq!(subscription_error.payload["scope"], json!("subscription"));
+    assert_eq!(
+        subscription_error.payload["correlationId"],
+        json!("internal-subscription")
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_and_invalid_subscription_errors_keep_subscription_context() {
+    let server = server().await;
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"unsupported-sub",
+            "payload":{"kind":"futureSubscription"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let unsupported = receive_frame(&mut ws).await;
+    assert_eq!(unsupported.payload["code"], json!("unsupportedMessage"));
+    assert_eq!(
+        unsupported.subscription_id.as_ref().unwrap().as_str(),
+        "unsupported-sub"
+    );
+    assert_eq!(unsupported.payload["scope"], json!("subscription"));
+    assert_eq!(
+        unsupported.payload["correlationId"],
+        json!("unsupported-sub")
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"invalid-sub", "payload":null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let invalid = receive_frame(&mut ws).await;
+    assert_eq!(invalid.payload["code"], json!("invalidRequest"));
+    assert_eq!(
+        invalid.subscription_id.as_ref().unwrap().as_str(),
+        "invalid-sub"
+    );
+    assert_eq!(invalid.payload["scope"], json!("subscription"));
+    assert_eq!(invalid.payload["correlationId"], json!("invalid-sub"));
     server.shutdown().await.unwrap();
 }
 

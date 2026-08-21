@@ -9,7 +9,7 @@ use k10s_backend::{
 };
 use k10s_protocol::{
     ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, Welcome, decode_client_frame,
+    Retryability, ServerFrame, ServerKind, SessionId, SubscriptionId, Welcome, decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -188,7 +188,7 @@ pub(crate) async fn serve_socket(
         let frame = match decode_client_frame(&text) {
             Ok(frame) => frame,
             Err(error) => {
-                if send_error(&outbound, None, error.code, error.message).is_err() {
+                if send_error(&outbound, ErrorTarget::Session, error.code, error.message).is_err() {
                     overload_close(&outbound);
                     break;
                 }
@@ -261,7 +261,7 @@ pub(crate) async fn serve_socket(
                             }
                             Err(error) => send_backend_error(
                                 &task_outbound,
-                                Some(request_id.clone()),
+                                ErrorTarget::Request(request_id.clone()),
                                 &task_session_id,
                                 error,
                             ),
@@ -294,9 +294,20 @@ pub(crate) async fn serve_socket(
                 let Some(subscription_id) = frame.subscription_id else {
                     continue;
                 };
-                if selector.0.get("kind").and_then(serde_json::Value::as_str)
-                    == Some("bootstrapStatus")
-                {
+                let selector_kind = selector.0.get("kind").and_then(serde_json::Value::as_str);
+                if selector_kind.is_none() {
+                    if send_error(
+                        &outbound,
+                        ErrorTarget::Subscription(subscription_id),
+                        ErrorCode::InvalidRequest,
+                        "invalid subscription payload".into(),
+                    )
+                    .is_err()
+                    {
+                        overload_close(&outbound);
+                        break;
+                    }
+                } else if selector_kind == Some("bootstrapStatus") {
                     match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
                         Ok(_) => {
                             let subscribed = ServerFrame {
@@ -312,7 +323,14 @@ pub(crate) async fn serve_socket(
                             }
                         }
                         Err(error) => {
-                            if send_backend_error(&outbound, None, &session_id, error).is_err() {
+                            if send_backend_error(
+                                &outbound,
+                                ErrorTarget::Subscription(subscription_id),
+                                &session_id,
+                                error,
+                            )
+                            .is_err()
+                            {
                                 overload_close(&outbound);
                                 break;
                             }
@@ -321,7 +339,7 @@ pub(crate) async fn serve_socket(
                 } else {
                     if send_error(
                         &outbound,
-                        None,
+                        ErrorTarget::Subscription(subscription_id),
                         ErrorCode::UnsupportedMessage,
                         "unsupported subscription".into(),
                     )
@@ -348,7 +366,7 @@ pub(crate) async fn serve_socket(
             Ok(_) => {
                 if send_error(
                     &outbound,
-                    frame.request_id,
+                    error_target(&frame),
                     ErrorCode::UnsupportedMessage,
                     "unsupported behavior".into(),
                 )
@@ -359,7 +377,7 @@ pub(crate) async fn serve_socket(
                 }
             }
             Err(error) => {
-                if send_error(&outbound, frame.request_id, error.code, error.message).is_err() {
+                if send_error(&outbound, error_target(&frame), error.code, error.message).is_err() {
                     overload_close(&outbound);
                     break;
                 }
@@ -398,30 +416,54 @@ fn send_frame(
     outbound.enqueue(priority, Message::Text(text.into()))
 }
 
+#[derive(Debug, Clone)]
+enum ErrorTarget {
+    Session,
+    Request(RequestId),
+    Subscription(SubscriptionId),
+}
+
+impl ErrorTarget {
+    fn correlation(&self) -> &str {
+        match self {
+            Self::Session => "session",
+            Self::Request(id) => id.as_str(),
+            Self::Subscription(id) => id.as_str(),
+        }
+    }
+}
+
+fn error_target(frame: &k10s_protocol::ClientFrame) -> ErrorTarget {
+    frame.request_id.clone().map_or_else(
+        || {
+            frame
+                .subscription_id
+                .clone()
+                .map_or(ErrorTarget::Session, ErrorTarget::Subscription)
+        },
+        ErrorTarget::Request,
+    )
+}
+
 fn send_error(
     outbound: &Scheduler,
-    request_id: Option<RequestId>,
+    target: ErrorTarget,
     code: ErrorCode,
     message: String,
 ) -> Result<(), EnqueueError> {
-    let correlation = request_id.as_ref().map_or("session", RequestId::as_str);
-    let error = ErrorFrame::new(
-        code,
-        message,
-        Retryability::Never,
-        if request_id.is_some() {
-            ErrorScope::Request
-        } else {
-            ErrorScope::Session
-        },
-        correlation,
-    );
+    let correlation = target.correlation().to_owned();
+    let (request_id, subscription_id, scope) = match target {
+        ErrorTarget::Session => (None, None, ErrorScope::Session),
+        ErrorTarget::Request(id) => (Some(id), None, ErrorScope::Request),
+        ErrorTarget::Subscription(id) => (None, Some(id), ErrorScope::Subscription),
+    };
+    let error = ErrorFrame::new(code, message, Retryability::Never, scope, correlation);
     send_frame(
         outbound,
         ServerFrame {
             kind: ServerKind::Error,
             request_id,
-            subscription_id: None,
+            subscription_id,
             sequence: None,
             payload: serde_json::to_value(error).expect("error serializes"),
         },
@@ -431,7 +473,7 @@ fn send_error(
 
 fn send_backend_error(
     outbound: &Scheduler,
-    request_id: Option<RequestId>,
+    target: ErrorTarget,
     session_id: &SessionId,
     error: BackendError,
 ) -> Result<(), EnqueueError> {
@@ -443,18 +485,27 @@ fn send_backend_error(
             format!("unsupported capability: {capability}"),
         ),
         BackendError::Internal(_) => {
-            let request = request_id.as_ref().map_or("-", RequestId::as_str);
+            let correlation = target.correlation();
+            let request = match &target {
+                ErrorTarget::Request(id) => id.as_str(),
+                _ => "-",
+            };
+            let subscription = match &target {
+                ErrorTarget::Subscription(id) => id.as_str(),
+                _ => "-",
+            };
             tracing::error!(
                 session_id = %session_id.as_str(),
                 request_id = %request,
-                correlation_id = %request,
+                subscription_id = %subscription,
+                correlation_id = %correlation,
                 diagnostic = "backend adapter returned an internal error",
                 "control backend failure"
             );
             (ErrorCode::Internal, "internal server error".to_owned())
         }
     };
-    send_error(outbound, request_id, code, safe_message)
+    send_error(outbound, target, code, safe_message)
 }
 
 async fn close_and_join(
