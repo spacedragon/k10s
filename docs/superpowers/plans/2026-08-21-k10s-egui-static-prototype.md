@@ -1,5 +1,7 @@
 # k10s egui Static Prototype Implementation Plan
 
+> **Status: Superseded.** Do not execute this plan. It predates the approved runtime architecture and bypasses the required WebSocket server and Backend Kernel. Use the staged plan set beginning with `docs/superpowers/plans/2026-08-21-k10s-implementation-roadmap.md` instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a native, static-but-interactive egui prototype of the approved k10s console using realistic mock Kubernetes data and no live cluster connection.
