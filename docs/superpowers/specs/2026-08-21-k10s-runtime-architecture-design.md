@@ -1,6 +1,6 @@
 # k10s Runtime Architecture and Technology Stack Design
 
-Status: Design approved; written specification pending user review
+Status: Review-ready; architecture decisions approved on 2026-08-21, awaiting final document approval
 
 Date: 2026-08-21
 
@@ -529,7 +529,7 @@ Normal UI navigation still applies the approved dirty-YAML and active-shell guar
 
 ## Technology stack
 
-Initial direct dependencies are exactly pinned for reproducible releases; `Cargo.lock` is checked in. Versions below are the approved 2026-08-21 baseline. Any dependency update is an explicit change reviewed with its tests; version ranges are not used for direct release dependencies.
+The Rust toolchain and release dependency graph are reproducible through an exact `rust-toolchain.toml` and checked-in `Cargo.lock`. Versions explicitly shown below are the approved 2026-08-21 core baselines. The implementation plan will record exact compatible versions for supporting direct dependencies such as `serde_json`, UUID, Tower, `tower-http`, tracing, `egui_kittest`, `proptest`, and `k8s-openapi` after resolving the complete graph. Dependency updates are explicit changes reviewed with their tests.
 
 | Concern | Choice |
 | --- | --- |
