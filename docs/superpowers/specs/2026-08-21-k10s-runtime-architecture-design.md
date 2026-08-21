@@ -130,6 +130,10 @@ Kubernetes API server
 
 The standalone server publishes the matching WASM and static assets so frontend and backend versions normally move together. It defaults to a loopback or private bind address. A public bind requires explicit configuration.
 
+The operator configures the single-user token out of band through a secret file, environment variable, or command-line secret source before starting the server. A non-loopback bind refuses to start without an explicitly configured token. The server never embeds the token in static assets or returns it from an endpoint.
+
+On a fresh browser tab, the web application displays a minimal connection gate before constructing the main k10s workspace. The backend URL defaults to the page's same origin. The user enters the operator-provided token; the UI keeps it only in memory and sends it in the first WebSocket frame. Authentication failure returns to the gate with a safe error. Refreshing or closing the tab discards the token and requires entry again. This gate is web-only startup UI; after authentication, native and web render the same approved application shell.
+
 Normal HTTP is retained only for static assets and health/readiness probes. The application API is WebSocket-only.
 
 ## Workspace and dependency direction
@@ -244,6 +248,20 @@ Each frontend subscription instead has a monotonic `BackendRevision`. Initial sy
 If Kubernetes watch history is unavailable, the adapter reinitializes. The old cache remains visible as stale until the new initialization completes; a half-built list is never published.
 
 Details and YAML are fetched on selection rather than stored for all 50,000 objects. A list cache keeps only the normalized fields needed by list rendering, filtering, sorting, identity, status, and age.
+
+### Metrics collector
+
+CPU and memory usage come only from the Kubernetes Resource Metrics API, `metrics.k8s.io/v1beta1`, normally served by metrics-server or a compatible adapter. The collector uses dynamically discovered `NodeMetrics` and `PodMetrics`; it does not infer live usage from requests, limits, node capacity, or allocatable values.
+
+Metrics are polled and cached rather than watched because the Resource Metrics API exposes point-in-time samples. Polling starts only while Overview, Nodes, or another metrics-consuming view has an active subscription, uses a configurable interval, and stops after a short linger period. The latest sample retains its source timestamp and collection window.
+
+- Overview CPU and memory usage aggregate available `NodeMetrics` samples and report coverage when some nodes are missing.
+- Node rows combine live usage from `NodeMetrics` with capacity/allocatable values from core `Node` objects.
+- Pod capacity is scheduled pod count versus summed node pod allocatable capacity from core APIs; it does not require metrics-server.
+- Pod/container usage, when a detail view requires it, comes from `PodMetrics`.
+- If the Metrics API is absent, forbidden, stale, or partially populated, affected values are `Unavailable` or `Partial` with timestamp/coverage details. They are never reported as zero.
+
+The metrics collector is an internal cluster-runtime module and uses the existing Kubernetes seam. Prometheus, custom metrics, external metrics, and direct kubelet Summary API access are non-goals for the first release.
 
 ### Operation engine
 
@@ -485,7 +503,8 @@ Error categories include:
 
 - Deploy behind a TLS reverse proxy or VPN and use WSS.
 - Serve UI assets and application sockets from the same origin.
-- Use one configured single-user access token in the first frame.
+- Require the operator to configure one high-entropy single-user token from a secret source before non-loopback startup.
+- Collect that token through the web-only connection gate and send it in the first frame.
 - Keep the token in browser session memory by default; do not write it to localStorage.
 - Bind to loopback/private addresses by default; require explicit configuration for public interfaces.
 - Trust forwarded headers only from configured proxies.
@@ -510,21 +529,21 @@ Normal UI navigation still applies the approved dirty-YAML and active-shell guar
 
 ## Technology stack
 
-Initial direct dependencies are exactly pinned for reproducible releases; `Cargo.lock` is checked in. Versions below are the approved 2026-08-21 baseline and may receive patch-only updates during implementation if tests remain green.
+Initial direct dependencies are exactly pinned for reproducible releases; `Cargo.lock` is checked in. Versions below are the approved 2026-08-21 baseline. Any dependency update is an explicit change reviewed with its tests; version ranges are not used for direct release dependencies.
 
 | Concern | Choice |
 | --- | --- |
 | Language | Rust 1.97.1, edition 2024 |
 | UI | `eframe`, `egui`, `egui_extras` 0.36.1 |
 | Renderer | wgpu with WebGPU preference and WebGL fallback on web |
-| Cross-platform WebSocket client | `ewebsock` 0.8.x |
-| Protocol serialization | `serde` 1.0.x, `serde_json`, UUID IDs |
-| Async runtime | Tokio 1.53.x |
-| Task lifecycle | `tokio-util` 0.7.x `CancellationToken` and `TaskTracker` |
-| Server | Axum 0.8.x, Tower, `tower-http` |
-| Kubernetes | kube 4.2.x and its compatible `k8s-openapi` version |
+| Cross-platform WebSocket client | `ewebsock` 0.8.0 |
+| Protocol serialization | `serde` 1.0.229, matching `serde_json`, UUID IDs |
+| Async runtime | Tokio 1.53.1 |
+| Task lifecycle | `tokio-util` 0.7.19 `CancellationToken` and `TaskTracker` |
+| Server | Axum 0.8.9, matching Tower and `tower-http` |
+| Kubernetes | kube 4.2.0 and the exact compatible `k8s-openapi` selected during dependency resolution |
 | Dynamic Kubernetes resources | kube discovery, `Api<DynamicObject>` |
-| YAML | `serde_yaml_ng` 0.10.x or its compatible maintained release, behind one internal parser module |
+| YAML | `serde_yaml_ng` 0.10.0 behind one internal parser module |
 | Observability | `tracing`, `tracing-subscriber`, `tower-http` trace |
 | UI testing | `egui_kittest` matching egui 0.36.1 |
 | Property testing | `proptest` for protocol and state-machine invariants |
@@ -539,6 +558,7 @@ No database, actor framework, GraphQL implementation, gRPC toolchain, or general
 - Backend resource caches, resume journals, validation tickets, idempotency records, and operations are in memory.
 - Native UI preferences use eframe persistence.
 - Web UI preferences use browser local storage only for non-secret presentation settings.
+- The web connection token is supplied at the connection gate and retained only in memory for the current tab.
 - Access tokens, kubeconfig content, YAML edit buffers, logs, and shell transcripts are not persisted by default.
 - A backend restart invalidates tickets and sessions and changes `server_instance_id`.
 
@@ -583,8 +603,9 @@ Tokens, kubeconfig, YAML bodies, terminal input/output, and log contents are exc
 
 ### Browser and cluster E2E
 
-- WASM/browser smoke tests for authentication, control requests, reconnect, and one logs/exec lifecycle.
+- WASM/browser smoke tests for the connection gate, authentication, control requests, reconnect, tab refresh token loss, and one logs/exec lifecycle.
 - Ephemeral kind-cluster tests for discovery, list/watch, context behavior, server-side dry run, apply, logs, exec, RBAC denial, and resource deletion.
+- Metrics tests with Resource Metrics API available, absent, forbidden, partial, and stale; usage must never fall back to requests, capacity, or zero.
 - macOS, Linux, and Windows native build and launch smoke tests.
 
 ## Capacity verification
@@ -618,6 +639,7 @@ The first working baseline records concrete memory, frame-time, startup-time, an
 - Add the kube-rs adapter behind the existing Kubernetes seam.
 - Load kubeconfig contexts and discovery.
 - Add on-demand watch/cache normalization for built-ins and dynamic resources.
+- Add demand-driven Resource Metrics API polling with partial-availability projection.
 - Implement real dry-run, mutations, logs, and exec.
 - Run the shared adapter contract and kind E2E suites.
 - Package desktop applications and the standalone web server.
@@ -632,7 +654,7 @@ Phase 2 must not require a UI data-source rewrite or protocol redesign. Any such
 - Protocol transcript fixtures and compatibility tests.
 - Ephemeral-cluster E2E tooling.
 - Load and fault-injection scenarios for the stated capacity target.
-- Deployment documentation for kubeconfig, bind address, access token, TLS reverse proxy, and health probes.
+- Deployment documentation for kubeconfig, bind address, token secret source and web connection gate, TLS reverse proxy, and health probes.
 
 ## Verification criteria
 
@@ -650,6 +672,8 @@ Phase 2 must not require a UI data-source rewrite or protocol redesign. Any such
 - Mutations require exact target identity, use idempotency keys, and expose outcome-unknown without blind retry.
 - Desktop binds only to a random loopback port and uses a per-launch token.
 - Web tokens are not placed in URLs or persisted by default.
+- A fresh web tab obtains its operator-provided token through the connection gate; the server never injects it into assets or returns it from an endpoint.
+- CPU and memory usage comes from the Resource Metrics API, while missing or partial metrics remain explicitly unavailable/partial rather than becoming zero or inferred usage.
 - Protocol compatibility tests cover the current and previous minor.
 - Capacity tests cover 50,000 objects, a 10,000-event burst, slow clients, high-throughput logs, watch reinitialization, and backend restart during mutation.
 
@@ -662,4 +686,5 @@ Phase 2 must not require a UI data-source rewrite or protocol redesign. Any such
 - [tokio-util task lifecycle](https://docs.rs/tokio-util/0.7.19/tokio_util/task/struct.TaskTracker.html)
 - [kube](https://docs.rs/kube/4.2.0/kube/)
 - [Kubernetes API watch and resource-version semantics](https://kubernetes.io/docs/reference/using-api/api-concepts/)
+- [Kubernetes Resource Metrics API](https://kubernetes.io/docs/reference/external-api/metrics.v1beta1/)
 - [Browser WebSocket backpressure limitations](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/index.html)
