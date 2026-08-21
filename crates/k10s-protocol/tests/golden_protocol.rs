@@ -28,6 +28,31 @@ fn unknown_kind_is_reported_without_panicking() {
 }
 
 #[test]
+fn kind_specific_envelope_metadata_is_required() {
+    let request =
+        decode_client_frame(r#"{"kind":"request","payload":{"kind":"bootstrap"}}"#).unwrap_err();
+    assert_eq!(request.code, ErrorCode::InvalidRequest);
+
+    for frame in [
+        json!({
+            "kind": "event",
+            "subscriptionId": "subscription-1",
+            "payload": { "kind": "changed" }
+        }),
+        json!({
+            "kind": "event",
+            "sequence": 1,
+            "payload": { "kind": "changed" }
+        }),
+        json!({ "kind": "complete", "payload": null }),
+        json!({ "kind": "response", "payload": {} }),
+    ] {
+        let error = decode_server_frame(frame).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
 fn current_client_decodes_previous_minor_and_ignores_optional_fields() {
     let frame = decode_server_frame(fixture("bootstrap-v1.0.json")).unwrap();
     let bootstrap = validate_bootstrap_response(&frame.payload).unwrap();

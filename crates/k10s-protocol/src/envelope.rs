@@ -288,7 +288,9 @@ pub fn decode_client_frame(raw: &str) -> Result<ClientFrame, ProtocolError> {
     ) {
         return Err(unsupported_kind(kind));
     }
-    serde_json::from_value(value).map_err(invalid_envelope)
+    let frame: ClientFrame = serde_json::from_value(value).map_err(invalid_envelope)?;
+    validate_client_metadata(&frame)?;
+    Ok(frame)
 }
 
 /// Decode a server envelope from a JSON value.
@@ -312,7 +314,65 @@ pub fn decode_server_frame(value: Value) -> Result<ServerFrame, ProtocolError> {
     ) {
         return Err(unsupported_kind(kind));
     }
-    serde_json::from_value(value).map_err(invalid_envelope)
+    let frame: ServerFrame = serde_json::from_value(value).map_err(invalid_envelope)?;
+    validate_server_metadata(&frame)?;
+    Ok(frame)
+}
+
+fn validate_client_metadata(frame: &ClientFrame) -> Result<(), ProtocolError> {
+    match frame.kind {
+        ClientKind::Request | ClientKind::CancelRequest => {
+            require_metadata(frame.request_id.is_some(), frame.kind, "requestId")
+        }
+        ClientKind::Subscribe | ClientKind::Unsubscribe => require_metadata(
+            frame.subscription_id.is_some(),
+            frame.kind,
+            "subscriptionId",
+        ),
+        ClientKind::Hello | ClientKind::Ack | ClientKind::Ping => Ok(()),
+    }
+}
+
+fn validate_server_metadata(frame: &ServerFrame) -> Result<(), ProtocolError> {
+    match frame.kind {
+        ServerKind::Response => {
+            require_metadata(frame.request_id.is_some(), frame.kind, "requestId")
+        }
+        ServerKind::Subscribed
+        | ServerKind::Complete
+        | ServerKind::Event
+        | ServerKind::SnapshotBegin
+        | ServerKind::SnapshotChunk
+        | ServerKind::SnapshotEnd => {
+            require_metadata(
+                frame.subscription_id.is_some(),
+                frame.kind,
+                "subscriptionId",
+            )?;
+            require_metadata(frame.sequence.is_some(), frame.kind, "sequence")
+        }
+        ServerKind::OperationUpdate | ServerKind::ResyncRequired => {
+            require_metadata(frame.sequence.is_some(), frame.kind, "sequence")
+        }
+        ServerKind::Welcome | ServerKind::Error | ServerKind::Pong | ServerKind::ShutdownNotice => {
+            Ok(())
+        }
+    }
+}
+
+fn require_metadata(
+    present: bool,
+    kind: impl std::fmt::Debug,
+    field: &str,
+) -> Result<(), ProtocolError> {
+    if present {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            ErrorCode::InvalidRequest,
+            format!("{kind:?} frame requires {field}"),
+        ))
+    }
 }
 
 fn kind_name(value: &Value) -> Result<&str, ProtocolError> {
