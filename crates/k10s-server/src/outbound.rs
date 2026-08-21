@@ -109,7 +109,7 @@ impl Scheduler {
             let expected = previous.saturating_add(1);
             entry.message = message;
             entry.revision = Some(revision);
-            if revision != previous {
+            if revision != previous && revision != expected {
                 entry.gap = Some(RevisionGap {
                     expected,
                     actual: revision,
@@ -244,6 +244,35 @@ mod tests {
             Some(RevisionGap {
                 expected: 8,
                 actual: 9
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_and_duplicate_revisions_do_not_mark_a_gap() {
+        let consecutive = Scheduler::new(3, 1);
+        consecutive.enqueue_p2("pod/a", 7, text("seven")).unwrap();
+        consecutive.enqueue_p2("pod/a", 8, text("eight")).unwrap();
+        assert_eq!(consecutive.recv().await.unwrap().gap, None);
+
+        let duplicate = Scheduler::new(3, 1);
+        duplicate.enqueue_p2("pod/a", 7, text("first")).unwrap();
+        duplicate
+            .enqueue_p2("pod/a", 7, text("replacement"))
+            .unwrap();
+        assert_eq!(duplicate.recv().await.unwrap().gap, None);
+    }
+
+    #[tokio::test]
+    async fn backward_revision_marks_a_gap() {
+        let scheduler = Scheduler::new(3, 1);
+        scheduler.enqueue_p2("pod/a", 7, text("newer")).unwrap();
+        scheduler.enqueue_p2("pod/a", 6, text("older")).unwrap();
+        assert_eq!(
+            scheduler.recv().await.unwrap().gap,
+            Some(RevisionGap {
+                expected: 8,
+                actual: 6,
             })
         );
     }
