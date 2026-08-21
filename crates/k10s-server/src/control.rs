@@ -169,6 +169,7 @@ pub(crate) async fn serve_socket(
                 let task_requests = requests.clone();
                 let task_protocol = negotiated_protocol.clone();
                 let task_capabilities = negotiated_capabilities.clone();
+                let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
                 let request_span = tracing::info_span!(
                     "control_request",
@@ -206,9 +207,12 @@ pub(crate) async fn serve_socket(
                                     Priority::P1,
                                 )
                             }
-                            Err(error) => {
-                                send_backend_error(&task_outbound, request_id.clone(), error)
-                            }
+                            Err(error) => send_backend_error(
+                                &task_outbound,
+                                Some(request_id.clone()),
+                                &task_session_id,
+                                error,
+                            ),
                         };
                         if sent.is_err() {
                             task_outbound.overload_close(Message::Close(Some(CloseFrame {
@@ -256,9 +260,7 @@ pub(crate) async fn serve_socket(
                             }
                         }
                         Err(error) => {
-                            if send_error(&outbound, None, ErrorCode::Internal, error.to_string())
-                                .is_err()
-                            {
+                            if send_backend_error(&outbound, None, &session_id, error).is_err() {
                                 overload_close(&outbound);
                                 break;
                             }
@@ -379,16 +381,30 @@ fn send_error(
 
 fn send_backend_error(
     outbound: &Scheduler,
-    request_id: RequestId,
+    request_id: Option<RequestId>,
+    session_id: &SessionId,
     error: BackendError,
 ) -> Result<(), EnqueueError> {
-    let code = match error {
-        BackendError::Timeout => ErrorCode::Timeout,
-        BackendError::Cancelled => ErrorCode::Cancelled,
-        BackendError::Unsupported { .. } => ErrorCode::UnsupportedMessage,
-        BackendError::Internal(_) => ErrorCode::Internal,
+    let (code, safe_message) = match error {
+        BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
+        BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
+        BackendError::Unsupported { capability } => (
+            ErrorCode::UnsupportedMessage,
+            format!("unsupported capability: {capability}"),
+        ),
+        BackendError::Internal(_) => {
+            let request = request_id.as_ref().map_or("-", RequestId::as_str);
+            tracing::error!(
+                session_id = %session_id.as_str(),
+                request_id = %request,
+                correlation_id = %request,
+                diagnostic = "backend adapter returned an internal error",
+                "control backend failure"
+            );
+            (ErrorCode::Internal, "internal server error".to_owned())
+        }
     };
-    send_error(outbound, Some(request_id), code, error.to_string())
+    send_error(outbound, request_id, code, safe_message)
 }
 
 async fn close_and_join(

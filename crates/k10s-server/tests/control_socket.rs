@@ -21,6 +21,42 @@ type Ws =
 #[derive(Debug, Clone)]
 struct SlowKubernetes;
 
+#[derive(Debug, Clone)]
+struct SensitiveKubernetes;
+
+impl KubernetesAccess for SensitiveKubernetes {
+    fn query<'a>(
+        &'a self,
+        _: Query,
+    ) -> Pin<Box<dyn Future<Output = Result<QueryResult, BackendError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(BackendError::Internal(
+                "credential=super-secret-query".into(),
+            ))
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        _: Command,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(BackendError::Internal(
+                "credential=super-secret-command".into(),
+            ))
+        })
+    }
+    fn subscribe<'a>(
+        &'a self,
+        _: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(BackendError::Internal(
+                "credential=super-secret-subscription".into(),
+            ))
+        })
+    }
+}
+
 impl KubernetesAccess for SlowKubernetes {
     fn query<'a>(
         &'a self,
@@ -500,6 +536,62 @@ async fn bootstrap_uses_the_connections_negotiated_protocol_and_capabilities() {
     assert_eq!(
         bootstrap.payload["capabilities"],
         welcome.payload["capabilities"]
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn internal_backend_diagnostics_never_reach_query_or_subscription_errors() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(SensitiveKubernetes, "sensitive-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"request", "requestId":"internal-query",
+            "payload":{"kind":"bootstrap"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let query_error = receive_frame(&mut ws).await;
+    assert_eq!(query_error.payload["code"], json!("internal"));
+    assert_eq!(
+        query_error.payload["safeMessage"],
+        json!("internal server error")
+    );
+    assert!(!query_error.payload.to_string().contains("super-secret"));
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"internal-subscription",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let subscription_error = receive_frame(&mut ws).await;
+    assert_eq!(subscription_error.payload["code"], json!("internal"));
+    assert_eq!(
+        subscription_error.payload["safeMessage"],
+        json!("internal server error")
+    );
+    assert!(
+        !subscription_error
+            .payload
+            .to_string()
+            .contains("super-secret")
     );
     server.shutdown().await.unwrap();
 }
