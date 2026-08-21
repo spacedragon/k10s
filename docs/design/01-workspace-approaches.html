@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k10s Workspace Approaches</title>
+<link rel="stylesheet" href="assets/design-frame.css"><script src="assets/design-frame.js" defer></script>
+<style>
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .egui-shell { background:#111; color:#aaa; border:1px solid #454545; border-radius:7px; overflow:hidden; font:11px ui-monospace, SFMono-Regular, Menlo, monospace; min-height:245px; }
+  .egui-bar { height:28px; display:flex; align-items:center; gap:12px; padding:0 9px; background:#1b1b1b; border-bottom:1px solid #3b3b3b; }
+  .egui-bar .active { color:#d8d8d8; }
+  .egui-bar .context { margin-left:auto; border:1px solid #555; border-radius:3px; padding:3px 7px; color:#ddd; background:#292929; }
+  .canvas { position:relative; height:216px; background:#151515; }
+  .window { position:absolute; background:#1b1b1b; border:1px solid #4b4b4b; border-radius:5px; box-shadow:5px 7px 12px #08080899; overflow:hidden; }
+  .window-title { height:25px; display:flex; align-items:center; padding:0 7px; border-bottom:1px solid #414141; color:#c2c2c2; }
+  .window-title span:last-child { margin-left:auto; }
+  .window-body { padding:8px; }
+  .statrow { display:flex; gap:5px; }
+  .stat { flex:1; background:#232323; border:1px solid #353535; padding:6px; border-radius:3px; }
+  .blue { color:#57aef7; }
+  .rail { position:absolute; top:0; right:0; bottom:0; width:78px; background:#1c1c1c; border-left:1px solid #454545; padding:8px 6px; }
+  .rail div { background:#17668d; color:#d7effb; margin:5px 0; padding:5px; border-radius:3px; text-align:center; }
+  .palette { top:8px; left:7px; width:93px; }
+  .palette .window-body div { border-bottom:1px solid #343434; padding:5px 1px; }
+  .overview-a { left:22px; top:20px; width:245px; }
+  .overview-b { left:12px; top:18px; width:208px; }
+  .overview-c { left:111px; top:26px; width:182px; }
+  @media (max-width: 900px) { .cards { grid-template-columns:1fr; } }
+</style>
+</head><body><main class="design-page">
+
+<h2>How should users open and organize resource windows?</h2>
+<p class="subtitle">All options keep Overview open by default and use draggable, resizable, collapsible egui windows. Click the structure you prefer.</p>
+
+<div class="cards">
+  <div class="card" data-choice="command-bar" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="egui-shell">
+        <div class="egui-bar"><b class="active">k10s</b><span>Overview</span><span>Workloads</span><span>Nodes</span><span>Storage</span><span class="context">prod-us-east ▾</span></div>
+        <div class="canvas">
+          <div class="window overview-a">
+            <div class="window-title"><span>▼ ◫ Overview</span><span>×</span></div>
+            <div class="window-body"><div class="statrow"><div class="stat"><span class="blue">12</span><br>Nodes</div><div class="stat"><span class="blue">248</span><br>Pods</div><div class="stat"><span class="blue">98.7%</span><br>Healthy</div></div><p>Cluster health<br>██████████████░</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · Command bar</h3><p>Recommended. Window toggles and the global context switch share one compact top bar, leaving the canvas open and familiar.</p></div>
+  </div>
+
+  <div class="card" data-choice="launcher-rail" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="egui-shell">
+        <div class="egui-bar"><b class="active">k10s</b><span class="context">prod-us-east ▾</span></div>
+        <div class="canvas">
+          <div class="window overview-b">
+            <div class="window-title"><span>▼ ◫ Overview</span><span>×</span></div>
+            <div class="window-body"><div class="statrow"><div class="stat"><span class="blue">12</span><br>Nodes</div><div class="stat"><span class="blue">248</span><br>Pods</div></div><p>Cluster health<br>██████████████░</p></div>
+          </div>
+          <div class="rail"><small>WINDOWS</small><div>Overview</div><div>Workloads</div><div>Nodes</div><div>Storage</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · Launcher rail</h3><p>Closest to the egui demo. Highly discoverable window controls, but the permanent rail consumes canvas space.</p></div>
+  </div>
+
+  <div class="card" data-choice="floating-palette" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="egui-shell">
+        <div class="egui-bar"><b class="active">k10s</b><span>☰ Windows</span><span class="context">prod-us-east ▾</span></div>
+        <div class="canvas">
+          <div class="window palette"><div class="window-title"><span>▼ Windows</span><span>×</span></div><div class="window-body"><div>☑ Overview</div><div>☐ Workloads</div><div>☐ Nodes</div><div>☐ Storage</div></div></div>
+          <div class="window overview-c"><div class="window-title"><span>▼ ◫ Overview</span><span>×</span></div><div class="window-body"><div class="statrow"><div class="stat"><span class="blue">12</span><br>Nodes</div><div class="stat"><span class="blue">248</span><br>Pods</div></div><p>Health<br>██████████████░</p></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · Floating palette</h3><p>The canvas stays flexible and the launcher behaves like everything else, though it adds another window to manage.</p></div>
+  </div>
+</div>
+</main></body></html>

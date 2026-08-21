@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k10s Screen Set</title>
+<link rel="stylesheet" href="assets/design-frame.css"><script src="assets/design-frame.js" defer></script>
+<style>
+  :root { --bg:#111; --canvas:#141414; --panel:#1b1b1b; --raised:#222; --line:#3f3f3f; --muted:#949494; --text:#c9c9c9; --blue:#55aef5; --bluebg:#17678e; --green:#58b883; --yellow:#d9ac55; --red:#e36b6b; }
+  .set-head { max-width:1180px; margin:0 auto 24px; }
+  .screen-block { max-width:1180px; margin:0 auto 38px; }
+  .screen-label { display:flex; align-items:baseline; gap:12px; margin-bottom:9px; }
+  .screen-label h3 { margin:0; }
+  .screen-label span { color:var(--muted); font-size:13px; }
+  .screen { height:640px; overflow:hidden; border:1px solid #4a4a4a; border-radius:10px; background:var(--bg); color:var(--text); box-shadow:0 16px 38px #0008; font:13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .menubar { height:35px; box-sizing:border-box; display:flex; align-items:center; gap:18px; padding:0 11px; background:#191919; border-bottom:1px solid var(--line); }
+  .menubar .spacer { flex:1; }
+  .statusline { color:var(--green); }
+  .combo,.button,.input,.seg { display:inline-flex; align-items:center; min-height:23px; box-sizing:border-box; border:1px solid #4d4d4d; border-radius:3px; background:#2a2a2a; color:#d3d3d3; padding:2px 8px; }
+  .button { background:#353535; }
+  .button.blue,.seg.on { background:var(--bluebg); color:#e0f3ff; border-color:#1b719b; }
+  .workspace { display:flex; height:605px; }
+  .side { flex:0 0 168px; box-sizing:border-box; padding:14px 9px; background:#1c1c1c; border-right:1px solid var(--line); }
+  .brand { font:700 21px ui-sans-serif, system-ui; color:#eee; padding:1px 7px 16px; letter-spacing:.3px; }
+  .brand small { display:block; margin-top:4px; color:#777; font:10px ui-monospace,monospace; font-weight:400; }
+  .side-section { color:#858585; font-size:10px; letter-spacing:.12em; padding:6px 7px 4px; }
+  .win-toggle { display:flex; align-items:center; gap:7px; min-height:27px; padding:0 7px; border-radius:3px; color:#aaa; }
+  .win-toggle.on { background:var(--bluebg); color:#def3ff; }
+  .check { width:12px; height:12px; border:1px solid #767676; border-radius:2px; display:inline-grid; place-items:center; font-size:10px; background:#292929; }
+  .win-toggle.on .check { border-color:#8bc7e2; }
+  .side-foot { margin-top:23px; border-top:1px solid #373737; padding:11px 7px; color:#888; font-size:11px; line-height:1.7; }
+  .canvas { position:relative; flex:1; background:var(--canvas); background-image:radial-gradient(#242424 0.7px, transparent 0.7px); background-size:16px 16px; overflow:hidden; }
+  .window { position:absolute; background:var(--panel); border:1px solid #505050; border-radius:6px; overflow:hidden; box-shadow:8px 12px 19px #060606a8; }
+  .window.behind { opacity:.62; filter:saturate(.7); box-shadow:4px 6px 12px #0008; }
+  .titlebar { height:33px; display:flex; align-items:center; border-bottom:1px solid #454545; padding:0 9px; font-size:15px; color:#bbb; }
+  .titlebar .title { flex:1; text-align:center; }
+  .titlebar .close { font-size:20px; font-family:ui-sans-serif; color:#aaa; }
+  .window-content { padding:11px 12px 13px; }
+  .toolbar { display:flex; align-items:center; gap:7px; min-height:27px; margin-bottom:10px; }
+  .toolbar .input { flex:1; color:#8e8e8e; background:#101010; }
+  .toolbar .updated { margin-left:auto; color:#777; font-size:11px; }
+  .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:7px; margin-bottom:10px; }
+  .metric { background:#232323; border:1px solid #383838; border-radius:4px; padding:9px 10px; }
+  .metric .value { color:#e4e4e4; font-size:20px; margin-bottom:4px; }
+  .metric .value.blue { color:var(--blue); }
+  .metric .caption { color:#8f8f8f; font-size:11px; }
+  .columns { display:grid; grid-template-columns:1.1fr .9fr; gap:9px; }
+  .group { border:1px solid #393939; border-radius:4px; background:#1d1d1d; padding:9px; }
+  .group-title { color:#bababa; margin-bottom:9px; }
+  .bar-row { display:grid; grid-template-columns:56px 1fr 42px; gap:8px; align-items:center; margin:8px 0; color:#999; }
+  .bar { height:13px; background:#080808; border-radius:7px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--bluebg); border-radius:7px; }
+  .bar i.warn { background:#8e6926; }
+  .health-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:6px; }
+  .health-item { padding:7px; background:#242424; border-radius:3px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--green); margin-right:6px; }
+  .dot.yellow { background:var(--yellow); } .dot.red { background:var(--red); } .dot.gray { background:#777; }
+  .table { width:100%; border-collapse:collapse; font-size:12px; }
+  .table th { color:#8f8f8f; font-weight:400; text-align:left; padding:7px 8px; border-bottom:1px solid #494949; background:#202020; }
+  .table td { padding:7px 8px; border-bottom:1px solid #303030; white-space:nowrap; }
+  .table tr.selected td { background:#174c66; color:#deeff8; }
+  .table tr:last-child td { border-bottom:0; }
+  .status-ok { color:var(--green); } .status-warn { color:var(--yellow); } .status-bad { color:var(--red); }
+  .details { margin-top:9px; padding-top:8px; border-top:1px solid #3c3c3c; color:#a7a7a7; }
+  .tabs { display:flex; gap:4px; margin-bottom:10px; }
+  .seg { border-color:transparent; background:transparent; }
+  .resize { position:absolute; right:3px; bottom:2px; color:#666; font-size:14px; transform:rotate(-45deg); }
+  .overview-win { left:48px; top:30px; width:700px; }
+  .ghost-overview { left:22px; top:20px; width:510px; height:385px; }
+  .workloads-win { left:125px; top:66px; width:735px; }
+  .nodes-win { left:103px; top:70px; width:760px; }
+  .storage-win { left:112px; top:60px; width:748px; }
+  .ghost-body { padding:12px; }
+  .ghost-lines { color:#777; line-height:2.1; }
+  .note { max-width:1180px; margin:8px auto 0; color:#8c8c8c; font-size:12px; }
+  @media(max-width:900px){ .screen { transform-origin:top left; } }
+</style>
+</head><body><main class="design-page">
+
+<div class="set-head">
+  <h2>k10s · egui console screen set</h2>
+  <p class="subtitle">Fixed left window panel, global cluster context, and movable resource windows. Overview is the initial state; later screens show an additional window layered over it.</p>
+</div>
+
+<div class="screen-block">
+  <div class="screen-label"><h3>01 · Overview</h3><span>Initial canvas on launch</span></div>
+  <div class="screen">
+    <div class="menubar"><span>File</span><span>View</span><span>Help</span><span class="spacer"></span><span class="statusline">● Connected</span><span class="button">↻</span><span class="combo">⎈ prod-us-east-1 ▾</span></div>
+    <div class="workspace">
+      <aside class="side"><div class="brand">⬡ k10s<small>Kubernetes console</small></div><div class="side-section">WINDOWS</div><div class="win-toggle on"><span class="check">✓</span>Overview</div><div class="win-toggle"><span class="check"></span>Workloads</div><div class="win-toggle"><span class="check"></span>Nodes</div><div class="win-toggle"><span class="check"></span>Storage</div><div class="side-foot">Context<br><b style="color:#bbb">prod-us-east-1</b><br>Kubernetes v1.32.3</div></aside>
+      <main class="canvas">
+        <section class="window overview-win"><div class="titlebar"><span>▼</span><span class="title">◫ Overview</span><span class="close">×</span></div><div class="window-content">
+          <div class="toolbar"><span class="button">↻ Refresh</span><span class="updated">Updated 4s ago</span></div>
+          <div class="summary"><div class="metric"><div class="value blue">12</div><div class="caption">Nodes · all ready</div></div><div class="metric"><div class="value blue">248</div><div class="caption">Pods · 244 running</div></div><div class="metric"><div class="value">73</div><div class="caption">Workloads</div></div><div class="metric"><div class="value">1.8 TiB</div><div class="caption">Persistent storage</div></div></div>
+          <div class="columns"><div class="group"><div class="group-title">Cluster capacity</div><div class="bar-row"><span>CPU</span><div class="bar"><i style="width:72%"></i></div><span>72%</span></div><div class="bar-row"><span>Memory</span><div class="bar"><i style="width:58%"></i></div><span>58%</span></div><div class="bar-row"><span>Pods</span><div class="bar"><i style="width:41%"></i></div><span>41%</span></div></div><div class="group"><div class="group-title">Workload health</div><div class="health-grid"><div class="health-item"><span class="dot"></span>244 Running</div><div class="health-item"><span class="dot yellow"></span>2 Pending</div><div class="health-item"><span class="dot red"></span>2 Failed</div><div class="health-item"><span class="dot gray"></span>0 Unknown</div></div></div></div>
+          <div class="group" style="margin-top:9px"><div class="group-title">▼ Needs attention</div><table class="table"><thead><tr><th>Kind</th><th>Namespace</th><th>Name</th><th>Status</th><th>Age</th></tr></thead><tbody><tr><td>Pod</td><td>payments</td><td>worker-7f498f8b6c-x2psq</td><td class="status-bad">● CrashLoopBackOff</td><td>18m</td></tr><tr><td>Pod</td><td>observability</td><td>loki-write-2</td><td class="status-warn">● Pending</td><td>4m</td></tr></tbody></table></div>
+        </div><span class="resize">⌟</span></section>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="screen-block">
+  <div class="screen-label"><h3>02 · Workloads</h3><span>Overview remains open behind the active window</span></div>
+  <div class="screen">
+    <div class="menubar"><span>File</span><span>View</span><span>Help</span><span class="spacer"></span><span class="statusline">● Connected</span><span class="button">↻</span><span class="combo">⎈ prod-us-east-1 ▾</span></div>
+    <div class="workspace">
+      <aside class="side"><div class="brand">⬡ k10s<small>Kubernetes console</small></div><div class="side-section">WINDOWS</div><div class="win-toggle on"><span class="check">✓</span>Overview</div><div class="win-toggle on"><span class="check">✓</span>Workloads</div><div class="win-toggle"><span class="check"></span>Nodes</div><div class="win-toggle"><span class="check"></span>Storage</div><div class="side-foot">2 windows open<br><span style="color:#aaa">Drag title bars to arrange</span></div></aside>
+      <main class="canvas">
+        <section class="window behind ghost-overview"><div class="titlebar"><span>▼</span><span class="title">◫ Overview</span><span class="close">×</span></div><div class="ghost-body"><div class="summary"><div class="metric"><div class="value">12</div><div class="caption">Nodes</div></div><div class="metric"><div class="value">248</div><div class="caption">Pods</div></div><div class="metric"><div class="value">73</div><div class="caption">Workloads</div></div><div class="metric"><div class="value">98%</div><div class="caption">Healthy</div></div></div><div class="ghost-lines">Cluster capacity&nbsp;&nbsp;████████░░<br>Workload health&nbsp;&nbsp;█████████░</div></div></section>
+        <section class="window workloads-win"><div class="titlebar"><span>▼</span><span class="title">▦ Workloads</span><span class="close">×</span></div><div class="window-content">
+          <div class="toolbar"><span class="combo">Namespace: all ▾</span><span class="combo">Kind: all ▾</span><span class="input">⌕ Search workloads…</span><span class="button">↻</span></div>
+          <table class="table"><thead><tr><th>Kind ↕</th><th>Namespace</th><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Age</th></tr></thead><tbody><tr><td>Deployment</td><td>payments</td><td>api</td><td>8/8</td><td class="status-ok">● Healthy</td><td>0</td><td>14d</td></tr><tr class="selected"><td>Deployment</td><td>payments</td><td>worker</td><td>5/6</td><td class="status-warn">● Degraded</td><td>7</td><td>14d</td></tr><tr><td>StatefulSet</td><td>observability</td><td>loki-write</td><td>2/3</td><td class="status-warn">● Progressing</td><td>0</td><td>42d</td></tr><tr><td>DaemonSet</td><td>kube-system</td><td>cilium</td><td>12/12</td><td class="status-ok">● Healthy</td><td>0</td><td>120d</td></tr><tr><td>Deployment</td><td>default</td><td>web</td><td>4/4</td><td class="status-ok">● Healthy</td><td>1</td><td>7d</td></tr></tbody></table>
+          <div class="details">▼ Selected: payments / worker&nbsp;&nbsp;&nbsp; Replicas 5 available · 1 unavailable&nbsp;&nbsp;&nbsp; <span class="status-bad">Latest event: Back-off restarting failed container</span></div>
+        </div><span class="resize">⌟</span></section>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="screen-block">
+  <div class="screen-label"><h3>03 · Nodes</h3><span>Capacity and readiness at a glance</span></div>
+  <div class="screen">
+    <div class="menubar"><span>File</span><span>View</span><span>Help</span><span class="spacer"></span><span class="statusline">● Connected</span><span class="button">↻</span><span class="combo">⎈ prod-us-east-1 ▾</span></div>
+    <div class="workspace">
+      <aside class="side"><div class="brand">⬡ k10s<small>Kubernetes console</small></div><div class="side-section">WINDOWS</div><div class="win-toggle on"><span class="check">✓</span>Overview</div><div class="win-toggle"><span class="check"></span>Workloads</div><div class="win-toggle on"><span class="check">✓</span>Nodes</div><div class="win-toggle"><span class="check"></span>Storage</div><div class="side-foot">2 windows open<br><span style="color:#aaa">Drag title bars to arrange</span></div></aside>
+      <main class="canvas">
+        <section class="window behind ghost-overview"><div class="titlebar"><span>▼</span><span class="title">◫ Overview</span><span class="close">×</span></div><div class="ghost-body"><div class="summary"><div class="metric"><div class="value">12</div><div class="caption">Nodes</div></div><div class="metric"><div class="value">248</div><div class="caption">Pods</div></div><div class="metric"><div class="value">73</div><div class="caption">Workloads</div></div><div class="metric"><div class="value">98%</div><div class="caption">Healthy</div></div></div></div></section>
+        <section class="window nodes-win"><div class="titlebar"><span>▼</span><span class="title">⬢ Nodes</span><span class="close">×</span></div><div class="window-content">
+          <div class="summary" style="grid-template-columns:repeat(3,1fr)"><div class="metric"><div class="value blue">12</div><div class="caption">Total nodes</div></div><div class="metric"><div class="value status-ok">12</div><div class="caption">Ready</div></div><div class="metric"><div class="value">248 / 600</div><div class="caption">Scheduled pods</div></div></div>
+          <div class="toolbar"><span class="combo">Role: all ▾</span><span class="input">⌕ Search nodes…</span><span class="updated">Updated 6s ago</span><span class="button">↻</span></div>
+          <table class="table"><thead><tr><th>Name ↕</th><th>Status</th><th>Roles</th><th>Version</th><th>CPU</th><th>Memory</th><th>Pods</th><th>Age</th></tr></thead><tbody><tr><td>ip-10-0-12-41</td><td class="status-ok">● Ready</td><td>control-plane</td><td>v1.32.3</td><td>42%</td><td>61%</td><td>18/50</td><td>120d</td></tr><tr><td>ip-10-0-18-93</td><td class="status-ok">● Ready</td><td>worker</td><td>v1.32.3</td><td>76%</td><td class="status-warn">82%</td><td>37/50</td><td>91d</td></tr><tr class="selected"><td>ip-10-0-24-17</td><td class="status-ok">● Ready</td><td>worker</td><td>v1.32.3</td><td class="status-warn">88%</td><td>73%</td><td>42/50</td><td>91d</td></tr><tr><td>ip-10-0-29-52</td><td class="status-ok">● Ready</td><td>worker</td><td>v1.32.3</td><td>39%</td><td>55%</td><td>29/50</td><td>45d</td></tr></tbody></table>
+          <div class="details">▼ Selected: ip-10-0-24-17&nbsp;&nbsp; Conditions: <span class="status-ok">Ready</span> · MemoryPressure false · DiskPressure false&nbsp;&nbsp; Taints: none</div>
+        </div><span class="resize">⌟</span></section>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="screen-block">
+  <div class="screen-label"><h3>04 · Storage</h3><span>Native selectable tabs for the storage resource types</span></div>
+  <div class="screen">
+    <div class="menubar"><span>File</span><span>View</span><span>Help</span><span class="spacer"></span><span class="statusline">● Connected</span><span class="button">↻</span><span class="combo">⎈ prod-us-east-1 ▾</span></div>
+    <div class="workspace">
+      <aside class="side"><div class="brand">⬡ k10s<small>Kubernetes console</small></div><div class="side-section">WINDOWS</div><div class="win-toggle on"><span class="check">✓</span>Overview</div><div class="win-toggle"><span class="check"></span>Workloads</div><div class="win-toggle"><span class="check"></span>Nodes</div><div class="win-toggle on"><span class="check">✓</span>Storage</div><div class="side-foot">2 windows open<br><span style="color:#aaa">Drag title bars to arrange</span></div></aside>
+      <main class="canvas">
+        <section class="window behind ghost-overview"><div class="titlebar"><span>▼</span><span class="title">◫ Overview</span><span class="close">×</span></div><div class="ghost-body"><div class="summary"><div class="metric"><div class="value">12</div><div class="caption">Nodes</div></div><div class="metric"><div class="value">248</div><div class="caption">Pods</div></div><div class="metric"><div class="value">1.8 TiB</div><div class="caption">Storage</div></div><div class="metric"><div class="value">98%</div><div class="caption">Healthy</div></div></div></div></section>
+        <section class="window storage-win"><div class="titlebar"><span>▼</span><span class="title">▤ Storage</span><span class="close">×</span></div><div class="window-content">
+          <div class="tabs"><span class="seg on">PersistentVolumeClaims</span><span class="seg">PersistentVolumes</span><span class="seg">StorageClasses</span></div>
+          <div class="toolbar"><span class="combo">Namespace: all ▾</span><span class="input">⌕ Search claims…</span><span class="updated">Updated 8s ago</span><span class="button">↻</span></div>
+          <table class="table"><thead><tr><th>Namespace</th><th>Name ↕</th><th>Status</th><th>Volume</th><th>Capacity</th><th>Access</th><th>Class</th><th>Age</th></tr></thead><tbody><tr><td>payments</td><td>postgres-data-0</td><td class="status-ok">● Bound</td><td>pvc-97e4…</td><td>500 GiB</td><td>RWO</td><td>gp3</td><td>91d</td></tr><tr><td>observability</td><td>loki-data-0</td><td class="status-ok">● Bound</td><td>pvc-3ab1…</td><td>200 GiB</td><td>RWO</td><td>gp3</td><td>42d</td></tr><tr class="selected"><td>default</td><td>uploads</td><td class="status-warn">● Pending</td><td>—</td><td>1 TiB</td><td>RWX</td><td>efs</td><td>6m</td></tr><tr><td>registry</td><td>registry-data</td><td class="status-ok">● Bound</td><td>pvc-a817…</td><td>100 GiB</td><td>RWO</td><td>gp3</td><td>120d</td></tr></tbody></table>
+          <div class="details">▼ Selected: default / uploads&nbsp;&nbsp; <span class="status-warn">Waiting for a volume to be created by provisioner efs.csi.aws.com</span><br><span style="color:#777">Requested: 1 TiB · AccessModes: ReadWriteMany · StorageClass: efs</span></div>
+        </div><span class="resize">⌟</span></section>
+      </main>
+    </div>
+  </div>
+</div>
+
+<p class="note">Status color is always paired with text, windows retain standard egui chrome, and every screen is designed from widgets available in default egui.</p>
+</main></body></html>
