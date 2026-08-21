@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+k10s-protocol = { path = "../k10s-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "time"] }
+uuid = { version = "1.24.1", features = ["v4"] }
 
 [lints]
 workspace = true

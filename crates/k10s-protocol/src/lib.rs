@@ -17,7 +17,7 @@ pub mod error;
 pub mod ids;
 pub mod route;
 
-pub use bootstrap::{BootstrapResponse, ProtocolVersion, ServerInfo};
+pub use bootstrap::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
 pub use envelope::{
     Ack, CancelRequest, ClientFrame, ClientKind, ClientPayload, Complete, Event, Hello,
     OperationStatus, OperationUpdate, Ping, Pong, ProtocolError, Request, Response, ResumeStatus,
