@@ -13,6 +13,7 @@ use k10s_backend::BackendKernel;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::{config::ServerConfig, control::serve_socket};
 
@@ -23,6 +24,7 @@ struct AppState {
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
     shutdown: CancellationToken,
+    connections: TaskTracker,
 }
 
 /// Handle for an embeddable loopback server.
@@ -73,15 +75,20 @@ pub async fn run(
         config: Arc::new(config),
         kernel: Arc::new(kernel),
         shutdown: cancel.clone(),
+        connections: TaskTracker::new(),
     };
+    let connections = state.connections.clone();
     let app = Router::new()
         .route(k10s_protocol::CONTROL_PATH, get(control_upgrade))
         .route(k10s_protocol::LOGS_PATH, get(not_implemented))
         .route(k10s_protocol::EXEC_PATH, get(not_implemented))
         .with_state(state);
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
+        .await;
+    connections.close();
+    connections.wait().await;
+    result
 }
 
 async fn not_implemented() -> StatusCode {
@@ -101,8 +108,13 @@ async fn control_upgrade(
     let kernel = state.kernel.clone();
     let auth = state.authenticated.clone();
     let shutdown = state.shutdown.clone();
+    let connections = state.connections.clone();
     Ok(ws
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
-        .on_upgrade(move |socket| serve_socket(socket, config, kernel, permit, auth, shutdown)))
+        .on_upgrade(move |socket| async move {
+            let _ = connections
+                .spawn(serve_socket(socket, config, kernel, permit, auth, shutdown))
+                .await;
+        }))
 }

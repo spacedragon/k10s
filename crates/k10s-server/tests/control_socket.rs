@@ -24,6 +24,39 @@ struct SlowKubernetes;
 #[derive(Debug, Clone)]
 struct SensitiveKubernetes;
 
+#[derive(Debug, Clone)]
+struct HugeKubernetes;
+
+impl KubernetesAccess for HugeKubernetes {
+    fn query<'a>(
+        &'a self,
+        _: Query,
+    ) -> Pin<Box<dyn Future<Output = Result<QueryResult, BackendError>> + Send + 'a>> {
+        Box::pin(async {
+            Ok(QueryResult::Bootstrap(BootstrapInfo {
+                contexts: vec![ContextInfo {
+                    name: "x".repeat(16 * 1024 * 1024),
+                    cluster: "large".into(),
+                    namespace: None,
+                    is_current: true,
+                }],
+            }))
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        _: Command,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("execute")) })
+    }
+    fn subscribe<'a>(
+        &'a self,
+        _: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("subscribe")) })
+    }
+}
+
 impl KubernetesAccess for SensitiveKubernetes {
     fn query<'a>(
         &'a self,
@@ -594,4 +627,36 @@ async fn internal_backend_diagnostics_never_reach_query_or_subscription_errors()
             .contains("super-secret")
     );
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_is_bounded_when_peer_does_not_read_large_response() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            graceful_flush_timeout: Duration::from_millis(20),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(HugeKubernetes, "huge-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"request", "requestId":"huge",
+            "payload":{"kind":"bootstrap"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_millis(500), server.shutdown())
+        .await
+        .expect("shutdown must not wait forever on a blocked websocket sink")
+        .unwrap();
+    drop(ws);
 }

@@ -7,6 +7,8 @@ pub struct ServerConfig {
     pub access_token: String,
     /// Maximum time allowed for the first frame.
     pub hello_timeout: Duration,
+    /// Maximum best-effort writer flush period before cancellation.
+    pub graceful_flush_timeout: Duration,
     /// Maximum WebSocket frame size.
     pub max_frame_size: usize,
     /// Maximum assembled WebSocket message size.
@@ -26,6 +28,7 @@ impl Default for ServerConfig {
         Self {
             access_token: String::new(),
             hello_timeout: Duration::from_secs(5),
+            graceful_flush_timeout: Duration::from_millis(250),
             max_frame_size: 1 << 20,
             max_message_size: 4 << 20,
             max_unauthenticated_connections: 32,

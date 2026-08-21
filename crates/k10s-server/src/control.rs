@@ -45,9 +45,11 @@ pub(crate) async fn serve_socket(
                         if let Some(gap) = item.gap {
                             let frame = ServerFrame { kind: ServerKind::ResyncRequired, request_id: None, subscription_id: None, sequence: Some(gap.actual), payload: serde_json::json!({"reason": format!("revision gap: expected {}, received {}", gap.expected, gap.actual)}) };
                             let text = serde_json::to_string(&frame).expect("resync frame serializes");
-                            if sink.send(Message::Text(text.into())).await.is_err() { break; }
+                            let send = sink.send(Message::Text(text.into()));
+                            if tokio::select! { () = writer_cancel.cancelled() => true, result = send => result.is_err() } { break; }
                         }
-                        if sink.send(item.message).await.is_err() { break; }
+                        let send = sink.send(item.message);
+                        if tokio::select! { () = writer_cancel.cancelled() => true, result = send => result.is_err() } { break; }
                     },
                     None => break,
                 }
@@ -55,27 +57,70 @@ pub(crate) async fn serve_socket(
         }
     });
     let first = tokio::select! {
-        () = shutdown.cancelled() => return close_and_join(outbound, child, writer, "server shutdown").await,
+        () = shutdown.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
         first = tokio::time::timeout(config.hello_timeout, stream.next()) => first,
     };
     let hello = match first {
         Ok(Some(Ok(Message::Text(text)))) => match decode_client_frame(&text) {
             Ok(frame) if frame.kind == ClientKind::Hello => match frame.decode_payload() {
                 Ok(ClientPayload::Hello(hello)) => hello,
-                _ => return close_and_join(outbound, child, writer, "invalid hello").await,
+                _ => {
+                    return close_and_join(
+                        outbound,
+                        child,
+                        writer,
+                        "invalid hello",
+                        config.graceful_flush_timeout,
+                    )
+                    .await;
+                }
             },
-            _ => return close_and_join(outbound, child, writer, "hello required").await,
+            _ => {
+                return close_and_join(
+                    outbound,
+                    child,
+                    writer,
+                    "hello required",
+                    config.graceful_flush_timeout,
+                )
+                .await;
+            }
         },
-        _ => return close_and_join(outbound, child, writer, "hello timeout").await,
+        _ => {
+            return close_and_join(
+                outbound,
+                child,
+                writer,
+                "hello timeout",
+                config.graceful_flush_timeout,
+            )
+            .await;
+        }
     };
     let negotiated = match authenticate(&config, &hello) {
         Ok(value) => value,
-        Err(reason) => return close_and_join(outbound, child, writer, reason).await,
+        Err(reason) => {
+            return close_and_join(
+                outbound,
+                child,
+                writer,
+                reason,
+                config.graceful_flush_timeout,
+            )
+            .await;
+        }
     };
     let authenticated = match authenticated_slots.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            return close_and_join(outbound, child, writer, "authenticated connection limit").await;
+            return close_and_join(
+                outbound,
+                child,
+                writer,
+                "authenticated connection limit",
+                config.graceful_flush_timeout,
+            )
+            .await;
         }
     };
     drop(unauthenticated);
@@ -88,7 +133,7 @@ pub(crate) async fn serve_socket(
     let negotiated_protocol = negotiated.protocol;
     let negotiated_capabilities = negotiated.capabilities;
     let welcome = Welcome {
-        protocol: negotiated_protocol.clone(),
+        protocol: negotiated_protocol,
         capabilities: negotiated_capabilities.clone(),
         session_id: session_id.clone(),
         server_instance_id: kernel.server_instance_id().to_owned(),
@@ -107,7 +152,14 @@ pub(crate) async fn serve_socket(
     )
     .is_err()
     {
-        return close_and_join(outbound, child, writer, "outbound overload").await;
+        return close_and_join(
+            outbound,
+            child,
+            writer,
+            "outbound overload",
+            config.graceful_flush_timeout,
+        )
+        .await;
     }
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -167,7 +219,7 @@ pub(crate) async fn serve_socket(
                 let task_kernel = kernel.clone();
                 let task_outbound = outbound.clone();
                 let task_requests = requests.clone();
-                let task_protocol = negotiated_protocol.clone();
+                let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
                 let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
@@ -323,9 +375,7 @@ pub(crate) async fn serve_socket(
     }
     while request_tasks.join_next().await.is_some() {}
     drop(authenticated);
-    outbound.close();
-    let _ = writer.await;
-    child.cancel();
+    finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
 }
 
 fn overload_close(outbound: &Scheduler) {
@@ -412,6 +462,7 @@ async fn close_and_join(
     child: CancellationToken,
     writer: tokio::task::JoinHandle<()>,
     reason: &'static str,
+    flush_timeout: Duration,
 ) {
     let _ = outbound.enqueue(
         Priority::P0,
@@ -420,7 +471,29 @@ async fn close_and_join(
             reason: reason.into(),
         })),
     );
+    finish_writer(outbound, child, writer, flush_timeout).await;
+}
+
+async fn finish_writer(
+    outbound: Scheduler,
+    child: CancellationToken,
+    mut writer: tokio::task::JoinHandle<()>,
+    flush_timeout: Duration,
+) {
     outbound.close();
-    let _ = writer.await;
+    if tokio::time::timeout(flush_timeout, &mut writer)
+        .await
+        .is_ok()
+    {
+        child.cancel();
+        return;
+    }
     child.cancel();
+    if tokio::time::timeout(flush_timeout, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+        let _ = writer.await;
+    }
 }
