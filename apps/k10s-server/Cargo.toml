@@ -1,0 +1,13 @@
+[package]
+name = "k10s-server-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "k10s-server"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
