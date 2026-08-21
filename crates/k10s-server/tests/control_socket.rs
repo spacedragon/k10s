@@ -473,3 +473,33 @@ async fn concurrent_fresh_clients_receive_distinct_session_ids() {
     );
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn bootstrap_uses_the_connections_negotiated_protocol_and_capabilities() {
+    let server = server().await;
+    let mut ws = connect(&server).await;
+    let mut custom_hello = serde_json::to_value(hello("secret")).unwrap();
+    custom_hello["payload"]["protocolMinor"] = json!(0);
+    custom_hello["payload"]["capabilities"] = json!(["exec.attach"]);
+    ws.send(Message::Text(custom_hello.to_string().into()))
+        .await
+        .unwrap();
+    let welcome = receive_frame(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"request", "requestId":"negotiated-bootstrap",
+            "payload":{"kind":"bootstrap"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let bootstrap = receive_frame(&mut ws).await;
+    assert_eq!(bootstrap.payload["protocol"], welcome.payload["protocol"]);
+    assert_eq!(
+        bootstrap.payload["capabilities"],
+        welcome.payload["capabilities"]
+    );
+    server.shutdown().await.unwrap();
+}

@@ -85,9 +85,11 @@ pub(crate) async fn serve_socket(
         queue_pressure = outbound.len(),
         "control session authenticated"
     );
+    let negotiated_protocol = negotiated.protocol;
+    let negotiated_capabilities = negotiated.capabilities;
     let welcome = Welcome {
-        protocol: negotiated.protocol,
-        capabilities: negotiated.capabilities,
+        protocol: negotiated_protocol.clone(),
+        capabilities: negotiated_capabilities.clone(),
         session_id: session_id.clone(),
         server_instance_id: kernel.server_instance_id().to_owned(),
         resume_status: ResumeStatus::Fresh,
@@ -165,6 +167,8 @@ pub(crate) async fn serve_socket(
                 let task_kernel = kernel.clone();
                 let task_outbound = outbound.clone();
                 let task_requests = requests.clone();
+                let task_protocol = negotiated_protocol.clone();
+                let task_capabilities = negotiated_capabilities.clone();
                 let queue_capacity = config.outbound_queue_capacity;
                 let request_span = tracing::info_span!(
                     "control_request",
@@ -192,11 +196,16 @@ pub(crate) async fn serve_socket(
                             result = query => result,
                         };
                         let sent = match result {
-                            Ok(KernelQueryResult::Bootstrap(value)) => send_frame(
-                                &task_outbound,
-                                ServerFrame::response(request_id.clone(), value.wire_payload()),
-                                Priority::P1,
-                            ),
+                            Ok(KernelQueryResult::Bootstrap(value)) => {
+                                let mut payload = value.wire_payload();
+                                payload.protocol = task_protocol;
+                                payload.capabilities = task_capabilities;
+                                send_frame(
+                                    &task_outbound,
+                                    ServerFrame::response(request_id.clone(), payload),
+                                    Priority::P1,
+                                )
+                            }
                             Err(error) => {
                                 send_backend_error(&task_outbound, request_id.clone(), error)
                             }
