@@ -1,0 +1,18 @@
+{
+  "kind": "response",
+  "requestId": "1",
+  "payload": {
+    "protocol": {
+      "major": 1,
+      "minor": 1
+    },
+    "capabilities": [
+      "logs.tail",
+      "exec.attach"
+    ],
+    "server": {
+      "instanceId": "instance-1",
+      "version": "0.1.0"
+    }
+  }
+}

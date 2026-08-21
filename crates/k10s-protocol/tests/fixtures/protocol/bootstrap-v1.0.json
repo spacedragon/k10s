@@ -1,0 +1,14 @@
+{
+  "kind": "response",
+  "requestId": "2",
+  "traceId": "tr-0",
+  "payload": {
+    "protocol": {
+      "major": 1,
+      "minor": 0
+    },
+    "capabilities": [
+      "logs.tail"
+    ]
+  }
+}
