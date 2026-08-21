@@ -447,3 +447,29 @@ async fn graceful_shutdown_notifies_active_socket_and_joins() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_fresh_clients_receive_distinct_session_ids() {
+    let server = server().await;
+    let mut third = connect(&server).await;
+    let mut fourth = connect(&server).await;
+    third
+        .send(Message::Text(
+            serde_json::to_string(&hello("secret")).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    fourth
+        .send(Message::Text(
+            serde_json::to_string(&hello("secret")).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let third_welcome = receive_frame(&mut third).await;
+    let fourth_welcome = receive_frame(&mut fourth).await;
+    assert_ne!(
+        third_welcome.payload["sessionId"],
+        fourth_welcome.payload["sessionId"]
+    );
+    server.shutdown().await.unwrap();
+}

@@ -79,7 +79,7 @@ pub(crate) async fn serve_socket(
         }
     };
     drop(unauthenticated);
-    let session_id = SessionId::new(format!("session-{}", kernel.server_instance_id()));
+    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string());
     tracing::info!(
         session_id = %session_id.as_str(),
         queue_pressure = outbound.len(),
