@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bootstrap::BootstrapResponse;
-use crate::error::{ErrorFrame, ErrorCode, ErrorScope};
+use crate::error::{ErrorCode, ErrorFrame, ErrorScope};
 use crate::ids::{CorrelationId, RequestId, SubscriptionId};
 
 /// Discriminators for client-to-server frames.
@@ -150,7 +150,7 @@ pub fn decode_client_frame(raw: &str) -> Result<ClientFrame, ProtocolError> {
             return Err(ProtocolError::new(
                 ErrorCode::UnsupportedMessage,
                 format!("unsupported message kind: {kind_str}"),
-            ))
+            ));
         }
     };
 
@@ -196,7 +196,7 @@ pub fn decode_server_frame(value: Value) -> Result<ServerFrame, ProtocolError> {
             return Err(ProtocolError::new(
                 ErrorCode::UnsupportedMessage,
                 format!("unsupported message kind: {kind_str}"),
-            ))
+            ));
         }
     };
 

@@ -19,10 +19,10 @@ pub mod route;
 
 pub use bootstrap::{BootstrapResponse, ProtocolVersion, ServerInfo};
 pub use envelope::{
-    decode_client_frame, decode_server_frame, unsupported_message_error,
-    validate_bootstrap_response, ClientFrame, ClientKind, ProtocolError, ServerFrame, ServerKind,
+    ClientFrame, ClientKind, ProtocolError, ServerFrame, ServerKind, decode_client_frame,
+    decode_server_frame, unsupported_message_error, validate_bootstrap_response,
 };
-pub use error::{ErrorFrame, ErrorCode, ErrorScope, Retryability};
+pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};
 pub use ids::{CorrelationId, OperationId, RequestId, SessionId, SubscriptionId};
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 
