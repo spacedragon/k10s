@@ -4,6 +4,20 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+futures-util = "0.3.34"
+k10s-backend = { version = "0.1.0", path = "../k10s-backend" }
+k10s-protocol = { version = "0.1.0", path = "../k10s-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time", "net"] }
+tokio-util = { version = "0.7.19", features = ["rt", "io"] }
+tracing = "0.1.44"
+uuid = { version = "1.24.1", features = ["v4"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.29.0"
+tracing-subscriber = "0.3.22"
