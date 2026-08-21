@@ -211,7 +211,7 @@ git commit -m "feat: add backend kernel and fake adapter"
 
 - [ ] **Step 1: Write failing loopback integration tests**
 
-Cover: only `CONTROL_PATH` upgrades; logs/exec paths exist but return `NotImplemented` in this plan; unauthenticated first frame closes; wrong token closes; correct `Hello` returns negotiated `Welcome`; bootstrap preserves `RequestId`; cancellation/deadline works; oversized first frame is rejected; bounded output overload closes explicitly.
+Cover: only `CONTROL_PATH` upgrades; logs/exec paths exist but return `NotImplemented` in this plan; unauthenticated first frame closes; wrong token closes; correct `Hello` returns negotiated `Welcome`; bootstrap preserves `RequestId`; cancellation/deadline works; oversized individual frames are rejected; an oversized message split across individually valid fragments is rejected before full payload assembly; bounded output overload closes explicitly.
 
 ```rust
 #[tokio::test]
@@ -233,7 +233,7 @@ Expected: FAIL because no router or lifecycle exists.
 
 - [ ] **Step 3: Implement bounded authentication and dispatch**
 
-Bind through `tokio::net::TcpListener`; configure hello timeout, maximum frame size, maximum authenticated/unauthenticated connections, and bounded per-connection queues. Split each accepted socket into read/write tasks joined by a child `CancellationToken`. Add the permanent bounded priority scheduler: P0 authentication/shutdown/terminal-operation/resync signals and P1 request responses/subscription lifecycle/connection/permission status are never silently discarded; P2 resource deltas may coalesce by resource identity while preserving detectable revision gaps. When P0/P1 pressure persists or the fixed reserve is exhausted, close with an explicit overload reason. Dispatch only through `BackendKernel`; bootstrap query and bootstrap-status subscription are the only supported behaviors in this plan. Emit tracing spans with session/request/correlation IDs and queue pressure, never token or payload bodies.
+Bind through `tokio::net::TcpListener`; configure hello timeout, separate maximum frame and assembled-message sizes on Axum's WebSocket upgrade, maximum authenticated/unauthenticated connections, and bounded per-connection queues. The assembled-message limit must apply across fragmentation before JSON payload allocation/dispatch. Split each accepted socket into read/write tasks joined by a child `CancellationToken`. Add the permanent bounded priority scheduler: P0 authentication/shutdown/terminal-operation/resync signals and P1 request responses/subscription lifecycle/connection/permission status are never silently discarded; P2 resource deltas may coalesce by resource identity while preserving detectable revision gaps. When P0/P1 pressure persists or the fixed reserve is exhausted, close with an explicit overload reason. Dispatch only through `BackendKernel`; bootstrap query and bootstrap-status subscription are the only supported behaviors in this plan. Emit tracing spans with session/request/correlation IDs and queue pressure, never token or payload bodies.
 
 - [ ] **Step 4: Run integration tests and Clippy**
 
@@ -256,10 +256,11 @@ git commit -m "feat: serve authenticated control websocket"
 - Create: `crates/k10s-ui/src/client/transport.rs`
 - Modify: `crates/k10s-ui/src/lib.rs`
 - Create: `crates/k10s-ui/tests/client_state.rs`
+- Create: `crates/k10s-ui/tests/client_transport.rs`
 
 - [ ] **Step 1: Write failing client-state tests**
 
-Test `Disconnected -> Authenticating -> Ready`, request correlation, unknown response IDs, cancellation/deadlines, bounded inbox overflow, full-jitter retry scheduling, and reconnect preserving local UI state while reissuing live subscriptions after `ResyncRequired`. Explicitly test terminal states: authentication rejection returns to the web gate without retry, incompatible protocol major stops with an upgrade-required error, and user/application explicit close remains closed until a new connect command.
+Test `Disconnected -> Authenticating -> Ready`, request correlation, unknown response IDs, cancellation/deadlines, bounded inbox overflow, full-jitter retry scheduling, and reconnect preserving local UI state while reissuing live subscriptions after `ResyncRequired`. Add a transport burst test that leaves the UI completely undrained, injects more events than the configured capacity, and proves the callback closes at the exact bound without any intermediate receiver queue. Explicitly test terminal states: authentication rejection returns to the web gate without retry, incompatible protocol major stops with an upgrade-required error, and user/application explicit close remains closed until a new connect command.
 
 ```rust
 #[test]
@@ -279,7 +280,7 @@ Expected: FAIL with missing client state.
 
 - [ ] **Step 3: Implement pure state plus target transport adapters**
 
-Keep request maps, inbox bounds, sequence/Ack tracking, reconnect/backoff, and resubscription logic in pure Rust. Retry only transient transport loss and retryable server errors. Authentication rejection, incompatible major version, and explicit close are terminal and cancel pending retry timers. Put `ewebsock` behind a private transport module selected by target. The browser and native paths both send the same `Hello` JSON and never attach credentials to the URL. Exercise the Plan 1 bootstrap-status subscription to prove the baseline recovery contract: after reconnect or `ResyncRequired`, preserve local UI state, invalidate server-issued state, re-bootstrap, and reissue subscriptions. Plan 2 extends the subscription selector without changing this state machine. Plan 5 may optimize recovery with bounded journal replay but cannot change the correctness contract.
+Keep request maps, inbox bounds, sequence/Ack tracking, reconnect/backoff, and resubscription logic in pure Rust. Retry only transient transport loss and retryable server errors. Authentication rejection, incompatible major version, and explicit close are terminal and cancel pending retry timers. Put `ewebsock` behind a private transport module selected by target, but use only `ws_connect` with an event callback that calls `try_send` directly on the bounded inbox and returns `ControlFlow::Break` on overflow; do not call `connect`, `connect_with_wakeup`, or construct `WsReceiver`, because those introduce an unbounded intermediate channel. The browser and native paths use this same bounded callback contract, send the same `Hello` JSON, and never attach credentials to the URL. Exercise the Plan 1 bootstrap-status subscription to prove the baseline recovery contract: after reconnect or `ResyncRequired`, preserve local UI state, invalidate server-issued state, re-bootstrap, and reissue subscriptions. Plan 2 extends the subscription selector without changing this state machine. Plan 5 may optimize recovery with bounded journal replay but cannot change the correctness contract.
 
 - [ ] **Step 4: Verify native and WASM compilation**
 
@@ -436,6 +437,6 @@ git commit -m "test: verify runtime foundation"
 - Web UI requires token entry, then retrieves the same bootstrap response.
 - Protocol crate builds without platform dependencies.
 - Backend tests cross `BackendKernel`; no UI test reads fake collections.
-- Authentication on the fixed route, terminal-versus-retryable disconnects, request correlation, compatibility, cancellation/deadlines, bounded scheduling, reconnect/full-resync, probe transitions, size limits, and graceful shutdown are tested.
+- Authentication on the fixed route, terminal-versus-retryable disconnects, request correlation, compatibility, cancellation/deadlines, end-to-end bounded client transport, fragmented-message limits, bounded scheduling, reconnect/full-resync, probe transitions, and graceful shutdown are tested.
 - `Cargo.lock`, Trunk output, and a real Chromium bootstrap smoke are part of the foundation gate.
 - All workspace tests, Clippy, and WASM checks pass.

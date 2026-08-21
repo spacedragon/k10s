@@ -171,7 +171,7 @@ The real and fake Kubernetes adapters are internal modules in `k10s-backend`; th
 
 **Used through:** `K10sApp` and a small protocol client facade.
 
-**Depends on:** `k10s-protocol`, egui/eframe, and a cross-platform WebSocket client. It does not depend on kube-rs or backend types.
+**Depends on:** `k10s-protocol`, egui/eframe, and a cross-platform WebSocket client. It does not depend on kube-rs or backend types. The ewebsock integration uses the low-level callback API and writes directly into a bounded client inbox; it must not use the high-level `WsReceiver` path because that path contains an unbounded internal channel.
 
 ### Protocol client module
 
@@ -183,7 +183,7 @@ The real and fake Kubernetes adapters are internal modules in `k10s-backend`; th
 
 ### Server adapter module
 
-**Does:** Serves assets and probes; upgrades WebSocket connections; authenticates the first frame; enforces connection, frame, and subscription limits; translates wire payloads to the backend interface; attaches correlation IDs; and manages connection lifetimes.
+**Does:** Serves assets and probes; upgrades WebSocket connections; authenticates the first frame; enforces connection, frame, assembled-message, and subscription limits; translates wire payloads to the backend interface; attaches correlation IDs; and manages connection lifetimes.
 
 **Used through:** An embeddable `Server` lifecycle used by both desktop and standalone entry points.
 
@@ -301,7 +301,7 @@ The hub owns connection tickets and lifetimes for resource events, logs, and exe
 - A logs or exec request on the control socket returns a short-lived, single-use `StreamTicket` bound to the exact context, resource UID, container, and requested parameters.
 - The dedicated stream socket must authenticate normally and redeem that ticket.
 - Logs use a bounded ring buffer and report truncation counts. Disconnect retains text already present in the UI and permits explicit reconnect with new log parameters.
-- Exec supports stdin, stdout, stderr, terminal resize, and exit status. It never starts implicitly. Disconnect or parent cancellation terminates the Kubernetes exec session; exec is not resumed or replayed.
+- Interactive Exec uses Kubernetes TTY semantics: stdin, one merged output stream, terminal resize, and exit status. It never requests a separate stderr stream with TTY. A future non-TTY exec mode may expose separate stdout and stderr, but it is a distinct session contract. Exec never starts implicitly. Disconnect or parent cancellation terminates the Kubernetes exec session; exec is not resumed or replayed.
 
 ## WebSocket protocol
 
@@ -508,7 +508,7 @@ Error categories include:
 - Keep the token in browser session memory by default; do not write it to localStorage.
 - Bind to loopback/private addresses by default; require explicit configuration for public interfaces.
 - Trust forwarded headers only from configured proxies.
-- Apply connection, frame, subscription, and stream limits before expensive work.
+- Apply connection, individual-frame, assembled-message, subscription, and stream limits before expensive work. Fragmentation must not allow a peer to exceed the message budget with individually valid frames.
 
 UI capability checks are explanatory only. Every mutation is validated in the backend and submitted to the Kubernetes API, which performs final authorization.
 
@@ -536,7 +536,7 @@ The Rust toolchain and release dependency graph are reproducible through an exac
 | Language | Rust 1.97.1, edition 2024 |
 | UI | `eframe`, `egui`, `egui_extras` 0.36.1 |
 | Renderer | wgpu with WebGPU preference and WebGL fallback on web |
-| Cross-platform WebSocket client | `ewebsock` 0.8.0 |
+| Cross-platform WebSocket client | `ewebsock` 0.8.0 low-level callback API feeding a bounded inbox |
 | Protocol serialization | `serde` 1.0.229, matching `serde_json`, UUID IDs |
 | Async runtime | Tokio 1.53.1 |
 | Task lifecycle | `tokio-util` 0.7.19 `CancellationToken` and `TaskTracker` |
@@ -584,6 +584,7 @@ Tokens, kubeconfig, YAML bodies, terminal input/output, and log contents are exc
 - Major/minor negotiation and unknown field/message behavior.
 - Property tests for duplicated, reordered, cancelled, gapped, expired, and retried messages.
 - Binary stream frame round trips and malformed-frame rejection.
+- Fragmented oversized-message rejection and an undrained transport burst proving that no hidden client receive queue grows without bound.
 
 ### Module-interface tests
 

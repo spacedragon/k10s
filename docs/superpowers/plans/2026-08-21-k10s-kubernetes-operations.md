@@ -66,9 +66,9 @@ Every task extends the existing `KubernetesAccess` port and crosses `BackendKern
 
 **Files:** create `kube/exec.rs`, modify backend `{stream,port,kernel}.rs`, modify server `{exec,config}.rs`, test `tests/exec_session.rs` and `crates/k10s-server/tests/exec_loopback.rs`.
 
-- [ ] Write failing tests for exact pod UID/container/command, explicit connect, TTY stdin/stdout/stderr, resize, exit status, missing binary, forbidden, parent close, socket loss, and no resume.
+- [ ] Write failing tests for exact pod UID/container/command, explicit connect, TTY stdin plus one merged output stream, resize, exit status, missing binary, forbidden, parent close, socket loss, and no resume. Add separate stdout/stderr assertions only to an explicitly non-TTY exec test.
 - [ ] Run focused tests; expect missing real exec session.
-- [ ] Issue the ticket through `BackendKernel::query`, then open kube-rs attach/exec in the kernel-owned Stream Hub behind `BackendKernel::subscribe` with a child cancellation token; acquire configured session/rate budgets, bridge bounded binary frames, close stdin and abort upstream on disconnect, trace pressure/lifecycle without payloads, and report exit exactly once. Never execute a local shell.
+- [ ] Issue the ticket through `BackendKernel::query`, then open kube-rs attach/exec in the kernel-owned Stream Hub behind `BackendKernel::subscribe` with a child cancellation token. For the interactive shell configure `AttachParams` with `tty(true)`, stdin/stdout enabled, and `stderr(false)`; treat TTY output as one merged stream and wire terminal resize. Only a distinct non-TTY mode may enable separate stderr. Acquire configured session/rate budgets, bridge bounded binary frames, close stdin and abort upstream on disconnect, trace pressure/lifecycle without payloads, and report exit exactly once. Never execute a local shell.
 - [ ] Run unit/recorded tests and kind exec smoke; expect PASS.
 - [ ] Commit `feat: add kubernetes pod exec`.
 
