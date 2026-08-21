@@ -19,7 +19,10 @@ pub mod route;
 
 pub use bootstrap::{BootstrapResponse, ProtocolVersion, ServerInfo};
 pub use envelope::{
-    ClientFrame, ClientKind, ProtocolError, ServerFrame, ServerKind, decode_client_frame,
+    Ack, CancelRequest, ClientFrame, ClientKind, ClientPayload, Complete, Event, Hello,
+    OperationStatus, OperationUpdate, Ping, Pong, ProtocolError, Request, Response, ResumeStatus,
+    ResyncRequired, ServerFrame, ServerKind, ServerPayload, ShutdownNotice, SnapshotBegin,
+    SnapshotChunk, SnapshotEnd, Subscribe, Subscribed, Unsubscribe, Welcome, decode_client_frame,
     decode_server_frame, unsupported_message_error, validate_bootstrap_response,
 };
 pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};

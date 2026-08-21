@@ -30,8 +30,9 @@ pub struct BootstrapResponse {
     pub protocol: ProtocolVersion,
     /// The negotiated capability set.
     pub capabilities: Vec<String>,
-    /// Server identification.
-    pub server: ServerInfo,
+    /// Server identification, added in protocol v1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerInfo>,
 }
 
 impl BootstrapResponse {
@@ -41,10 +42,10 @@ impl BootstrapResponse {
         Self {
             protocol: ProtocolVersion { major: 1, minor: 1 },
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],
-            server: ServerInfo {
+            server: Some(ServerInfo {
                 instance_id: "instance-1".into(),
                 version: "0.1.0".into(),
-            },
+            }),
         }
     }
 }
