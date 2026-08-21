@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k10s_protocol::{BootstrapResponse, ProtocolVersion, ServerInfo};
-use serde::Serialize;
+use uuid::Uuid;
 
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, KubernetesAccess, OperationId, Query,
@@ -29,9 +29,20 @@ impl BackendKernel {
     /// Create a new backend kernel with the given adapter.
     #[must_use]
     pub fn new(adapter: impl KubernetesAccess + 'static) -> Self {
+        Self::new_with_instance_id(adapter, Uuid::new_v4().to_string())
+    }
+
+    /// Create a new backend kernel with a deterministic instance ID.
+    ///
+    /// Intended for tests and other contexts that need a stable identity.
+    #[must_use]
+    pub fn new_with_instance_id(
+        adapter: impl KubernetesAccess + 'static,
+        instance_id: impl Into<String>,
+    ) -> Self {
         Self {
             adapter: Arc::new(adapter),
-            server_instance_id: "instance-1".into(),
+            server_instance_id: instance_id.into(),
         }
     }
 
@@ -122,16 +133,30 @@ impl KernelQueryResult {
     }
 
     /// Serialize the result to a JSON string.
+    ///
+    /// Returns the wire payload exactly as the server would place it in a
+    /// `response` frame.
     #[must_use]
     pub fn serialized(&self) -> String {
         match self {
             Self::Bootstrap(b) => b.serialized(),
         }
     }
+
+    /// Return the wire payload for the result.
+    ///
+    /// For bootstrap results this is the exact [`BootstrapResponse`] payload
+    /// the server sends in a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> BootstrapResponse {
+        match self {
+            Self::Bootstrap(b) => b.wire_payload(),
+        }
+    }
 }
 
 /// Bootstrap result with protocol metadata and context information.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct BootstrapResult {
     /// The negotiated protocol version and capabilities.
     protocol: BootstrapResponse,
@@ -162,11 +187,18 @@ impl BootstrapResult {
         self.contexts.iter().map(|c| c.name.as_str()).collect()
     }
 
-    /// Serialize the result to a JSON string.
+    /// Return the wire payload: the exact `BootstrapResponse` the server
+    /// sends in a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> BootstrapResponse {
+        self.protocol.clone()
+    }
+
+    /// Serialize the wire payload to a JSON string.
     ///
     /// Never includes credentials or tokens.
     #[must_use]
     pub fn serialized(&self) -> String {
-        serde_json::to_string(self).expect("BootstrapResult must serialize")
+        serde_json::to_string(&self.protocol).expect("BootstrapResponse must serialize")
     }
 }

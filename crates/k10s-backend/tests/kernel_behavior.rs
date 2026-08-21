@@ -11,6 +11,9 @@ use k10s_backend::{
     BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
     QueryResult, Subscribe, SubscriptionHandle,
 };
+use k10s_protocol::{
+    RequestId, ServerFrame, ServerKind, decode_server_frame, validate_bootstrap_response,
+};
 
 #[tokio::test]
 async fn unsupported_queries_return_typed_capability_errors() {
@@ -82,12 +85,44 @@ async fn bootstrap_status_subscription_is_opaque() {
 
 #[tokio::test]
 async fn bootstrap_result_carries_server_instance_id() {
-    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let kernel = BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "instance-1");
     let result = kernel.query(Query::Bootstrap).await.unwrap();
     let serialized = result.serialized();
     assert!(serialized.contains("instance-1"));
-    assert!(serialized.contains("dev-local"));
-    assert!(serialized.contains("prod-readonly"));
+    assert_eq!(result.context_names(), ["dev-local", "prod-readonly"]);
+}
+
+#[tokio::test]
+async fn bootstrap_wire_payload_decodes_through_protocol_validator() {
+    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let result = kernel.query(Query::Bootstrap).await.unwrap();
+
+    // The wire payload must decode through the protocol validator.
+    let wire = result.wire_payload();
+    let value = serde_json::to_value(&wire).unwrap();
+    assert!(validate_bootstrap_response(&value).is_ok());
+
+    // It must also round-trip through a ServerFrame response envelope.
+    let frame = ServerFrame::response(RequestId::from("req-1"), &wire);
+    let frame_value = serde_json::to_value(&frame).unwrap();
+    let decoded = decode_server_frame(frame_value).unwrap();
+    assert_eq!(decoded.kind, ServerKind::Response);
+    assert!(decoded.request_id().is_some());
+}
+
+#[tokio::test]
+async fn distinct_kernels_get_distinct_instance_ids() {
+    let a = BackendKernel::new(FakeKubernetes::standard());
+    let b = BackendKernel::new(FakeKubernetes::standard());
+    assert_ne!(a.server_instance_id(), b.server_instance_id());
+}
+
+#[tokio::test]
+async fn deterministic_instance_id_injection() {
+    let a = BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "fixed-id");
+    let b = BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "fixed-id");
+    assert_eq!(a.server_instance_id(), b.server_instance_id());
+    assert_eq!(a.server_instance_id(), "fixed-id");
 }
 
 /// An adapter that never responds in time, used to verify deadline enforcement.
