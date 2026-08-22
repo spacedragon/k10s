@@ -3,9 +3,15 @@
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use egui::{Id, Pos2, Rect, Vec2};
+use egui::{Id, LayerId, Order, Pos2, Rect, Vec2};
 
-use crate::workspace::{Window, WindowGeom, WindowKind, WorkspaceCommand, WorkspaceState};
+use crate::workspace::{
+    Window, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
+};
+
+pub(super) fn layer_id(id: WindowId) -> LayerId {
+    LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
+}
 
 pub(super) fn show_canvas<I>(
     ui: &mut egui::Ui,
@@ -15,11 +21,34 @@ pub(super) fn show_canvas<I>(
     I: Clone + Eq + Hash + Debug,
 {
     let canvas = ui.available_rect_before_wrap();
+    let navigation_queued = queued.iter().any(|command| {
+        matches!(
+            command,
+            WorkspaceCommand::ActivateLauncherItem(_)
+                | WorkspaceCommand::AddWorkloadInstance(_)
+                | WorkspaceCommand::FocusWindow(_)
+        )
+    });
     let mut windows: Vec<_> = workspace.windows().iter().collect();
     windows.sort_by_key(|window| window.z);
 
     for window in windows {
         show_window(ui, canvas, window, queued);
+    }
+
+    if !navigation_queued
+        && let Some(top_layer) = ui.ctx().top_layer_id()
+        && let Some(top_window) = workspace
+            .windows()
+            .iter()
+            .find(|window| layer_id(window.id) == top_layer)
+        && workspace
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .is_some_and(|window| window.id != top_window.id)
+    {
+        queued.push(WorkspaceCommand::FocusWindow(top_window.id));
     }
 }
 
@@ -40,7 +69,7 @@ fn show_window<I>(
         WindowKind::Workload(_) | WindowKind::Detail => Vec2::new(640.0, 420.0),
         WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => Vec2::new(480.0, 320.0),
     };
-    let id = Id::new(("k10s.window", state.id.0));
+    let id = layer_id(state.id).id;
 
     let response = egui::Window::new(state.title.as_str())
         .id(id)

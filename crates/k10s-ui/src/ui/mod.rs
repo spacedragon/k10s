@@ -8,7 +8,7 @@ mod window;
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use crate::workspace::{WorkspaceCommand, WorkspaceState};
+use crate::workspace::{WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 /// User-visible state of the shared control connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,15 @@ where
         &self.workspace
     }
 
+    /// Apply a command initiated outside the shell's immediate-mode frame,
+    /// such as a navigation-guard resolution dialog.
+    pub fn apply_workspace_command(
+        &mut self,
+        command: WorkspaceCommand<I>,
+    ) -> Vec<WorkspaceEvent<I>> {
+        self.workspace.apply(command)
+    }
+
     /// Render one frame. All mutations are queued while immutable workspace
     /// state is being rendered, then applied after every panel and window.
     pub fn show(
@@ -99,13 +108,24 @@ where
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));
         if let Some(context) = context_change {
-            *selected_context = Some(context.clone());
             queued.push(WorkspaceCommand::ContextSwitch { to: context });
         }
 
         if !queued.is_empty() {
             for command in queued {
-                self.workspace.apply(command);
+                for event in self.workspace.apply(command) {
+                    match event {
+                        WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => {
+                            ui.ctx().move_to_top(window::layer_id(id));
+                        }
+                        WorkspaceEvent::ContextSwitched { to } => {
+                            *selected_context = Some(to);
+                        }
+                        WorkspaceEvent::Closed(_)
+                        | WorkspaceEvent::Blocked(_)
+                        | WorkspaceEvent::YamlOwnerInUse { .. } => {}
+                    }
+                }
             }
             ui.ctx().request_repaint();
         }

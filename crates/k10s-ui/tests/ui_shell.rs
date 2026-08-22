@@ -5,7 +5,9 @@ use egui_kittest::{
 };
 use k10s_ui::{
     ui::{ConnectionState, UiShell},
-    workspace::{WindowKind, WorkloadKind},
+    workspace::{
+        BlockResolution, LauncherItem, WindowId, WindowKind, WorkloadKind, WorkspaceCommand,
+    },
 };
 
 const PRIMARY_CONTEXT: &str = "dev-admin@singapore-development";
@@ -43,6 +45,50 @@ fn shell_harness() -> Harness<'static, ShellFixture> {
         .with_size(egui::vec2(1_280.0, 800.0))
         .with_pixels_per_point(1.0)
         .build_ui_state(render_shell, ShellFixture::default())
+}
+
+fn window_layer(id: WindowId) -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(("k10s.window", id.0)))
+}
+
+fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, SECONDARY_CONTEXT)
+        .click();
+    harness.run();
+}
+
+fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: bool) {
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkloadKind::Pods),
+        ));
+    let window = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Workload(WorkloadKind::Pods))
+        .expect("Pods window opens")
+        .id;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SelectRow(window, ()));
+    let guard = if dirty_yaml {
+        WorkspaceCommand::BeginYamlEdit(window)
+    } else {
+        WorkspaceCommand::ConnectShell(window)
+    };
+    harness.state_mut().shell.apply_workspace_command(guard);
+    harness.run();
 }
 
 #[test]
@@ -194,6 +240,21 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
         .expect("Nodes opens")
         .z;
 
+    harness
+        .get_by_role_and_label(Role::Button, "Storage")
+        .click();
+    harness.run();
+    let storage_id = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Storage)
+        .expect("Storage opens")
+        .id;
+    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
+
     harness.get_by_role_and_label(Role::Button, "Nodes").click();
     harness.run();
     let nodes: Vec<_> = harness
@@ -209,6 +270,11 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
     assert!(
         nodes[0].z > first_z,
         "second click focuses and raises Nodes"
+    );
+    assert_eq!(
+        harness.ctx.top_layer_id(),
+        Some(window_layer(nodes[0].id)),
+        "launcher focus must also raise the existing egui window layer"
     );
     assert!(
         harness
@@ -255,7 +321,7 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
             .click();
         harness.run();
     }
-    let (mru_id, mru_z) = harness
+    let mru_id = harness
         .state()
         .shell
         .workspace()
@@ -263,8 +329,51 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
         .iter()
         .filter(|window| window.kind == WindowKind::Workload(WorkloadKind::Pods))
         .max_by_key(|window| window.z)
-        .map(|window| (window.id, window.z))
+        .map(|window| window.id)
         .expect("two Pods windows are open");
+    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(mru_id)));
+
+    let older_id = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .filter(|window| window.kind == WindowKind::Workload(WorkloadKind::Pods))
+        .min_by_key(|window| window.z)
+        .map(|window| window.id)
+        .expect("an older Pods window is open");
+    let older_title = harness
+        .get_all_by_role_and_label(Role::Window, "Pods")
+        .min_by(|left, right| left.rect().top().total_cmp(&right.rect().top()))
+        .expect("the older staggered Pods window is visible")
+        .rect()
+        .left_top()
+        + egui::vec2(96.0, 10.0);
+    harness.drag_at(older_title);
+    harness.run();
+    harness.drop_at(older_title);
+    harness.run();
+
+    assert_eq!(
+        harness.ctx.top_layer_id(),
+        Some(window_layer(older_id)),
+        "direct window interaction raises its egui layer"
+    );
+    let workspace_mru = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .filter(|window| window.kind == WindowKind::Workload(WorkloadKind::Pods))
+        .max_by_key(|window| window.z)
+        .map(|window| window.id);
+    assert_eq!(
+        workspace_mru,
+        Some(older_id),
+        "direct egui focus must update workspace MRU"
+    );
 
     harness.get_by_role_and_label(Role::Button, "Pods").click();
     harness.run();
@@ -277,15 +386,10 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
             .instance_count(WorkloadKind::Pods),
         2
     );
-    assert!(
-        harness
-            .state()
-            .shell
-            .workspace()
-            .window(mru_id)
-            .expect("MRU window remains open")
-            .z
-            > mru_z
+    assert_eq!(
+        harness.ctx.top_layer_id(),
+        Some(window_layer(older_id)),
+        "workload launcher focuses the actual MRU window"
     );
 }
 
@@ -293,14 +397,7 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
 fn context_selector_commits_global_context_after_rendering() {
     let mut harness = shell_harness();
 
-    harness
-        .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
-        .click();
-    harness.run();
-    harness
-        .get_by_role_and_label(Role::Button, SECONDARY_CONTEXT)
-        .click();
-    harness.run();
+    choose_secondary_context(&mut harness);
 
     assert_eq!(
         harness.state().selected_context.as_deref(),
@@ -317,6 +414,60 @@ fn context_selector_commits_global_context_after_rendering() {
             .as_deref(),
         Some(SECONDARY_CONTEXT)
     );
+}
+
+#[test]
+fn dirty_yaml_cancel_keeps_context_selection_and_does_not_requeue() {
+    let mut harness = shell_harness();
+    add_guarded_pods_detail(&mut harness, true);
+
+    choose_secondary_context(&mut harness);
+    assert_eq!(
+        harness.state().selected_context.as_deref(),
+        Some(PRIMARY_CONTEXT)
+    );
+    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
+    assert!(harness.state().shell.workspace().pending().is_some());
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ResolveBlock(BlockResolution::Cancel));
+    harness.run();
+
+    assert_eq!(
+        harness.state().selected_context.as_deref(),
+        Some(PRIMARY_CONTEXT)
+    );
+    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
+    assert!(harness.state().shell.workspace().pending().is_none());
+}
+
+#[test]
+fn connected_shell_cancel_keeps_context_selection_and_does_not_requeue() {
+    let mut harness = shell_harness();
+    add_guarded_pods_detail(&mut harness, false);
+
+    choose_secondary_context(&mut harness);
+    assert_eq!(
+        harness.state().selected_context.as_deref(),
+        Some(PRIMARY_CONTEXT)
+    );
+    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
+    assert!(harness.state().shell.workspace().pending().is_some());
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ResolveBlock(BlockResolution::Cancel));
+    harness.run();
+
+    assert_eq!(
+        harness.state().selected_context.as_deref(),
+        Some(PRIMARY_CONTEXT)
+    );
+    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
+    assert!(harness.state().shell.workspace().pending().is_none());
 }
 
 #[test]
