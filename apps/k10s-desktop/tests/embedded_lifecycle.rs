@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use k10s_desktop::launch_embedded_server;
+use k10s_desktop::{DesktopApp, launch_embedded_server};
 use k10s_protocol::CONTROL_PATH;
 use k10s_ui::client::ConnectTarget;
 use k10s_ui::{AppView, K10sApp};
@@ -141,4 +141,15 @@ fn many_consecutive_launches_have_unique_ports_and_tokens() {
     for server in &mut servers {
         server.shutdown().expect("server must stop cleanly");
     }
+}
+
+#[test]
+fn desktop_window_owner_shuts_down_server_on_exit() {
+    let desktop = DesktopApp::launch().expect("desktop owner must launch after server readiness");
+    let addr = desktop.local_addr();
+    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok());
+
+    drop(desktop);
+
+    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_err());
 }

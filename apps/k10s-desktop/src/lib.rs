@@ -10,6 +10,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_server::ServerConfig;
+use k10s_ui::client::{ConnectTarget, TransportError};
+use k10s_ui::{AppView, K10sApp};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -122,6 +124,153 @@ impl Drop for EmbeddedServerHandle {
         if self.thread.is_some() {
             let _ = self.shutdown();
         }
+    }
+}
+
+/// Native window owner that keeps the shared app and embedded server alive together.
+pub struct DesktopApp {
+    app: Option<K10sApp>,
+    server: Option<EmbeddedServerHandle>,
+}
+
+impl std::fmt::Debug for DesktopApp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopApp")
+            .field("app", &self.app)
+            .field("server", &self.server)
+            .finish()
+    }
+}
+
+impl DesktopApp {
+    /// Launch the server to readiness before constructing the protocol UI.
+    pub fn launch() -> Result<Self, DesktopLaunchError> {
+        let server = launch_embedded_server()?;
+        let target = ConnectTarget::new(server.control_url(), server.access_token());
+        let app = K10sApp::connect(target)?;
+        Ok(Self {
+            app: Some(app),
+            server: Some(server),
+        })
+    }
+
+    /// Bound address exposed for lifecycle verification.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.server
+            .as_ref()
+            .expect("desktop server exists until drop")
+            .local_addr()
+    }
+}
+
+impl eframe::App for DesktopApp {
+    fn logic(&mut self, context: &eframe::egui::Context, _: &mut eframe::Frame) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        app.poll();
+        context.request_repaint_after(Duration::from_millis(16));
+    }
+
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
+        let Some(app) = self.app.as_ref() else {
+            return;
+        };
+        let view = app.view().clone();
+        eframe::egui::Frame::central_panel(ui.style())
+            .fill(eframe::egui::Color32::from_rgb(242, 247, 252))
+            .inner_margin(32.0)
+            .show(ui, |ui| {
+                ui.heading(
+                    eframe::egui::RichText::new("k10s")
+                        .size(30.0)
+                        .strong()
+                        .color(eframe::egui::Color32::from_rgb(32, 94, 166)),
+                );
+                ui.add_space(20.0);
+                match view {
+                    AppView::Connecting => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Connecting to the local control plane…");
+                        });
+                    }
+                    AppView::Ready {
+                        server_instance_id,
+                        context_names,
+                    } => {
+                        ui.label(
+                            eframe::egui::RichText::new("LOCAL CONTROL PLANE")
+                                .small()
+                                .strong()
+                                .color(eframe::egui::Color32::from_rgb(73, 91, 109)),
+                        );
+                        ui.monospace(server_instance_id);
+                        ui.add_space(24.0);
+                        ui.heading("Kubernetes contexts");
+                        for context_name in context_names {
+                            ui.label(format!("• {context_name}"));
+                        }
+                    }
+                    AppView::Failed { message } => {
+                        ui.colored_label(
+                            eframe::egui::Color32::from_rgb(178, 45, 45),
+                            "Connection failed",
+                        );
+                        ui.label(message);
+                    }
+                }
+            });
+    }
+}
+
+impl Drop for DesktopApp {
+    fn drop(&mut self) {
+        drop(self.app.take());
+        if let Some(mut server) = self.server.take() {
+            let _ = server.shutdown();
+        }
+    }
+}
+
+/// Failure to construct the native desktop owner.
+#[derive(Debug)]
+pub enum DesktopLaunchError {
+    /// Embedded server startup failed.
+    Server(EmbeddedServerError),
+    /// Shared WebSocket transport startup failed.
+    Transport(TransportError),
+}
+
+impl std::fmt::Display for DesktopLaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Server(error) => error.fmt(formatter),
+            Self::Transport(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for DesktopLaunchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Server(error) => Some(error),
+            Self::Transport(error) => Some(error),
+        }
+    }
+}
+
+impl From<EmbeddedServerError> for DesktopLaunchError {
+    fn from(error: EmbeddedServerError) -> Self {
+        Self::Server(error)
+    }
+}
+
+impl From<TransportError> for DesktopLaunchError {
+    fn from(error: TransportError) -> Self {
+        Self::Transport(error)
     }
 }
 
