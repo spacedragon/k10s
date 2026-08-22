@@ -19,26 +19,26 @@ pub enum EnqueueError {
     Coalesced,
 }
 
-/// Detectable discontinuity between resource revisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RevisionGap {
-    pub expected: u64,
-    pub actual: u64,
-}
-
 #[derive(Debug)]
 pub struct ScheduledItem {
     pub message: Message,
-    pub gap: Option<RevisionGap>,
 }
 
 #[derive(Debug)]
 struct Entry {
     priority: Priority,
     message: Message,
-    resource: Option<String>,
-    revision: Option<u64>,
-    gap: Option<RevisionGap>,
+    p2_identity: Option<P2Identity>,
+    sequence: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum P2Identity {
+    Resource {
+        subscription: Option<String>,
+        resource: String,
+    },
+    RecoveryBarrier,
 }
 
 #[derive(Debug)]
@@ -47,7 +47,8 @@ struct State {
     closed: bool,
 }
 
-/// Fixed-capacity priority scheduler with reliable reserve and P2 coalescing.
+/// Fixed-capacity priority scheduler with reliable reserve and
+/// subscription-scoped P2 coalescing.
 #[derive(Debug, Clone)]
 pub struct Scheduler {
     capacity: usize,
@@ -71,7 +72,7 @@ impl Scheduler {
     }
 
     pub fn enqueue(&self, priority: Priority, message: Message) -> Result<(), EnqueueError> {
-        debug_assert_ne!(priority, Priority::P2, "P2 requires identity and revision");
+        debug_assert_ne!(priority, Priority::P2, "P2 requires a coalescing identity");
         let mut state = self
             .state
             .lock()
@@ -82,9 +83,33 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority,
             message,
-            resource: None,
-            revision: None,
-            gap: None,
+            p2_identity: None,
+            sequence: None,
+        });
+        drop(state);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Enqueue a reliable sequenced item while holding the scheduler lock so
+    /// allocation order and queue order cannot diverge across forwarders.
+    pub fn enqueue_sequenced(
+        &self,
+        build: impl FnOnce() -> Result<(u64, Message), EnqueueError>,
+    ) -> Result<(), EnqueueError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || state.queue.len() == self.capacity {
+            return Err(EnqueueError::Overloaded);
+        }
+        let (sequence, message) = build()?;
+        state.queue.push_back(Entry {
+            priority: Priority::P1,
+            message,
+            p2_identity: None,
+            sequence: Some(sequence),
         });
         drop(state);
         self.ready.notify_one();
@@ -94,44 +119,143 @@ impl Scheduler {
     pub fn enqueue_p2(
         &self,
         resource: impl Into<String>,
-        revision: u64,
         message: Message,
     ) -> Result<(), EnqueueError> {
-        let resource = resource.into();
+        let p2_identity = P2Identity::Resource {
+            subscription: None,
+            resource: resource.into(),
+        };
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = state.queue.iter_mut().find(|entry| {
-            entry.priority == Priority::P2 && entry.resource.as_deref() == Some(resource.as_str())
-        }) {
-            let previous = entry.revision.unwrap_or(revision);
-            let expected = previous.saturating_add(1);
+        if state.closed {
+            return Err(EnqueueError::Coalesced);
+        }
+        if let Some(entry) = state
+            .queue
+            .iter_mut()
+            .find(|entry| entry.p2_identity.as_ref() == Some(&p2_identity))
+        {
             entry.message = message;
-            entry.revision = Some(revision);
-            if revision != previous && revision != expected {
-                entry.gap = Some(RevisionGap {
-                    expected,
-                    actual: revision,
-                });
-            }
             return Ok(());
         }
         let p2_limit = self.capacity.saturating_sub(self.reliable_reserve);
         let p2_count = state
             .queue
             .iter()
-            .filter(|entry| entry.priority == Priority::P2)
+            .filter(|entry| {
+                matches!(
+                    entry.p2_identity.as_ref(),
+                    Some(P2Identity::Resource { .. })
+                )
+            })
             .count();
-        if state.closed || state.queue.len() == self.capacity || p2_count == p2_limit {
+        if state.queue.len() == self.capacity || p2_count >= p2_limit {
             return Err(EnqueueError::Coalesced);
         }
         state.queue.push_back(Entry {
             priority: Priority::P2,
             message,
-            resource: Some(resource),
-            revision: Some(revision),
-            gap: None,
+            p2_identity: Some(p2_identity),
+            sequence: None,
+        });
+        drop(state);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Enqueue a subscription-scoped sequenced P2 item, allocating a
+    /// connection sequence only for a new queue slot. Replacements rebuild
+    /// their payload with the original slot sequence so coalescing cannot
+    /// create a wire-level sequence hole.
+    pub fn enqueue_p2_sequenced(
+        &self,
+        subscription: impl Into<String>,
+        resource: impl Into<String>,
+        build: impl FnOnce(Option<u64>) -> Result<(u64, Message), EnqueueError>,
+    ) -> Result<(), EnqueueError> {
+        let p2_identity = P2Identity::Resource {
+            subscription: Some(subscription.into()),
+            resource: resource.into(),
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return Err(EnqueueError::Coalesced);
+        }
+        if let Some(entry) = state
+            .queue
+            .iter_mut()
+            .find(|entry| entry.p2_identity.as_ref() == Some(&p2_identity))
+        {
+            let queued_sequence = entry
+                .sequence
+                .expect("sequenced P2 entries retain their connection sequence");
+            let (sequence, message) = build(Some(queued_sequence))?;
+            debug_assert_eq!(sequence, queued_sequence);
+            entry.message = message;
+            return Ok(());
+        }
+        let p2_limit = self.capacity.saturating_sub(self.reliable_reserve);
+        let p2_count = state
+            .queue
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.p2_identity.as_ref(),
+                    Some(P2Identity::Resource { .. })
+                )
+            })
+            .count();
+        if state.queue.len() == self.capacity || p2_count >= p2_limit {
+            return Err(EnqueueError::Coalesced);
+        }
+        let (sequence, message) = build(None)?;
+        state.queue.push_back(Entry {
+            priority: Priority::P2,
+            message,
+            p2_identity: Some(p2_identity),
+            sequence: Some(sequence),
+        });
+        drop(state);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Append a sequenced recovery barrier behind the current P2 tail, or
+    /// reuse the queued barrier when another watch has already demanded
+    /// recovery. The sequence is allocated while holding the queue lock so
+    /// later sequenced frames cannot be admitted ahead of it.
+    pub fn enqueue_p2_barrier(
+        &self,
+        build: impl FnOnce() -> Result<(u64, Message), EnqueueError>,
+    ) -> Result<(), EnqueueError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return Err(EnqueueError::Overloaded);
+        }
+        if state
+            .queue
+            .iter()
+            .any(|entry| entry.p2_identity.as_ref() == Some(&P2Identity::RecoveryBarrier))
+        {
+            return Ok(());
+        }
+        if state.queue.len() == self.capacity {
+            return Err(EnqueueError::Overloaded);
+        }
+        let (sequence, message) = build()?;
+        state.queue.push_back(Entry {
+            priority: Priority::P2,
+            message,
+            p2_identity: Some(P2Identity::RecoveryBarrier),
+            sequence: Some(sequence),
         });
         drop(state);
         self.ready.notify_one();
@@ -151,17 +275,26 @@ impl Scheduler {
                     .iter()
                     .position(|entry| entry.priority == Priority::P0)
                     .or_else(|| {
+                        state.queue.iter().position(|entry| {
+                            entry.priority == Priority::P1 && entry.sequence.is_none()
+                        })
+                    })
+                    .or_else(|| {
                         state
                             .queue
                             .iter()
-                            .position(|entry| entry.priority == Priority::P1)
+                            .enumerate()
+                            .filter_map(|(index, entry)| {
+                                entry.sequence.map(|sequence| (sequence, index))
+                            })
+                            .min_by_key(|(sequence, _)| *sequence)
+                            .map(|(_, index)| index)
                     })
                     .or_else(|| (!state.queue.is_empty()).then_some(0));
                 if let Some(index) = index {
                     let entry = state.queue.remove(index).expect("selected entry exists");
                     return Some(ScheduledItem {
                         message: entry.message,
-                        gap: entry.gap,
                     });
                 }
                 if state.closed {
@@ -205,9 +338,8 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority: Priority::P0,
             message,
-            resource: None,
-            revision: None,
-            gap: None,
+            p2_identity: None,
+            sequence: None,
         });
         drop(state);
         self.ready.notify_one();
@@ -224,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn priority_ordering_and_fixed_reserve() {
         let scheduler = Scheduler::new(4, 2);
-        scheduler.enqueue_p2("pod/a", 1, text("delta")).unwrap();
+        scheduler.enqueue_p2("pod/a", text("delta")).unwrap();
         scheduler.enqueue(Priority::P1, text("response")).unwrap();
         scheduler.enqueue(Priority::P0, text("terminal")).unwrap();
         assert_eq!(scheduler.recv().await.unwrap().message, text("terminal"));
@@ -233,48 +365,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_resource_coalesces_and_marks_revision_gap() {
+    async fn same_resource_coalesces_to_the_latest_payload() {
         let scheduler = Scheduler::new(3, 1);
-        scheduler.enqueue_p2("pod/a", 7, text("old")).unwrap();
-        scheduler.enqueue_p2("pod/a", 9, text("new")).unwrap();
+        scheduler.enqueue_p2("pod/a", text("old")).unwrap();
+        scheduler.enqueue_p2("pod/a", text("new")).unwrap();
         let item = scheduler.recv().await.unwrap();
         assert_eq!(item.message, text("new"));
-        assert_eq!(
-            item.gap,
-            Some(RevisionGap {
-                expected: 8,
-                actual: 9
-            })
-        );
     }
 
     #[tokio::test]
-    async fn consecutive_and_duplicate_revisions_do_not_mark_a_gap() {
-        let consecutive = Scheduler::new(3, 1);
-        consecutive.enqueue_p2("pod/a", 7, text("seven")).unwrap();
-        consecutive.enqueue_p2("pod/a", 8, text("eight")).unwrap();
-        assert_eq!(consecutive.recv().await.unwrap().gap, None);
-
-        let duplicate = Scheduler::new(3, 1);
-        duplicate.enqueue_p2("pod/a", 7, text("first")).unwrap();
-        duplicate
-            .enqueue_p2("pod/a", 7, text("replacement"))
-            .unwrap();
-        assert_eq!(duplicate.recv().await.unwrap().gap, None);
-    }
-
-    #[tokio::test]
-    async fn backward_revision_marks_a_gap() {
+    async fn sequenced_replacement_reuses_the_queued_sequence() {
         let scheduler = Scheduler::new(3, 1);
-        scheduler.enqueue_p2("pod/a", 7, text("newer")).unwrap();
-        scheduler.enqueue_p2("pod/a", 6, text("older")).unwrap();
-        assert_eq!(
-            scheduler.recv().await.unwrap().gap,
-            Some(RevisionGap {
-                expected: 8,
-                actual: 6,
-            })
-        );
+        let allocated = std::sync::atomic::AtomicU64::new(0);
+        for payload in ["old", "new"] {
+            scheduler
+                .enqueue_p2_sequenced("sub-a", "pod/a", |queued| {
+                    let sequence = queued.unwrap_or_else(|| {
+                        allocated.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
+                    });
+                    Ok((sequence, text(&format!("{payload}-{sequence}"))))
+                })
+                .unwrap();
+        }
+        assert_eq!(allocated.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(scheduler.recv().await.unwrap().message, text("new-1"));
     }
 
     #[test]
@@ -291,12 +405,48 @@ mod tests {
     #[test]
     fn p2_cannot_consume_reliable_reserve() {
         let scheduler = Scheduler::new(3, 1);
-        scheduler.enqueue_p2("pod/a", 1, text("a")).unwrap();
-        scheduler.enqueue_p2("pod/b", 1, text("b")).unwrap();
+        scheduler.enqueue_p2("pod/a", text("a")).unwrap();
+        scheduler.enqueue_p2("pod/b", text("b")).unwrap();
         assert_eq!(
-            scheduler.enqueue_p2("pod/c", 1, text("c")),
+            scheduler.enqueue_p2("pod/c", text("c")),
             Err(EnqueueError::Coalesced)
         );
         scheduler.enqueue(Priority::P0, text("close")).unwrap();
+    }
+
+    #[test]
+    fn recovery_barrier_does_not_expand_the_resource_partition() {
+        let scheduler = Scheduler::new(4, 2);
+        scheduler.enqueue_p2("pod/a", text("a")).unwrap();
+        scheduler.enqueue_p2("pod/b", text("b")).unwrap();
+        scheduler
+            .enqueue_p2_barrier(|| Ok((3, text("resync"))))
+            .unwrap();
+
+        assert_eq!(
+            scheduler.enqueue_p2("pod/c", text("c")),
+            Err(EnqueueError::Coalesced),
+            "the queued barrier must not let resource traffic enter the reserve"
+        );
+        assert_eq!(scheduler.len(), 3);
+    }
+
+    #[test]
+    fn concurrent_recovery_barriers_share_one_reliable_slot() {
+        let scheduler = Scheduler::new(4, 2);
+        scheduler.enqueue_p2("pod/a", text("a")).unwrap();
+        scheduler.enqueue_p2("pod/b", text("b")).unwrap();
+        let allocated = std::sync::atomic::AtomicU64::new(2);
+        for _ in 0..2 {
+            scheduler
+                .enqueue_p2_barrier(|| {
+                    let sequence = allocated.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                    Ok((sequence, text(&format!("resync-{sequence}"))))
+                })
+                .unwrap();
+        }
+
+        assert_eq!(allocated.load(std::sync::atomic::Ordering::Acquire), 3);
+        assert_eq!(scheduler.len(), 3, "only one recovery barrier is queued");
     }
 }

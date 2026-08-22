@@ -11,6 +11,7 @@ pub mod port;
 pub use fake::FakeKubernetes;
 pub use kernel::{BackendKernel, BootstrapResult, KernelQueryResult};
 pub use port::{
-    BackendError, Command, KubernetesAccess, OperationId, Query, QueryResult, StreamKind,
+    BackendError, BackendEvent, Command, Gvk, KubernetesAccess, MetricsSample, OperationId,
+    OwnerRef, Query, QueryResult, ResourceListData, ResourceRecord, ResourceRef, StreamKind,
     Subscribe, SubscriptionHandle,
 };

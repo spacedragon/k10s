@@ -103,6 +103,8 @@ pub struct ServerConfig {
     pub max_authenticated_connections: usize,
     /// Bounded outbound queue capacity per socket.
     pub outbound_queue_capacity: usize,
+    /// Maximum live resource-watch subscriptions per authenticated socket.
+    pub max_resource_subscriptions_per_session: usize,
     /// Per-socket window after the shutdown notice during which status reads stay served.
     pub drain_grace_timeout: Duration,
     /// Hard deadline for draining tracked connection tasks.
@@ -122,6 +124,7 @@ impl Default for ServerConfig {
             max_unauthenticated_connections: 32,
             max_authenticated_connections: 128,
             outbound_queue_capacity: 64,
+            max_resource_subscriptions_per_session: 64,
             drain_grace_timeout: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(10),
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],
