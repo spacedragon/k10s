@@ -22,6 +22,7 @@ use crate::config::ServerConfig;
 use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_socket(
     socket: WebSocket,
     config: Arc<ServerConfig>,
@@ -30,6 +31,7 @@ pub(crate) async fn serve_socket(
     authenticated_slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<MutationGate>,
     signals: crate::lifecycle::DrainSignals,
+    tasks: Arc<crate::lifecycle::ConnectionTasks>,
 ) {
     let DrainSignals { drain, force } = signals;
     let (mut sink, mut stream) = socket.split();
@@ -60,6 +62,7 @@ pub(crate) async fn serve_socket(
             }
         }
     });
+    tasks.track(&writer);
     let first = tokio::select! {
         biased;
         () = force.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,

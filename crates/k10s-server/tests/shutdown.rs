@@ -457,25 +457,33 @@ async fn accepted_upgrade_racing_shutdown_cannot_outlive_it() {
     .unwrap();
     let addr = server.addr();
 
-    // A raw handshake request that reaches the control route but never turns
-    // into a speaking session: the accepted upgrade races shutdown itself.
+    // A raw handshake request racing shutdown itself: the write, the server's
+    // accept/register path, and the drain all interleave nondeterministically.
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
          Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
         k10s_protocol::CONTROL_PATH
     );
+    let started = std::time::Instant::now();
+    let shutdown = tokio::spawn(async move {
+        // Give the request a head start at registering, then shut down while
+        // the upgrade is still in flight.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        server.shutdown().await
+    });
     stream.write_all(request.as_bytes()).await.unwrap();
     let response = read_response_head(&mut stream).await;
     assert!(
-        response.starts_with("HTTP/1.1 101"),
-        "expected the upgrade to be accepted before shutdown: {response:?}"
+        response.is_empty()
+            || response.starts_with("HTTP/1.1 101")
+            || response.starts_with("HTTP/1.1 503"),
+        "unexpected probe response during shutdown race: {response:?}"
     );
-
-    let started = std::time::Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), server.shutdown())
+    let outcome = tokio::time::timeout(Duration::from_secs(10), shutdown)
         .await
-        .expect("shutdown must stay bounded despite the racing upgrade");
+        .expect("shutdown must stay bounded despite the racing upgrade")
+        .unwrap();
     let elapsed = started.elapsed();
 
     // The racing upgrade is either swept into the drain (Ok) or, if it lands

@@ -46,11 +46,12 @@ struct AppState {
 /// Registry of spawned connection tasks giving shutdown hard-abort ownership.
 ///
 /// The tracker only counts tasks; it cannot stop one that ignores the force
-/// signal. Every connection task handle is retained here so forced teardown can
-/// abort and join any survivor before `shutdown` returns.
+/// signal. Every connection and writer task registers an abort handle here so
+/// forced teardown can stop any survivor; completion is observed through the
+/// tracker (session tasks) and the handles' finished flags.
 #[derive(Debug, Default)]
 pub struct ConnectionTasks {
-    handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
+    aborts: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl ConnectionTasks {
@@ -60,22 +61,32 @@ impl ConnectionTasks {
         Arc::new(Self::default())
     }
 
-    fn track(&self, handle: JoinHandle<()>) {
-        let mut handles = self
-            .handles
+    pub(crate) fn track(&self, handle: &JoinHandle<()>) {
+        let mut aborts = self
+            .aborts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        handles.retain(|handle| !handle.is_finished());
-        handles.push(handle);
+        aborts.retain(|abort| !abort.is_finished());
+        aborts.push(handle.abort_handle());
     }
 
-    fn take(&self) -> Vec<JoinHandle<()>> {
-        std::mem::take(
-            &mut *self
-                .handles
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+    fn abort_all(&self) {
+        for abort in self
+            .aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            abort.abort();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.aborts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .all(|abort| abort.is_finished())
     }
 }
 
@@ -254,32 +265,30 @@ async fn drain_tracked_tasks(
     completed
 }
 
-/// Force-close every surviving connection task and join it.
+/// Force-close every surviving connection task and pending upgrade, joining them.
 ///
-/// The force signal lets well-behaved sockets unwind through their bounded
-/// flush path; anything still alive after the unwind window is aborted so no
-/// task can outlive `shutdown`.
+/// Force-aware sockets first get the unwind window to unwind cleanly through
+/// their bounded flush path so clients observe proper close frames. Anything
+/// still alive afterwards — including upgrades accepted but not yet converted
+/// into tracked tasks, and per-socket writer tasks — is aborted and joined, so
+/// nothing can outlive `shutdown`.
 async fn abort_surviving_tasks(
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
+    upgrades: Arc<UpgradeGate>,
     unwind_window: Duration,
 ) {
     let _ = tokio::time::timeout(unwind_window, connections.wait()).await;
-    let survivors = tasks.take();
-    if survivors.is_empty() {
-        return;
-    }
-    tracing::warn!(
-        target: "k10s_server::lifecycle",
-        count = survivors.len(),
-        "aborting connection tasks that ignored forced teardown"
-    );
-    for handle in &survivors {
-        handle.abort();
-    }
-    for handle in survivors {
-        let _ = handle.await;
-    }
+    let _ = tokio::time::timeout(unwind_window, async {
+        loop {
+            tasks.abort_all();
+            if connections.is_empty() && tasks.is_empty() && upgrades.pending() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 }
 
 /// Handle for an embeddable loopback server.
@@ -400,7 +409,7 @@ pub async fn run_with_assets(
             let completed = drain_tracked_tasks(
                 deadline,
                 coordinator_connections.clone(),
-                coordinator_upgrades,
+                Arc::clone(&coordinator_upgrades),
                 coordinator_flag,
             )
             .await;
@@ -419,6 +428,7 @@ pub async fn run_with_assets(
             abort_surviving_tasks(
                 coordinator_connections,
                 coordinator_tasks,
+                coordinator_upgrades,
                 flush_window * 2 + Duration::from_millis(50),
             )
             .await;
@@ -494,14 +504,21 @@ async fn control_upgrade(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    // Register before consulting readiness: once draining begins the readiness
+    // check below fails and the guard is dropped, while a check that races the
+    // drain's final observation is covered by the pending registration itself.
+    let upgrade_guard = state.upgrades.register();
     if state.readiness.state() != ReadinessState::Ready {
+        drop(upgrade_guard);
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    let permit = state
-        .unauthenticated
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let permit = match state.unauthenticated.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            drop(upgrade_guard);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
     let config = state.config.clone();
     let kernel = state.kernel.clone();
     let auth = state.authenticated.clone();
@@ -509,18 +526,91 @@ async fn control_upgrade(
     let gate = state.gate.clone();
     let connections = state.connections.clone();
     let tasks = state.tasks.clone();
-    // Register the accepted upgrade before the response leaves the server so a
-    // shutdown racing this request can never observe an empty tracker while
-    // this socket is still about to start.
-    let upgrade_guard = state.upgrades.register();
     Ok(ws
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
         .on_upgrade(move |socket| async move {
+            // Retain the session task's own handle for abort ownership; the
+            // session task registers its writer task in the same registry.
             let handle = connections.spawn(serve_socket(
-                socket, config, kernel, permit, auth, gate, signals,
+                socket,
+                config,
+                kernel,
+                permit,
+                auth,
+                gate,
+                signals,
+                Arc::clone(&tasks),
             ));
-            tasks.track(handle);
+            tasks.track(&handle);
             drop(upgrade_guard);
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pending upgrade must block drain success until it converts or drops,
+    /// and releasing it must let the drain complete.
+    #[tokio::test]
+    async fn drain_waits_for_pending_upgrades_before_declaring_success() {
+        let connections = Arc::new(TaskTracker::new());
+        let upgrades = UpgradeGate::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        connections.close();
+
+        let guard = upgrades.register();
+        assert_eq!(upgrades.pending(), 1);
+        let timed_out = drain_tracked_tasks(
+            tokio::time::Instant::now() + Duration::from_millis(30),
+            Arc::clone(&connections),
+            Arc::clone(&upgrades),
+            Arc::clone(&flag),
+        )
+        .await;
+        assert!(!timed_out, "pending upgrade must block drain success");
+        assert!(!flag.load(Ordering::Acquire));
+
+        drop(guard);
+        assert_eq!(upgrades.pending(), 0);
+        let completed = drain_tracked_tasks(
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            connections,
+            upgrades,
+            flag,
+        )
+        .await;
+        assert!(completed, "released upgrade must let the drain complete");
+    }
+
+    /// A tracked task must block drain success until it finishes.
+    #[tokio::test]
+    async fn drain_waits_for_tracked_tasks_until_they_finish() {
+        let connections = Arc::new(TaskTracker::new());
+        let upgrades = UpgradeGate::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        connections.close();
+        let handle = connections.spawn(std::future::pending::<()>());
+
+        let drained = drain_tracked_tasks(
+            tokio::time::Instant::now() + Duration::from_millis(30),
+            Arc::clone(&connections),
+            upgrades,
+            Arc::clone(&flag),
+        )
+        .await;
+        assert!(!drained, "live task must block drain success");
+
+        // Aborting the survivor (as forced teardown does) unblocks the drain.
+        handle.abort();
+        let completed = drain_tracked_tasks(
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            connections,
+            UpgradeGate::new(),
+            flag,
+        )
+        .await;
+        assert!(completed, "aborted survivor must let the drain complete");
+    }
 }
