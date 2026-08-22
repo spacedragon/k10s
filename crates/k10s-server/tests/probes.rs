@@ -4,8 +4,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_server::{
-    ConnectionTasks, DrainSignals, MutationGate, Readiness, ReadinessState, ServerConfig,
-    UpgradeGate, router,
+    Admission, ConnectionTasks, DrainSignals, MutationGate, Readiness, ReadinessState,
+    ServerConfig, router,
 };
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -18,7 +18,7 @@ async fn probe(readiness: &Arc<Readiness>, path: &str) -> (StatusCode, String) {
         Arc::clone(readiness),
         Arc::new(TaskTracker::new()),
         ConnectionTasks::new(),
-        UpgradeGate::new(),
+        Admission::new(),
         MutationGate::new(),
         DrainSignals {
             drain: CancellationToken::new(),

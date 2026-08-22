@@ -1,10 +1,12 @@
 //! Axum-based control server lifecycle with ordered graceful shutdown.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -38,7 +40,7 @@ struct AppState {
     signals: DrainSignals,
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
-    upgrades: Arc<UpgradeGate>,
+    admission: Arc<Admission>,
     readiness: Arc<Readiness>,
     gate: Arc<MutationGate>,
 }
@@ -90,42 +92,144 @@ impl ConnectionTasks {
     }
 }
 
-/// Counts accepted WebSocket upgrades that have not yet become tracked tasks.
+/// Single source of truth for control-socket admission and upgrade ownership.
 ///
-/// `TaskTracker::close` does not refuse later spawns, so an upgrade accepted
-/// just before shutdown could register its task after the drain observed an
-/// empty tracker. The guard is taken synchronously before the upgrade response
-/// is returned and released only once the task has joined the tracker (or the
-/// upgrade future is dropped), closing that window.
+/// Accepting an upgrade and shutting down are independent operations on a
+/// multithreaded runtime, so the acceptance decision, the pending-upgrade
+/// registration, and the conversion into a running tracked task all happen
+/// under one lock. A drain or forced teardown observes [`Self::has_live`] —
+/// pending and running entries alike — through that same lock, which makes the
+/// handoff atomic: an upgrade is either fully registered before the drain
+/// looks, or its handler sees the closed barrier and rejects.
 #[derive(Debug, Default)]
-pub struct UpgradeGate(AtomicUsize);
+pub struct Admission(Mutex<AdmissionState>);
 
-impl UpgradeGate {
-    /// Construct an idle gate.
+#[derive(Debug, Default)]
+struct AdmissionState {
+    closed: bool,
+    next_id: u64,
+    entries: HashMap<u64, AdmissionEntry>,
+}
+
+#[derive(Debug)]
+enum AdmissionEntry {
+    /// Accepted, upgrade callback not yet running.
+    Pending,
+    /// Running as a spawned session task; abort ownership is retained.
+    Running(tokio::task::AbortHandle),
+}
+
+impl AdmissionEntry {
+    fn is_live(&self) -> bool {
+        match self {
+            Self::Pending => true,
+            Self::Running(abort) => !abort.is_finished(),
+        }
+    }
+}
+
+impl Admission {
+    /// Construct an open admission barrier.
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Number of accepted upgrades not yet running as tracked tasks.
-    #[must_use]
-    pub fn pending(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+    /// Register an accepted upgrade unless shutdown has closed the barrier.
+    ///
+    /// The readiness decision is part of the same critical section, so a
+    /// handler can never accept an upgrade the drain cannot observe.
+    pub(crate) fn try_register(self: &Arc<Self>, readiness: &Readiness) -> Option<AdmissionGuard> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || readiness.state() != ReadinessState::Ready {
+            return None;
+        }
+        let id = state.next_id;
+        state.next_id += 1;
+        state.entries.insert(id, AdmissionEntry::Pending);
+        Some(AdmissionGuard {
+            id: Some(id),
+            admission: Arc::clone(self),
+        })
     }
 
-    fn register(self: &Arc<Self>) -> UpgradeGuard {
-        self.0.fetch_add(1, Ordering::AcqRel);
-        UpgradeGuard(Arc::clone(self))
+    /// Close the barrier and publish the not-ready transition under one lock.
+    ///
+    /// Holding the admission lock while flipping readiness makes the handler
+    /// decision atomic with shutdown: a registration that observed `Ready` is
+    /// fully inserted before any later drain observation of this mutex, and a
+    /// handler running after this call observes both `Draining` and closed.
+    pub(crate) fn close_barrier(&self, readiness: &Readiness) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        readiness.set(ReadinessState::Draining);
+        state.closed = true;
+    }
+
+    /// Convert a pending registration into a running tracked task.
+    fn confirm_running(&self, id: u64, handle: &JoinHandle<()>) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .entries
+            .insert(id, AdmissionEntry::Running(handle.abort_handle()));
+    }
+
+    /// Whether any pending upgrade or running session task is still live.
+    fn has_live(&self) -> bool {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.entries.values().any(AdmissionEntry::is_live)
     }
 }
 
-/// Releases one [`UpgradeGate`] registration on drop.
-#[derive(Debug)]
-struct UpgradeGuard(Arc<UpgradeGate>);
+/// Releases one [`Admission`] registration on drop unless it was converted.
+pub(crate) struct AdmissionGuard {
+    id: Option<u64>,
+    admission: Arc<Admission>,
+}
 
-impl Drop for UpgradeGuard {
+impl std::fmt::Debug for AdmissionGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmissionGuard")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl AdmissionGuard {
+    /// Hand ownership over to the spawned session task.
+    ///
+    /// The pending entry becomes a live running entry observed through the
+    /// same lock, so the drain can never miss this task; dropping afterwards
+    /// no longer withdraws anything.
+    pub(crate) fn confirm_running(mut self, handle: &JoinHandle<()>) {
+        if let Some(id) = self.id {
+            self.admission.confirm_running(id, handle);
+        }
+        self.id = None;
+    }
+}
+
+impl Drop for AdmissionGuard {
     fn drop(&mut self) {
-        self.0.0.fetch_sub(1, Ordering::AcqRel);
+        if let Some(id) = self.id {
+            let mut state = self
+                .admission
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.entries.remove(&id);
+        }
     }
 }
 
@@ -240,16 +344,15 @@ impl ShutdownCoordinator {
 async fn drain_tracked_tasks(
     deadline: tokio::time::Instant,
     connections: Arc<TaskTracker>,
-    upgrades: Arc<UpgradeGate>,
+    admission: Arc<Admission>,
     drained_in_time: Arc<AtomicBool>,
 ) -> bool {
     connections.close();
     let completed = tokio::time::timeout_at(deadline, async {
-        // An upgrade accepted before shutdown holds a pending registration that
-        // only converts into a tracked task (or drops) later; waiting on the
-        // tracker alone would report an empty server while that socket was
-        // still about to start.
-        while !connections.is_empty() || upgrades.pending() > 0 {
+        // An upgrade accepted before shutdown is visible as a live admission
+        // entry until its task has joined the tracker, so the tracker alone
+        // can never report an empty server while a socket is about to start.
+        while !connections.is_empty() || admission.has_live() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -275,14 +378,14 @@ async fn drain_tracked_tasks(
 async fn abort_surviving_tasks(
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
-    upgrades: Arc<UpgradeGate>,
+    admission: Arc<Admission>,
     unwind_window: Duration,
 ) {
     let _ = tokio::time::timeout(unwind_window, connections.wait()).await;
     let _ = tokio::time::timeout(unwind_window, async {
         loop {
             tasks.abort_all();
-            if connections.is_empty() && tasks.is_empty() && upgrades.pending() == 0 {
+            if connections.is_empty() && tasks.is_empty() && !admission.has_live() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -359,7 +462,7 @@ pub async fn run_with_assets(
     let readiness = Readiness::new();
     let connections = Arc::new(TaskTracker::new());
     let tasks = ConnectionTasks::new();
-    let upgrades = UpgradeGate::new();
+    let admission = Admission::new();
     let gate = MutationGate::new();
     let signals = DrainSignals {
         drain: CancellationToken::new(),
@@ -371,7 +474,7 @@ pub async fn run_with_assets(
         Arc::clone(&readiness),
         Arc::clone(&connections),
         Arc::clone(&tasks),
-        Arc::clone(&upgrades),
+        Arc::clone(&admission),
         Arc::clone(&gate),
         signals.clone(),
         dist_dir,
@@ -386,7 +489,7 @@ pub async fn run_with_assets(
     let root = cancel.clone();
     let coordinator_connections = Arc::clone(&connections);
     let coordinator_tasks = Arc::clone(&tasks);
-    let coordinator_upgrades = Arc::clone(&upgrades);
+    let coordinator_admission = Arc::clone(&admission);
     let coordinator_flag = Arc::clone(&drained_in_time);
     let shutdown_coordinator = Arc::clone(&coordinator);
     // The whole teardown sequence runs inside this future so the listener only
@@ -401,6 +504,9 @@ pub async fn run_with_assets(
                 let mut coordinator = shutdown_coordinator
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // The not-ready flip happens under the admission barrier so no
+                // upgrade can be accepted outside the drain's observation.
+                coordinator_admission.close_barrier(&coordinator.readiness);
                 coordinator.mark_not_ready();
                 coordinator.stop_accepting_application_connections();
                 coordinator.send_notice_and_close_mutation_gate(&signals.drain);
@@ -409,7 +515,7 @@ pub async fn run_with_assets(
             let completed = drain_tracked_tasks(
                 deadline,
                 coordinator_connections.clone(),
-                Arc::clone(&coordinator_upgrades),
+                Arc::clone(&coordinator_admission),
                 coordinator_flag,
             )
             .await;
@@ -428,7 +534,7 @@ pub async fn run_with_assets(
             abort_surviving_tasks(
                 coordinator_connections,
                 coordinator_tasks,
-                coordinator_upgrades,
+                coordinator_admission,
                 flush_window * 2 + Duration::from_millis(50),
             )
             .await;
@@ -460,7 +566,7 @@ pub fn router(
     readiness: Arc<Readiness>,
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
-    upgrades: Arc<UpgradeGate>,
+    admission: Arc<Admission>,
     gate: Arc<MutationGate>,
     signals: DrainSignals,
     dist_dir: Option<PathBuf>,
@@ -473,7 +579,7 @@ pub fn router(
         signals,
         connections,
         tasks,
-        upgrades,
+        admission,
         readiness,
         gate,
     };
@@ -504,14 +610,12 @@ async fn control_upgrade(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    // Register before consulting readiness: once draining begins the readiness
-    // check below fails and the guard is dropped, while a check that races the
-    // drain's final observation is covered by the pending registration itself.
-    let upgrade_guard = state.upgrades.register();
-    if state.readiness.state() != ReadinessState::Ready {
-        drop(upgrade_guard);
+    // Registration and the readiness decision share one critical section, so
+    // an accepted upgrade is always observable by the drain, and once draining
+    // began no upgrade can be accepted at all.
+    let Some(upgrade_guard) = state.admission.try_register(&state.readiness) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    };
     let permit = match state.unauthenticated.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -542,8 +646,8 @@ async fn control_upgrade(
                 signals,
                 Arc::clone(&tasks),
             ));
+            upgrade_guard.confirm_running(&handle);
             tasks.track(&handle);
-            drop(upgrade_guard);
         }))
 }
 
@@ -552,20 +656,25 @@ mod tests {
     use super::*;
 
     /// A pending upgrade must block drain success until it converts or drops,
-    /// and releasing it must let the drain complete.
+    /// and releasing it must let the drain complete. This is the deterministic
+    /// handoff test: registration is observable through the same lock that the
+    /// drain consults, so a paused callback cannot be missed.
     #[tokio::test]
     async fn drain_waits_for_pending_upgrades_before_declaring_success() {
         let connections = Arc::new(TaskTracker::new());
-        let upgrades = UpgradeGate::new();
+        let admission = Admission::new();
+        let readiness = Readiness::new();
+        readiness.set(ReadinessState::Ready);
         let flag = Arc::new(AtomicBool::new(false));
         connections.close();
 
-        let guard = upgrades.register();
-        assert_eq!(upgrades.pending(), 1);
+        let guard = admission
+            .try_register(&readiness)
+            .expect("open barrier admits a ready upgrade");
         let timed_out = drain_tracked_tasks(
             tokio::time::Instant::now() + Duration::from_millis(30),
             Arc::clone(&connections),
-            Arc::clone(&upgrades),
+            Arc::clone(&admission),
             Arc::clone(&flag),
         )
         .await;
@@ -573,22 +682,25 @@ mod tests {
         assert!(!flag.load(Ordering::Acquire));
 
         drop(guard);
-        assert_eq!(upgrades.pending(), 0);
         let completed = drain_tracked_tasks(
             tokio::time::Instant::now() + Duration::from_secs(2),
             connections,
-            upgrades,
+            Arc::clone(&admission),
             flag,
         )
         .await;
         assert!(completed, "released upgrade must let the drain complete");
+
+        // After close_barrier no registration succeeds even when ready.
+        admission.close_barrier(&readiness);
+        assert!(admission.try_register(&readiness).is_none());
     }
 
     /// A tracked task must block drain success until it finishes.
     #[tokio::test]
     async fn drain_waits_for_tracked_tasks_until_they_finish() {
         let connections = Arc::new(TaskTracker::new());
-        let upgrades = UpgradeGate::new();
+        let admission = Admission::new();
         let flag = Arc::new(AtomicBool::new(false));
         connections.close();
         let handle = connections.spawn(std::future::pending::<()>());
@@ -596,7 +708,7 @@ mod tests {
         let drained = drain_tracked_tasks(
             tokio::time::Instant::now() + Duration::from_millis(30),
             Arc::clone(&connections),
-            upgrades,
+            Arc::clone(&admission),
             Arc::clone(&flag),
         )
         .await;
@@ -607,7 +719,7 @@ mod tests {
         let completed = drain_tracked_tasks(
             tokio::time::Instant::now() + Duration::from_secs(2),
             connections,
-            UpgradeGate::new(),
+            admission,
             flag,
         )
         .await;
