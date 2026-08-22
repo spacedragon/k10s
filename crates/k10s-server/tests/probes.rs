@@ -12,10 +12,10 @@ async fn probe(readiness: &Arc<Readiness>, path: &str) -> (StatusCode, String) {
     let app = router(
         ServerConfig::default(),
         BackendKernel::new(FakeKubernetes::standard()),
-        CancellationToken::new(),
         Arc::clone(readiness),
         Arc::new(TaskTracker::new()),
         MutationGate::new(),
+        CancellationToken::new(),
         None,
     );
     let response = app

@@ -178,6 +178,12 @@ async fn shutdown_follows_the_approved_order_and_closes_the_listener() {
     };
     assert!(!payload.reason.is_empty());
 
+    // The notice is only fired after not-ready and acceptance-closed stages, so
+    // a draining probe must already be observable the instant it arrives.
+    let readyz = http_probe(addr, "/readyz").await.expect("listener open");
+    assert_eq!(readyz.0, 503);
+    assert!(readyz.1.contains("draining"));
+
     // Stage 4: mutations are rejected while status reads keep working.
     ws.send(Message::Text(
         json!({"kind":"request","requestId":"mutation-1","payload":{"kind":"exec"}})
@@ -306,4 +312,40 @@ async fn embedded_desktop_launch_shuts_down_through_the_same_lifecycle() {
     assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     server.shutdown().await.unwrap();
     assert!(!tcp_connectable(addr).await);
+}
+
+#[tokio::test]
+async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_window() {
+    let (_capture, _) = install_capture();
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: ACCESS_TOKEN.into(),
+            drain_grace_timeout: Duration::from_secs(30),
+            drain_timeout: Duration::from_millis(400),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(FakeKubernetes::standard()),
+    )
+    .await
+    .unwrap();
+    let addr = server.addr();
+    let ws = connect_authenticated(addr).await;
+
+    let started = std::time::Instant::now();
+    // The connected socket wants 30s of grace, but the drain deadline is hard.
+    let result = tokio::time::timeout(Duration::from_secs(10), server.shutdown())
+        .await
+        .expect("shutdown must stay bounded by the drain deadline");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::TimedOut),
+        "an abandoned socket must surface as a timed-out shutdown: {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "shutdown exceeded twice the drain deadline: {elapsed:?}"
+    );
+    assert!(!tcp_connectable(addr).await);
+    drop(ws);
 }

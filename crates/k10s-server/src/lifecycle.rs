@@ -187,6 +187,11 @@ pub async fn run(
 }
 
 /// Serve an existing listener and optionally host one exact Trunk distribution tree.
+///
+/// The approved shutdown order is driven by [`ShutdownCoordinator`]: the caller
+/// cancellation token wakes only the coordinator, which marks readiness,
+/// refuses application upgrades, and only then fires the dedicated drain token
+/// observed by connection tasks.
 pub async fn run_with_assets(
     listener: TcpListener,
     config: ServerConfig,
@@ -198,13 +203,14 @@ pub async fn run_with_assets(
     let readiness = Readiness::new();
     let connections = Arc::new(TaskTracker::new());
     let gate = MutationGate::new();
+    let drain = CancellationToken::new();
     let app = router(
         config,
         kernel,
-        cancel.clone(),
         Arc::clone(&readiness),
         Arc::clone(&connections),
         Arc::clone(&gate),
+        drain.clone(),
         dist_dir,
     );
     readiness.set(ReadinessState::Ready);
@@ -214,35 +220,48 @@ pub async fn run_with_assets(
         gate,
     };
     let root = cancel.clone();
-    let drain_connections = Arc::clone(&connections);
+    let coordinator_connections = Arc::clone(&connections);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             root.cancelled().await;
             coordinator.mark_not_ready();
             coordinator.stop_accepting_application_connections();
-            coordinator.send_notice_and_close_mutation_gate(&cancel);
+            coordinator.send_notice_and_close_mutation_gate(&drain);
             coordinator.cancel_watches_logs_and_exec();
             coordinator
-                .drain_tracked_tasks(drain_timeout, drain_connections)
+                .drain_tracked_tasks(drain_timeout, coordinator_connections)
                 .await;
         })
         .await;
-    // Axum does not drain upgraded WebSocket tasks; join any straggler left past
-    // the deadline so callers never drop the runtime mid-shutdown-notice.
+    // Axum does not drain upgraded WebSocket tasks; enforce the drain deadline
+    // one last time so callers get a bounded, explicit failure instead of a
+    // silent hang when a socket outlived the coordinator's window.
     connections.close();
-    connections.wait().await;
+    let joined = tokio::time::timeout(drain_timeout, connections.wait())
+        .await
+        .is_ok();
+    if !joined {
+        tracing::warn!(
+            target: "k10s_server::lifecycle",
+            "connection tasks abandoned past the drain deadline"
+        );
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
     result
 }
 
 /// Build the application router with independently testable readiness state.
+///
+/// The `drain` token is fired by the shutdown coordinator only after readiness
+/// has been marked draining and application upgrades have been refused.
 #[allow(clippy::too_many_arguments)]
 pub fn router(
     config: ServerConfig,
     kernel: BackendKernel,
-    cancel: CancellationToken,
     readiness: Arc<Readiness>,
     connections: Arc<TaskTracker>,
     gate: Arc<MutationGate>,
+    drain: CancellationToken,
     dist_dir: Option<PathBuf>,
 ) -> Router {
     let state = AppState {
@@ -250,7 +269,7 @@ pub fn router(
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
         config: Arc::new(config),
         kernel: Arc::new(kernel),
-        drain: cancel.clone(),
+        drain,
         connections,
         readiness,
         gate,
