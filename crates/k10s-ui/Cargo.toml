@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+k10s-protocol = { path = "../k10s-protocol" }
+serde_json = "=1.0.151"
+ewebsock = { version = "=0.8.0", default-features = false, features = ["tls"] }
 
 [lints]
 workspace = true
