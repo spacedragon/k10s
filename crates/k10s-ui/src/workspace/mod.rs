@@ -84,6 +84,12 @@ pub enum WorkspaceEvent<I> {
     YamlOwnerInUse {
         owner: WindowId,
     },
+    /// A context switch committed: the workspace now serves `to`. Emitted
+    /// for direct switches and for pending switches after every blocker
+    /// resolved; `Cancel` never emits it.
+    ContextSwitched {
+        to: String,
+    },
 }
 
 /// The complete workspace state.
@@ -92,6 +98,8 @@ pub struct WorkspaceState<I> {
     windows: Vec<Window<I>>,
     next_id: u64,
     next_z: u64,
+    /// Active context; empty until the first switch commits.
+    context: String,
     /// Writable-YAML ownership: at most one editor per resource identity.
     yaml_owner: HashMap<I, WindowId>,
     pending: Option<PendingNavigation<I>>,
@@ -117,6 +125,7 @@ where
             windows: Vec::new(),
             next_id: 1,
             next_z: 1,
+            context: String::new(),
             yaml_owner: HashMap::new(),
             pending: None,
         };
@@ -130,6 +139,11 @@ where
 
     pub fn window(&self, id: WindowId) -> Option<&Window<I>> {
         self.windows.iter().find(|window| window.id == id)
+    }
+
+    /// The active context; empty until the first context switch commits.
+    pub fn context(&self) -> &str {
+        &self.context
     }
 
     /// The navigation currently waiting on guard resolution, if any.
@@ -539,6 +553,10 @@ where
         }
         // Every dirty buffer was resolved before the switch committed.
         self.yaml_owner.clear();
+        // The switch is observable: state records the target and the caller
+        // learns it through the commit event.
+        self.context = to.clone();
+        events.push(WorkspaceEvent::ContextSwitched { to });
         events
     }
 

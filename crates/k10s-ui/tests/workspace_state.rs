@@ -633,6 +633,7 @@ fn context_switch_commits_after_all_blockers_resolve() {
     // The dedicated window closes and selections are cleared.
     assert!(state.window(dedicated).is_none());
     assert_eq!(state.pending(), None);
+    assert_eq!(state.context(), "prod");
     assert!(
         out.iter()
             .any(|event| matches!(event, WorkspaceEvent::Closed(id) if *id == dedicated))
@@ -679,6 +680,79 @@ fn context_switch_without_blockers_proceeds_directly() {
         other => panic!("expected a resource window, got {other:?}"),
     };
     assert_eq!(resource.selection, None);
+}
+
+#[test]
+fn context_switch_applies_and_reports_the_target_context() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    assert_eq!(state.context(), "");
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "prod".into() },
+    );
+    assert_eq!(state.context(), "prod");
+    assert!(out.contains(&WorkspaceEvent::ContextSwitched { to: "prod".into() }));
+}
+
+#[test]
+fn resolved_pending_context_switch_applies_the_target_context() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "dev".into() },
+    );
+
+    let window = open_pods(&mut state);
+    select(&mut state, window, TestIdentity::pod("dirty-pod"));
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "prod".into() },
+    );
+    assert!(!blocked(&out).blockers.is_empty());
+    // Nothing changed while the switch waited on the guard.
+    assert_eq!(state.context(), "dev");
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window }),
+    );
+    assert_eq!(state.context(), "prod");
+    assert!(out.contains(&WorkspaceEvent::ContextSwitched { to: "prod".into() }));
+}
+
+#[test]
+fn canceled_context_switch_preserves_the_previous_context() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "dev".into() },
+    );
+
+    let window = open_pods(&mut state);
+    select(&mut state, window, TestIdentity::pod("dirty-pod"));
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "prod".into() },
+    );
+    assert!(!blocked(&out).blockers.is_empty());
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ResolveBlock(BlockResolution::Cancel),
+    );
+    assert!(out.is_empty());
+    assert_eq!(state.context(), "dev");
+    let resource = match &state.window(window).unwrap().content {
+        WindowContent::Resource(resource) => resource,
+        other => panic!("expected a resource window, got {other:?}"),
+    };
+    assert_eq!(resource.selection.as_ref().unwrap().name, "dirty-pod");
+    assert!(resource.detail.as_ref().unwrap().yaml.dirty);
 }
 
 #[test]
