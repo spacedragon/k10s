@@ -107,11 +107,11 @@ where
             match state.kind {
                 WindowKind::Overview => super::overview::show(ui, response, connection),
                 WindowKind::Nodes => {
-                    super::infrastructure::show_nodes(ui, infrastructure, response);
+                    super::infrastructure::show_nodes(ui, infrastructure, response, connection);
                     false
                 }
                 WindowKind::Storage => {
-                    super::infrastructure::show_storage(ui, infrastructure, response);
+                    super::infrastructure::show_storage(ui, infrastructure, response, connection);
                     false
                 }
                 WindowKind::Workload(_) | WindowKind::Detail => {

@@ -49,9 +49,18 @@ pub(super) fn show(
             });
 
             ui.push_id("k10s.top_bar.refresh", |ui| {
+                let label = if connection == ConnectionState::Connected {
+                    "Refresh"
+                } else {
+                    "Retry"
+                };
                 refresh = ui
-                    .button("Refresh")
-                    .on_hover_text("Refresh all resources")
+                    .button(label)
+                    .on_hover_text(if connection == ConnectionState::Connected {
+                        "Refresh all resources"
+                    } else {
+                        "Retry the control connection"
+                    })
                     .clicked();
             });
 

@@ -20,6 +20,7 @@ const GIB: u64 = 1_073_741_824;
 struct Fixture {
     shell: UiShell<()>,
     response: InfrastructureResponse,
+    show_response: bool,
     connection: ConnectionState,
     selected_context: Option<String>,
 }
@@ -29,6 +30,7 @@ impl Default for Fixture {
         Self {
             shell: UiShell::new(),
             response: full_response(),
+            show_response: true,
             connection: ConnectionState::Connected,
             selected_context: Some(CONTEXT.to_owned()),
         }
@@ -36,12 +38,13 @@ impl Default for Fixture {
 }
 
 fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
+    let response = fixture.show_response.then_some(&fixture.response);
     fixture.shell.show_with_infrastructure(
         ui,
         fixture.connection,
         &[CONTEXT.to_owned()],
         &mut fixture.selected_context,
-        Some(&fixture.response),
+        response,
     );
 }
 
@@ -231,6 +234,17 @@ fn nodes_table_is_searchable_sortable_and_progress_always_has_numeric_text() {
     }
 
     nodes
+        .get_by_role_and_label(Role::Button, "Sort nodes by age")
+        .click();
+    harness.run();
+    let nodes = harness.get_by_role_and_label(Role::Window, "Nodes");
+    assert!(
+        nodes.get_by_label("dev-node-2").rect().top()
+            < nodes.get_by_label("dev-node-1").rect().top(),
+        "8d must sort before 14d when age is ascending"
+    );
+
+    nodes
         .get_by_role_and_label(Role::TextInput, "Search nodes")
         .focus();
     harness.run();
@@ -246,6 +260,36 @@ fn nodes_table_is_searchable_sortable_and_progress_always_has_numeric_text() {
     nodes
         .get_by_role_and_label(Role::Button, "Sort nodes by status")
         .click();
+}
+
+#[test]
+fn node_filter_empty_state_can_be_cleared() {
+    let mut harness = harness();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Window, "Nodes")
+        .get_by_role_and_label(Role::TextInput, "Search nodes")
+        .focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Window, "Nodes")
+        .get_by_role_and_label(Role::TextInput, "Search nodes")
+        .type_text("does-not-exist");
+    harness.run();
+
+    let nodes = harness.get_by_role_and_label(Role::Window, "Nodes");
+    nodes.get_by_label("No resources match these filters");
+    nodes
+        .get_by_role_and_label(Role::Button, "Clear filters")
+        .click();
+    harness.run();
+    let nodes = harness.get_by_role_and_label(Role::Window, "Nodes");
+    nodes.get_by_label("dev-node-1");
+    nodes.get_by_label("dev-node-2");
 }
 
 #[test]
@@ -381,9 +425,75 @@ fn metrics_states_and_connection_staleness_are_textual_and_missing_is_never_zero
 
     harness.state_mut().connection = ConnectionState::Connecting;
     harness.run();
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    overview.get_by_label(
+        "Connection stale · showing last successful update from 2026-08-21T01:05:00Z",
+    );
+    overview.get_by_role_and_label(Role::Button, "Retry connection");
+
     harness
-        .get_by_role_and_label(Role::Window, "Overview")
-        .get_by_label(
-            "Connection stale · showing last successful update from 2026-08-21T01:05:00Z",
-        );
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Storage,
+        ));
+    harness.run();
+    for window in ["Nodes", "Storage"] {
+        harness
+            .get_by_role_and_label(Role::Window, window)
+            .get_by_label(
+                "Connection stale · showing last successful update from 2026-08-21T01:05:00Z",
+            );
+    }
+}
+
+#[test]
+fn loading_and_empty_storage_states_keep_window_chrome_explanatory() {
+    let mut harness = harness();
+    harness.state_mut().show_response = false;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Storage,
+        ));
+    harness.step();
+    for (window, label) in [
+        ("Overview", "Loading cluster overview"),
+        ("Nodes", "Loading node inventory"),
+        ("Storage", "Loading storage inventory"),
+    ] {
+        let window = harness.get_by_role_and_label(Role::Window, window);
+        window.get_by_role(Role::ProgressIndicator);
+        window.get_by_label(label);
+    }
+
+    harness.state_mut().show_response = true;
+    harness.state_mut().response.storage = StorageInventory::default();
+    harness.run();
+    let storage = harness.get_by_role_and_label(Role::Window, "Storage");
+    storage.get_by_label("No PersistentVolumeClaims in this namespace");
+    storage
+        .get_by_role_and_label(Role::Button, "PersistentVolumes")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Window, "Storage")
+        .get_by_label("No PersistentVolumes");
+    harness
+        .get_by_role_and_label(Role::Window, "Storage")
+        .get_by_role_and_label(Role::Button, "StorageClasses")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Window, "Storage")
+        .get_by_label("No StorageClasses");
 }

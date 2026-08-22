@@ -1,12 +1,13 @@
 //! Overview window rendered exclusively from one protocol response.
 
-use egui::{Color32, ProgressBar, RichText, WidgetInfo, WidgetType};
-use k10s_protocol::{CapacityUsage, HealthLevel, InfrastructureResponse, MetricsCondition};
+use egui::{Color32, RichText, Spinner, WidgetInfo, WidgetType};
+use k10s_protocol::{HealthLevel, InfrastructureResponse, MetricsCondition};
 
-use super::{ConnectionState, theme};
-
-const GIB: f64 = 1_073_741_824.0;
-const MISSING_TOOLTIP: &str = "Metric was not reported; — does not mean zero.";
+use super::{
+    ConnectionState,
+    infrastructure::{Quantity, usage},
+    theme,
+};
 
 pub(super) fn show(
     ui: &mut egui::Ui,
@@ -15,7 +16,7 @@ pub(super) fn show(
 ) -> bool {
     let Some(response) = response else {
         ui.horizontal(|ui| {
-            ui.label("◌");
+            ui.add(Spinner::new());
             ui.label("Loading cluster overview");
         });
         return false;
@@ -46,9 +47,19 @@ pub(super) fn show(
     });
     ui.separator();
 
-    cluster_progress(ui, "CPU", response.cluster_cpu, Quantity::Cpu);
-    cluster_progress(ui, "Memory", response.cluster_memory, Quantity::Memory);
-    cluster_progress(ui, "Pod capacity", response.pod_capacity, Quantity::Pods);
+    usage(ui, response.cluster_cpu, Quantity::Cpu, Some("CPU"));
+    usage(
+        ui,
+        response.cluster_memory,
+        Quantity::Memory,
+        Some("Memory"),
+    );
+    usage(
+        ui,
+        response.pod_capacity,
+        Quantity::Pods,
+        Some("Pod capacity"),
+    );
 
     ui.separator();
     ui.horizontal_wrapped(|ui| {
@@ -105,53 +116,17 @@ pub(super) fn show(
     ));
 
     ui.horizontal(|ui| {
-        let refresh = ui.button("Refresh");
-        refresh.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Refresh overview"));
+        let (visible, accessible) = if connection == ConnectionState::Connected {
+            ("Refresh", "Refresh overview")
+        } else {
+            ("Retry", "Retry connection")
+        };
+        let refresh = ui.button(visible);
+        refresh.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible));
         ui.label(format!("Last updated: {}", response.generated_at));
         refresh.clicked()
     })
     .inner
-}
-
-#[derive(Clone, Copy)]
-enum Quantity {
-    Cpu,
-    Memory,
-    Pods,
-}
-
-fn cluster_progress(ui: &mut egui::Ui, label: &str, usage: CapacityUsage, quantity: Quantity) {
-    let (Some(used), Some(capacity)) = (usage.used, usage.capacity) else {
-        ui.label(format!("{label} —"))
-            .on_hover_text(MISSING_TOOLTIP);
-        return;
-    };
-    let text = match quantity {
-        Quantity::Cpu => format!(
-            "{label} {:.1} / {:.1} cores",
-            used as f64 / 1_000.0,
-            capacity as f64 / 1_000.0
-        ),
-        Quantity::Memory => format!(
-            "{label} {:.1} / {:.1} GiB",
-            used as f64 / GIB,
-            capacity as f64 / GIB
-        ),
-        Quantity::Pods => format!("{label} {used} / {capacity} pods"),
-    };
-    ui.add(
-        ProgressBar::new(fraction(used, capacity))
-            .text(text)
-            .animate(false),
-    );
-}
-
-fn fraction(used: u64, capacity: u64) -> f32 {
-    if capacity == 0 {
-        0.0
-    } else {
-        (used as f64 / capacity as f64).clamp(0.0, 1.0) as f32
-    }
 }
 
 fn health_color(level: HealthLevel, error: Color32) -> Color32 {

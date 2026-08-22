@@ -55,11 +55,11 @@ fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
     harness
         .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
         .click();
-    harness.run();
+    harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Button, SECONDARY_CONTEXT)
         .click();
-    harness.run();
+    harness.run_steps(4);
 }
 
 fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: bool) {
@@ -88,7 +88,7 @@ fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: 
         WorkspaceCommand::ConnectShell(window)
     };
     harness.state_mut().shell.apply_workspace_command(guard);
-    harness.run();
+    harness.run_steps(4);
 }
 
 #[test]
@@ -141,13 +141,13 @@ fn workloads_group_expands_and_launcher_never_uses_checkbox_roles() {
     harness
         .get_by_role_and_label(Role::Button, "Workloads")
         .click();
-    harness.run();
+    harness.run_steps(4);
     assert!(harness.query_by_label("Pods").is_none());
 
     harness
         .get_by_role_and_label(Role::Button, "Workloads")
         .click();
-    harness.run();
+    harness.run_steps(4);
     harness.get_by_role_and_label(Role::Button, "Pods");
     assert_eq!(harness.query_all_by_role(Role::CheckBox).count(), 0);
 }
@@ -157,7 +157,7 @@ fn workload_highlight_count_plus_and_close_track_workspace_instances() {
     let mut harness = shell_harness();
 
     harness.get_by_role_and_label(Role::Button, "Pods").click();
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness
@@ -179,7 +179,7 @@ fn workload_highlight_count_plus_and_close_track_workspace_instances() {
     harness
         .get_by_role_and_label(Role::Button, "Open another Pods window")
         .click();
-    harness.run();
+    harness.run_steps(4);
     assert_eq!(
         harness
             .state()
@@ -204,7 +204,7 @@ fn workload_highlight_count_plus_and_close_track_workspace_instances() {
         pods_window
             .get_by_role_and_label(Role::Button, "Close window")
             .click();
-        harness.run();
+        harness.run_steps(4);
     }
     assert_eq!(
         harness
@@ -229,7 +229,7 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
     let mut harness = shell_harness();
 
     harness.get_by_role_and_label(Role::Button, "Nodes").click();
-    harness.run();
+    harness.run_steps(4);
     let first_z = harness
         .state()
         .shell
@@ -243,7 +243,7 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
     harness
         .get_by_role_and_label(Role::Button, "Storage")
         .click();
-    harness.run();
+    harness.run_steps(4);
     let storage_id = harness
         .state()
         .shell
@@ -256,7 +256,7 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
     assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
 
     harness.get_by_role_and_label(Role::Button, "Nodes").click();
-    harness.run();
+    harness.run_steps(4);
     let nodes: Vec<_> = harness
         .state()
         .shell
@@ -292,7 +292,7 @@ fn plus_always_opens_independent_staggered_workload_windows() {
         harness
             .get_by_role_and_label(Role::Button, "Open another Deployments window")
             .click();
-        harness.run();
+        harness.run_steps(4);
     }
 
     let deployments: Vec<_> = harness
@@ -319,7 +319,7 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
         harness
             .get_by_role_and_label(Role::Button, "Open another Pods window")
             .click();
-        harness.run();
+        harness.run_steps(4);
     }
     let mru_id = harness
         .state()
@@ -351,9 +351,9 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
         .left_top()
         + egui::vec2(96.0, 10.0);
     harness.drag_at(older_title);
-    harness.run();
+    harness.run_steps(4);
     harness.drop_at(older_title);
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness.ctx.top_layer_id(),
@@ -376,7 +376,7 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
     );
 
     harness.get_by_role_and_label(Role::Button, "Pods").click();
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness
@@ -433,7 +433,7 @@ fn dirty_yaml_cancel_keeps_context_selection_and_does_not_requeue() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::ResolveBlock(BlockResolution::Cancel));
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness.state().selected_context.as_deref(),
@@ -460,7 +460,7 @@ fn connected_shell_cancel_keeps_context_selection_and_does_not_requeue() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::ResolveBlock(BlockResolution::Cancel));
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness.state().selected_context.as_deref(),
@@ -487,7 +487,7 @@ fn controls_and_window_chrome_keep_stable_accessibility_identity() {
         .get_by_role_and_label(Role::Button, "Close window");
     assert!(harness.query_all_by_role(Role::Splitter).count() > 0);
 
-    harness.run();
+    harness.run_steps(4);
 
     assert_eq!(
         harness
@@ -508,7 +508,7 @@ fn controls_and_window_chrome_keep_stable_accessibility_identity() {
         .get_by_role_and_label(Role::Window, "Overview")
         .get_by_role_and_label(Role::Button, "Hide")
         .click();
-    harness.run();
+    harness.run_steps(4);
     assert!(
         harness.state().shell.workspace().windows()[0]
             .geometry
@@ -519,7 +519,7 @@ fn controls_and_window_chrome_keep_stable_accessibility_identity() {
         .get_by_role_and_label(Role::Window, "Overview")
         .get_by_role_and_label(Role::Button, "Show")
         .click();
-    harness.run();
+    harness.run_steps(4);
     assert!(
         !harness.state().shell.workspace().windows()[0]
             .geometry

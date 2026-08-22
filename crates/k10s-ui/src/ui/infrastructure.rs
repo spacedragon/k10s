@@ -2,8 +2,10 @@
 
 use std::cmp::Ordering;
 
-use egui::{ProgressBar, TextEdit, WidgetInfo, WidgetType};
+use egui::{ProgressBar, RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{CapacityUsage, InfrastructureResponse, NodeRow};
+
+use super::{ConnectionState, theme};
 
 const GIB: f64 = 1_073_741_824.0;
 const MISSING_TOOLTIP: &str = "Metric was not reported; — does not mean zero.";
@@ -52,14 +54,17 @@ pub(super) fn show_nodes(
     ui: &mut egui::Ui,
     state: &mut InfrastructureUiState,
     response: Option<&InfrastructureResponse>,
+    connection: ConnectionState,
 ) {
     let Some(response) = response else {
         ui.horizontal(|ui| {
-            ui.label("◌");
+            ui.add(Spinner::new());
             ui.label("Loading node inventory");
         });
         return;
     };
+
+    stale_banner(ui, response, connection);
 
     let ready = response
         .nodes
@@ -104,7 +109,7 @@ pub(super) fn show_nodes(
             NodeSort::Cpu => usage_order(left.cpu, right.cpu),
             NodeSort::Memory => usage_order(left.memory, right.memory),
             NodeSort::Pods => usage_order(left.pods, right.pods),
-            NodeSort::Age => left.age.cmp(&right.age),
+            NodeSort::Age => age_order(&left.age, &right.age),
         }
         .then_with(|| left.name.cmp(&right.name));
         if state.node_sort_ascending {
@@ -113,6 +118,18 @@ pub(super) fn show_nodes(
             order.reverse()
         }
     });
+
+    if rows.is_empty() {
+        if state.node_search.is_empty() {
+            ui.label("No Nodes in this context");
+        } else {
+            ui.label("No resources match these filters");
+            if ui.button("Clear filters").clicked() {
+                state.node_search.clear();
+            }
+        }
+        return;
+    }
 
     egui::ScrollArea::both()
         .id_salt("k10s.nodes.table.scroll")
@@ -142,9 +159,9 @@ pub(super) fn show_nodes(
                         ui.label(&node.status);
                         ui.label(node.roles.join(", "));
                         ui.monospace(&node.kubernetes_version);
-                        usage(ui, node.cpu, Quantity::Cpu);
-                        usage(ui, node.memory, Quantity::Memory);
-                        usage(ui, node.pods, Quantity::Pods);
+                        usage(ui, node.cpu, Quantity::Cpu, None);
+                        usage(ui, node.memory, Quantity::Memory, None);
+                        usage(ui, node.pods, Quantity::Pods, None);
                         ui.monospace(&node.age);
                         ui.end_row();
                     }
@@ -156,14 +173,17 @@ pub(super) fn show_storage(
     ui: &mut egui::Ui,
     state: &mut InfrastructureUiState,
     response: Option<&InfrastructureResponse>,
+    connection: ConnectionState,
 ) {
     let Some(response) = response else {
         ui.horizontal(|ui| {
-            ui.label("◌");
+            ui.add(Spinner::new());
             ui.label("Loading storage inventory");
         });
         return;
     };
+
+    stale_banner(ui, response, connection);
 
     ui.horizontal(|ui| {
         for (tab, label) in [
@@ -185,6 +205,10 @@ pub(super) fn show_storage(
         .id_salt("k10s.storage.table.scroll")
         .show(ui, |ui| match state.storage_tab {
             StorageTab::PersistentVolumeClaims => {
+                if response.storage.persistent_volume_claims.is_empty() {
+                    ui.label("No PersistentVolumeClaims in this namespace");
+                    return;
+                }
                 egui::Grid::new("k10s.storage.pvcs")
                     .striped(true)
                     .show(ui, |ui| {
@@ -219,6 +243,10 @@ pub(super) fn show_storage(
                     });
             }
             StorageTab::PersistentVolumes => {
+                if response.storage.persistent_volumes.is_empty() {
+                    ui.label("No PersistentVolumes");
+                    return;
+                }
                 egui::Grid::new("k10s.storage.pvs")
                     .striped(true)
                     .show(ui, |ui| {
@@ -253,6 +281,10 @@ pub(super) fn show_storage(
                     });
             }
             StorageTab::StorageClasses => {
+                if response.storage.storage_classes.is_empty() {
+                    ui.label("No StorageClasses");
+                    return;
+                }
                 egui::Grid::new("k10s.storage.classes")
                     .striped(true)
                     .show(ui, |ui| {
@@ -298,18 +330,24 @@ fn cells(ui: &mut egui::Ui, values: &[&str]) {
 }
 
 #[derive(Clone, Copy)]
-enum Quantity {
+pub(super) enum Quantity {
     Cpu,
     Memory,
     Pods,
 }
 
-fn usage(ui: &mut egui::Ui, usage: CapacityUsage, quantity: Quantity) {
+pub(super) fn usage(
+    ui: &mut egui::Ui,
+    usage: CapacityUsage,
+    quantity: Quantity,
+    label: Option<&str>,
+) {
     let (Some(used), Some(capacity)) = (usage.used, usage.capacity) else {
-        ui.label("—").on_hover_text(MISSING_TOOLTIP);
+        ui.label(label.map_or_else(|| "—".to_owned(), |label| format!("{label} —")))
+            .on_hover_text(MISSING_TOOLTIP);
         return;
     };
-    let text = match quantity {
+    let value = match quantity {
         Quantity::Cpu => format!(
             "{:.1} / {:.1} cores",
             used as f64 / 1_000.0,
@@ -322,6 +360,7 @@ fn usage(ui: &mut egui::Ui, usage: CapacityUsage, quantity: Quantity) {
         ),
         Quantity::Pods => format!("{used} / {capacity} pods"),
     };
+    let text = label.map_or(value.clone(), |label| format!("{label} {value}"));
     let fraction = if capacity == 0 {
         0.0
     } else {
@@ -341,6 +380,43 @@ fn usage_order(left: CapacityUsage, right: CapacityUsage) -> Ordering {
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => left.capacity.cmp(&right.capacity),
+    }
+}
+
+fn age_order(left: &str, right: &str) -> Ordering {
+    match (age_seconds(left), age_seconds(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn age_seconds(age: &str) -> Option<u64> {
+    for (suffix, multiplier) in [
+        ("y", 365 * 24 * 60 * 60),
+        ("d", 24 * 60 * 60),
+        ("h", 60 * 60),
+        ("m", 60),
+        ("s", 1),
+    ] {
+        if let Some(value) = age.strip_suffix(suffix) {
+            return value.parse::<u64>().ok()?.checked_mul(multiplier);
+        }
+    }
+    None
+}
+
+fn stale_banner(ui: &mut egui::Ui, response: &InfrastructureResponse, connection: ConnectionState) {
+    if connection != ConnectionState::Connected {
+        ui.label(
+            RichText::new(format!(
+                "Connection stale · showing last successful update from {}",
+                response.generated_at
+            ))
+            .color(theme::WARNING),
+        );
+        ui.separator();
     }
 }
 

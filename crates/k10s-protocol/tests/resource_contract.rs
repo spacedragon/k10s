@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, MetricsAvailability, PodMetrics, RequestId,
-    ResourceCapabilities, ResourceDetailResponse, ResourceGone, ResourceIdentity,
+    BackendRevision, GroupVersionKind, InfrastructureWatchSpec, MetricsAvailability, PodMetrics,
+    RequestId, ResourceCapabilities, ResourceDetailResponse, ResourceGone, ResourceIdentity,
     ResourceListResponse, ResourceListRow, ResourceScope, ResourceSnapshotPage, ServerFrame,
-    ServerKind, WorkloadKind, decode_server_frame,
+    ServerKind, SubscriptionSelector, WorkloadKind, decode_server_frame,
 };
 use serde_json::{Value, json};
 
@@ -21,6 +21,17 @@ fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> V
     let reencoded = serde_json::to_value(&decoded).expect("payload must re-serialize");
     assert_eq!(encoded, reencoded, "round trip must be stable");
     encoded
+}
+
+#[test]
+fn infrastructure_watch_uses_the_typed_subscription_selector() {
+    let selector = SubscriptionSelector::Infrastructure(InfrastructureWatchSpec {
+        context: "dev-local".into(),
+    });
+    assert_eq!(
+        round_trip(&selector),
+        json!({"kind": "infrastructure", "context": "dev-local"})
+    );
 }
 
 #[test]

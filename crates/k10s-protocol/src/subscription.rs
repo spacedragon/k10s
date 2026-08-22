@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::InfrastructureWatchSpec;
 use crate::resource::{BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow};
 
 /// Envelope event kind carrying a [`ResourceChanged`] delta.
@@ -22,6 +23,8 @@ pub enum SubscriptionSelector {
     BootstrapStatus,
     /// Watch one resource type on one context.
     Resource(ResourceWatchSpec),
+    /// Watch Overview, Nodes, Storage, and metrics for one context.
+    Infrastructure(InfrastructureWatchSpec),
 }
 
 /// The resource type a watch follows.

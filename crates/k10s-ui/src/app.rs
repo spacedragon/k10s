@@ -222,7 +222,14 @@ impl K10sApp {
             response.as_ref(),
         );
         let selected_after = self.client.local_ui().selected_context.clone();
-        let request_result = if selected_after != selected_before {
+        let retry_requested = refresh && self.client.phase() != ClientPhase::Ready;
+        let request_result = if retry_requested {
+            let now_ms =
+                u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.jitter_counter = self.jitter_counter.wrapping_add(1);
+            let entropy = now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
+            self.retry_now(now_ms, entropy)
+        } else if selected_after != selected_before {
             selected_after.as_deref().map_or(Ok(()), |context| {
                 self.select_infrastructure_context(context)
             })
@@ -233,10 +240,15 @@ impl K10sApp {
         } else {
             Ok(())
         };
-        if let Err(error) = request_result.and_then(|()| {
-            self.flush_outbound()
-                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
-        }) {
+        let request_result = if retry_requested {
+            request_result
+        } else {
+            request_result.and_then(|()| {
+                self.flush_outbound()
+                    .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+            })
+        };
+        if let Err(error) = request_result {
             self.terminal_failure(error.to_string());
         }
     }
@@ -399,6 +411,21 @@ impl K10sApp {
         Ok(())
     }
 
+    fn retry_now(&mut self, now_ms: u64, entropy: u64) -> Result<(), ClientError> {
+        if self.connection.is_some() || Self::terminal_phase(self.client.phase()) {
+            return Ok(());
+        }
+        if !self.client.retry_if_due(u64::MAX)? {
+            return Ok(());
+        }
+        match self.factory.connect(&self.connection_url) {
+            Ok(connection) => self.connection = Some(connection),
+            Err(_) => self.transient_loss(now_ms, entropy),
+        }
+        self.view = AppView::Connecting;
+        Ok(())
+    }
+
     fn transient_loss(&mut self, now_ms: u64, entropy: u64) {
         if Self::terminal_phase(self.client.phase()) {
             return;
@@ -465,6 +492,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
 
+    use egui_kittest::{Harness, kittest::Queryable as _};
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
         BootstrapResponse, ClientFrame, ClientKind, ErrorCode, ErrorFrame, ErrorScope,
@@ -815,5 +843,32 @@ mod tests {
         assert_eq!(schedule.attempt, 0);
         assert_eq!(schedule.max_delay_ms, 250);
         assert_eq!(schedule.retry_at_ms, 300);
+    }
+
+    #[test]
+    fn stale_retry_starts_a_transport_without_issuing_a_non_ready_query() {
+        fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
+            app.render_ui(ui);
+        }
+
+        let (mut app, state) = test_app(vec![
+            ConnectionScript::default(),
+            ConnectionScript::default(),
+        ]);
+        app.client.local_ui_mut().selected_context = Some("dev-local".into());
+        app.transient_loss(100, 250);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_280.0, 800.0))
+            .build_ui_state(render, app);
+
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Retry")
+            .click();
+        harness.step();
+
+        assert_eq!(state.borrow().connect_count, 2);
+        assert_eq!(harness.state().client.phase(), ClientPhase::Authenticating);
+        assert_eq!(harness.state().view(), &AppView::Connecting);
+        assert!(harness.state().infrastructure_request.is_none());
     }
 }

@@ -507,10 +507,10 @@ impl ClientState {
         }
         let id = SubscriptionId::new(format!("infrastructure-{}", self.next_subscription_id));
         self.next_subscription_id = self.next_subscription_id.saturating_add(1);
-        let selector =
-            serde_json::to_value(InfrastructureWatchSpec::new(context)).map_err(|error| {
-                ClientError::Protocol(format!("could not encode selector: {error}"))
-            })?;
+        let selector = serde_json::to_value(SubscriptionSelector::Infrastructure(
+            InfrastructureWatchSpec::new(context),
+        ))
+        .map_err(|error| ClientError::Protocol(format!("could not encode selector: {error}")))?;
         self.queue_subscribe(id.clone(), selector.clone())?;
         self.live_subscriptions.insert(id.clone(), selector);
         self.refresh_server_validity();

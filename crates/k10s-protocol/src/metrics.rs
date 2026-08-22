@@ -115,8 +115,6 @@ pub struct InfrastructureRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InfrastructureWatchSpec {
-    /// Discriminator used by the control route.
-    pub kind: String,
     /// Kubernetes context to watch.
     pub context: String,
 }
@@ -126,7 +124,6 @@ impl InfrastructureWatchSpec {
     #[must_use]
     pub fn new(context: impl Into<String>) -> Self {
         Self {
-            kind: "infrastructure".into(),
             context: context.into(),
         }
     }
