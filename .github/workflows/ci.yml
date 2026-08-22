@@ -49,6 +49,35 @@ jobs:
       - name: Unit tests
         run: cargo test --locked --workspace --all-targets
 
+  # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
+  wasm:
+    name: WASM check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain-file: rust-toolchain.toml
+
+      - name: Rust version
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-wasm-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Check k10s-web for wasm32-unknown-unknown
+        run: cargo check --locked -p k10s-web --target wasm32-unknown-unknown
+
   # Web foundation gate: pinned Trunk build plus the Chromium browser smoke.
   web:
     name: Web foundation
