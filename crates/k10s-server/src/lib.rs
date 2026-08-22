@@ -4,10 +4,14 @@ mod auth;
 mod config;
 mod control;
 mod lifecycle;
+mod origin;
 mod outbound;
 mod probes;
 
-pub use config::{ServerConfig, StandaloneConfig, StandaloneConfigError};
+pub use config::{
+    AccessTokenSourceError, ServerConfig, StandaloneConfig, StandaloneConfigError,
+    resolve_access_token,
+};
 pub use lifecycle::{
     Admission, ConnectionTasks, DrainSignals, MutationGate, ServerHandle, router, run,
     run_with_assets, spawn_loopback,

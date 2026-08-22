@@ -622,8 +622,40 @@ async fn not_implemented() -> StatusCode {
 
 async fn control_upgrade(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    // Same-origin policy for browser upgrades. Native clients send no Origin
+    // header and are unconstrained; spoofed X-Forwarded-* style headers are
+    // deliberately ignored (see README security section).
+    let origin = headers.get("origin");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if let Some(text) = origin.and_then(|value| value.to_str().ok()) {
+        // Present and decodable: only a true same-origin pair is admitted; the
+        // check below also requires a parseable Host header.
+        if !crate::origin::origin_matches_host(Some(text), host) {
+            tracing::warn!(
+                target: "k10s_server::lifecycle",
+                ?text,
+                ?host,
+                "cross-origin control upgrade rejected"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    } else if origin.is_some() {
+        // Present but undecodable bytes must fail closed instead of collapsing
+        // into the absent-Origin allowance for native clients; log without the
+        // raw header value.
+        tracing::warn!(
+            target: "k10s_server::lifecycle",
+            ?host,
+            "control upgrade rejected: undecodable Origin header"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     // Registration and the readiness decision share one critical section, so
     // an accepted upgrade is always observable by the drain, and once draining
     // began no upgrade can be accepted at all.
