@@ -28,14 +28,17 @@ pub struct ScheduledItem {
 struct Entry {
     priority: Priority,
     message: Message,
-    coalescing: Option<CoalescingIdentity>,
+    p2_identity: Option<P2Identity>,
     sequence: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct CoalescingIdentity {
-    subscription: Option<String>,
-    resource: String,
+enum P2Identity {
+    Resource {
+        subscription: Option<String>,
+        resource: String,
+    },
+    RecoveryBarrier,
 }
 
 #[derive(Debug)]
@@ -80,7 +83,7 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority,
             message,
-            coalescing: None,
+            p2_identity: None,
             sequence: None,
         });
         drop(state);
@@ -105,7 +108,7 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority: Priority::P1,
             message,
-            coalescing: None,
+            p2_identity: None,
             sequence: Some(sequence),
         });
         drop(state);
@@ -118,7 +121,7 @@ impl Scheduler {
         resource: impl Into<String>,
         message: Message,
     ) -> Result<(), EnqueueError> {
-        let coalescing = CoalescingIdentity {
+        let p2_identity = P2Identity::Resource {
             subscription: None,
             resource: resource.into(),
         };
@@ -132,7 +135,7 @@ impl Scheduler {
         if let Some(entry) = state
             .queue
             .iter_mut()
-            .find(|entry| entry.coalescing.as_ref() == Some(&coalescing))
+            .find(|entry| entry.p2_identity.as_ref() == Some(&p2_identity))
         {
             entry.message = message;
             return Ok(());
@@ -141,7 +144,12 @@ impl Scheduler {
         let p2_count = state
             .queue
             .iter()
-            .filter(|entry| entry.coalescing.is_some())
+            .filter(|entry| {
+                matches!(
+                    entry.p2_identity.as_ref(),
+                    Some(P2Identity::Resource { .. })
+                )
+            })
             .count();
         if state.queue.len() == self.capacity || p2_count >= p2_limit {
             return Err(EnqueueError::Coalesced);
@@ -149,7 +157,7 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority: Priority::P2,
             message,
-            coalescing: Some(coalescing),
+            p2_identity: Some(p2_identity),
             sequence: None,
         });
         drop(state);
@@ -167,7 +175,7 @@ impl Scheduler {
         resource: impl Into<String>,
         build: impl FnOnce(Option<u64>) -> Result<(u64, Message), EnqueueError>,
     ) -> Result<(), EnqueueError> {
-        let coalescing = CoalescingIdentity {
+        let p2_identity = P2Identity::Resource {
             subscription: Some(subscription.into()),
             resource: resource.into(),
         };
@@ -181,7 +189,7 @@ impl Scheduler {
         if let Some(entry) = state
             .queue
             .iter_mut()
-            .find(|entry| entry.coalescing.as_ref() == Some(&coalescing))
+            .find(|entry| entry.p2_identity.as_ref() == Some(&p2_identity))
         {
             let queued_sequence = entry
                 .sequence
@@ -195,7 +203,12 @@ impl Scheduler {
         let p2_count = state
             .queue
             .iter()
-            .filter(|entry| entry.coalescing.is_some())
+            .filter(|entry| {
+                matches!(
+                    entry.p2_identity.as_ref(),
+                    Some(P2Identity::Resource { .. })
+                )
+            })
             .count();
         if state.queue.len() == self.capacity || p2_count >= p2_limit {
             return Err(EnqueueError::Coalesced);
@@ -204,7 +217,7 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority: Priority::P2,
             message,
-            coalescing: Some(coalescing),
+            p2_identity: Some(p2_identity),
             sequence: Some(sequence),
         });
         drop(state);
@@ -212,9 +225,10 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Append a sequenced recovery barrier behind the current P2 tail. The
-    /// sequence is allocated while holding the queue lock so later sequenced
-    /// frames cannot be admitted ahead of it.
+    /// Append a sequenced recovery barrier behind the current P2 tail, or
+    /// reuse the queued barrier when another watch has already demanded
+    /// recovery. The sequence is allocated while holding the queue lock so
+    /// later sequenced frames cannot be admitted ahead of it.
     pub fn enqueue_p2_barrier(
         &self,
         build: impl FnOnce() -> Result<(u64, Message), EnqueueError>,
@@ -223,14 +237,24 @@ impl Scheduler {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.closed || state.queue.len() == self.capacity {
+        if state.closed {
+            return Err(EnqueueError::Overloaded);
+        }
+        if state
+            .queue
+            .iter()
+            .any(|entry| entry.p2_identity.as_ref() == Some(&P2Identity::RecoveryBarrier))
+        {
+            return Ok(());
+        }
+        if state.queue.len() == self.capacity {
             return Err(EnqueueError::Overloaded);
         }
         let (sequence, message) = build()?;
         state.queue.push_back(Entry {
             priority: Priority::P2,
             message,
-            coalescing: None,
+            p2_identity: Some(P2Identity::RecoveryBarrier),
             sequence: Some(sequence),
         });
         drop(state);
@@ -314,7 +338,7 @@ impl Scheduler {
         state.queue.push_back(Entry {
             priority: Priority::P0,
             message,
-            coalescing: None,
+            p2_identity: None,
             sequence: None,
         });
         drop(state);
@@ -405,5 +429,24 @@ mod tests {
             "the queued barrier must not let resource traffic enter the reserve"
         );
         assert_eq!(scheduler.len(), 3);
+    }
+
+    #[test]
+    fn concurrent_recovery_barriers_share_one_reliable_slot() {
+        let scheduler = Scheduler::new(4, 2);
+        scheduler.enqueue_p2("pod/a", text("a")).unwrap();
+        scheduler.enqueue_p2("pod/b", text("b")).unwrap();
+        let allocated = std::sync::atomic::AtomicU64::new(2);
+        for _ in 0..2 {
+            scheduler
+                .enqueue_p2_barrier(|| {
+                    let sequence = allocated.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                    Ok((sequence, text(&format!("resync-{sequence}"))))
+                })
+                .unwrap();
+        }
+
+        assert_eq!(allocated.load(std::sync::atomic::Ordering::Acquire), 3);
+        assert_eq!(scheduler.len(), 3, "only one recovery barrier is queued");
     }
 }
