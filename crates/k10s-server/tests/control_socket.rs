@@ -6,7 +6,10 @@ use k10s_backend::{
     BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
     QueryResult, Subscribe, SubscriptionHandle,
 };
-use k10s_protocol::{ClientFrame, ClientKind, RequestId, ServerFrame, ServerKind};
+use k10s_protocol::{
+    ClientFrame, ClientKind, ErrorCode, RequestId, Retryability, ServerFrame, ServerKind,
+    ServerPayload,
+};
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::json;
 use tokio_tungstenite::tungstenite::protocol::frame::{
@@ -299,6 +302,14 @@ async fn wrong_token_and_incompatible_major_close_explicitly() {
         ))
         .await
         .unwrap();
+    let rejected = receive_frame(&mut wrong).await;
+    let ServerPayload::Error(rejected) = rejected.decode_payload().unwrap() else {
+        panic!("expected terminal authentication error");
+    };
+    assert_eq!(rejected.code, ErrorCode::Unauthorized);
+    assert_eq!(rejected.retryability, Retryability::Never);
+    assert!(!rejected.safe_message.contains("wrong"));
+    assert!(!rejected.safe_message.contains("secret"));
     assert_close_reason(wrong.next().await.unwrap().unwrap(), "authentication");
 
     let mut incompatible = connect(&server).await;
@@ -308,6 +319,12 @@ async fn wrong_token_and_incompatible_major_close_explicitly() {
         .send(Message::Text(value.to_string().into()))
         .await
         .unwrap();
+    let upgrade = receive_frame(&mut incompatible).await;
+    let ServerPayload::Error(upgrade) = upgrade.decode_payload().unwrap() else {
+        panic!("expected terminal protocol error");
+    };
+    assert_eq!(upgrade.code, ErrorCode::IncompatibleProtocol);
+    assert_eq!(upgrade.retryability, Retryability::Never);
     assert_close_reason(incompatible.next().await.unwrap().unwrap(), "incompatible");
     server.shutdown().await.unwrap();
 }

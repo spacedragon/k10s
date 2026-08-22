@@ -12,6 +12,8 @@ pub enum ErrorCode {
     InvalidRequest,
     /// Authentication or authorization failed.
     Unauthorized,
+    /// Client and server protocol major versions cannot interoperate.
+    IncompatibleProtocol,
     /// The requested resource was not found.
     NotFound,
     /// The operation is already in progress.

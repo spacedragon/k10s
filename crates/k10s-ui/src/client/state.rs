@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use k10s_protocol::{
-    Ack, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode, ErrorFrame, Hello,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, Request, RequestId, ResumeStatus, Retryability, ServerFrame,
-    ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
+    Ack, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode, ErrorFrame,
+    ErrorScope, Hello, PROTOCOL_MAJOR, PROTOCOL_MINOR, Request, RequestId, ResumeStatus,
+    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
 };
 
 /// Client connection lifecycle.
@@ -370,6 +370,7 @@ impl ClientState {
         }
         self.phase = ClientPhase::Disconnected;
         self.reconnecting = true;
+        self.outbound.clear();
         self.invalidate_server_state();
         let exponent = self.retry_attempt.min(63);
         let ceiling = self
@@ -649,7 +650,35 @@ impl ClientState {
                 self.target = None;
                 Err(ClientError::AuthenticationRejected)
             }
+            ServerPayload::Error(error)
+                if self.phase == ClientPhase::Authenticating
+                    && error.code == ErrorCode::IncompatibleProtocol =>
+            {
+                let server_major = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("serverProtocolMajor"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|major| u16::try_from(major).ok())
+                    .unwrap_or(0);
+                self.phase = ClientPhase::UpgradeRequired;
+                self.retry = None;
+                self.reconnecting = false;
+                self.target = None;
+                Err(ClientError::IncompatibleProtocol {
+                    client_major: PROTOCOL_MAJOR,
+                    server_major,
+                })
+            }
             ServerPayload::Error(error) => {
+                if error.scope == ErrorScope::Request {
+                    let id = frame.request_id.clone().ok_or_else(|| {
+                        ClientError::Protocol("request error missing request ID".to_owned())
+                    })?;
+                    self.pending
+                        .remove(&id)
+                        .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
+                }
                 if error.retryability == Retryability::AfterReconnect {
                     self.transport_lost(now_ms, entropy);
                 }
@@ -681,6 +710,7 @@ impl ClientState {
     }
 
     fn rebuild_server_state(&mut self) -> Result<(), ClientError> {
+        self.outbound.clear();
         self.invalidate_server_state();
         let _bootstrap = self.begin(Query::Bootstrap)?;
         let subscriptions: Vec<_> = self

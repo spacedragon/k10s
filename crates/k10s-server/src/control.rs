@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::auth::authenticate;
+use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
 use crate::outbound::{EnqueueError, Priority, Scheduler};
 
@@ -99,12 +99,12 @@ pub(crate) async fn serve_socket(
     };
     let negotiated = match authenticate(&config, &hello) {
         Ok(value) => value,
-        Err(reason) => {
-            return close_and_join(
+        Err(error) => {
+            return terminal_auth_error_and_close(
                 outbound,
                 child,
                 writer,
-                reason,
+                error,
                 config.graceful_flush_timeout,
             )
             .await;
@@ -394,6 +394,47 @@ pub(crate) async fn serve_socket(
     while request_tasks.join_next().await.is_some() {}
     drop(authenticated);
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
+}
+
+async fn terminal_auth_error_and_close(
+    outbound: Scheduler,
+    child: CancellationToken,
+    writer: tokio::task::JoinHandle<()>,
+    error: AuthenticationError,
+    flush_timeout: Duration,
+) {
+    let mut terminal = ErrorFrame::new(
+        error.code(),
+        error.safe_reason(),
+        Retryability::Never,
+        ErrorScope::Session,
+        "authentication",
+    );
+    if let AuthenticationError::IncompatibleProtocol { client_major } = error {
+        terminal = terminal.with_details(serde_json::json!({
+            "clientProtocolMajor": client_major,
+            "serverProtocolMajor": k10s_protocol::PROTOCOL_MAJOR,
+        }));
+    }
+    let _ = send_frame(
+        &outbound,
+        ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(terminal).expect("terminal error serializes"),
+        },
+        Priority::P0,
+    );
+
+    let wait_for_writer = async {
+        while !outbound.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    };
+    let _ = tokio::time::timeout(flush_timeout, wait_for_writer).await;
+    close_and_join(outbound, child, writer, error.safe_reason(), flush_timeout).await;
 }
 
 fn overload_close(outbound: &Scheduler) {

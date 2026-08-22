@@ -224,7 +224,6 @@ fn resync_required_reissues_bootstrap_and_live_subscriptions() {
     let _ack = client.take_outbound();
 
     client.apply(resync_required(2)).unwrap();
-    let _ack = client.take_outbound().unwrap();
     let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
         .map(|frame| frame.kind)
         .collect();
@@ -328,6 +327,121 @@ fn only_transient_loss_and_after_reconnect_server_errors_schedule_retry() {
     assert_eq!(client.retry_schedule(), None);
 }
 
+#[test]
+fn reconnect_discards_stale_outbound_and_sends_only_hello_before_welcome() {
+    let mut client = ready_client();
+    let pending = client.begin(Query::Bootstrap).unwrap();
+    assert!(client.cancel(&pending));
+
+    client.transport_lost(1_000, 0);
+    assert!(client.take_outbound().is_none());
+    assert!(client.retry_if_due(1_000));
+    assert_eq!(client.take_outbound().unwrap().kind, ClientKind::Hello);
+    assert!(client.take_outbound().is_none());
+}
+
+#[test]
+fn resync_discards_stale_outbound_before_recovery_frames() {
+    let mut client = ready_client();
+    let live = client.subscribe_bootstrap_status().unwrap();
+    let _subscribe = client.take_outbound();
+    client.apply(subscribed(live.id(), 1)).unwrap();
+    let _ack = client.take_outbound();
+    let _stale_request = client.begin(Query::Bootstrap).unwrap();
+
+    client.apply(resync_required(2)).unwrap();
+    let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
+        .map(|frame| frame.kind)
+        .collect();
+    assert_eq!(kinds, [ClientKind::Request, ClientKind::Subscribe]);
+}
+
+#[test]
+fn request_scoped_error_terminates_only_the_matching_pending_request() {
+    let mut client = ready_client();
+    let first = client.begin(Query::Bootstrap).unwrap();
+    let second = client.begin(Query::Bootstrap).unwrap();
+    let _first_frame = client.take_outbound();
+    let _second_frame = client.take_outbound();
+
+    let error = client
+        .apply(request_error_frame(
+            first.id(),
+            ErrorCode::Timeout,
+            Retryability::Never,
+        ))
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Server(_)));
+    assert!(!client.is_pending(&first));
+    assert!(client.is_pending(&second));
+}
+
+#[test]
+fn request_scoped_error_with_unknown_id_is_rejected() {
+    let mut client = ready_client();
+    let unknown = RequestId::from_u128(404);
+    let error = client
+        .apply(request_error_frame(
+            &unknown,
+            ErrorCode::Timeout,
+            Retryability::Never,
+        ))
+        .unwrap_err();
+    assert_eq!(error, ClientError::UnknownResponse(unknown));
+}
+
+#[test]
+fn real_server_terminal_error_codes_reach_terminal_client_states() {
+    let mut rejected = ClientState::new(ClientConfig::default());
+    rejected
+        .connect(ConnectTarget::new(
+            "wss://example.test/api/v1/control",
+            "bad",
+        ))
+        .unwrap();
+    let _hello = rejected.take_outbound();
+    assert_eq!(
+        rejected
+            .apply(error_frame(ErrorCode::Unauthorized, Retryability::Never))
+            .unwrap_err(),
+        ClientError::AuthenticationRejected
+    );
+    assert_eq!(rejected.phase(), ClientPhase::WebGate);
+
+    let mut incompatible = ClientState::new(ClientConfig::default());
+    incompatible
+        .connect(ConnectTarget::new(
+            "wss://example.test/api/v1/control",
+            "secret",
+        ))
+        .unwrap();
+    let _hello = incompatible.take_outbound();
+    assert_eq!(
+        incompatible
+            .apply(error_frame(
+                ErrorCode::IncompatibleProtocol,
+                Retryability::Never,
+            ))
+            .unwrap_err(),
+        ClientError::IncompatibleProtocol {
+            client_major: 1,
+            server_major: 2,
+        }
+    );
+    assert_eq!(incompatible.phase(), ClientPhase::UpgradeRequired);
+    assert_eq!(incompatible.retry_schedule(), None);
+}
+
+#[test]
+fn connect_target_debug_redacts_access_token() {
+    let debug = format!(
+        "{:?}",
+        ConnectTarget::new("wss://example.test/api/v1/control", "top-secret")
+    );
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("top-secret"));
+}
+
 fn ready_client() -> ClientState {
     let mut client = ClientState::new(ClientConfig::default());
     client
@@ -407,17 +521,41 @@ fn resync_required(sequence: u64) -> ServerFrame {
 }
 
 fn error_frame(code: ErrorCode, retryability: Retryability) -> ServerFrame {
+    let mut error = ErrorFrame::new(
+        code,
+        "safe error",
+        retryability,
+        ErrorScope::Session,
+        "correlation-1",
+    );
+    if code == ErrorCode::IncompatibleProtocol {
+        error = error.with_details(serde_json::json!({"serverProtocolMajor": 2}));
+    }
     ServerFrame {
         kind: ServerKind::Error,
         request_id: None,
         subscription_id: None,
         sequence: None,
+        payload: serde_json::to_value(error).unwrap(),
+    }
+}
+
+fn request_error_frame(
+    request_id: &RequestId,
+    code: ErrorCode,
+    retryability: Retryability,
+) -> ServerFrame {
+    ServerFrame {
+        kind: ServerKind::Error,
+        request_id: Some(request_id.clone()),
+        subscription_id: None,
+        sequence: None,
         payload: serde_json::to_value(ErrorFrame::new(
             code,
-            "safe error",
+            "request failed",
             retryability,
-            ErrorScope::Session,
-            "correlation-1",
+            ErrorScope::Request,
+            request_id.as_str(),
         ))
         .unwrap(),
     }
