@@ -1,8 +1,7 @@
 use k10s_protocol::{
-    BackendRevision, BootstrapResponse, ClientKind, ErrorCode, ErrorFrame, ErrorScope, Event,
-    ProtocolVersion, RequestId, ResourceSnapshotPage, ResumeStatus, Retryability, ServerFrame,
-    ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId,
-    Welcome,
+    BootstrapResponse, ClientKind, ErrorCode, ErrorFrame, ErrorScope, Event, ProtocolVersion,
+    RequestId, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, Subscribed,
+    SubscriptionId, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, Query, QueryResult,
@@ -234,107 +233,6 @@ fn resync_required_reissues_bootstrap_and_live_subscriptions() {
     assert_eq!(
         kinds,
         [ClientKind::Request, ClientKind::Subscribe, ClientKind::Ack]
-    );
-}
-
-#[test]
-fn unsequenced_resync_notice_rebaselines_the_stream_after_a_jump() {
-    let mut client = ready_client();
-    let subscription = client.subscribe_bootstrap_status().unwrap();
-    let _subscribe = client.take_outbound();
-    client.apply(subscribed(subscription.id(), 1)).unwrap();
-    let _ack = client.take_outbound();
-
-    // The notice is control-plane traffic: it carries no sequence because it
-    // must preempt stale sequenced deltas without breaking contiguity.
-    client.apply(unsequenced_resync_required()).unwrap();
-    assert!(client.server_state_invalid());
-
-    // The server counter kept advancing while the discarded deltas drained,
-    // so the first sequenced frame after the notice jumps. Recovery must
-    // re-baseline on it instead of reporting another gap.
-    client.apply(subscribed(subscription.id(), 8)).unwrap();
-    assert_eq!(client.last_acked_sequence(), Some(8));
-
-    // The recovery traffic converges into a complete snapshot.
-    client
-        .apply(snapshot_begin(subscription.id(), 9, 1))
-        .unwrap();
-    client
-        .apply(snapshot_chunk(subscription.id(), 10, 0, 7))
-        .unwrap();
-    client.apply(snapshot_end(subscription.id(), 11)).unwrap();
-    let snapshot = client
-        .take_resource_snapshot(subscription.id())
-        .expect("post-resync snapshot completes");
-    assert_eq!(snapshot.rows.len(), 7);
-    assert_eq!(snapshot.revision, BackendRevision::new(4_100));
-
-    let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
-        .map(|frame| frame.kind)
-        .collect();
-    assert_eq!(
-        kinds,
-        [ClientKind::Request, ClientKind::Subscribe, ClientKind::Ack]
-    );
-}
-
-#[test]
-fn frames_from_a_superseded_generation_are_absorbed_during_recovery() {
-    let mut client = ready_client();
-    let subscription = client.subscribe_bootstrap_status().unwrap();
-    let _subscribe = client.take_outbound();
-    client.apply(subscribed(subscription.id(), 1)).unwrap();
-    let _ack = client.take_outbound();
-
-    // Generation one starts streaming and is then superseded mid-flight.
-    client
-        .apply(snapshot_begin(subscription.id(), 2, 2))
-        .unwrap();
-    client
-        .apply(snapshot_chunk(subscription.id(), 3, 0, 4))
-        .unwrap();
-    client.apply(unsequenced_resync_required()).unwrap();
-    assert!(client.server_state_invalid());
-
-    // Queued tail of the superseded generation drains after the notice: the
-    // orphan end must be absorbed, and the next jump re-baselines again.
-    client.apply(snapshot_end(subscription.id(), 4)).unwrap();
-    client.apply(subscribed(subscription.id(), 9)).unwrap();
-    client
-        .apply(snapshot_begin(subscription.id(), 10, 1))
-        .unwrap();
-    client
-        .apply(snapshot_chunk(subscription.id(), 11, 0, 2))
-        .unwrap();
-    client.apply(snapshot_end(subscription.id(), 12)).unwrap();
-    let snapshot = client
-        .take_resource_snapshot(subscription.id())
-        .expect("fresh generation completes after stale tail");
-    assert_eq!(snapshot.rows.len(), 2);
-    assert_eq!(client.last_acked_sequence(), Some(12));
-}
-
-#[test]
-fn fresh_reconnect_does_not_reuse_an_in_place_resync_baseline() {
-    let mut client = ready_client();
-    let subscription = client.subscribe_bootstrap_status().unwrap();
-    let _subscribe = client.take_outbound();
-    client.apply(subscribed(subscription.id(), 1)).unwrap();
-    let _ack = client.take_outbound();
-    client.apply(unsequenced_resync_required()).unwrap();
-
-    client.transport_lost(1_000, 0);
-    assert!(client.retry_if_due(1_000).unwrap());
-    let _hello = client.take_outbound();
-    client.apply(welcome()).unwrap();
-
-    assert_eq!(
-        client.apply(subscribed(subscription.id(), 3)).unwrap_err(),
-        ClientError::SequenceGap {
-            expected: 1,
-            got: 3,
-        }
     );
 }
 
@@ -919,71 +817,6 @@ fn resync_required(sequence: u64) -> ServerFrame {
         subscription_id: None,
         sequence: Some(sequence),
         payload: serde_json::json!({"reason":"journal unavailable"}),
-    }
-}
-
-fn unsequenced_resync_required() -> ServerFrame {
-    ServerFrame {
-        kind: ServerKind::ResyncRequired,
-        request_id: None,
-        subscription_id: None,
-        sequence: None,
-        payload: serde_json::json!({"reason":"resource deltas were dropped"}),
-    }
-}
-
-fn snapshot_begin(id: &SubscriptionId, sequence: u64, total_chunks: u32) -> ServerFrame {
-    ServerFrame {
-        kind: ServerKind::SnapshotBegin,
-        request_id: None,
-        subscription_id: Some(id.clone()),
-        sequence: Some(sequence),
-        payload: serde_json::to_value(SnapshotBegin { total_chunks }).unwrap(),
-    }
-}
-
-fn snapshot_chunk(id: &SubscriptionId, sequence: u64, index: u32, rows: usize) -> ServerFrame {
-    let page = ResourceSnapshotPage {
-        revision: BackendRevision::new(4_100),
-        rows: (0..rows)
-            .map(|index| k10s_protocol::ResourceListRow {
-                identity: k10s_protocol::ResourceIdentity {
-                    context: "dev-local".into(),
-                    gvk: k10s_protocol::GroupVersionKind::core("v1", "Pod"),
-                    namespace: Some("default".into()),
-                    name: format!("pod-{index}"),
-                    uid: format!("uid-pod-{index}"),
-                },
-                revision: BackendRevision::new(4_100),
-                labels: Default::default(),
-                summary: "Running".into(),
-                created_at: "2026-08-21T00:00:00Z".into(),
-            })
-            .collect(),
-    };
-    ServerFrame {
-        kind: ServerKind::SnapshotChunk,
-        request_id: None,
-        subscription_id: Some(id.clone()),
-        sequence: Some(sequence),
-        payload: serde_json::to_value(SnapshotChunk {
-            chunk_index: index,
-            data: serde_json::to_value(page).unwrap(),
-        })
-        .unwrap(),
-    }
-}
-
-fn snapshot_end(id: &SubscriptionId, sequence: u64) -> ServerFrame {
-    ServerFrame {
-        kind: ServerKind::SnapshotEnd,
-        request_id: None,
-        subscription_id: Some(id.clone()),
-        sequence: Some(sequence),
-        payload: serde_json::to_value(SnapshotEnd {
-            checksum: "fnv-64:0000000000000000".into(),
-        })
-        .unwrap(),
     }
 }
 

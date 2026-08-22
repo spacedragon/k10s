@@ -280,7 +280,6 @@ pub struct ClientState {
     retry: Option<RetrySchedule>,
     reconnecting: bool,
     last_acked_sequence: Option<u64>,
-    resync_rebaseline_pending: bool,
     next_subscription_id: u128,
     live_subscriptions: HashMap<SubscriptionId, serde_json::Value>,
     active_subscriptions: HashSet<SubscriptionId>,
@@ -308,7 +307,6 @@ impl std::fmt::Debug for ClientState {
             .field("retry", &self.retry)
             .field("reconnecting", &self.reconnecting)
             .field("last_acked_sequence", &self.last_acked_sequence)
-            .field("resync_rebaseline_pending", &self.resync_rebaseline_pending)
             .field("live_subscriptions_len", &self.live_subscriptions.len())
             .field("active_subscriptions_len", &self.active_subscriptions.len())
             .field("snapshot_assemblies_len", &self.snapshot_assemblies.len())
@@ -339,7 +337,6 @@ impl ClientState {
             retry: None,
             reconnecting: false,
             last_acked_sequence: None,
-            resync_rebaseline_pending: false,
             next_subscription_id: 1,
             live_subscriptions: HashMap::new(),
             active_subscriptions: HashSet::new(),
@@ -368,7 +365,6 @@ impl ClientState {
         self.session_id = None;
         self.server_instance_id = None;
         self.last_acked_sequence = None;
-        self.resync_rebaseline_pending = false;
         self.outbound.clear();
         self.live_subscriptions.clear();
         self.invalidate_server_state();
@@ -532,7 +528,6 @@ impl ClientState {
         self.reconnecting = false;
         self.target = None;
         self.server_state_invalid = true;
-        self.resync_rebaseline_pending = false;
         self.active_subscriptions.clear();
         Err(ClientError::OutboundOverload {
             capacity: self.config.outbound_capacity,
@@ -578,7 +573,6 @@ impl ClientState {
         }
         self.phase = ClientPhase::Disconnected;
         self.reconnecting = true;
-        self.resync_rebaseline_pending = false;
         self.outbound.clear();
         self.invalidate_server_state();
         let exponent = self.retry_attempt.min(63);
@@ -640,7 +634,6 @@ impl ClientState {
         self.phase = ClientPhase::Closed;
         self.retry = None;
         self.reconnecting = false;
-        self.resync_rebaseline_pending = false;
         self.pending.clear();
         self.completed.clear();
         self.outbound.clear();
@@ -835,21 +828,11 @@ impl ClientState {
                 .last_acked_sequence
                 .map_or(1, |last| last.saturating_add(1));
             if sequence > expected {
-                if self.resync_rebaseline_pending && frame.kind == ServerKind::Subscribed {
-                    // An out-of-band resync notice can overtake the stale P2
-                    // tail. Once the replacement subscription is confirmed,
-                    // its first sequence establishes the new contiguous base.
-                    self.last_acked_sequence = Some(sequence.saturating_sub(1));
-                    self.resync_rebaseline_pending = false;
-                    self.snapshot_assemblies.clear();
-                    self.completed_snapshots.clear();
-                } else {
-                    self.rebuild_server_state(0)?;
-                    return Err(ClientError::SequenceGap {
-                        expected,
-                        got: sequence,
-                    });
-                }
+                self.rebuild_server_state(0)?;
+                return Err(ClientError::SequenceGap {
+                    expected,
+                    got: sequence,
+                });
             }
             if sequence < expected {
                 self.queue_ack(self.last_acked_sequence.unwrap_or(0))?;
@@ -958,16 +941,13 @@ impl ClientState {
                         debug_assert!(self.completed_snapshots.contains_key(&id));
                         Ok(())
                     }
-                    None if self.resync_rebaseline_pending => Ok(()),
                     Some(_) | None => Err(ClientError::Protocol(
                         "snapshot ended before all chunks arrived".to_owned(),
                     )),
                 }
             }
             ServerPayload::ResyncRequired(_) => {
-                self.rebuild_server_state(usize::from(sequence.is_some()))?;
-                self.resync_rebaseline_pending = sequence.is_none();
-                Ok(())
+                self.rebuild_server_state(usize::from(sequence.is_some()))
             }
             ServerPayload::Error(error)
                 if self.phase == ClientPhase::Authenticating

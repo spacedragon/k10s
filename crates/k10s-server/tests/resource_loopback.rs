@@ -658,19 +658,17 @@ async fn dropped_delta_burst_recovers_in_place_with_a_single_forwarder() {
         );
     }
 
-    // Recovery must converge through the same socket and subscription: the
-    // out-of-band notice arrives first, stale deltas drain harmlessly, and
-    // the rebuilt subscription lands on a jumped sequence that the client
-    // re-baselines onto instead of reporting another gap.
+    // Recovery must converge through the same socket and subscription: every
+    // admitted delta drains first, then a valid sequenced resync notice, then
+    // the rebuilt subscription continues on the next connection sequence.
     let mut noticed = false;
     loop {
         let frame = receive_raw_frame(&mut socket).await;
         if frame.kind == ServerKind::ResyncRequired {
             noticed = true;
-            assert_eq!(
-                frame.sequence, None,
-                "resync notices are out-of-band control frames"
-            );
+            assert!(frame.sequence.is_some(), "resync notices are sequenced");
+            k10s_protocol::decode_server_frame(serde_json::to_value(&frame).unwrap())
+                .expect("resync notice satisfies the public wire contract");
         }
         let frame_kind = frame.kind;
         client
