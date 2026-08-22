@@ -9,6 +9,8 @@ use crate::workspace::{
     Window, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
 };
 
+use super::{ConnectionState, infrastructure::InfrastructureUiState};
+
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
 }
@@ -16,8 +18,12 @@ pub(super) fn layer_id(id: WindowId) -> LayerId {
 pub(super) fn show_canvas<I>(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState<I>,
+    infrastructure: &mut InfrastructureUiState,
+    response: Option<&k10s_protocol::InfrastructureResponse>,
+    connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
-) where
+) -> bool
+where
     I: Clone + Eq + Hash + Debug,
 {
     let canvas = ui.available_rect_before_wrap();
@@ -32,8 +38,17 @@ pub(super) fn show_canvas<I>(
     let mut windows: Vec<_> = workspace.windows().iter().collect();
     windows.sort_by_key(|window| window.z);
 
+    let mut refresh_requested = false;
     for window in windows {
-        show_window(ui, canvas, window, queued);
+        refresh_requested |= show_window(
+            ui,
+            canvas,
+            window,
+            infrastructure,
+            response,
+            connection,
+            queued,
+        );
     }
 
     if !navigation_queued
@@ -50,14 +65,19 @@ pub(super) fn show_canvas<I>(
     {
         queued.push(WorkspaceCommand::FocusWindow(top_window.id));
     }
+    refresh_requested
 }
 
 fn show_window<I>(
     ui: &mut egui::Ui,
     canvas: Rect,
     state: &Window<I>,
+    infrastructure: &mut InfrastructureUiState,
+    response: Option<&k10s_protocol::InfrastructureResponse>,
+    connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
-) where
+) -> bool
+where
     I: Clone,
 {
     let mut open = true;
@@ -84,16 +104,30 @@ fn show_window<I>(
         .constrain_to(canvas)
         .show(ui.ctx(), |ui| {
             ui.set_min_size(min_size - Vec2::new(24.0, 48.0));
-            ui.label(window_placeholder(state.kind));
+            match state.kind {
+                WindowKind::Overview => super::overview::show(ui, response, connection),
+                WindowKind::Nodes => {
+                    super::infrastructure::show_nodes(ui, infrastructure, response);
+                    false
+                }
+                WindowKind::Storage => {
+                    super::infrastructure::show_storage(ui, infrastructure, response);
+                    false
+                }
+                WindowKind::Workload(_) | WindowKind::Detail => {
+                    ui.label(window_placeholder(state.kind));
+                    false
+                }
+            }
         });
 
     if !open {
         queued.push(WorkspaceCommand::CloseWindow(state.id));
-        return;
+        return false;
     }
 
     let Some(response) = response else {
-        return;
+        return false;
     };
     let collapsed = response.inner.is_none();
     let rect = response.response.rect;
@@ -109,13 +143,14 @@ fn show_window<I>(
     if geometry != state.geometry {
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
+    response.inner.unwrap_or(false)
 }
 
 fn window_placeholder(kind: WindowKind) -> &'static str {
     match kind {
-        WindowKind::Overview => "Cluster overview",
-        WindowKind::Nodes => "Node inventory",
-        WindowKind::Storage => "Storage inventory",
+        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => {
+            unreachable!("infrastructure windows have concrete renderers")
+        }
         WindowKind::Workload(_) => "Resource list",
         WindowKind::Detail => "Resource detail",
     }

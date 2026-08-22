@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use k10s_protocol::{
     Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
-    ErrorFrame, ErrorScope, Hello, PROTOCOL_MAJOR, PROTOCOL_MINOR, RESOURCE_EVENT_CHANGED,
-    RESOURCE_EVENT_GONE, Request, RequestId, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResumeStatus, Retryability, ServerFrame, ServerKind, ServerPayload, SessionId,
-    Subscribe, SubscriptionId, SubscriptionSelector,
+    ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
+    InfrastructureResponse, InfrastructureWatchSpec, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceListRequest,
+    ResourceListResponse, ResourceListRow, ResumeStatus, Retryability, ServerFrame, ServerKind,
+    ServerPayload, SessionId, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
 };
 
 /// Client connection lifecycle.
@@ -170,6 +171,8 @@ pub enum Query {
     Bootstrap,
     /// Retrieve a normalized resource list for one type on one context.
     ResourceList(ResourceListQuery),
+    /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
+    Infrastructure(InfrastructureRequest),
 }
 
 /// Selector for a normalized resource list query.
@@ -194,6 +197,8 @@ pub enum QueryResult {
     Bootstrap(BootstrapResponse),
     /// Normalized resource list result.
     ResourceList(ResourceListResponse),
+    /// Complete infrastructure projection.
+    Infrastructure(Box<InfrastructureResponse>),
 }
 
 /// A reassembled resource snapshot delivered for one subscription.
@@ -285,6 +290,7 @@ pub struct ClientState {
     active_subscriptions: HashSet<SubscriptionId>,
     snapshot_assemblies: HashMap<SubscriptionId, SnapshotAssembly>,
     completed_snapshots: HashMap<SubscriptionId, ResourceSnapshot>,
+    infrastructure: HashMap<String, InfrastructureResponse>,
     server_bootstrap: Option<BootstrapResponse>,
     server_state_invalid: bool,
     local_ui: LocalUiState,
@@ -311,6 +317,7 @@ impl std::fmt::Debug for ClientState {
             .field("active_subscriptions_len", &self.active_subscriptions.len())
             .field("snapshot_assemblies_len", &self.snapshot_assemblies.len())
             .field("completed_snapshots_len", &self.completed_snapshots.len())
+            .field("infrastructure_len", &self.infrastructure.len())
             .field("server_state_invalid", &self.server_state_invalid)
             .field("local_ui", &self.local_ui)
             .field("session_id", &self.session_id)
@@ -342,6 +349,7 @@ impl ClientState {
             active_subscriptions: HashSet::new(),
             snapshot_assemblies: HashMap::new(),
             completed_snapshots: HashMap::new(),
+            infrastructure: HashMap::new(),
             server_bootstrap: None,
             server_state_invalid: true,
             local_ui: LocalUiState::default(),
@@ -483,6 +491,59 @@ impl ClientState {
         self.live_subscriptions.insert(id.clone(), selector);
         self.refresh_server_validity();
         Ok(LiveSubscription { id })
+    }
+
+    /// Subscribe to coalesced infrastructure telemetry for one context.
+    pub fn subscribe_infrastructure(
+        &mut self,
+        context: impl Into<String>,
+    ) -> Result<LiveSubscription, ClientError> {
+        if self.phase != ClientPhase::Ready {
+            return Err(ClientError::InvalidState("client is not ready"));
+        }
+        let limit = self.live_subscription_limit();
+        if self.live_subscriptions.len() >= limit {
+            return Err(ClientError::LiveSubscriptionLimit { limit });
+        }
+        let id = SubscriptionId::new(format!("infrastructure-{}", self.next_subscription_id));
+        self.next_subscription_id = self.next_subscription_id.saturating_add(1);
+        let selector =
+            serde_json::to_value(InfrastructureWatchSpec::new(context)).map_err(|error| {
+                ClientError::Protocol(format!("could not encode selector: {error}"))
+            })?;
+        self.queue_subscribe(id.clone(), selector.clone())?;
+        self.live_subscriptions.insert(id.clone(), selector);
+        self.refresh_server_validity();
+        Ok(LiveSubscription { id })
+    }
+
+    /// Stop retaining and recovering one desired subscription.
+    pub fn unsubscribe(&mut self, subscription: &LiveSubscription) -> Result<bool, ClientError> {
+        if !self.live_subscriptions.contains_key(subscription.id()) {
+            return Ok(false);
+        }
+        self.enqueue_reliable(ClientFrame {
+            kind: ClientKind::Unsubscribe,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: None,
+            payload: serde_json::to_value(Unsubscribe)
+                .expect("unit unsubscribe payload always serializes"),
+        })?;
+        self.live_subscriptions.remove(subscription.id());
+        self.active_subscriptions.remove(subscription.id());
+        self.snapshot_assemblies.remove(subscription.id());
+        self.completed_snapshots.remove(subscription.id());
+        self.refresh_server_validity();
+        Ok(true)
+    }
+
+    /// Latest response or telemetry update for a context. The response is
+    /// retained across connection loss so the UI can mark it stale with its
+    /// original timestamp.
+    #[must_use]
+    pub fn infrastructure(&self, context: &str) -> Option<&InfrastructureResponse> {
+        self.infrastructure.get(context)
     }
 
     /// Take the completed snapshot reassembled for one subscription.
@@ -679,6 +740,7 @@ impl ClientState {
             request_kind: match &query {
                 Query::Bootstrap => "bootstrap".to_owned(),
                 Query::ResourceList(_) => "resource.list".to_owned(),
+                Query::Infrastructure(_) => "infrastructure.get".to_owned(),
             },
             deadline: relative_deadline_ms,
             idempotency_key: None,
@@ -696,6 +758,11 @@ impl ClientState {
                 .map_err(|error| {
                     ClientError::Protocol(format!("could not encode request: {error}"))
                 })?,
+                Query::Infrastructure(request) => {
+                    serde_json::to_value(request).map_err(|error| {
+                        ClientError::Protocol(format!("could not encode request: {error}"))
+                    })?
+                }
             },
         };
         let frame = ClientFrame {
@@ -813,6 +880,14 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceList(list)
                 }
+                Query::Infrastructure(_) => {
+                    let response: InfrastructureResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    self.infrastructure
+                        .insert(response.context.clone(), response.clone());
+                    QueryResult::Infrastructure(Box::new(response))
+                }
             };
             let _pending = self.pending.remove(&id);
             self.completed.insert(id, result);
@@ -887,6 +962,22 @@ impl ClientState {
                 RESOURCE_EVENT_GONE => {
                     let _: k10s_protocol::ResourceGone = serde_json::from_value(event.payload)
                         .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    Ok(())
+                }
+                INFRASTRUCTURE_EVENT_UPDATED => {
+                    if self.owned_subscription(&frame).is_some() {
+                        let response: InfrastructureResponse =
+                            serde_json::from_value(event.payload)
+                                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                        let replace = self
+                            .infrastructure
+                            .get(&response.context)
+                            .is_none_or(|current| response.revision >= current.revision);
+                        if replace {
+                            self.infrastructure
+                                .insert(response.context.clone(), response);
+                        }
+                    }
                     Ok(())
                 }
                 _ => Ok(()),

@@ -3,11 +3,11 @@
 use web_time::Instant;
 
 use ewebsock::{Options, WsEvent, WsMessage};
-use k10s_protocol::{ClientFrame, ResourceIdentity, ServerFrame};
+use k10s_protocol::{ClientFrame, InfrastructureRequest, ResourceIdentity, ServerFrame};
 
 use crate::client::{
     BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
-    PendingRequest, Query, TransportError, WebSocketTransport,
+    LiveSubscription, PendingRequest, Query, QueryResult, TransportError, WebSocketTransport,
 };
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
 use crate::workspace::WorkspaceState;
@@ -83,6 +83,9 @@ pub struct K10sApp {
     factory: Box<dyn ConnectionFactory>,
     connection: Option<Box<dyn AppConnection>>,
     bootstrap: Option<PendingRequest>,
+    infrastructure_request: Option<PendingRequest>,
+    infrastructure_subscription: Option<LiveSubscription>,
+    infrastructure_context: Option<String>,
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
@@ -98,6 +101,12 @@ impl std::fmt::Debug for K10sApp {
             .field("client", &self.client)
             .field("connection_active", &self.connection.is_some())
             .field("bootstrap", &self.bootstrap)
+            .field("infrastructure_request", &self.infrastructure_request)
+            .field(
+                "infrastructure_subscription",
+                &self.infrastructure_subscription,
+            )
+            .field("infrastructure_context", &self.infrastructure_context)
             .field("recovering", &self.recovering)
             .field("view", &self.view)
             .field("shell", &self.shell)
@@ -127,6 +136,9 @@ impl K10sApp {
             factory,
             connection: Some(connection),
             bootstrap: None,
+            infrastructure_request: None,
+            infrastructure_subscription: None,
+            infrastructure_context: None,
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
@@ -197,8 +209,36 @@ impl K10sApp {
             }
             AppView::Failed { .. } => (ShellConnectionState::Failed, &[]),
         };
-        let selected_context = &mut self.client.local_ui_mut().selected_context;
-        self.shell.show(ui, connection, contexts, selected_context);
+        let selected_before = self.client.local_ui().selected_context.clone();
+        let response = selected_before
+            .as_deref()
+            .and_then(|context| self.client.infrastructure(context))
+            .cloned();
+        let refresh = self.shell.show_with_infrastructure(
+            ui,
+            connection,
+            contexts,
+            &mut self.client.local_ui_mut().selected_context,
+            response.as_ref(),
+        );
+        let selected_after = self.client.local_ui().selected_context.clone();
+        let request_result = if selected_after != selected_before {
+            selected_after.as_deref().map_or(Ok(()), |context| {
+                self.select_infrastructure_context(context)
+            })
+        } else if refresh {
+            selected_after
+                .as_deref()
+                .map_or(Ok(()), |context| self.refresh_infrastructure(context))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = request_result.and_then(|()| {
+            self.flush_outbound()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+        }) {
+            self.terminal_failure(error.to_string());
+        }
     }
 
     /// Credential-free endpoint used by the shared transport.
@@ -253,39 +293,53 @@ impl K10sApp {
                         _ => return Err(AppEventError::Terminal(error.to_string())),
                     }
                 }
+                self.finish_infrastructure_request();
                 if self.bootstrap.is_none() {
                     self.bootstrap = self.client.take_rebuilt_bootstrap();
                 }
-                if self.client.phase() == ClientPhase::Ready && self.bootstrap.is_none() {
-                    if self.recovering {
-                        self.recovering = false;
-                    } else {
-                        self.bootstrap = Some(
-                            self.client
-                                .begin(Query::Bootstrap)
-                                .map_err(|error| AppEventError::Terminal(error.to_string()))?,
-                        );
-                    }
+                if self.client.phase() == ClientPhase::Ready
+                    && self.bootstrap.is_none()
+                    && self.client.server_bootstrap().is_none()
+                {
+                    self.bootstrap = Some(
+                        self.client
+                            .begin(Query::Bootstrap)
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?,
+                    );
                 }
-                if let Some(response) = self.client.server_bootstrap().cloned() {
-                    if let Some(request) = self.bootstrap.take() {
-                        let _ = self.client.take(request);
-                    }
+                if let Some(request) = self.bootstrap.clone()
+                    && !self.client.is_pending(&request)
+                    && let Some(QueryResult::Bootstrap(response)) = self.client.take(request)
+                {
+                    self.bootstrap = None;
                     let server_instance_id = response
                         .server
                         .ok_or_else(|| {
                             AppEventError::Terminal("bootstrap omitted server identity".to_owned())
                         })?
                         .instance_id;
-                    let context_names = response
+                    let context_names: Vec<String> = response
                         .contexts
                         .into_iter()
                         .map(|context| context.name)
                         .collect();
+                    let selected = self
+                        .client
+                        .local_ui()
+                        .selected_context
+                        .clone()
+                        .filter(|selected| context_names.contains(selected))
+                        .or_else(|| context_names.first().cloned());
+                    self.client.local_ui_mut().selected_context = selected.clone();
                     self.view = AppView::Ready {
                         server_instance_id,
                         context_names,
                     };
+                    self.recovering = false;
+                    if let Some(context) = selected {
+                        self.select_infrastructure_context(&context)
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                    }
                 }
                 self.flush_outbound()
             }
@@ -305,6 +359,46 @@ impl K10sApp {
         Ok(())
     }
 
+    fn finish_infrastructure_request(&mut self) {
+        let Some(request) = self.infrastructure_request.clone() else {
+            return;
+        };
+        if self.client.is_pending(&request) {
+            return;
+        }
+        if let Some(QueryResult::Infrastructure(_)) = self.client.take(request) {
+            self.infrastructure_request = None;
+        }
+    }
+
+    fn select_infrastructure_context(&mut self, context: &str) -> Result<(), ClientError> {
+        if self.infrastructure_context.as_deref() != Some(context) {
+            if let Some(subscription) = self.infrastructure_subscription.take() {
+                self.client.unsubscribe(&subscription)?;
+            }
+            self.infrastructure_subscription =
+                Some(self.client.subscribe_infrastructure(context.to_owned())?);
+            self.infrastructure_context = Some(context.to_owned());
+        }
+        self.refresh_infrastructure(context)
+    }
+
+    fn refresh_infrastructure(&mut self, context: &str) -> Result<(), ClientError> {
+        if let Some(request) = self.infrastructure_request.take() {
+            if self.client.is_pending(&request) {
+                self.client.cancel(&request)?;
+            } else {
+                let _ = self.client.take(request);
+            }
+        }
+        self.infrastructure_request = Some(self.client.begin(Query::Infrastructure(
+            InfrastructureRequest {
+                context: context.to_owned(),
+            },
+        ))?);
+        Ok(())
+    }
+
     fn transient_loss(&mut self, now_ms: u64, entropy: u64) {
         if Self::terminal_phase(self.client.phase()) {
             return;
@@ -316,6 +410,7 @@ impl K10sApp {
             self.client.transport_lost(now_ms, entropy);
         }
         self.bootstrap = None;
+        self.infrastructure_request = None;
         self.recovering = true;
         self.view = AppView::Connecting;
     }
@@ -374,7 +469,7 @@ mod tests {
     use k10s_protocol::{
         BootstrapResponse, ClientFrame, ClientKind, ErrorCode, ErrorFrame, ErrorScope,
         ProtocolVersion, RequestId, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId,
-        Welcome,
+        Subscribed, SubscriptionId, Welcome,
     };
 
     use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
@@ -457,6 +552,13 @@ mod tests {
 
     fn server_message(frame: &ServerFrame) -> WsEvent {
         WsEvent::Message(WsMessage::Text(serde_json::to_string(frame).unwrap()))
+    }
+
+    fn request_kind(frame: &ClientFrame) -> Option<String> {
+        let k10s_protocol::ClientPayload::Request(request) = frame.decode_payload().ok()? else {
+            return None;
+        };
+        Some(request.request_kind)
     }
 
     #[test]
@@ -568,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_bootstrap_response_reaches_ready_without_an_extra_request() {
+    fn reconnect_bootstrap_response_reaches_ready_and_loads_infrastructure_once() {
         let response = ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
         let (mut app, state) = test_app(vec![
             ConnectionScript {
@@ -592,13 +694,97 @@ mod tests {
         app.poll_at(100, 0);
 
         assert!(matches!(app.view(), AppView::Ready { .. }));
-        let request_count = state
+        let request_kinds: Vec<_> = state
             .borrow()
             .sent
             .iter()
             .filter(|frame| frame.kind == ClientKind::Request)
-            .count();
-        assert_eq!(request_count, 1, "recovery queues exactly one bootstrap");
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            request_kinds,
+            ["bootstrap", "infrastructure.get"],
+            "recovery loads bootstrap then exactly one infrastructure snapshot"
+        );
+        assert_eq!(app.client.outbound_len(), 0);
+    }
+
+    #[test]
+    fn infrastructure_subscription_ack_does_not_restart_bootstrap_or_snapshot_query() {
+        let bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let subscribed = ServerFrame {
+            kind: ServerKind::Subscribed,
+            request_id: None,
+            subscription_id: Some(SubscriptionId::new("infrastructure-1")),
+            sequence: Some(1),
+            payload: serde_json::to_value(Subscribed).unwrap(),
+        };
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+                server_message(&subscribed),
+            ]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 0);
+
+        let request_kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            request_kinds,
+            ["bootstrap", "infrastructure.get"],
+            "subscription acknowledgement must not re-bootstrap or restart the snapshot"
+        );
+    }
+
+    #[test]
+    fn sequence_gap_flushes_resync_on_the_existing_connection() {
+        let initial_bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let gapped_event = ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: None,
+            sequence: Some(2),
+            payload: serde_json::json!({"kind":"bootstrapStatus","payload":null}),
+        };
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&initial_bootstrap),
+                server_message(&gapped_event),
+            ]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 0);
+
+        assert!(!matches!(app.view(), AppView::Failed { .. }));
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(app.connection.is_some(), "existing connection remains live");
+        assert_eq!(state.borrow().connect_count, 1);
+        let request_kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            request_kinds,
+            ["bootstrap", "infrastructure.get", "bootstrap"],
+            "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
+        );
         assert_eq!(app.client.outbound_len(), 0);
     }
 
@@ -629,42 +815,5 @@ mod tests {
         assert_eq!(schedule.attempt, 0);
         assert_eq!(schedule.max_delay_ms, 250);
         assert_eq!(schedule.retry_at_ms, 300);
-    }
-
-    #[test]
-    fn sequence_gap_flushes_resync_on_the_existing_connection() {
-        let initial_bootstrap =
-            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
-        let gapped_event = ServerFrame {
-            kind: ServerKind::Event,
-            request_id: None,
-            subscription_id: None,
-            sequence: Some(2),
-            payload: serde_json::json!({"kind":"bootstrapStatus","payload":null}),
-        };
-        let (mut app, state) = test_app(vec![ConnectionScript {
-            events: VecDeque::from([
-                WsEvent::Opened,
-                server_message(&welcome()),
-                server_message(&initial_bootstrap),
-                server_message(&gapped_event),
-            ]),
-            overflowed: false,
-        }]);
-
-        app.poll_at(100, 0);
-
-        assert!(!matches!(app.view(), AppView::Failed { .. }));
-        assert_eq!(app.client.phase(), ClientPhase::Ready);
-        assert!(app.connection.is_some(), "existing connection remains live");
-        assert_eq!(state.borrow().connect_count, 1);
-        let request_count = state
-            .borrow()
-            .sent
-            .iter()
-            .filter(|frame| frame.kind == ClientKind::Request)
-            .count();
-        assert_eq!(request_count, 2, "initial plus one resync bootstrap");
-        assert_eq!(app.client.outbound_len(), 0);
     }
 }

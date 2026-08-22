@@ -303,3 +303,141 @@ pub struct ResourceDetailResponse {
     /// Capabilities asserted for this kind.
     pub capabilities: ResourceCapabilities,
 }
+
+/// Whether a workload-health bucket is healthy, warning, or failing.
+///
+/// UI code always renders this level together with [`WorkloadHealth::label`]
+/// and never relies on the associated color alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HealthLevel {
+    /// The resources in this bucket are healthy.
+    Healthy,
+    /// The resources need observation, for example while pending.
+    Warning,
+    /// The resources are unhealthy.
+    Failure,
+}
+
+/// One explicitly labelled workload-health total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadHealth {
+    /// Semantic level used for the status dot.
+    pub level: HealthLevel,
+    /// Human-readable status text shown beside the dot.
+    pub label: String,
+    /// Number of workloads in this state.
+    pub count: u32,
+}
+
+/// One short Overview row for a pending or unhealthy resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionRow {
+    /// Namespace, absent for a cluster-scoped resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Kubernetes kind.
+    pub kind: String,
+    /// Resource name.
+    pub name: String,
+    /// Short status such as `Pending` or `Degraded`.
+    pub status: String,
+    /// Short reason explaining why the row needs attention.
+    pub reason: String,
+}
+
+/// One row of the Nodes inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeRow {
+    /// Node name.
+    pub name: String,
+    /// Ready state rendered as text.
+    pub status: String,
+    /// Node roles in deterministic display order.
+    pub roles: Vec<String>,
+    /// Kubernetes version reported by the node.
+    pub kubernetes_version: String,
+    /// CPU usage and capacity in millicores.
+    pub cpu: crate::metrics::CapacityUsage,
+    /// Memory usage and capacity in bytes.
+    pub memory: crate::metrics::CapacityUsage,
+    /// Scheduled pods and allocatable pod count.
+    pub pods: crate::metrics::CapacityUsage,
+    /// Deterministic backend-formatted age.
+    pub age: String,
+}
+
+/// One PersistentVolumeClaim inventory row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentVolumeClaimRow {
+    /// Claim namespace.
+    pub namespace: String,
+    /// Claim name.
+    pub name: String,
+    /// Claim phase.
+    pub status: String,
+    /// Requested or bound capacity formatted for display.
+    pub capacity: String,
+    /// Kubernetes access modes.
+    pub access_modes: Vec<String>,
+    /// StorageClass name.
+    pub storage_class: String,
+    /// Bound PersistentVolume name, or `—` when unbound.
+    pub bound_volume: String,
+    /// Deterministic backend-formatted age.
+    pub age: String,
+}
+
+/// One PersistentVolume inventory row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentVolumeRow {
+    /// Volume name.
+    pub name: String,
+    /// Volume phase.
+    pub status: String,
+    /// Capacity formatted for display.
+    pub capacity: String,
+    /// Kubernetes access modes.
+    pub access_modes: Vec<String>,
+    /// StorageClass name.
+    pub storage_class: String,
+    /// Bound claim formatted as `namespace/name`, or `—`.
+    pub bound_claim: String,
+    /// Reclaim policy.
+    pub reclaim_policy: String,
+    /// Deterministic backend-formatted age.
+    pub age: String,
+}
+
+/// One StorageClass inventory row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageClassRow {
+    /// StorageClass name.
+    pub name: String,
+    /// CSI or in-tree provisioner.
+    pub provisioner: String,
+    /// Default reclaim policy.
+    pub reclaim_policy: String,
+    /// Volume binding mode.
+    pub volume_binding_mode: String,
+    /// Deterministic backend-formatted age.
+    pub age: String,
+}
+
+/// Storage rows grouped by the three selectable UI tabs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageInventory {
+    /// PersistentVolumeClaims.
+    pub persistent_volume_claims: Vec<PersistentVolumeClaimRow>,
+    /// PersistentVolumes.
+    pub persistent_volumes: Vec<PersistentVolumeRow>,
+    /// StorageClasses.
+    pub storage_classes: Vec<StorageClassRow>,
+}

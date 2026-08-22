@@ -12,10 +12,11 @@ use k10s_backend::{
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResourceIdentity,
-    ResourceListRequest, ResourceRefRequest, ResumeStatus, Retryability, ServerFrame, ServerKind,
-    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
-    SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
+    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest,
+    InfrastructureWatchSpec, RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest,
+    ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin,
+    SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome,
+    decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -422,6 +423,11 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(KernelQueryResult::Infrastructure(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
                             Err(RequestFailure::Malformed(message)) => send_error(
                                 &task_outbound,
                                 ErrorTarget::Request(request_id.clone()),
@@ -509,6 +515,37 @@ pub(crate) async fn serve_socket(
                         _ => Err((
                             ErrorCode::InvalidRequest,
                             "invalid resource subscription payload".into(),
+                        )),
+                    }
+                } else if selector_kind == Some("infrastructure") {
+                    match serde_json::from_value::<InfrastructureWatchSpec>(selector.0.clone()) {
+                        Ok(spec) => {
+                            if !resource_subscriptions.contains_key(&subscription_id)
+                                && resource_subscriptions.len()
+                                    >= config.max_resource_subscriptions_per_session
+                            {
+                                Err((
+                                    ErrorCode::Conflict,
+                                    format!(
+                                        "resource subscription limit is {}",
+                                        config.max_resource_subscriptions_per_session
+                                    ),
+                                ))
+                            } else {
+                                match kernel
+                                    .subscribe(BackendSubscribe::Infrastructure {
+                                        context: spec.context,
+                                    })
+                                    .await
+                                {
+                                    Ok(handle) => Ok(Some(handle)),
+                                    Err(error) => Err(backend_rejection(&error)),
+                                }
+                            }
+                        }
+                        Err(_) => Err((
+                            ErrorCode::InvalidRequest,
+                            "invalid infrastructure subscription payload".into(),
                         )),
                     }
                 } else {
@@ -717,6 +754,13 @@ fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option
                 })
             })
             .map_err(|error| format!("invalid resource.metrics payload: {error}")),
+        "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload)
+            .map(|parsed| {
+                Some(Query::Infrastructure {
+                    context: parsed.context,
+                })
+            })
+            .map_err(|error| format!("invalid infrastructure.get payload: {error}")),
         _ => Ok(None),
     }
 }
@@ -764,7 +808,7 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
     }
 }
 
-/// Forward one resource watch from the backend to the client.
+/// Forward one resource or infrastructure watch from the backend to the client.
 ///
 /// Snapshots stream as lossless bounded `snapshot*` frames; deltas ride the
 /// bounded P2 scheduler coalesced by resource identity. A lagging backend
@@ -844,6 +888,32 @@ async fn stream_backend_events(
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
+                        overload_close(outbound);
+                        break;
+                    }
+                }
+            }
+            Ok(BackendEvent::Infrastructure(snapshot)) => {
+                let context = snapshot.context().to_owned();
+                let revision = snapshot.revision();
+                let payload = kernel.infrastructure_update(snapshot);
+                match enqueue_infrastructure(
+                    outbound,
+                    subscription_id,
+                    &context,
+                    revision,
+                    &payload,
+                    sequence_counter,
+                ) {
+                    Ok(()) => {}
+                    Err(EnqueueError::Coalesced) => {
+                        tracing::debug!(
+                            subscription_id = %subscription_id.as_str(),
+                            context,
+                            "infrastructure telemetry dropped under bounded P2 pressure"
+                        );
+                    }
+                    Err(EnqueueError::Overloaded) => {
                         overload_close(outbound);
                         break;
                     }
@@ -971,6 +1041,39 @@ fn enqueue_delta(
         Err(EnqueueError::Coalesced) => Err(DeltaAdmission::Dropped),
         Err(EnqueueError::Overloaded) => Err(DeltaAdmission::Overloaded),
     }
+}
+
+/// Enqueue one infrastructure telemetry update on the existing bounded P2
+/// partition, coalesced by subscription and context. Unlike resource
+/// revisions, telemetry may be dropped under pressure; the UI retains and
+/// explicitly marks its last timestamp rather than inventing a newer value.
+fn enqueue_infrastructure(
+    outbound: &Scheduler,
+    subscription_id: &SubscriptionId,
+    context: &str,
+    revision: u64,
+    payload: &impl serde::Serialize,
+    sequence_counter: &AtomicU64,
+) -> Result<(), EnqueueError> {
+    outbound.enqueue_p2_sequenced(subscription_id.as_str(), context, |queued_sequence| {
+        let sequence = match queued_sequence {
+            Some(sequence) => sequence,
+            None => allocate_sequence(sequence_counter).ok_or(EnqueueError::Overloaded)?,
+        };
+        let frame = ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload: serde_json::json!({
+                "kind": k10s_protocol::INFRASTRUCTURE_EVENT_UPDATED,
+                "revision": revision.to_string(),
+                "payload": payload,
+            }),
+        };
+        let text = serde_json::to_string(&frame).expect("server frame serializes");
+        Ok((sequence, Message::Text(text.into())))
+    })
 }
 
 /// Tell the client its revision stream can no longer be trusted. If the
@@ -1445,6 +1548,38 @@ mod tests {
             .apply(frames.into_iter().next().unwrap())
             .expect("coalesced full-row delta stays contiguous for the real client");
         assert_eq!(client.last_acked_sequence(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn infrastructure_updates_coalesce_by_context_without_a_sequence_gap() {
+        let scheduler = Scheduler::new(8, 2);
+        let subscription_id = SubscriptionId::new("infrastructure-1");
+        let counter = AtomicU64::new(0);
+
+        enqueue_infrastructure(
+            &scheduler,
+            &subscription_id,
+            "dev-local",
+            2_000,
+            &serde_json::json!({"metrics": "available"}),
+            &counter,
+        )
+        .unwrap();
+        enqueue_infrastructure(
+            &scheduler,
+            &subscription_id,
+            "dev-local",
+            2_001,
+            &serde_json::json!({"metrics": "partial"}),
+            &counter,
+        )
+        .unwrap();
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1, "one context occupies one bounded P2 slot");
+        assert_eq!(frames[0].sequence, Some(1));
+        assert_eq!(frames[0].payload["revision"], "2001");
+        assert_eq!(frames[0].payload["payload"]["metrics"], "partial");
     }
 
     #[tokio::test]
