@@ -260,6 +260,7 @@ impl PendingRequest {
 struct PendingEntry {
     query: Query,
     deadline_at_ms: Option<u64>,
+    cancelled: bool,
 }
 
 /// In-progress reassembly of one chunked resource snapshot.
@@ -780,6 +781,7 @@ impl ClientState {
             PendingEntry {
                 query,
                 deadline_at_ms,
+                cancelled: false,
             },
         );
         Ok(PendingRequest { id })
@@ -788,7 +790,9 @@ impl ClientState {
     /// Whether this request is still awaiting a response.
     #[must_use]
     pub fn is_pending(&self, request: &PendingRequest) -> bool {
-        self.pending.contains_key(request.id())
+        self.pending
+            .get(request.id())
+            .is_some_and(|entry| !entry.cancelled)
     }
 
     /// Retrieve a completed result once.
@@ -803,11 +807,18 @@ impl ClientState {
 
     /// Cancel a live request. Repeated cancellation is a no-op.
     pub fn cancel(&mut self, request: &PendingRequest) -> Result<bool, ClientError> {
-        if !self.pending.contains_key(request.id()) {
+        if self
+            .pending
+            .get(request.id())
+            .is_none_or(|entry| entry.cancelled)
+        {
             return Ok(false);
         }
         self.queue_cancel(request.id().clone())?;
-        let _removed = self.pending.remove(request.id());
+        self.pending
+            .get_mut(request.id())
+            .expect("request remains correlated after queuing cancellation")
+            .cancelled = true;
         Ok(true)
     }
 
@@ -816,7 +827,9 @@ impl ClientState {
         let expired: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, entry)| entry.deadline_at_ms.is_some_and(|at| at <= now_ms))
+            .filter(|(_, entry)| {
+                !entry.cancelled && entry.deadline_at_ms.is_some_and(|at| at <= now_ms)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         self.ensure_outbound_slots(expired.len())?;
@@ -824,7 +837,10 @@ impl ClientState {
             self.queue_cancel(id.clone())?;
         }
         for id in &expired {
-            let _removed = self.pending.remove(id);
+            self.pending
+                .get_mut(id)
+                .expect("expired request remains correlated")
+                .cancelled = true;
         }
         Ok(expired
             .into_iter()
@@ -863,8 +879,13 @@ impl ClientState {
             let query = self
                 .pending
                 .get(&id)
-                .map(|pending| pending.query.clone())
+                .map(|pending| (pending.query.clone(), pending.cancelled))
                 .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
+            let (query, cancelled) = query;
+            if cancelled {
+                self.pending.remove(&id);
+                return Ok(());
+            }
             let result = match query {
                 Query::Bootstrap => {
                     let bootstrap: BootstrapResponse = frame
@@ -884,8 +905,14 @@ impl ClientState {
                     let response: InfrastructureResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    self.infrastructure
-                        .insert(response.context.clone(), response.clone());
+                    let replace = self
+                        .infrastructure
+                        .get(&response.context)
+                        .is_none_or(|current| response.revision >= current.revision);
+                    if replace {
+                        self.infrastructure
+                            .insert(response.context.clone(), response.clone());
+                    }
                     QueryResult::Infrastructure(Box::new(response))
                 }
             };
@@ -1071,18 +1098,25 @@ impl ClientState {
                 })
             }
             ServerPayload::Error(error) => {
-                if error.scope == ErrorScope::Request {
+                let cancelled = if error.scope == ErrorScope::Request {
                     let id = frame.request_id.clone().ok_or_else(|| {
                         ClientError::Protocol("request error missing request ID".to_owned())
                     })?;
                     self.pending
                         .remove(&id)
-                        .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
-                }
-                if error.retryability == Retryability::AfterReconnect {
+                        .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?
+                        .cancelled
+                } else {
+                    false
+                };
+                if cancelled {
+                    Ok(())
+                } else if error.retryability == Retryability::AfterReconnect {
                     self.transport_lost(now_ms, entropy);
+                    Err(ClientError::Server(error))
+                } else {
+                    Err(ClientError::Server(error))
                 }
-                Err(ClientError::Server(error))
             }
             _ => Err(ClientError::Protocol("unexpected server frame".to_owned())),
         };
