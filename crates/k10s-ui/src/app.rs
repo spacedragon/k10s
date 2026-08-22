@@ -148,7 +148,7 @@ impl K10sApp {
                 self.transient_loss(now_ms, entropy);
                 break;
             }
-            match self.handle_event(event) {
+            match self.handle_event(event, now_ms, entropy) {
                 Ok(()) => {}
                 Err(AppEventError::Transient) => {
                     self.transient_loss(now_ms, entropy);
@@ -199,19 +199,27 @@ impl K10sApp {
         }
     }
 
-    fn handle_event(&mut self, event: WsEvent) -> Result<(), AppEventError> {
+    fn handle_event(
+        &mut self,
+        event: WsEvent,
+        now_ms: u64,
+        entropy: u64,
+    ) -> Result<(), AppEventError> {
         match event {
             WsEvent::Opened => self.flush_outbound(),
             WsEvent::Message(WsMessage::Text(text)) => {
                 let frame: ServerFrame = serde_json::from_str(&text).map_err(|error| {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
-                if let Err(error) = self.client.apply(frame) {
+                if let Err(error) = self.client.apply_at(frame, now_ms, entropy) {
                     return if self.client.phase() == ClientPhase::Disconnected {
                         Err(AppEventError::Transient)
                     } else {
                         Err(AppEventError::Terminal(error.to_string()))
                     };
+                }
+                if self.bootstrap.is_none() {
+                    self.bootstrap = self.client.take_rebuilt_bootstrap();
                 }
                 if self.client.phase() == ClientPhase::Ready && self.bootstrap.is_none() {
                     if self.recovering {
@@ -269,7 +277,9 @@ impl K10sApp {
         if let Some(mut connection) = self.connection.take() {
             connection.close();
         }
-        self.client.transport_lost(now_ms, entropy);
+        if self.client.phase() != ClientPhase::Disconnected {
+            self.client.transport_lost(now_ms, entropy);
+        }
         self.bootstrap = None;
         self.recovering = true;
         self.view = AppView::Connecting;
@@ -327,7 +337,9 @@ mod tests {
 
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        ClientFrame, ErrorCode, ErrorFrame, ErrorScope, Retryability, ServerFrame, ServerKind,
+        BootstrapResponse, ClientFrame, ClientKind, ErrorCode, ErrorFrame, ErrorScope,
+        ProtocolVersion, RequestId, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId,
+        Welcome,
     };
 
     use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
@@ -408,6 +420,27 @@ mod tests {
         (app, state)
     }
 
+    fn server_message(frame: &ServerFrame) -> WsEvent {
+        WsEvent::Message(WsMessage::Text(serde_json::to_string(frame).unwrap()))
+    }
+
+    fn welcome() -> ServerFrame {
+        ServerFrame {
+            kind: ServerKind::Welcome,
+            request_id: None,
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(Welcome {
+                protocol: ProtocolVersion { major: 1, minor: 1 },
+                capabilities: vec![],
+                session_id: SessionId::new("reconnected-session"),
+                server_instance_id: "reconnected-server".to_owned(),
+                resume_status: ResumeStatus::Fresh,
+            })
+            .unwrap(),
+        }
+    }
+
     #[test]
     fn transient_loss_schedules_a_fresh_transport_and_preserves_local_state() {
         let (mut app, state) = test_app(vec![
@@ -486,5 +519,69 @@ mod tests {
         assert_eq!(state.borrow().received, CAPACITY);
         assert_eq!(app.client.phase(), ClientPhase::Disconnected);
         assert_eq!(app.view(), &AppView::Connecting);
+    }
+
+    #[test]
+    fn reconnect_bootstrap_response_reaches_ready_without_an_extra_request() {
+        let response = ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let (mut app, state) = test_app(vec![
+            ConnectionScript {
+                events: VecDeque::from([
+                    WsEvent::Opened,
+                    WsEvent::Error("connection reset".to_owned()),
+                ]),
+                overflowed: false,
+            },
+            ConnectionScript {
+                events: VecDeque::from([
+                    WsEvent::Opened,
+                    server_message(&welcome()),
+                    server_message(&response),
+                ]),
+                overflowed: false,
+            },
+        ]);
+
+        app.poll_at(100, 0);
+        app.poll_at(100, 0);
+
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        let request_count = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .count();
+        assert_eq!(request_count, 1, "recovery queues exactly one bootstrap");
+        assert_eq!(app.client.outbound_len(), 0);
+    }
+
+    #[test]
+    fn after_reconnect_error_advances_backoff_only_once() {
+        let error = ErrorFrame::new(
+            ErrorCode::Internal,
+            "reconnect required",
+            Retryability::AfterReconnect,
+            ErrorScope::Session,
+            "session-error",
+        );
+        let frame = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(error).unwrap(),
+        };
+        let (mut app, _) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([WsEvent::Opened, server_message(&frame)]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 200);
+
+        let schedule = app.client.retry_schedule().unwrap();
+        assert_eq!(schedule.attempt, 0);
+        assert_eq!(schedule.max_delay_ms, 250);
+        assert_eq!(schedule.retry_at_ms, 300);
     }
 }
