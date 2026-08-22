@@ -466,7 +466,41 @@ async fn resubscribing_the_same_id_replaces_the_live_forwarder() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn overlapping_resource_watches_each_receive_the_mutation() {
+    let (server, fake) = spawn_server_with_fake().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    let _all_snapshot = subscribe_pods(&mut ws, "res-all", None).await;
+    let _default_snapshot = subscribe_pods(&mut ws, "res-default", Some("default")).await;
+
+    assert!(
+        fake.touch_resource(
+            "dev-local",
+            &backend_gvk(&GroupVersionKind::core("v1", "Pod")),
+            Some("default"),
+            "web-frontend-7d9f8-00001",
+        )
+        .is_some()
+    );
+
+    let mut delivered_to = Vec::new();
+    for _ in 0..2 {
+        let frame = receive_frame(&mut ws).await;
+        assert_eq!(frame.kind, ServerKind::Event, "{frame:?}");
+        delivered_to.push(frame.subscription_id.unwrap().as_str().to_owned());
+    }
+    delivered_to.sort();
+    assert_eq!(delivered_to, ["res-all", "res-default"]);
+
+    server.shutdown().await.unwrap();
+}
+
 async fn subscribe_default_pods(ws: &mut Ws, subscription_id: &str) -> u64 {
+    subscribe_pods(ws, subscription_id, Some("default")).await
+}
+
+async fn subscribe_pods(ws: &mut Ws, subscription_id: &str, namespace: Option<&str>) -> u64 {
     ws.send(Message::Text(
         json!({
             "kind":"subscribe", "subscriptionId":subscription_id,
@@ -474,7 +508,7 @@ async fn subscribe_default_pods(ws: &mut Ws, subscription_id: &str) -> u64 {
                 "kind":"resource",
                 "context":"dev-local",
                 "gvk":{"group":"","version":"v1","kind":"Pod"},
-                "namespace":"default"
+                "namespace":namespace
             }
         })
         .to_string()

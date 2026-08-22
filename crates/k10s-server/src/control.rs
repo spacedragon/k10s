@@ -819,9 +819,9 @@ enum DeltaAdmission {
 }
 
 /// Enqueue one resource delta on the bounded P2 scheduler, coalesced by
-/// resource identity. A dropped delta leaves the client's revision stream
-/// permanently behind, so the caller must demand a resync instead of
-/// continuing silently.
+/// subscription and resource identity. A dropped delta leaves the client's
+/// revision stream permanently behind, so the caller must demand a resync
+/// instead of continuing silently.
 fn enqueue_delta(
     outbound: &Scheduler,
     subscription_id: &SubscriptionId,
@@ -831,7 +831,7 @@ fn enqueue_delta(
     payload: &impl serde::Serialize,
     sequence_counter: &AtomicU64,
 ) -> Result<(), DeltaAdmission> {
-    match outbound.enqueue_p2_sequenced(resource, |queued_sequence| {
+    match outbound.enqueue_p2_sequenced(subscription_id.as_str(), resource, |queued_sequence| {
         let sequence = match queued_sequence {
             Some(sequence) => sequence,
             None => allocate_sequence(sequence_counter).ok_or(EnqueueError::Overloaded)?,
@@ -1360,6 +1360,43 @@ mod tests {
                 (ServerKind::SnapshotBegin, Some(2)),
             ],
             "priority must not reorder the connection sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_subscriptions_keep_distinct_delta_slots() {
+        let scheduler = Scheduler::new(8, 2);
+        let counter = AtomicU64::new(0);
+        for subscription_id in ["resource-all", "resource-default"] {
+            assert!(matches!(
+                enqueue_delta(
+                    &scheduler,
+                    &SubscriptionId::new(subscription_id),
+                    "pod/a",
+                    k10s_protocol::RESOURCE_EVENT_CHANGED,
+                    2_000,
+                    &serde_json::json!({"name": "pod-a"}),
+                    &counter,
+                ),
+                Ok(())
+            ));
+        }
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 2, "each subscription owns a delta slot");
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame.subscription_id.as_ref().unwrap().as_str())
+                .collect::<Vec<_>>(),
+            ["resource-all", "resource-default"]
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter_map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            [1, 2]
         );
     }
 
