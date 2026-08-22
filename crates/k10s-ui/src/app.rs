@@ -6,8 +6,8 @@ use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{ClientFrame, ServerFrame};
 
 use crate::client::{
-    BoundedInbox, ClientConfig, ClientPhase, ClientState, ConnectTarget, PendingRequest, Query,
-    TransportError, WebSocketTransport,
+    BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
+    PendingRequest, Query, TransportError, WebSocketTransport,
 };
 
 trait AppConnection: std::fmt::Debug {
@@ -212,11 +212,16 @@ impl K10sApp {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
                 if let Err(error) = self.client.apply_at(frame, now_ms, entropy) {
-                    return if self.client.phase() == ClientPhase::Disconnected {
-                        Err(AppEventError::Transient)
-                    } else {
-                        Err(AppEventError::Terminal(error.to_string()))
-                    };
+                    match error {
+                        ClientError::SequenceGap { .. } => {
+                            self.bootstrap = self.client.take_rebuilt_bootstrap();
+                            self.view = AppView::Connecting;
+                        }
+                        _ if self.client.phase() == ClientPhase::Disconnected => {
+                            return Err(AppEventError::Transient);
+                        }
+                        _ => return Err(AppEventError::Terminal(error.to_string())),
+                    }
                 }
                 if self.bootstrap.is_none() {
                     self.bootstrap = self.client.take_rebuilt_bootstrap();
@@ -583,5 +588,42 @@ mod tests {
         assert_eq!(schedule.attempt, 0);
         assert_eq!(schedule.max_delay_ms, 250);
         assert_eq!(schedule.retry_at_ms, 300);
+    }
+
+    #[test]
+    fn sequence_gap_flushes_resync_on_the_existing_connection() {
+        let initial_bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let gapped_event = ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: None,
+            sequence: Some(2),
+            payload: serde_json::json!({"kind":"bootstrapStatus","payload":null}),
+        };
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&initial_bootstrap),
+                server_message(&gapped_event),
+            ]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 0);
+
+        assert!(!matches!(app.view(), AppView::Failed { .. }));
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(app.connection.is_some(), "existing connection remains live");
+        assert_eq!(state.borrow().connect_count, 1);
+        let request_count = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .count();
+        assert_eq!(request_count, 2, "initial plus one resync bootstrap");
+        assert_eq!(app.client.outbound_len(), 0);
     }
 }
