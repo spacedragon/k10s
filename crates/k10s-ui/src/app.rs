@@ -222,7 +222,7 @@ impl K10sApp {
             response.as_ref(),
         );
         let selected_after = self.client.local_ui().selected_context.clone();
-        let retry_requested = refresh && self.client.phase() != ClientPhase::Ready;
+        let retry_requested = refresh && connection != ShellConnectionState::Connected;
         let request_result = if retry_requested {
             let now_ms =
                 u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -414,6 +414,9 @@ impl K10sApp {
     fn retry_now(&mut self, now_ms: u64, entropy: u64) -> Result<(), ClientError> {
         if self.connection.is_some() || Self::terminal_phase(self.client.phase()) {
             return Ok(());
+        }
+        if self.client.phase() != ClientPhase::Disconnected {
+            self.client.transport_lost(now_ms, entropy);
         }
         if !self.client.retry_if_due(u64::MAX)? {
             return Ok(());
@@ -857,6 +860,35 @@ mod tests {
         ]);
         app.client.local_ui_mut().selected_context = Some("dev-local".into());
         app.transient_loss(100, 250);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_280.0, 800.0))
+            .build_ui_state(render, app);
+
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Retry")
+            .click();
+        harness.step();
+
+        assert_eq!(state.borrow().connect_count, 2);
+        assert_eq!(harness.state().client.phase(), ClientPhase::Authenticating);
+        assert_eq!(harness.state().view(), &AppView::Connecting);
+        assert!(harness.state().infrastructure_request.is_none());
+    }
+
+    #[test]
+    fn failed_view_retry_reconnects_even_when_the_client_was_ready() {
+        fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
+            app.render_ui(ui);
+        }
+
+        let (mut app, state) = test_app(vec![
+            ConnectionScript::default(),
+            ConnectionScript::default(),
+        ]);
+        app.client.apply(welcome()).unwrap();
+        app.client.local_ui_mut().selected_context = Some("dev-local".into());
+        app.terminal_failure("malformed server response".into());
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_280.0, 800.0))
             .build_ui_state(render, app);
