@@ -34,6 +34,8 @@ pub struct ClientConfig {
     pub retry_cap_ms: u64,
     /// Hard maximum number of frames waiting for transport delivery.
     pub outbound_capacity: usize,
+    /// Shared hard bound for pending and completed request results.
+    pub request_capacity: usize,
 }
 
 impl Default for ClientConfig {
@@ -43,6 +45,7 @@ impl Default for ClientConfig {
             retry_base_ms: 250,
             retry_cap_ms: 30_000,
             outbound_capacity: 256,
+            request_capacity: 256,
         }
     }
 }
@@ -113,6 +116,16 @@ pub enum ClientError {
         /// Configured hard frame bound.
         capacity: usize,
     },
+    /// Adding a desired subscription would make worst-case recovery impossible.
+    LiveSubscriptionLimit {
+        /// Maximum recoverable desired subscription count.
+        limit: usize,
+    },
+    /// Pending and completed requests reached their shared retention bound.
+    RequestRetentionLimit {
+        /// Configured shared request retention bound.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -135,6 +148,12 @@ impl std::fmt::Display for ClientError {
             Self::Server(error) => formatter.write_str(&error.safe_message),
             Self::OutboundOverload { capacity } => {
                 write!(formatter, "outbound queue reached capacity {capacity}")
+            }
+            Self::LiveSubscriptionLimit { limit } => {
+                write!(formatter, "live subscription limit is {limit}")
+            }
+            Self::RequestRetentionLimit { limit } => {
+                write!(formatter, "request retention limit is {limit}")
             }
         }
     }
@@ -350,10 +369,25 @@ impl ClientState {
         self.live_subscriptions.len()
     }
 
+    /// Maximum desired set that always leaves room for bootstrap and a
+    /// sequenced resync acknowledgement.
+    #[must_use]
+    pub fn live_subscription_limit(&self) -> usize {
+        if self.config.request_capacity == 0 {
+            0
+        } else {
+            self.config.outbound_capacity.saturating_sub(2)
+        }
+    }
+
     /// Start and remember the Plan 1 bootstrap-status subscription.
     pub fn subscribe_bootstrap_status(&mut self) -> Result<LiveSubscription, ClientError> {
         if self.phase != ClientPhase::Ready {
             return Err(ClientError::InvalidState("client is not ready"));
+        }
+        let limit = self.live_subscription_limit();
+        if self.live_subscriptions.len() >= limit {
+            return Err(ClientError::LiveSubscriptionLimit { limit });
         }
         let id = SubscriptionId::new(format!("bootstrap-status-{}", self.next_subscription_id));
         self.next_subscription_id = self.next_subscription_id.saturating_add(1);
@@ -541,6 +575,11 @@ impl ClientState {
     ) -> Result<PendingRequest, ClientError> {
         if self.phase != ClientPhase::Ready {
             return Err(ClientError::InvalidState("client is not ready"));
+        }
+        if self.pending.len().saturating_add(self.completed.len()) >= self.config.request_capacity {
+            return Err(ClientError::RequestRetentionLimit {
+                limit: self.config.request_capacity,
+            });
         }
         let id = RequestId::from_u128(self.next_request_id);
         self.next_request_id = self.next_request_id.saturating_add(1);
@@ -810,6 +849,10 @@ impl ClientState {
     }
 
     fn rebuild_server_state(&mut self, reserved_outbound: usize) -> Result<(), ClientError> {
+        if self.config.request_capacity == 0 {
+            self.phase = ClientPhase::Closed;
+            return Err(ClientError::RequestRetentionLimit { limit: 0 });
+        }
         let required = 1_usize
             .saturating_add(self.live_subscriptions.len())
             .saturating_add(reserved_outbound);

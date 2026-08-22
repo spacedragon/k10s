@@ -490,20 +490,21 @@ fn reliable_outbound_capacity_is_an_exact_hard_bound() {
 #[test]
 fn subscribe_rolls_back_when_reliable_outbound_is_full() {
     let mut client = ready_client_with_config(ClientConfig {
-        outbound_capacity: 1,
+        outbound_capacity: 3,
         ..ClientConfig::default()
     });
-    let first = client.subscribe_bootstrap_status().unwrap();
-    assert_eq!(client.outbound_len(), 1);
-    assert_eq!(client.live_subscription_count(), 1);
+    let _first = client.begin(Query::Bootstrap).unwrap();
+    let _second = client.begin(Query::Bootstrap).unwrap();
+    let _third = client.begin(Query::Bootstrap).unwrap();
+    assert_eq!(client.outbound_len(), 3);
+    assert_eq!(client.live_subscription_count(), 0);
 
     assert_eq!(
         client.subscribe_bootstrap_status().unwrap_err(),
-        ClientError::OutboundOverload { capacity: 1 }
+        ClientError::OutboundOverload { capacity: 3 }
     );
-    assert_eq!(client.outbound_len(), 1);
-    assert_eq!(client.live_subscription_count(), 1);
-    assert_eq!(first.id().as_str(), "bootstrap-status-1");
+    assert_eq!(client.outbound_len(), 3);
+    assert_eq!(client.live_subscription_count(), 0);
 }
 
 #[test]
@@ -544,20 +545,15 @@ fn zero_capacity_rejects_hello_without_queuing_or_authenticating() {
 #[test]
 fn recovery_preflights_the_whole_reliable_batch_and_rolls_back() {
     let mut client = ready_client_with_config(ClientConfig {
-        outbound_capacity: 2,
+        outbound_capacity: 1,
         ..ClientConfig::default()
     });
-    let _first = client.subscribe_bootstrap_status().unwrap();
-    let _frame = client.take_outbound();
-    let _second = client.subscribe_bootstrap_status().unwrap();
-    let _frame = client.take_outbound();
-    assert_eq!(client.live_subscription_count(), 2);
 
     assert_eq!(
         client.apply(resync_required(1)).unwrap_err(),
-        ClientError::OutboundOverload { capacity: 2 }
+        ClientError::OutboundOverload { capacity: 1 }
     );
-    assert_eq!(client.live_subscription_count(), 2);
+    assert_eq!(client.live_subscription_count(), 0);
     assert_eq!(client.outbound_len(), 0);
     assert_eq!(client.last_acked_sequence(), None);
     assert_eq!(client.phase(), ClientPhase::Closed);
@@ -622,6 +618,124 @@ fn undrained_acks_coalesce_to_the_highest_contiguous_cursor_at_exact_bound() {
         panic!("expected coalesced ack");
     };
     assert_eq!(ack.last_acked_sequence, 2);
+}
+
+#[test]
+fn maximum_live_subscription_set_always_fits_sequenced_resync_recovery() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 4,
+        ..ClientConfig::default()
+    });
+    assert_eq!(client.live_subscription_limit(), 2);
+
+    for _ in 0..2 {
+        let _subscription = client.subscribe_bootstrap_status().unwrap();
+        assert_eq!(client.take_outbound().unwrap().kind, ClientKind::Subscribe);
+    }
+    assert_eq!(client.live_subscription_count(), 2);
+
+    assert_eq!(
+        client.subscribe_bootstrap_status().unwrap_err(),
+        ClientError::LiveSubscriptionLimit { limit: 2 }
+    );
+    assert_eq!(client.live_subscription_count(), 2);
+    assert_eq!(client.phase(), ClientPhase::Ready);
+
+    client.apply(resync_required(1)).unwrap();
+    assert_eq!(client.outbound_len(), 4);
+    let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
+        .map(|frame| frame.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ClientKind::Request,
+            ClientKind::Subscribe,
+            ClientKind::Subscribe,
+            ClientKind::Ack,
+        ]
+    );
+}
+
+#[test]
+fn small_outbound_config_rejects_unrecoverable_live_subscription_set() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 1,
+        ..ClientConfig::default()
+    });
+    assert_eq!(client.live_subscription_limit(), 0);
+    assert_eq!(
+        client.subscribe_bootstrap_status().unwrap_err(),
+        ClientError::LiveSubscriptionLimit { limit: 0 }
+    );
+    assert_eq!(client.live_subscription_count(), 0);
+    assert_eq!(client.outbound_len(), 0);
+    assert_eq!(client.phase(), ClientPhase::Ready);
+}
+
+#[test]
+fn pending_and_completed_requests_share_an_exact_retention_budget() {
+    let mut client = ready_client_with_config(ClientConfig {
+        request_capacity: 2,
+        ..ClientConfig::default()
+    });
+    let first = client.begin(Query::Bootstrap).unwrap();
+    let _first_frame = client.take_outbound();
+    let second = client.begin(Query::Bootstrap).unwrap();
+    let _second_frame = client.take_outbound();
+
+    assert_eq!(
+        client.begin(Query::Bootstrap).unwrap_err(),
+        ClientError::RequestRetentionLimit { limit: 2 }
+    );
+    assert_eq!(client.outbound_len(), 0);
+    assert!(client.is_pending(&first));
+    assert!(client.is_pending(&second));
+
+    client
+        .apply(ServerFrame::response(
+            first.id().clone(),
+            BootstrapResponse::fixture(),
+        ))
+        .unwrap();
+    assert!(!client.is_pending(&first));
+    assert_eq!(
+        client.begin(Query::Bootstrap).unwrap_err(),
+        ClientError::RequestRetentionLimit { limit: 2 }
+    );
+
+    assert_eq!(
+        client.take(first),
+        Some(QueryResult::Bootstrap(BootstrapResponse::fixture()))
+    );
+    let third = client.begin(Query::Bootstrap).unwrap();
+    assert!(client.is_pending(&third));
+    assert!(client.is_pending(&second));
+}
+
+#[test]
+fn resync_clears_retained_results_before_allocating_recovery_bootstrap() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 2,
+        request_capacity: 1,
+        ..ClientConfig::default()
+    });
+    let completed = client.begin(Query::Bootstrap).unwrap();
+    let _request = client.take_outbound();
+    client
+        .apply(ServerFrame::response(
+            completed.id().clone(),
+            BootstrapResponse::fixture(),
+        ))
+        .unwrap();
+
+    client.apply(resync_required(1)).unwrap();
+    assert!(client.take(completed).is_none());
+    assert_eq!(client.outbound_len(), 2);
+    assert_eq!(
+        client.begin(Query::Bootstrap).unwrap_err(),
+        ClientError::RequestRetentionLimit { limit: 1 }
+    );
 }
 
 fn ready_client() -> ClientState {
