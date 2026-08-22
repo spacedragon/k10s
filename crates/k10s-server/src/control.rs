@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -34,6 +34,69 @@ const RESOURCE_ROWS_PER_CHUNK: usize = 16;
 enum RequestFailure {
     Backend(BackendError),
     Malformed(String),
+}
+
+/// Coordinates one generation of resource-watch forwarders for a session.
+/// The first recovery demand advances the generation and cancels every old
+/// forwarder, so a delayed old-generation demand cannot invalidate recovery
+/// requests after the first barrier has left the scheduler queue.
+#[derive(Clone)]
+struct WatchRecovery {
+    state: Arc<Mutex<WatchRecoveryState>>,
+}
+
+struct WatchRecoveryState {
+    generation: u128,
+    cancel: CancellationToken,
+}
+
+struct WatchGeneration {
+    id: u128,
+    cancel: CancellationToken,
+    recovery: WatchRecovery,
+}
+
+impl WatchRecovery {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(WatchRecoveryState {
+                generation: 0,
+                cancel: CancellationToken::new(),
+            })),
+        }
+    }
+
+    fn register(&self) -> WatchGeneration {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        WatchGeneration {
+            id: state.generation,
+            cancel: state.cancel.clone(),
+            recovery: self.clone(),
+        }
+    }
+
+    fn demand(&self, generation: u128) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if generation != state.generation {
+            return false;
+        }
+        state.cancel.cancel();
+        state.generation = state.generation.wrapping_add(1);
+        state.cancel = CancellationToken::new();
+        true
+    }
+}
+
+impl WatchGeneration {
+    fn demand(&self) -> bool {
+        self.recovery.demand(self.id)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -183,6 +246,7 @@ pub(crate) async fn serve_socket(
     let mut request_tasks = JoinSet::new();
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let subscription_cancel = child.child_token();
+    let watch_recovery = WatchRecovery::new();
     let mut subscription_cancels: HashMap<SubscriptionId, CancellationToken> = HashMap::new();
     let mut last_acked_sequence = 0_u64;
     let mut noticed = false;
@@ -428,6 +492,7 @@ pub(crate) async fn serve_socket(
                         }
                         let task_cancel =
                             handle.as_ref().map(|_| subscription_cancel.child_token());
+                        let task_generation = handle.as_ref().map(|_| watch_recovery.register());
                         if let Some(cancel) = &task_cancel {
                             subscription_cancels.insert(subscription_id.clone(), cancel.clone());
                         }
@@ -450,6 +515,8 @@ pub(crate) async fn serve_socket(
                             let task_kernel = Arc::clone(&kernel);
                             let task_cancel = task_cancel.expect("resource watch has cancellation");
                             let task_counter = Arc::clone(&last_sent_sequence);
+                            let task_generation =
+                                task_generation.expect("resource watch has a generation");
                             let forwarder_span = tracing::info_span!(
                                 "control_subscription",
                                 session_id = %session_id.as_str(),
@@ -465,6 +532,7 @@ pub(crate) async fn serve_socket(
                                         handle.take_events(),
                                         &task_counter,
                                         &task_cancel,
+                                        task_generation,
                                     )
                                     .await;
                                 }
@@ -661,6 +729,7 @@ async fn stream_backend_events(
     events: Option<tokio::sync::broadcast::Receiver<BackendEvent>>,
     sequence_counter: &AtomicU64,
     cancel: &CancellationToken,
+    generation: WatchGeneration,
 ) {
     let mut events = match events {
         Some(events) => events,
@@ -669,6 +738,7 @@ async fn stream_backend_events(
     loop {
         let event = tokio::select! {
             biased;
+            () = generation.cancel.cancelled() => break,
             () = cancel.cancelled() => break,
             event = events.recv() => event,
         };
@@ -697,7 +767,7 @@ async fn stream_backend_events(
                 ) {
                     Ok(()) => {}
                     Err(DeltaAdmission::Dropped) => {
-                        demand_resync(outbound, sequence_counter);
+                        demand_resync(outbound, sequence_counter, &generation);
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
@@ -723,7 +793,7 @@ async fn stream_backend_events(
                 ) {
                     Ok(()) => {}
                     Err(DeltaAdmission::Dropped) => {
-                        demand_resync(outbound, sequence_counter);
+                        demand_resync(outbound, sequence_counter, &generation);
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
@@ -738,7 +808,7 @@ async fn stream_backend_events(
                     dropped,
                     "subscription consumer lagged; demanding resync"
                 );
-                demand_resync(outbound, sequence_counter);
+                demand_resync(outbound, sequence_counter, &generation);
                 break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -858,7 +928,10 @@ fn enqueue_delta(
 
 /// Tell the client its revision stream can no longer be trusted. If the
 /// connection cannot even carry the notice, close it as overloaded.
-fn demand_resync(outbound: &Scheduler, sequence_counter: &AtomicU64) {
+fn demand_resync(outbound: &Scheduler, sequence_counter: &AtomicU64, generation: &WatchGeneration) {
+    if !generation.demand() {
+        return;
+    }
     if outbound
         .enqueue_p2_barrier(|| {
             let sequence = allocate_sequence(sequence_counter).ok_or(EnqueueError::Overloaded)?;
@@ -1200,6 +1273,8 @@ mod tests {
         let subscription_id = SubscriptionId::new("sub-test");
         let counter = AtomicU64::new(0);
         let cancel = CancellationToken::new();
+        let recovery = WatchRecovery::new();
+        let generation = recovery.register();
         let (sender, receiver) = tokio::sync::broadcast::channel(32);
         let mut client = ready_client();
         let pending = client.begin(k10s_ui::client::Query::Bootstrap).unwrap();
@@ -1232,6 +1307,7 @@ mod tests {
             Some(receiver),
             &counter,
             &cancel,
+            generation,
         )
         .await;
 
@@ -1274,6 +1350,8 @@ mod tests {
         let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
         let counter = AtomicU64::new(1);
         let cancel = CancellationToken::new();
+        let recovery = WatchRecovery::new();
+        let generation = recovery.register();
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
         let mut first = changed_record("pod-same");
         first.revision = 2_000;
@@ -1290,6 +1368,7 @@ mod tests {
             Some(receiver),
             &counter,
             &cancel,
+            generation,
         )
         .await;
         let frames = drain_frames(&scheduler).await;
@@ -1401,12 +1480,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_generation_suppresses_old_demand_after_barrier_dequeue() {
+        let scheduler = Scheduler::new(8, 2);
+        let counter = AtomicU64::new(0);
+        let mut client = ready_client();
+        let recovery = WatchRecovery::new();
+        let first_generation = recovery.register();
+        let second_generation = recovery.register();
+
+        demand_resync(&scheduler, &counter, &first_generation);
+        assert!(first_generation.cancel.is_cancelled());
+        assert!(second_generation.cancel.is_cancelled());
+        let first = scheduler.recv().await.expect("first recovery barrier");
+        let Message::Text(first) = first.message else {
+            panic!("recovery barrier is text");
+        };
+        let first: ServerFrame = serde_json::from_str(&first).unwrap();
+        client.apply(first).expect("first recovery begins");
+        let recovery_request = client.take_outbound().expect("recovery bootstrap request");
+        assert_eq!(recovery_request.kind, ClientKind::Request);
+        let recovery_request_id = recovery_request.request_id.unwrap();
+
+        // A second old-generation forwarder can demand recovery after the
+        // writer has dequeued the first barrier. It must not create another
+        // notice that would clear the first generation's pending request.
+        demand_resync(&scheduler, &counter, &second_generation);
+        assert!(
+            scheduler.is_empty(),
+            "the old recovery generation stays deduplicated after dequeue"
+        );
+        client
+            .apply(ServerFrame::response(
+                recovery_request_id,
+                k10s_protocol::BootstrapResponse::fixture(),
+            ))
+            .expect("delayed first-generation response remains correlated");
+    }
+
+    #[tokio::test]
     async fn admission_drop_recovery_converges_a_real_client_state() {
         let scheduler = Scheduler::new(8, 2);
         let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
         let subscription_id = SubscriptionId::new("resource-1");
         let counter = AtomicU64::new(0);
         let cancel = CancellationToken::new();
+        let recovery = WatchRecovery::new();
+        let generation = recovery.register();
         let (sender, receiver) = tokio::sync::broadcast::channel(32);
         for index in 0..10_u32 {
             sender
@@ -1423,6 +1542,7 @@ mod tests {
             Some(receiver),
             &counter,
             &cancel,
+            generation,
         )
         .await;
         let mut wire = drain_frames(&scheduler).await;
