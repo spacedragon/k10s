@@ -6,3 +6,7 @@ pub use app::{AppView, K10sApp};
 
 /// Target-neutral protocol client.
 pub mod client;
+
+/// Command-driven workspace state: windows, focus order, per-window
+/// resource state, dedicated details, and navigation guards.
+pub mod workspace;
