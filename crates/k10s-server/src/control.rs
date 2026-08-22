@@ -189,6 +189,7 @@ pub(crate) async fn serve_socket(
     let mut request_tasks = JoinSet::new();
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let subscription_cancel = child.child_token();
+    let mut subscription_cancels: HashMap<SubscriptionId, CancellationToken> = HashMap::new();
     let mut last_acked_sequence = 0_u64;
     let mut noticed = false;
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
@@ -427,7 +428,15 @@ pub(crate) async fn serve_socket(
                     ))
                 };
                 match outcome {
-                    Ok(handle) => {
+                    Ok(mut handle) => {
+                        if let Some(previous) = subscription_cancels.remove(&subscription_id) {
+                            previous.cancel();
+                        }
+                        let task_cancel =
+                            handle.as_ref().map(|_| subscription_cancel.child_token());
+                        if let Some(cancel) = &task_cancel {
+                            subscription_cancels.insert(subscription_id.clone(), cancel.clone());
+                        }
                         let Some(sequence) = allocate_sequence(&last_sent_sequence) else {
                             if send_error(
                                 &outbound,
@@ -453,10 +462,10 @@ pub(crate) async fn serve_socket(
                             overload_close(&outbound);
                             break;
                         }
-                        if let Some(mut handle) = handle {
+                        if let Some(mut handle) = handle.take() {
                             let task_outbound = outbound.clone();
                             let task_kernel = Arc::clone(&kernel);
-                            let task_cancel = subscription_cancel.child_token();
+                            let task_cancel = task_cancel.expect("resource watch has cancellation");
                             let task_counter = Arc::clone(&last_sent_sequence);
                             let forwarder_span = tracing::info_span!(
                                 "control_subscription",
@@ -493,6 +502,13 @@ pub(crate) async fn serve_socket(
                             break;
                         }
                     }
+                }
+            }
+            Ok(ClientPayload::Unsubscribe(_)) => {
+                if let Some(subscription_id) = frame.subscription_id
+                    && let Some(cancel) = subscription_cancels.remove(&subscription_id)
+                {
+                    cancel.cancel();
                 }
             }
             Ok(ClientPayload::Ack(ack)) => {
@@ -669,6 +685,7 @@ async fn stream_backend_events(
     };
     loop {
         let event = tokio::select! {
+            biased;
             () = cancel.cancelled() => break,
             event = events.recv() => event,
         };
@@ -697,7 +714,7 @@ async fn stream_backend_events(
                 ) {
                     Ok(()) => {}
                     Err(DeltaAdmission::Dropped) => {
-                        demand_resync(outbound, sequence_counter);
+                        demand_resync(outbound);
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
@@ -723,7 +740,7 @@ async fn stream_backend_events(
                 ) {
                     Ok(()) => {}
                     Err(DeltaAdmission::Dropped) => {
-                        demand_resync(outbound, sequence_counter);
+                        demand_resync(outbound);
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
@@ -738,16 +755,7 @@ async fn stream_backend_events(
                     dropped,
                     "subscription consumer lagged; demanding resync"
                 );
-                if let Some(sequence) = allocate_sequence(sequence_counter) {
-                    let frame = ServerFrame {
-                        kind: ServerKind::ResyncRequired,
-                        request_id: None,
-                        subscription_id: None,
-                        sequence: Some(sequence),
-                        payload: serde_json::json!({"reason": "subscription fell behind"}),
-                    };
-                    let _ = send_frame(outbound, frame, Priority::P0);
-                }
+                demand_resync(outbound);
                 break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -864,16 +872,12 @@ fn enqueue_delta(
 
 /// Tell the client its revision stream can no longer be trusted. If the
 /// connection cannot even carry the notice, close it as overloaded.
-fn demand_resync(outbound: &Scheduler, sequence_counter: &AtomicU64) {
-    let Some(sequence) = allocate_sequence(sequence_counter) else {
-        overload_close(outbound);
-        return;
-    };
+fn demand_resync(outbound: &Scheduler) {
     let frame = ServerFrame {
         kind: ServerKind::ResyncRequired,
         request_id: None,
         subscription_id: None,
-        sequence: Some(sequence),
+        sequence: None,
         payload: serde_json::json!({"reason": "resource deltas were dropped"}),
     };
     if send_frame(outbound, frame, Priority::P0).is_err() {
@@ -1152,8 +1156,19 @@ mod tests {
         }
     }
 
+    async fn drain_frames(scheduler: &Scheduler) -> Vec<ServerFrame> {
+        scheduler.close();
+        let mut frames = Vec::new();
+        while let Some(item) = scheduler.recv().await {
+            if let Message::Text(text) = item.message {
+                frames.push(serde_json::from_str(&text).unwrap());
+            }
+        }
+        frames
+    }
+
     #[tokio::test]
-    async fn p2_admission_failure_demands_resync_instead_of_stopping_silently() {
+    async fn p2_admission_failure_demands_an_out_of_band_resync() {
         let scheduler = Scheduler::new(8, 2);
         let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
         let subscription_id = SubscriptionId::new("sub-test");
@@ -1182,26 +1197,160 @@ mod tests {
         )
         .await;
 
-        scheduler.close();
-        let mut kinds = Vec::new();
-        while let Some(item) = scheduler.recv().await {
-            if let Message::Text(text) = item.message {
-                let frame: ServerFrame = serde_json::from_str(&text).unwrap();
-                kinds.push(frame.kind);
-            }
+        let frames = drain_frames(&scheduler).await;
+        assert!(
+            matches!(frames.first(), Some(frame) if frame.kind == ServerKind::ResyncRequired),
+            "an admission drop must notify the client: {frames:?}"
+        );
+        let notice = frames.first().expect("notice present");
+        assert_eq!(
+            notice.sequence, None,
+            "the notice is out-of-band and must not preempt sequenced traffic with a sequence"
+        );
+        let deltas: Vec<u64> = frames
+            .iter()
+            .filter(|frame| frame.kind == ServerKind::Event)
+            .filter_map(|frame| frame.sequence)
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![1, 2, 3, 4, 5, 6],
+            "admitted deltas keep their allocated sequences"
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_drop_recovery_converges_a_real_client_state() {
+        let scheduler = Scheduler::new(8, 2);
+        let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
+        let subscription_id = SubscriptionId::new("resource-1");
+        let counter = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(32);
+        for index in 0..10_u32 {
+            sender
+                .send(BackendEvent::Changed(changed_record(&format!(
+                    "pod-{index:02}"
+                ))))
+                .expect("broadcast has capacity");
         }
-        assert_eq!(
-            kinds.first(),
-            Some(&ServerKind::ResyncRequired),
-            "an admission drop must notify the client"
+        drop(sender);
+        stream_backend_events(
+            &scheduler,
+            &kernel,
+            &subscription_id,
+            Some(receiver),
+            &counter,
+            &cancel,
+        )
+        .await;
+        let mut wire = drain_frames(&scheduler).await;
+
+        // Drive the produced frames plus simulated recovery traffic through
+        // the real client state machine: it must converge without ever
+        // reporting a sequence gap.
+        use k10s_ui::client::{ClientConfig, ClientPhase, ClientState, ConnectTarget};
+        let mut client = ClientState::new(ClientConfig::default());
+        client
+            .connect(ConnectTarget::new(
+                "ws://localhost/api/v1/control",
+                "secret",
+            ))
+            .unwrap();
+        let _hello = client.take_outbound();
+        let welcome_payload = Welcome {
+            protocol: k10s_protocol::ProtocolVersion {
+                major: k10s_protocol::PROTOCOL_MAJOR,
+                minor: k10s_protocol::PROTOCOL_MINOR,
+            },
+            capabilities: vec![],
+            session_id: SessionId::new("session-1"),
+            server_instance_id: "instance-1".into(),
+            resume_status: ResumeStatus::Fresh,
+        };
+        client
+            .apply(ServerFrame {
+                kind: ServerKind::Welcome,
+                request_id: None,
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(welcome_payload).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(client.phase(), ClientPhase::Ready);
+        let handle = client
+            .subscribe_resource("dev-local", "", "v1", "Pod", None)
+            .unwrap();
+        assert_eq!(handle.id().as_str(), "resource-1");
+        let _queued_subscribe = client.take_outbound();
+
+        // Simulated recovery tail: the rebuilt subscription lands on a jumped
+        // sequence followed by a complete fresh snapshot.
+        let mut recovery = vec![
+            ServerFrame {
+                kind: ServerKind::Subscribed,
+                request_id: None,
+                subscription_id: Some(handle.id().clone()),
+                sequence: Some(8),
+                payload: serde_json::to_value(Subscribed).unwrap(),
+            },
+            ServerFrame {
+                kind: ServerKind::SnapshotBegin,
+                request_id: None,
+                subscription_id: Some(handle.id().clone()),
+                sequence: Some(9),
+                payload: serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            },
+        ];
+        let page = kernel.snapshot_page(
+            4_100,
+            &[k10s_backend::ResourceRecord {
+                reference: k10s_backend::ResourceRef {
+                    context: "dev-local".into(),
+                    gvk: Gvk::core("v1", "Pod"),
+                    namespace: Some("default".into()),
+                    name: "pod-a".into(),
+                    uid: "uid-pod-a".into(),
+                },
+                revision: 4_100,
+                labels: BTreeMap::new(),
+                summary: "Running".into(),
+                created_at: "2026-08-21T00:00:00Z".into(),
+                owner_references: Vec::new(),
+            }],
         );
-        assert_eq!(
-            kinds
-                .iter()
-                .filter(|kind| **kind == ServerKind::Event)
-                .count(),
-            6,
-            "admitted deltas remain contiguous ahead of the resync"
-        );
+        recovery.push(ServerFrame {
+            kind: ServerKind::SnapshotChunk,
+            request_id: None,
+            subscription_id: Some(handle.id().clone()),
+            sequence: Some(10),
+            payload: serde_json::to_value(SnapshotChunk {
+                chunk_index: 0,
+                data: serde_json::to_value(page).unwrap(),
+            })
+            .unwrap(),
+        });
+        recovery.push(ServerFrame {
+            kind: ServerKind::SnapshotEnd,
+            request_id: None,
+            subscription_id: Some(handle.id().clone()),
+            sequence: Some(11),
+            payload: serde_json::to_value(SnapshotEnd {
+                checksum: "fnv-64:0000000000000000".into(),
+            })
+            .unwrap(),
+        });
+        wire.extend(recovery);
+
+        for frame in wire {
+            client
+                .apply(frame)
+                .unwrap_or_else(|error| panic!("recovery frame must converge cleanly: {error:?}"));
+        }
+        let snapshot = client
+            .take_resource_snapshot(handle.id())
+            .expect("snapshot reassembled after resync");
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(client.last_acked_sequence(), Some(11));
     }
 }

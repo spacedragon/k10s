@@ -48,6 +48,13 @@ struct FakeState {
     revision: u64,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct SubscriptionCutGate {
+    registered: Arc<std::sync::Barrier>,
+    mutation_done: Arc<std::sync::Barrier>,
+}
+
 impl FakeState {
     fn advance_revision(&mut self) -> u64 {
         self.revision += 1;
@@ -102,7 +109,10 @@ impl FakeState {
     }
 
     fn notify_matching(&mut self, reference: &ResourceRef, event: crate::port::BackendEvent) {
-        for watcher in &self.watchers {
+        self.watchers.retain(|watcher| {
+            if watcher.sender.receiver_count() == 0 {
+                return false;
+            }
             if watcher.context == reference.context
                 && watcher.gvk == reference.gvk
                 && watcher
@@ -112,7 +122,8 @@ impl FakeState {
             {
                 let _ = watcher.sender.send(event.clone());
             }
-        }
+            true
+        });
     }
 }
 
@@ -123,6 +134,8 @@ impl FakeState {
 #[derive(Debug, Clone)]
 pub struct FakeKubernetes {
     state: Arc<Mutex<FakeState>>,
+    #[cfg(test)]
+    subscription_cut_gate: Arc<Mutex<Option<SubscriptionCutGate>>>,
 }
 
 impl FakeKubernetes {
@@ -175,6 +188,8 @@ impl FakeKubernetes {
                 watchers: Vec::new(),
                 revision: INITIAL_REVISION,
             })),
+            #[cfg(test)]
+            subscription_cut_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -190,6 +205,8 @@ impl FakeKubernetes {
                 watchers: Vec::new(),
                 revision: INITIAL_REVISION,
             })),
+            #[cfg(test)]
+            subscription_cut_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -243,6 +260,28 @@ impl FakeKubernetes {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Number of registered watchers; test-only observability for pruning.
+    #[cfg(test)]
+    fn watcher_count(&self) -> usize {
+        self.lock().watchers.len()
+    }
+
+    /// Coordinate a test mutation at the registration/snapshot cut.
+    #[cfg(test)]
+    fn set_subscription_cut_gate(
+        &self,
+        registered: Arc<std::sync::Barrier>,
+        mutation_done: Arc<std::sync::Barrier>,
+    ) {
+        *self
+            .subscription_cut_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SubscriptionCutGate {
+            registered,
+            mutation_done,
+        });
     }
 }
 
@@ -351,7 +390,7 @@ impl KubernetesAccess for FakeKubernetes {
                     namespace,
                 } => {
                     let (sender, receiver) = broadcast::channel(WATCH_CAPACITY);
-                    let snapshot = {
+                    {
                         let mut state = self.lock();
                         if !state.contexts.iter().any(|c| c.name == context) {
                             return Err(BackendError::NotFound);
@@ -383,9 +422,21 @@ impl KubernetesAccess for FakeKubernetes {
                             namespace,
                             sender: sender.clone(),
                         });
-                        snapshot
-                    };
-                    let _ = sender.send(crate::port::BackendEvent::Snapshot(snapshot));
+                        // Publish while the state lock still protects the
+                        // snapshot cut: later mutations can only enqueue
+                        // deltas after this initial event.
+                        let _ = sender.send(crate::port::BackendEvent::Snapshot(snapshot));
+                    }
+                    #[cfg(test)]
+                    if let Some(gate) = self
+                        .subscription_cut_gate
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        gate.registered.wait();
+                        gate.mutation_done.wait();
+                    }
                     Ok(SubscriptionHandle::with_events("resource-watch", receiver))
                 }
             }
@@ -684,6 +735,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::port::BackendEvent;
 
     #[test]
     fn rfc3339_formats_the_fixed_fake_epoch() {
@@ -701,5 +753,73 @@ mod tests {
             None
         );
         assert!(!fake.delete_resource("dev-local", &deployment_gvk(), None, "x"));
+    }
+
+    /// Watch one dev-local pod selector, returning the event receiver.
+    async fn watch_pods(fake: &FakeKubernetes) -> tokio::sync::broadcast::Receiver<BackendEvent> {
+        let mut handle = fake
+            .subscribe(Subscribe::ResourceWatch {
+                context: "dev-local".into(),
+                gvk: Gvk::core("v1", "Pod"),
+                namespace: Some("default".into()),
+            })
+            .await
+            .expect("pod watch subscribes");
+        handle.take_events().expect("resource watches carry events")
+    }
+
+    #[tokio::test]
+    async fn repeated_subscribe_cycles_do_not_retain_dead_watchers() {
+        let fake = FakeKubernetes::standard();
+        let mut kept = watch_pods(&fake).await;
+        assert!(matches!(
+            kept.recv().await.expect("initial snapshot arrives"),
+            BackendEvent::Snapshot(_)
+        ));
+        for _ in 0..32 {
+            drop(watch_pods(&fake).await);
+        }
+        // Any mutation prunes watchers whose receivers are gone; the live one
+        // stays registered and still receives the delta.
+        fake.touch_resource(
+            "dev-local",
+            &Gvk::core("v1", "Pod"),
+            Some("default"),
+            "web-frontend-7d9f8-00001",
+        )
+        .expect("touched pod exists");
+        assert_eq!(fake.watcher_count(), 1, "dead watchers must be pruned");
+        let event = kept.recv().await.expect("live watcher still notified");
+        assert!(matches!(event, BackendEvent::Changed(_)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_always_the_first_event_despite_concurrent_mutations() {
+        let fake = FakeKubernetes::standard();
+        let registered = Arc::new(std::sync::Barrier::new(2));
+        let mutation_done = Arc::new(std::sync::Barrier::new(2));
+        fake.set_subscription_cut_gate(Arc::clone(&registered), Arc::clone(&mutation_done));
+
+        let mutator_fake = fake.clone();
+        let mutator = std::thread::spawn(move || {
+            registered.wait();
+            mutator_fake
+                .touch_resource(
+                    "dev-local",
+                    &Gvk::core("v1", "Pod"),
+                    Some("default"),
+                    "web-frontend-7d9f8-00002",
+                )
+                .expect("touched pod exists");
+            mutation_done.wait();
+        });
+
+        let mut receiver = watch_pods(&fake).await;
+        let first = receiver.recv().await.expect("snapshot arrives first");
+        mutator.join().expect("mutator thread exits");
+        assert!(
+            matches!(first, BackendEvent::Snapshot(_)),
+            "a mutation delta preceded the snapshot"
+        );
     }
 }

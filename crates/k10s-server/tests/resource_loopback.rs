@@ -366,6 +366,137 @@ async fn resource_watch_streams_chunked_snapshot_then_deltas() {
 }
 
 #[tokio::test]
+async fn unsubscribe_stops_the_resource_forwarder() {
+    let (server, fake) = spawn_server_with_fake().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"res-unsubscribe",
+            "payload":{
+                "kind":"resource",
+                "context":"dev-local",
+                "gvk":{"group":"","version":"v1","kind":"Pod"},
+                "namespace":"default"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+    let begin = receive_frame(&mut ws).await;
+    let total_chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
+        .unwrap()
+        .total_chunks;
+    for _ in 0..total_chunks {
+        assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::SnapshotChunk);
+    }
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::SnapshotEnd);
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"unsubscribe", "subscriptionId":"res-unsubscribe",
+            "payload":null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    // Ping is an in-band barrier proving the server processed unsubscribe.
+    ws.send(Message::Text(
+        json!({"kind":"ping", "payload":null}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Pong);
+
+    assert!(
+        fake.touch_resource(
+            "dev-local",
+            &backend_gvk(&GroupVersionKind::core("v1", "Pod")),
+            Some("default"),
+            "web-frontend-7d9f8-00001",
+        )
+        .is_some()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), ws.next())
+            .await
+            .is_err(),
+        "an unsubscribed resource forwarder must stay silent"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn resubscribing_the_same_id_replaces_the_live_forwarder() {
+    let (server, fake) = spawn_server_with_fake().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    let _first_end = subscribe_default_pods(&mut ws, "res-replaced").await;
+    let replacement_end = subscribe_default_pods(&mut ws, "res-replaced").await;
+
+    assert!(
+        fake.touch_resource(
+            "dev-local",
+            &backend_gvk(&GroupVersionKind::core("v1", "Pod")),
+            Some("default"),
+            "web-frontend-7d9f8-00001",
+        )
+        .is_some()
+    );
+    let first = receive_frame(&mut ws).await;
+    assert_eq!(first.kind, ServerKind::Event, "{first:?}");
+    assert_eq!(
+        first.sequence,
+        Some(replacement_end + 1),
+        "the replacement owns the next connection sequence"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), ws.next())
+            .await
+            .is_err(),
+        "only one forwarder may remain for a subscription ID"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+async fn subscribe_default_pods(ws: &mut Ws, subscription_id: &str) -> u64 {
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":subscription_id,
+            "payload":{
+                "kind":"resource",
+                "context":"dev-local",
+                "gvk":{"group":"","version":"v1","kind":"Pod"},
+                "namespace":"default"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(ws).await.kind, ServerKind::Subscribed);
+    let begin = receive_frame(ws).await;
+    assert_eq!(begin.kind, ServerKind::SnapshotBegin);
+    let total_chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
+        .unwrap()
+        .total_chunks;
+    for _ in 0..total_chunks {
+        assert_eq!(receive_frame(ws).await.kind, ServerKind::SnapshotChunk);
+    }
+    let end = receive_frame(ws).await;
+    assert_eq!(end.kind, ServerKind::SnapshotEnd);
+    end.sequence.expect("snapshot end is sequenced")
+}
+
+#[tokio::test]
 async fn unknown_subscription_kinds_stay_rejected_over_the_socket() {
     let (server, _fake) = spawn_server_with_fake().await;
     let mut ws = connect_authenticated(&server).await;
@@ -444,4 +575,157 @@ async fn receive_raw_frame(ws: &mut Ws) -> ServerFrame {
         .expect("socket open")
         .expect("socket healthy");
     serde_json::from_str(&message.into_text().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn dropped_delta_burst_recovers_in_place_with_a_single_forwarder() {
+    use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget};
+
+    let fake = FakeKubernetes::standard();
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            // Six-slot P2 partition (capacity 8 minus a reserve of 2).
+            outbound_queue_capacity: 8,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(fake.clone(), "resync-server"),
+    )
+    .await
+    .unwrap();
+    let url = format!("ws://{}{}", server.addr(), k10s_protocol::CONTROL_PATH);
+    let (mut socket, _) = connect_async(&url).await.unwrap();
+    let mut client = ClientState::new(ClientConfig::default());
+
+    client
+        .connect(ConnectTarget::new(url.clone(), "secret"))
+        .unwrap();
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&client.take_outbound().unwrap())
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    client.apply(receive_raw_frame(&mut socket).await).unwrap();
+
+    let subscription = client
+        .subscribe_resource("dev-local", "", "v1", "Pod", Some("default".into()))
+        .unwrap();
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&client.take_outbound().unwrap())
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let frame = receive_raw_frame(&mut socket).await;
+        let done = frame.kind == ServerKind::SnapshotEnd;
+        client.apply(frame).expect("initial snapshot applies");
+        while let Some(outbound) = client.take_outbound() {
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&outbound).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        if done {
+            break;
+        }
+    }
+    let initial = client
+        .take_resource_snapshot(subscription.id())
+        .expect("initial snapshot completes");
+    assert_eq!(initial.rows.len(), 22);
+
+    // Burst seven distinct resources synchronously: the forwarder drains the
+    // broadcast backlog in one activation and overflows the six-slot P2
+    // partition deterministically.
+    let pods = GroupVersionKind::core("v1", "Pod");
+    for index in 1..=7_u32 {
+        assert!(
+            fake.touch_resource(
+                "dev-local",
+                &backend_gvk(&pods),
+                Some("default"),
+                &format!("web-frontend-7d9f8-{index:05}"),
+            )
+            .is_some()
+        );
+    }
+
+    // Recovery must converge through the same socket and subscription: the
+    // out-of-band notice arrives first, stale deltas drain harmlessly, and
+    // the rebuilt subscription lands on a jumped sequence that the client
+    // re-baselines onto instead of reporting another gap.
+    let mut noticed = false;
+    loop {
+        let frame = receive_raw_frame(&mut socket).await;
+        if frame.kind == ServerKind::ResyncRequired {
+            noticed = true;
+            assert_eq!(
+                frame.sequence, None,
+                "resync notices are out-of-band control frames"
+            );
+        }
+        let frame_kind = frame.kind;
+        client
+            .apply(frame)
+            .expect("recovery must converge without protocol errors");
+        while let Some(outbound) = client.take_outbound() {
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&outbound).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        if noticed && frame_kind == ServerKind::SnapshotEnd {
+            break;
+        }
+    }
+    let recovered = client
+        .take_resource_snapshot(subscription.id())
+        .expect("recovered snapshot completes on the same subscription ID");
+    assert_eq!(recovered.rows.len(), 22);
+
+    // Only one forwarder may remain: a single touch produces exactly one
+    // changed delta and nothing else.
+    assert!(
+        fake.touch_resource(
+            "dev-local",
+            &backend_gvk(&pods),
+            Some("default"),
+            "web-frontend-7d9f8-00008",
+        )
+        .is_some()
+    );
+    let mut deltas = 0;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), ws_read_optional(&mut socket)).await
+        {
+            Ok(Some(frame)) => {
+                assert_eq!(frame.kind, ServerKind::Event, "{frame:?}");
+                deltas += 1;
+            }
+            Ok(None) => break,
+            Err(_elapsed) => break,
+        }
+    }
+    assert_eq!(deltas, 1, "exactly one live forwarder delivers the delta");
+
+    drop(client);
+    server.shutdown().await.unwrap();
+}
+
+/// Read one frame, distinguishing a closed socket from a quiet one.
+async fn ws_read_optional(ws: &mut Ws) -> Option<ServerFrame> {
+    match ws.next().await {
+        Some(Ok(message)) => Some(serde_json::from_str(&message.into_text().unwrap()).unwrap()),
+        Some(Err(_)) | None => None,
+    }
 }
