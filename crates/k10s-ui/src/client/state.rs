@@ -32,6 +32,8 @@ pub struct ClientConfig {
     pub retry_base_ms: u64,
     /// Maximum retry ceiling.
     pub retry_cap_ms: u64,
+    /// Hard maximum number of frames waiting for transport delivery.
+    pub outbound_capacity: usize,
 }
 
 impl Default for ClientConfig {
@@ -40,6 +42,7 @@ impl Default for ClientConfig {
             capabilities: vec!["bootstrap-status".to_owned()],
             retry_base_ms: 250,
             retry_cap_ms: 30_000,
+            outbound_capacity: 256,
         }
     }
 }
@@ -105,6 +108,11 @@ pub enum ClientError {
     },
     /// A structured server-side failure.
     Server(ErrorFrame),
+    /// A reliable frame could not enter the bounded outbound queue.
+    OutboundOverload {
+        /// Configured hard frame bound.
+        capacity: usize,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -125,6 +133,9 @@ impl std::fmt::Display for ClientError {
                 "incompatible protocol major: client {client_major}, server {server_major}"
             ),
             Self::Server(error) => formatter.write_str(&error.safe_message),
+            Self::OutboundOverload { capacity } => {
+                write!(formatter, "outbound queue reached capacity {capacity}")
+            }
         }
     }
 }
@@ -198,7 +209,6 @@ struct PendingEntry {
 }
 
 /// Pure client protocol state.
-#[derive(Debug)]
 pub struct ClientState {
     config: ClientConfig,
     phase: ClientPhase,
@@ -221,14 +231,39 @@ pub struct ClientState {
     server_instance_id: Option<String>,
 }
 
+impl std::fmt::Debug for ClientState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientState")
+            .field("config", &self.config)
+            .field("phase", &self.phase)
+            .field("outbound_len", &self.outbound.len())
+            .field("pending_len", &self.pending.len())
+            .field("completed_len", &self.completed.len())
+            .field("target", &self.target)
+            .field("retry_attempt", &self.retry_attempt)
+            .field("retry", &self.retry)
+            .field("reconnecting", &self.reconnecting)
+            .field("last_acked_sequence", &self.last_acked_sequence)
+            .field("live_subscriptions_len", &self.live_subscriptions.len())
+            .field("active_subscriptions_len", &self.active_subscriptions.len())
+            .field("server_state_invalid", &self.server_state_invalid)
+            .field("local_ui", &self.local_ui)
+            .field("session_id", &self.session_id)
+            .field("server_instance_id", &self.server_instance_id)
+            .finish()
+    }
+}
+
 impl ClientState {
     /// Construct a disconnected client.
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
+        let outbound_capacity = config.outbound_capacity;
         Self {
             config,
             phase: ClientPhase::Disconnected,
-            outbound: VecDeque::new(),
+            outbound: VecDeque::with_capacity(outbound_capacity),
             next_request_id: 1,
             pending: BTreeMap::new(),
             completed: BTreeMap::new(),
@@ -282,7 +317,7 @@ impl ClientState {
             last_acked_sequence: self.last_acked_sequence,
             stream_ticket: None,
         };
-        self.outbound.push_back(ClientFrame {
+        let frame = ClientFrame {
             kind: ClientKind::Hello,
             request_id: None,
             subscription_id: None,
@@ -290,14 +325,29 @@ impl ClientState {
             payload: serde_json::to_value(hello).map_err(|error| {
                 ClientError::Protocol(format!("could not encode hello: {error}"))
             })?,
-        });
+        };
         let _endpoint_without_credentials = target.url;
-        Ok(())
+        self.enqueue_reliable(frame)
     }
 
     /// Remove the next frame waiting for transport delivery.
     pub fn take_outbound(&mut self) -> Option<ClientFrame> {
+        if self.phase == ClientPhase::Closed {
+            return None;
+        }
         self.outbound.pop_front()
+    }
+
+    /// Number of frames waiting for transport delivery.
+    #[must_use]
+    pub fn outbound_len(&self) -> usize {
+        self.outbound.len()
+    }
+
+    /// Number of desired subscriptions retained for recovery.
+    #[must_use]
+    pub fn live_subscription_count(&self) -> usize {
+        self.live_subscriptions.len()
     }
 
     /// Start and remember the Plan 1 bootstrap-status subscription.
@@ -308,9 +358,9 @@ impl ClientState {
         let id = SubscriptionId::new(format!("bootstrap-status-{}", self.next_subscription_id));
         self.next_subscription_id = self.next_subscription_id.saturating_add(1);
         let selector = serde_json::json!({"kind":"bootstrapStatus"});
-        self.live_subscriptions.insert(id.clone(), selector.clone());
+        self.queue_subscribe(id.clone(), selector.clone())?;
+        self.live_subscriptions.insert(id.clone(), selector);
         self.refresh_server_validity();
-        self.queue_subscribe(id.clone(), selector)?;
         Ok(LiveSubscription { id })
     }
 
@@ -319,7 +369,7 @@ impl ClientState {
         id: SubscriptionId,
         selector: serde_json::Value,
     ) -> Result<(), ClientError> {
-        self.outbound.push_back(ClientFrame {
+        self.enqueue_reliable(ClientFrame {
             kind: ClientKind::Subscribe,
             request_id: None,
             subscription_id: Some(id),
@@ -327,8 +377,35 @@ impl ClientState {
             payload: serde_json::to_value(Subscribe(selector)).map_err(|error| {
                 ClientError::Protocol(format!("could not encode subscription: {error}"))
             })?,
-        });
+        })
+    }
+
+    fn enqueue_reliable(&mut self, frame: ClientFrame) -> Result<(), ClientError> {
+        self.ensure_outbound_slots(1)?;
+        self.outbound.push_back(frame);
         Ok(())
+    }
+
+    fn ensure_outbound_slots(&mut self, additional: usize) -> Result<(), ClientError> {
+        if self.outbound.len().saturating_add(additional) <= self.config.outbound_capacity {
+            return Ok(());
+        }
+        self.fail_outbound_overload()
+    }
+
+    fn fail_outbound_overload<T>(&mut self) -> Result<T, ClientError> {
+        // Retain the queue and request/subscription maps for diagnostics and
+        // rollback observability, but make them undrainable until an explicit
+        // new connection clears the failed generation.
+        self.phase = ClientPhase::Closed;
+        self.retry = None;
+        self.reconnecting = false;
+        self.target = None;
+        self.server_state_invalid = true;
+        self.active_subscriptions.clear();
+        Err(ClientError::OutboundOverload {
+            capacity: self.config.outbound_capacity,
+        })
     }
 
     /// UI state retained across reconnects and full resynchronization.
@@ -398,25 +475,23 @@ impl ClientState {
     }
 
     /// Start a scheduled reconnect when its deadline has arrived.
-    pub fn retry_if_due(&mut self, now_ms: u64) -> bool {
+    pub fn retry_if_due(&mut self, now_ms: u64) -> Result<bool, ClientError> {
         if self.phase != ClientPhase::Disconnected {
-            return false;
+            return Ok(false);
         }
         let Some(schedule) = self.retry else {
-            return false;
+            return Ok(false);
         };
         if now_ms < schedule.retry_at_ms {
-            return false;
+            return Ok(false);
         }
         let Some(target) = self.target.clone() else {
-            return false;
+            return Ok(false);
         };
         self.retry = None;
-        if self.queue_hello(target).is_err() {
-            return false;
-        }
+        self.queue_hello(target)?;
         self.phase = ClientPhase::Authenticating;
-        true
+        Ok(true)
     }
 
     /// Explicit user-requested close. No reconnect occurs until [`Self::connect`].
@@ -477,7 +552,7 @@ impl ClientState {
             idempotency_key: None,
             payload: serde_json::Value::Null,
         };
-        self.outbound.push_back(ClientFrame {
+        let frame = ClientFrame {
             kind: ClientKind::Request,
             request_id: Some(id.clone()),
             subscription_id: None,
@@ -485,7 +560,8 @@ impl ClientState {
             payload: serde_json::to_value(payload).map_err(|error| {
                 ClientError::Protocol(format!("could not encode request: {error}"))
             })?,
-        });
+        };
+        self.enqueue_reliable(frame)?;
         self.pending.insert(
             id.clone(),
             PendingEntry {
@@ -508,41 +584,45 @@ impl ClientState {
     }
 
     /// Cancel a live request. Repeated cancellation is a no-op.
-    pub fn cancel(&mut self, request: &PendingRequest) -> bool {
-        if self.pending.remove(request.id()).is_none() {
-            return false;
+    pub fn cancel(&mut self, request: &PendingRequest) -> Result<bool, ClientError> {
+        if !self.pending.contains_key(request.id()) {
+            return Ok(false);
         }
-        self.queue_cancel(request.id().clone());
-        true
+        self.queue_cancel(request.id().clone())?;
+        let _removed = self.pending.remove(request.id());
+        Ok(true)
     }
 
     /// Cancel and return every request whose deadline has elapsed.
-    pub fn expire_deadlines(&mut self, now_ms: u64) -> Vec<PendingRequest> {
+    pub fn expire_deadlines(&mut self, now_ms: u64) -> Result<Vec<PendingRequest>, ClientError> {
         let expired: Vec<_> = self
             .pending
             .iter()
             .filter(|(_, entry)| entry.deadline_at_ms.is_some_and(|at| at <= now_ms))
             .map(|(id, _)| id.clone())
             .collect();
+        self.ensure_outbound_slots(expired.len())?;
+        for id in &expired {
+            self.queue_cancel(id.clone())?;
+        }
         for id in &expired {
             let _removed = self.pending.remove(id);
-            self.queue_cancel(id.clone());
         }
-        expired
+        Ok(expired
             .into_iter()
             .map(|id| PendingRequest { id })
-            .collect()
+            .collect())
     }
 
-    fn queue_cancel(&mut self, id: RequestId) {
-        self.outbound.push_back(ClientFrame {
+    fn queue_cancel(&mut self, id: RequestId) -> Result<(), ClientError> {
+        self.enqueue_reliable(ClientFrame {
             kind: ClientKind::CancelRequest,
             request_id: Some(id),
             subscription_id: None,
             sequence: None,
             payload: serde_json::to_value(CancelRequest)
                 .expect("unit cancellation payload always serializes"),
-        });
+        })
     }
 
     /// Apply one decoded server frame.
@@ -562,11 +642,12 @@ impl ClientState {
                 .request_id
                 .clone()
                 .ok_or_else(|| ClientError::Protocol("response missing request ID".to_owned()))?;
-            let pending = self
+            let query = self
                 .pending
-                .remove(&id)
+                .get(&id)
+                .map(|pending| pending.query)
                 .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
-            let result = match pending.query {
+            let result = match query {
                 Query::Bootstrap => {
                     let bootstrap: BootstrapResponse = frame
                         .decode_response_payload()
@@ -576,32 +657,33 @@ impl ClientState {
                     QueryResult::Bootstrap(bootstrap)
                 }
             };
+            let _pending = self.pending.remove(&id);
             self.completed.insert(id, result);
             return Ok(());
         }
-        if let Some(sequence) = frame.sequence {
+
+        let payload = frame
+            .decode_payload()
+            .map_err(|error| ClientError::Protocol(error.message))?;
+        let sequence = frame.sequence;
+        if let Some(sequence) = sequence {
             let expected = self
                 .last_acked_sequence
                 .map_or(1, |last| last.saturating_add(1));
             if sequence > expected {
-                self.rebuild_server_state()?;
+                self.rebuild_server_state(0)?;
                 return Err(ClientError::SequenceGap {
                     expected,
                     got: sequence,
                 });
             }
-            if sequence == expected {
-                self.last_acked_sequence = Some(sequence);
-                self.queue_ack(sequence);
-            } else {
-                self.queue_ack(self.last_acked_sequence.unwrap_or(0));
+            if sequence < expected {
+                self.queue_ack(self.last_acked_sequence.unwrap_or(0))?;
                 return Ok(());
             }
         }
-        match frame
-            .decode_payload()
-            .map_err(|error| ClientError::Protocol(error.message))?
-        {
+
+        let result = match payload {
             ServerPayload::Welcome(welcome) if self.phase == ClientPhase::Authenticating => {
                 if welcome.protocol.major != PROTOCOL_MAJOR {
                     self.phase = ClientPhase::UpgradeRequired;
@@ -624,7 +706,7 @@ impl ClientState {
                 self.retry_attempt = 0;
                 self.reconnecting = false;
                 if recover {
-                    self.rebuild_server_state()?;
+                    self.rebuild_server_state(0)?;
                 }
                 Ok(())
             }
@@ -639,7 +721,9 @@ impl ClientState {
                 Ok(())
             }
             ServerPayload::Event(_) => Ok(()),
-            ServerPayload::ResyncRequired(_) => self.rebuild_server_state(),
+            ServerPayload::ResyncRequired(_) => {
+                self.rebuild_server_state(usize::from(sequence.is_some()))
+            }
             ServerPayload::Error(error)
                 if self.phase == ClientPhase::Authenticating
                     && error.code == ErrorCode::Unauthorized =>
@@ -685,11 +769,18 @@ impl ClientState {
                 Err(ClientError::Server(error))
             }
             _ => Err(ClientError::Protocol("unexpected server frame".to_owned())),
+        };
+        result?;
+
+        if let Some(sequence) = sequence {
+            self.queue_ack(sequence)?;
+            self.last_acked_sequence = Some(sequence);
         }
+        Ok(())
     }
 
-    fn queue_ack(&mut self, sequence: u64) {
-        self.outbound.push_back(ClientFrame {
+    fn queue_ack(&mut self, sequence: u64) -> Result<(), ClientError> {
+        let ack = ClientFrame {
             kind: ClientKind::Ack,
             request_id: None,
             subscription_id: None,
@@ -698,7 +789,16 @@ impl ClientState {
                 last_acked_sequence: sequence,
             })
             .expect("ack payload always serializes"),
-        });
+        };
+        if let Some(queued) = self
+            .outbound
+            .iter_mut()
+            .find(|frame| frame.kind == ClientKind::Ack)
+        {
+            *queued = ack;
+            return Ok(());
+        }
+        self.enqueue_reliable(ack)
     }
 
     fn invalidate_server_state(&mut self) {
@@ -709,7 +809,13 @@ impl ClientState {
         self.completed.clear();
     }
 
-    fn rebuild_server_state(&mut self) -> Result<(), ClientError> {
+    fn rebuild_server_state(&mut self, reserved_outbound: usize) -> Result<(), ClientError> {
+        let required = 1_usize
+            .saturating_add(self.live_subscriptions.len())
+            .saturating_add(reserved_outbound);
+        if required > self.config.outbound_capacity {
+            return self.fail_outbound_overload();
+        }
         self.outbound.clear();
         self.invalidate_server_state();
         let _bootstrap = self.begin(Query::Bootstrap)?;

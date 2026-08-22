@@ -74,8 +74,8 @@ fn cancellation_is_idempotent_and_deadlines_cancel_pending_requests() {
     let cancelled = client.begin(Query::Bootstrap).unwrap();
     let request = client.take_outbound().unwrap();
     assert_eq!(request.kind, ClientKind::Request);
-    assert!(client.cancel(&cancelled));
-    assert!(!client.cancel(&cancelled));
+    assert!(client.cancel(&cancelled).unwrap());
+    assert!(!client.cancel(&cancelled).unwrap());
     let cancel = client.take_outbound().unwrap();
     assert_eq!(cancel.kind, ClientKind::CancelRequest);
     assert_eq!(cancel.request_id(), Some(cancelled.id()));
@@ -90,8 +90,11 @@ fn cancellation_is_idempotent_and_deadlines_cancel_pending_requests() {
         panic!("expected request payload");
     };
     assert_eq!(request_payload.deadline, Some(250));
-    assert!(client.expire_deadlines(1_249).is_empty());
-    assert_eq!(client.expire_deadlines(1_250), vec![expiring.clone()]);
+    assert!(client.expire_deadlines(1_249).unwrap().is_empty());
+    assert_eq!(
+        client.expire_deadlines(1_250).unwrap(),
+        vec![expiring.clone()]
+    );
     assert!(!client.is_pending(&expiring));
     let cancel = client.take_outbound().unwrap();
     assert_eq!(cancel.kind, ClientKind::CancelRequest);
@@ -159,8 +162,8 @@ fn full_jitter_retry_is_bounded_and_increases_exponentially() {
             retry_at_ms: 10_000 + (u64::MAX % 101),
         })
     );
-    assert!(!client.retry_if_due(10_050));
-    assert!(client.retry_if_due(10_100));
+    assert!(!client.retry_if_due(10_050).unwrap());
+    assert!(client.retry_if_due(10_100).unwrap());
 
     client.transport_lost(20_000, 199);
     assert_eq!(
@@ -198,7 +201,7 @@ fn reconnect_preserves_local_state_and_rebuilds_server_state() {
     );
     assert!(client.server_state_invalid());
     assert!(client.server_bootstrap().is_none());
-    assert!(client.retry_if_due(1_000));
+    assert!(client.retry_if_due(1_000).unwrap());
     let hello = client.take_outbound().unwrap();
     assert_eq!(hello.kind, ClientKind::Hello);
     let k10s_protocol::ClientPayload::Hello(hello) = hello.decode_payload().unwrap() else {
@@ -227,7 +230,10 @@ fn resync_required_reissues_bootstrap_and_live_subscriptions() {
     let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
         .map(|frame| frame.kind)
         .collect();
-    assert_eq!(kinds, [ClientKind::Request, ClientKind::Subscribe]);
+    assert_eq!(
+        kinds,
+        [ClientKind::Request, ClientKind::Subscribe, ClientKind::Ack]
+    );
 }
 
 #[test]
@@ -292,7 +298,7 @@ fn explicit_user_or_application_close_stays_closed_until_new_connect() {
         assert_eq!(client.phase(), ClientPhase::Closed);
         assert_eq!(client.retry_schedule(), None);
         client.transport_lost(2_000, 0);
-        assert!(!client.retry_if_due(u64::MAX));
+        assert!(!client.retry_if_due(u64::MAX).unwrap());
         assert!(client.take_outbound().is_none());
 
         client
@@ -331,11 +337,11 @@ fn only_transient_loss_and_after_reconnect_server_errors_schedule_retry() {
 fn reconnect_discards_stale_outbound_and_sends_only_hello_before_welcome() {
     let mut client = ready_client();
     let pending = client.begin(Query::Bootstrap).unwrap();
-    assert!(client.cancel(&pending));
+    assert!(client.cancel(&pending).unwrap());
 
     client.transport_lost(1_000, 0);
     assert!(client.take_outbound().is_none());
-    assert!(client.retry_if_due(1_000));
+    assert!(client.retry_if_due(1_000).unwrap());
     assert_eq!(client.take_outbound().unwrap().kind, ClientKind::Hello);
     assert!(client.take_outbound().is_none());
 }
@@ -353,7 +359,10 @@ fn resync_discards_stale_outbound_before_recovery_frames() {
     let kinds: Vec<_> = std::iter::from_fn(|| client.take_outbound())
         .map(|frame| frame.kind)
         .collect();
-    assert_eq!(kinds, [ClientKind::Request, ClientKind::Subscribe]);
+    assert_eq!(
+        kinds,
+        [ClientKind::Request, ClientKind::Subscribe, ClientKind::Ack]
+    );
 }
 
 #[test]
@@ -442,8 +451,185 @@ fn connect_target_debug_redacts_access_token() {
     assert!(!debug.contains("top-secret"));
 }
 
-fn ready_client() -> ClientState {
+#[test]
+fn client_state_debug_never_renders_queued_hello_credentials() {
     let mut client = ClientState::new(ClientConfig::default());
+    client
+        .connect(ConnectTarget::new(
+            "wss://example.test/api/v1/control",
+            "queued-exact-secret",
+        ))
+        .unwrap();
+
+    let debug = format!("{client:?}");
+    assert!(!debug.contains("queued-exact-secret"));
+    assert!(!debug.contains("accessToken"));
+}
+
+#[test]
+fn reliable_outbound_capacity_is_an_exact_hard_bound() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 2,
+        ..ClientConfig::default()
+    });
+    let first = client.begin(Query::Bootstrap).unwrap();
+    let second = client.begin(Query::Bootstrap).unwrap();
+    assert_eq!(client.outbound_len(), 2);
+
+    assert_eq!(
+        client.begin(Query::Bootstrap).unwrap_err(),
+        ClientError::OutboundOverload { capacity: 2 }
+    );
+    assert_eq!(client.outbound_len(), 2);
+    assert!(client.is_pending(&first));
+    assert!(client.is_pending(&second));
+    assert_eq!(client.phase(), ClientPhase::Closed);
+    assert!(client.take_outbound().is_none());
+}
+
+#[test]
+fn subscribe_rolls_back_when_reliable_outbound_is_full() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 1,
+        ..ClientConfig::default()
+    });
+    let first = client.subscribe_bootstrap_status().unwrap();
+    assert_eq!(client.outbound_len(), 1);
+    assert_eq!(client.live_subscription_count(), 1);
+
+    assert_eq!(
+        client.subscribe_bootstrap_status().unwrap_err(),
+        ClientError::OutboundOverload { capacity: 1 }
+    );
+    assert_eq!(client.outbound_len(), 1);
+    assert_eq!(client.live_subscription_count(), 1);
+    assert_eq!(first.id().as_str(), "bootstrap-status-1");
+}
+
+#[test]
+fn cancel_keeps_request_pending_when_cancel_frame_cannot_be_enqueued() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 1,
+        ..ClientConfig::default()
+    });
+    let pending = client.begin(Query::Bootstrap).unwrap();
+
+    assert_eq!(
+        client.cancel(&pending).unwrap_err(),
+        ClientError::OutboundOverload { capacity: 1 }
+    );
+    assert!(client.is_pending(&pending));
+    assert_eq!(client.outbound_len(), 1);
+}
+
+#[test]
+fn zero_capacity_rejects_hello_without_queuing_or_authenticating() {
+    let mut client = ClientState::new(ClientConfig {
+        outbound_capacity: 0,
+        ..ClientConfig::default()
+    });
+    assert_eq!(
+        client
+            .connect(ConnectTarget::new(
+                "wss://example.test/api/v1/control",
+                "secret",
+            ))
+            .unwrap_err(),
+        ClientError::OutboundOverload { capacity: 0 }
+    );
+    assert_eq!(client.outbound_len(), 0);
+    assert_eq!(client.phase(), ClientPhase::Closed);
+}
+
+#[test]
+fn recovery_preflights_the_whole_reliable_batch_and_rolls_back() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 2,
+        ..ClientConfig::default()
+    });
+    let _first = client.subscribe_bootstrap_status().unwrap();
+    let _frame = client.take_outbound();
+    let _second = client.subscribe_bootstrap_status().unwrap();
+    let _frame = client.take_outbound();
+    assert_eq!(client.live_subscription_count(), 2);
+
+    assert_eq!(
+        client.apply(resync_required(1)).unwrap_err(),
+        ClientError::OutboundOverload { capacity: 2 }
+    );
+    assert_eq!(client.live_subscription_count(), 2);
+    assert_eq!(client.outbound_len(), 0);
+    assert_eq!(client.last_acked_sequence(), None);
+    assert_eq!(client.phase(), ClientPhase::Closed);
+}
+
+#[test]
+fn malformed_sequenced_event_does_not_advance_or_ack_cursor() {
+    let mut client = ready_client();
+    let malformed = ServerFrame {
+        kind: ServerKind::Event,
+        request_id: None,
+        subscription_id: Some(SubscriptionId::new("sub-malformed")),
+        sequence: Some(1),
+        payload: serde_json::json!({}),
+    };
+
+    assert!(matches!(
+        client.apply(malformed).unwrap_err(),
+        ClientError::Protocol(_)
+    ));
+    assert_eq!(client.last_acked_sequence(), None);
+    assert_eq!(client.outbound_len(), 0);
+}
+
+#[test]
+fn ack_overload_fails_closed_without_claiming_cursor_progress() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 1,
+        ..ClientConfig::default()
+    });
+    let _pending = client.begin(Query::Bootstrap).unwrap();
+    assert_eq!(client.outbound_len(), 1);
+
+    assert_eq!(
+        client
+            .apply(event(&SubscriptionId::new("sub-1"), 1))
+            .unwrap_err(),
+        ClientError::OutboundOverload { capacity: 1 }
+    );
+    assert_eq!(client.last_acked_sequence(), None);
+    assert_eq!(client.outbound_len(), 1);
+    assert_eq!(client.phase(), ClientPhase::Closed);
+    assert!(client.server_state_invalid());
+}
+
+#[test]
+fn undrained_acks_coalesce_to_the_highest_contiguous_cursor_at_exact_bound() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 1,
+        ..ClientConfig::default()
+    });
+    let subscription = SubscriptionId::new("sub-1");
+
+    client.apply(event(&subscription, 1)).unwrap();
+    assert_eq!(client.outbound_len(), 1);
+    client.apply(event(&subscription, 2)).unwrap();
+    assert_eq!(client.outbound_len(), 1);
+    assert_eq!(client.last_acked_sequence(), Some(2));
+
+    let ack = client.take_outbound().unwrap();
+    let k10s_protocol::ClientPayload::Ack(ack) = ack.decode_payload().unwrap() else {
+        panic!("expected coalesced ack");
+    };
+    assert_eq!(ack.last_acked_sequence, 2);
+}
+
+fn ready_client() -> ClientState {
+    ready_client_with_config(ClientConfig::default())
+}
+
+fn ready_client_with_config(config: ClientConfig) -> ClientState {
+    let mut client = ClientState::new(config);
     client
         .connect(ConnectTarget::new(
             "ws://localhost/api/v1/control",
