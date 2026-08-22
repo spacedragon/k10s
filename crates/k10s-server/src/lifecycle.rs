@@ -184,11 +184,12 @@ impl Admission {
 
     /// Whether any pending upgrade or running session task is still live.
     fn has_live(&self) -> bool {
-        let state = self
+        let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.entries.values().any(AdmissionEntry::is_live)
+        state.entries.retain(|_, entry| entry.is_live());
+        !state.entries.is_empty()
     }
 }
 
@@ -724,5 +725,37 @@ mod tests {
         )
         .await;
         assert!(completed, "aborted survivor must let the drain complete");
+    }
+
+    /// Completed connections must retire their admission entries: after churn
+    /// the registry holds nothing, so neither memory nor shutdown work grows
+    /// with historical sessions.
+    #[tokio::test]
+    async fn confirmed_entries_retire_when_their_tasks_finish() {
+        let admission = Admission::new();
+        let readiness = Readiness::new();
+        readiness.set(ReadinessState::Ready);
+
+        for _ in 0..8 {
+            let guard = admission
+                .try_register(&readiness)
+                .expect("open barrier admits a ready upgrade");
+            assert!(admission.has_live(), "pending entry must count as live");
+            let handle = tokio::spawn(std::future::ready(()));
+            guard.confirm_running(&handle);
+            assert!(admission.has_live(), "running entry must count as live");
+            let _ = handle.await;
+            assert!(!admission.has_live(), "finished task must retire its entry");
+        }
+
+        let state = admission
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.entries.is_empty(),
+            "registry must return to zero after churn: {:?}",
+            state.entries.len()
+        );
     }
 }
