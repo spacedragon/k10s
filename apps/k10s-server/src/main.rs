@@ -11,8 +11,39 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_DIST_DIR: &str = "dist";
 
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+        .init();
+}
+
+/// Cancel the runtime on SIGINT/SIGTERM so `run_with_assets` drains in order.
+async fn forward_termination_signals(cancel: CancellationToken) {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+    tracing::info!(target: "k10s_server_app", "termination signal received");
+    cancel.cancel();
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    init_tracing();
     let bind_addr: SocketAddr = env::var("K10S_BIND_ADDR")
         .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned())
         .parse()?;
@@ -33,11 +64,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         access_token: standalone.access_token().to_owned(),
         ..ServerConfig::default()
     };
+    let cancel = CancellationToken::new();
+    tokio::spawn(forward_termination_signals(cancel.clone()));
     k10s_server::run_with_assets(
         listener,
         config,
         BackendKernel::new(FakeKubernetes::standard()),
-        CancellationToken::new(),
+        cancel,
         Some(standalone.dist_dir().to_owned()),
     )
     .await?;

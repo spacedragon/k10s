@@ -9,8 +9,8 @@ use k10s_backend::{
 };
 use k10s_protocol::{
     ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, Subscribed, SubscriptionId, Welcome,
-    decode_client_frame,
+    Retryability, ServerFrame, ServerKind, SessionId, ShutdownNotice, Subscribed, SubscriptionId,
+    Welcome, decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -19,16 +19,21 @@ use tracing::Instrument;
 
 use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
+use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_socket(
     socket: WebSocket,
     config: Arc<ServerConfig>,
     kernel: Arc<BackendKernel>,
     unauthenticated: OwnedSemaphorePermit,
     authenticated_slots: Arc<tokio::sync::Semaphore>,
-    shutdown: CancellationToken,
+    gate: Arc<MutationGate>,
+    signals: crate::lifecycle::DrainSignals,
+    tasks: Arc<crate::lifecycle::ConnectionTasks>,
 ) {
+    let DrainSignals { drain, force } = signals;
     let (mut sink, mut stream) = socket.split();
     let outbound = Scheduler::new(
         config.outbound_queue_capacity,
@@ -57,8 +62,11 @@ pub(crate) async fn serve_socket(
             }
         }
     });
+    tasks.track(&writer);
     let first = tokio::select! {
-        () = shutdown.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
+        biased;
+        () = force.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
+        () = drain.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
         first = tokio::time::timeout(config.hello_timeout, stream.next()) => first,
     };
     let hello = match first {
@@ -167,13 +175,35 @@ pub(crate) async fn serve_socket(
     let mut request_tasks = JoinSet::new();
     let mut last_sent_sequence = 0_u64;
     let mut last_acked_sequence = 0_u64;
+    let mut noticed = false;
+    let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         let next = tokio::select! {
-            () = shutdown.cancelled() => {
-                let notice = ServerFrame { kind: ServerKind::ShutdownNotice, request_id: None, subscription_id: None, sequence: None, payload: serde_json::json!({"reason":"server shutdown"}) };
+            biased;
+            () = force.cancelled() => break,
+            () = drain.cancelled(), if !noticed => {
+                noticed = true;
+                tracing::info!(
+                    session_id = %session_id.as_str(),
+                    drain_window_ms = config.drain_grace_timeout.as_millis() as u64,
+                    "control session entering drain window"
+                );
+                let notice = ServerFrame {
+                    kind: ServerKind::ShutdownNotice,
+                    request_id: None,
+                    subscription_id: None,
+                    sequence: None,
+                    payload: serde_json::to_value(ShutdownNotice {
+                        reason: "server shutdown".to_owned(),
+                        retry_after: Some(config.drain_grace_timeout.as_secs().max(1)),
+                    })
+                    .expect("shutdown notice serializes"),
+                };
                 if send_frame(&outbound, notice, Priority::P0).is_err() { overload_close(&outbound); }
-                break;
+                drain_grace = Some(Box::pin(tokio::time::sleep(config.drain_grace_timeout)));
+                continue;
             }
+            () = async { drain_grace.as_mut().expect("grace window armed").await }, if drain_grace.is_some() => break,
             next = stream.next() => next,
             completed = request_tasks.join_next(), if !request_tasks.is_empty() => {
                 let _ = completed;
@@ -203,6 +233,28 @@ pub(crate) async fn serve_socket(
                 let Some(request_id) = frame.request_id else {
                     continue;
                 };
+                if !gate.is_open() && request.request_kind != "bootstrap" {
+                    let rejection = ErrorFrame::new(
+                        ErrorCode::Cancelled,
+                        "server is shutting down",
+                        Retryability::AfterReconnect,
+                        ErrorScope::Request,
+                        request_id.as_str(),
+                    );
+                    tracing::info!(
+                        session_id = %session_id.as_str(),
+                        request_id = %request_id.as_str(),
+                        correlation_id = %request_id.as_str(),
+                        "mutation rejected during drain"
+                    );
+                    if send_error_frame(&outbound, Some(request_id.clone()), None, rejection)
+                        .is_err()
+                    {
+                        overload_close(&outbound);
+                        break;
+                    }
+                    continue;
+                }
                 let request_cancel = child.child_token();
                 {
                     let mut active = requests
@@ -500,6 +552,25 @@ fn send_frame(
 ) -> Result<(), EnqueueError> {
     let text = serde_json::to_string(&frame).expect("server frame serializes");
     outbound.enqueue(priority, Message::Text(text.into()))
+}
+
+fn send_error_frame(
+    outbound: &Scheduler,
+    request_id: Option<RequestId>,
+    subscription_id: Option<SubscriptionId>,
+    error: ErrorFrame,
+) -> Result<(), EnqueueError> {
+    send_frame(
+        outbound,
+        ServerFrame {
+            kind: ServerKind::Error,
+            request_id,
+            subscription_id,
+            sequence: None,
+            payload: serde_json::to_value(error).expect("error serializes"),
+        },
+        Priority::P1,
+    )
 }
 
 #[derive(Debug, Clone)]

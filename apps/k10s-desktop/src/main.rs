@@ -3,6 +3,10 @@ use std::error::Error;
 use k10s_desktop::DesktopApp;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+        .with_writer(std::io::stderr)
+        .init();
     let app = DesktopApp::launch()?;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([640.0, 420.0]),
