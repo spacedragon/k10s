@@ -74,6 +74,8 @@ impl FakeState {
         })
     }
 
+    /// Resolve a full resource identity, including the UID. A stale UID
+    /// (delete/recreate reuse of the same name) resolves to nothing.
     fn find_record(&self, reference: &ResourceRef) -> Option<&ResourceRecord> {
         self.records.iter().find(|record| {
             let candidate = &record.reference;
@@ -81,6 +83,7 @@ impl FakeState {
                 && candidate.gvk == reference.gvk
                 && candidate.namespace == reference.namespace
                 && candidate.name == reference.name
+                && candidate.uid == reference.uid
         })
     }
 

@@ -147,7 +147,8 @@ async fn resource_list_detail_and_metrics_flow_through_the_real_socket() {
     assert!(!list.generated_at.is_empty());
 
     // Detail: replicaset carries a controller owner reference to its
-    // deployment plus kind-specific sections.
+    // deployment plus kind-specific sections. The lookup matches the full
+    // advertised identity, including the UID.
     send_request(
         &mut ws,
         "detail-1",
@@ -158,7 +159,7 @@ async fn resource_list_detail_and_metrics_flow_through_the_real_socket() {
                 gvk: replicasets(),
                 namespace: Some("default".into()),
                 name: "web-frontend-7d9f8".into(),
-                uid: "whatever".into(),
+                uid: "uid-dev-local-replicaset-default-web-frontend-7d9f8".into(),
             },
         })
         .unwrap(),
@@ -180,6 +181,32 @@ async fn resource_list_detail_and_metrics_flow_through_the_real_socket() {
         "replicasets are not directly scalable"
     );
 
+    // A stale identity whose name still exists but whose UID belongs to a
+    // previous object lifetime must not resolve.
+    send_request(
+        &mut ws,
+        "detail-stale",
+        "resource.detail",
+        serde_json::to_value(ResourceRefRequest {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: replicasets(),
+                namespace: Some("default".into()),
+                name: "web-frontend-7d9f8".into(),
+                uid: "uid-from-a-past-life".into(),
+            },
+        })
+        .unwrap(),
+    )
+    .await;
+    let response = receive_frame(&mut ws).await;
+    assert_eq!(response.kind, ServerKind::Error);
+    assert_eq!(
+        response.request_id.as_ref().map(|id| id.as_str()),
+        Some("detail-stale")
+    );
+    assert_eq!(response.payload["code"], json!("notFound"));
+
     // Metrics tri-state across pods of the same namespace.
     for (name, availability, cpu, memory) in [
         ("web-frontend-7d9f8-00001", "available", true, true),
@@ -196,7 +223,7 @@ async fn resource_list_detail_and_metrics_flow_through_the_real_socket() {
                     gvk: GroupVersionKind::core("v1", "Pod"),
                     namespace: Some("default".into()),
                     name: name.into(),
-                    uid: "whatever".into(),
+                    uid: format!("uid-dev-local-pod-default-{name}"),
                 },
             })
             .unwrap(),
@@ -356,4 +383,65 @@ async fn unknown_subscription_kinds_stay_rejected_over_the_socket() {
     assert_eq!(error.kind, ServerKind::Error);
     assert_eq!(error.subscription_id.unwrap().as_str(), "res-x");
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_selection_reassembles_as_a_complete_empty_client_snapshot() {
+    use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget};
+
+    let (server, _fake) = spawn_server_with_fake().await;
+    let url = format!("ws://{}{}", server.addr(), k10s_protocol::CONTROL_PATH);
+    let (mut socket, _) = connect_async(&url).await.unwrap();
+    let mut client = ClientState::new(ClientConfig::default());
+
+    client
+        .connect(ConnectTarget::new(url.clone(), "secret"))
+        .unwrap();
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&client.take_outbound().unwrap())
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    client.apply(receive_raw_frame(&mut socket).await).unwrap();
+    assert_eq!(client.phase(), k10s_ui::client::ClientPhase::Ready);
+
+    // prod-readonly has no pods: a valid selector with zero rows.
+    let subscription = client
+        .subscribe_resource("prod-readonly", "", "v1", "Pod", Some("default".into()))
+        .unwrap();
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&client.take_outbound().unwrap())
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    for _ in 0..4 {
+        client
+            .apply(receive_raw_frame(&mut socket).await)
+            .expect("subscribed and snapshot frames apply cleanly");
+    }
+
+    let snapshot = client
+        .take_resource_snapshot(subscription.id())
+        .expect("empty snapshot reassembles completely");
+    assert!(snapshot.rows.is_empty());
+    assert!(snapshot.revision.get() > 0);
+
+    drop(client);
+    server.shutdown().await.unwrap();
+}
+
+async fn receive_raw_frame(ws: &mut Ws) -> ServerFrame {
+    let message = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("server frame within timeout")
+        .expect("socket open")
+        .expect("socket healthy");
+    serde_json::from_str(&message.into_text().unwrap()).unwrap()
 }

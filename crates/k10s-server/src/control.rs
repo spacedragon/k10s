@@ -686,7 +686,7 @@ async fn stream_backend_events(
                 let revision = record.revision;
                 let delta = kernel.changed_delta(&record);
                 let resource = record.reference.coalescing_key();
-                if enqueue_delta(
+                match enqueue_delta(
                     outbound,
                     subscription_id,
                     &resource,
@@ -694,10 +694,16 @@ async fn stream_backend_events(
                     revision,
                     &delta,
                     sequence_counter,
-                )
-                .is_err()
-                {
-                    break;
+                ) {
+                    Ok(()) => {}
+                    Err(DeltaAdmission::Dropped) => {
+                        demand_resync(outbound, sequence_counter);
+                        break;
+                    }
+                    Err(DeltaAdmission::Overloaded) => {
+                        overload_close(outbound);
+                        break;
+                    }
                 }
             }
             Ok(BackendEvent::Gone {
@@ -706,7 +712,7 @@ async fn stream_backend_events(
             }) => {
                 let delta = kernel.gone_delta(&reference, revision);
                 let resource = reference.coalescing_key();
-                if enqueue_delta(
+                match enqueue_delta(
                     outbound,
                     subscription_id,
                     &resource,
@@ -714,10 +720,16 @@ async fn stream_backend_events(
                     revision,
                     &delta,
                     sequence_counter,
-                )
-                .is_err()
-                {
-                    break;
+                ) {
+                    Ok(()) => {}
+                    Err(DeltaAdmission::Dropped) => {
+                        demand_resync(outbound, sequence_counter);
+                        break;
+                    }
+                    Err(DeltaAdmission::Overloaded) => {
+                        overload_close(outbound);
+                        break;
+                    }
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
@@ -766,8 +778,15 @@ async fn stream_snapshot(
     )
     .await?;
 
+    // An empty selection still streams exactly one empty page so the client
+    // can complete reassembly.
+    let pages: Vec<&[k10s_backend::ResourceRecord]> = if data.rows.is_empty() {
+        vec![&data.rows[..]]
+    } else {
+        data.rows.chunks(RESOURCE_ROWS_PER_CHUNK).collect()
+    };
     let mut checksum: u64 = FNV_OFFSET_BASIS;
-    for (index, chunk) in data.rows.chunks(RESOURCE_ROWS_PER_CHUNK).enumerate() {
+    for (index, chunk) in pages.into_iter().enumerate() {
         let page = kernel.snapshot_page(data.revision, chunk);
         let page_bytes = serde_json::to_vec(&page).expect("snapshot page serializes");
         for byte in &page_bytes {
@@ -800,9 +819,18 @@ async fn stream_snapshot(
     .await
 }
 
+/// Why a delta could not be admitted to the bounded scheduler.
+enum DeltaAdmission {
+    /// The P2 partition rejected the delta; the watch must resynchronize.
+    Dropped,
+    /// The session is out of queue capacity and must close.
+    Overloaded,
+}
+
 /// Enqueue one resource delta on the bounded P2 scheduler, coalesced by
-/// resource identity. Deltas are droppable: the scheduler gap tracker and a
-/// subsequent resync repair any skipped revision.
+/// resource identity. A dropped delta leaves the client's revision stream
+/// permanently behind, so the caller must demand a resync instead of
+/// continuing silently.
 fn enqueue_delta(
     outbound: &Scheduler,
     subscription_id: &SubscriptionId,
@@ -811,9 +839,9 @@ fn enqueue_delta(
     revision: u64,
     payload: &impl serde::Serialize,
     sequence_counter: &AtomicU64,
-) -> Result<(), EnqueueError> {
+) -> Result<(), DeltaAdmission> {
     let Some(sequence) = allocate_sequence(sequence_counter) else {
-        return Err(EnqueueError::Overloaded);
+        return Err(DeltaAdmission::Overloaded);
     };
     let frame = ServerFrame {
         kind: ServerKind::Event,
@@ -827,7 +855,30 @@ fn enqueue_delta(
         }),
     };
     let text = serde_json::to_string(&frame).expect("server frame serializes");
-    outbound.enqueue_p2(resource, revision, Message::Text(text.into()))
+    match outbound.enqueue_p2(resource, revision, Message::Text(text.into())) {
+        Ok(()) => Ok(()),
+        Err(EnqueueError::Coalesced) => Err(DeltaAdmission::Dropped),
+        Err(EnqueueError::Overloaded) => Err(DeltaAdmission::Overloaded),
+    }
+}
+
+/// Tell the client its revision stream can no longer be trusted. If the
+/// connection cannot even carry the notice, close it as overloaded.
+fn demand_resync(outbound: &Scheduler, sequence_counter: &AtomicU64) {
+    let Some(sequence) = allocate_sequence(sequence_counter) else {
+        overload_close(outbound);
+        return;
+    };
+    let frame = ServerFrame {
+        kind: ServerKind::ResyncRequired,
+        request_id: None,
+        subscription_id: None,
+        sequence: Some(sequence),
+        payload: serde_json::json!({"reason": "resource deltas were dropped"}),
+    };
+    if send_frame(outbound, frame, Priority::P0).is_err() {
+        overload_close(outbound);
+    }
 }
 
 /// Enqueue one sequenced snapshot frame at lossless priority.
@@ -1072,5 +1123,85 @@ async fn finish_writer(
     {
         writer.abort();
         let _ = writer.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn changed_record(name: &str) -> k10s_backend::ResourceRecord {
+        k10s_backend::ResourceRecord {
+            reference: k10s_backend::ResourceRef {
+                context: "dev-local".into(),
+                gvk: Gvk {
+                    group: String::new(),
+                    version: "v1".into(),
+                    kind: "Pod".into(),
+                },
+                namespace: Some("default".into()),
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: 2000,
+            labels: BTreeMap::new(),
+            summary: "Running".into(),
+            created_at: "2026-08-21T00:00:00Z".into(),
+            owner_references: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn p2_admission_failure_demands_resync_instead_of_stopping_silently() {
+        let scheduler = Scheduler::new(8, 2);
+        let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
+        let subscription_id = SubscriptionId::new("sub-test");
+        let counter = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(32);
+
+        // Ten distinct resource keys overflow the six-slot P2 partition;
+        // nothing drains because no writer runs.
+        for index in 0..10_u32 {
+            sender
+                .send(BackendEvent::Changed(changed_record(&format!(
+                    "pod-{index:02}"
+                ))))
+                .expect("broadcast has capacity");
+        }
+        drop(sender);
+
+        stream_backend_events(
+            &scheduler,
+            &kernel,
+            &subscription_id,
+            Some(receiver),
+            &counter,
+            &cancel,
+        )
+        .await;
+
+        scheduler.close();
+        let mut kinds = Vec::new();
+        while let Some(item) = scheduler.recv().await {
+            if let Message::Text(text) = item.message {
+                let frame: ServerFrame = serde_json::from_str(&text).unwrap();
+                kinds.push(frame.kind);
+            }
+        }
+        assert_eq!(
+            kinds.first(),
+            Some(&ServerKind::ResyncRequired),
+            "an admission drop must notify the client"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == ServerKind::Event)
+                .count(),
+            6,
+            "admitted deltas remain contiguous ahead of the resync"
+        );
     }
 }
