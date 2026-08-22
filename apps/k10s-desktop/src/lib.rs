@@ -10,8 +10,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_server::ServerConfig;
+use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
-use k10s_ui::{AppView, K10sApp};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -175,54 +175,10 @@ impl eframe::App for DesktopApp {
     }
 
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
-        let Some(app) = self.app.as_ref() else {
+        let Some(app) = self.app.as_mut() else {
             return;
         };
-        let view = app.view().clone();
-        eframe::egui::Frame::central_panel(ui.style())
-            .fill(eframe::egui::Color32::from_rgb(242, 247, 252))
-            .inner_margin(32.0)
-            .show(ui, |ui| {
-                ui.heading(
-                    eframe::egui::RichText::new("k10s")
-                        .size(30.0)
-                        .strong()
-                        .color(eframe::egui::Color32::from_rgb(32, 94, 166)),
-                );
-                ui.add_space(20.0);
-                match view {
-                    AppView::Connecting => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Connecting to the local control plane…");
-                        });
-                    }
-                    AppView::Ready {
-                        server_instance_id,
-                        context_names,
-                    } => {
-                        ui.label(
-                            eframe::egui::RichText::new("LOCAL CONTROL PLANE")
-                                .small()
-                                .strong()
-                                .color(eframe::egui::Color32::from_rgb(73, 91, 109)),
-                        );
-                        ui.monospace(server_instance_id);
-                        ui.add_space(24.0);
-                        ui.heading("Kubernetes contexts");
-                        for context_name in context_names {
-                            ui.label(format!("• {context_name}"));
-                        }
-                    }
-                    AppView::Failed { message } => {
-                        ui.colored_label(
-                            eframe::egui::Color32::from_rgb(178, 45, 45),
-                            "Connection failed",
-                        );
-                        ui.label(message);
-                    }
-                }
-            });
+        app.render_ui(ui);
     }
 }
 

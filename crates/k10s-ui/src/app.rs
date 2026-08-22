@@ -3,12 +3,14 @@
 use web_time::Instant;
 
 use ewebsock::{Options, WsEvent, WsMessage};
-use k10s_protocol::{ClientFrame, ServerFrame};
+use k10s_protocol::{ClientFrame, ResourceIdentity, ServerFrame};
 
 use crate::client::{
     BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
     PendingRequest, Query, TransportError, WebSocketTransport,
 };
+use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
+use crate::workspace::WorkspaceState;
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -83,6 +85,7 @@ pub struct K10sApp {
     bootstrap: Option<PendingRequest>,
     recovering: bool,
     view: AppView,
+    shell: UiShell<ResourceIdentity>,
     clock_started: Instant,
     jitter_counter: u64,
 }
@@ -97,6 +100,7 @@ impl std::fmt::Debug for K10sApp {
             .field("bootstrap", &self.bootstrap)
             .field("recovering", &self.recovering)
             .field("view", &self.view)
+            .field("shell", &self.shell)
             .finish()
     }
 }
@@ -125,6 +129,7 @@ impl K10sApp {
             bootstrap: None,
             recovering: false,
             view: AppView::Connecting,
+            shell: UiShell::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
         })
@@ -175,6 +180,25 @@ impl K10sApp {
     #[must_use]
     pub fn view(&self) -> &AppView {
         &self.view
+    }
+
+    /// Persistent command-driven workspace rendered by the application shell.
+    #[must_use]
+    pub fn workspace(&self) -> &WorkspaceState<ResourceIdentity> {
+        self.shell.workspace()
+    }
+
+    /// Render the approved default-egui shell for the current connection view.
+    pub fn render_ui(&mut self, ui: &mut egui::Ui) {
+        let (connection, contexts): (ShellConnectionState, &[String]) = match &self.view {
+            AppView::Connecting => (ShellConnectionState::Connecting, &[]),
+            AppView::Ready { context_names, .. } => {
+                (ShellConnectionState::Connected, context_names.as_slice())
+            }
+            AppView::Failed { .. } => (ShellConnectionState::Failed, &[]),
+        };
+        let selected_context = &mut self.client.local_ui_mut().selected_context;
+        self.shell.show(ui, connection, contexts, selected_context);
     }
 
     /// Credential-free endpoint used by the shared transport.
@@ -433,6 +457,17 @@ mod tests {
 
     fn server_message(frame: &ServerFrame) -> WsEvent {
         WsEvent::Message(WsMessage::Text(serde_json::to_string(frame).unwrap()))
+    }
+
+    #[test]
+    fn application_owns_the_overview_only_workspace_shell() {
+        let (app, _) = test_app(Vec::new());
+
+        assert_eq!(app.workspace().windows().len(), 1);
+        assert_eq!(
+            app.workspace().windows()[0].kind,
+            crate::workspace::WindowKind::Overview
+        );
     }
 
     fn welcome() -> ServerFrame {

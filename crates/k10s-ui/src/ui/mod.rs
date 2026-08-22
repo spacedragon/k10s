@@ -1,0 +1,113 @@
+//! The fixed application shell rendered around the command-driven workspace.
+
+mod launcher;
+mod theme;
+mod top_bar;
+mod window;
+
+use std::fmt::Debug;
+use std::hash::Hash;
+
+use crate::workspace::{WorkspaceCommand, WorkspaceState};
+
+/// User-visible state of the shared control connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Connecting,
+    Connected,
+    Failed,
+}
+
+impl ConnectionState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Failed => "Connection failed",
+        }
+    }
+}
+
+/// Persistent UI shell state. The existing [`WorkspaceState`] remains the
+/// only source of truth for window instances, geometry, focus, and content.
+#[derive(Debug)]
+pub struct UiShell<I> {
+    workspace: WorkspaceState<I>,
+}
+
+impl<I> Default for UiShell<I>
+where
+    I: Clone + Eq + Hash + Debug,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<I> UiShell<I>
+where
+    I: Clone + Eq + Hash + Debug,
+{
+    /// Create a shell around an Overview-only workspace.
+    pub fn new() -> Self {
+        Self {
+            workspace: WorkspaceState::new(),
+        }
+    }
+
+    /// Inspect the persistent workspace rendered by this shell.
+    pub fn workspace(&self) -> &WorkspaceState<I> {
+        &self.workspace
+    }
+
+    /// Render one frame. All mutations are queued while immutable workspace
+    /// state is being rendered, then applied after every panel and window.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[String],
+        selected_context: &mut Option<String>,
+    ) {
+        theme::apply(ui.ctx());
+
+        let mut queued = Vec::<WorkspaceCommand<I>>::new();
+        let selected = selected_context
+            .as_deref()
+            .filter(|selected| contexts.iter().any(|context| context == selected))
+            .or_else(|| contexts.first().map(String::as_str))
+            .map(str::to_owned);
+
+        let mut context_change = None;
+        egui::Panel::top("k10s.top_bar")
+            .resizable(false)
+            .show(ui, |ui| {
+                context_change = top_bar::show(ui, connection, contexts, selected.as_deref());
+            });
+
+        egui::Panel::left("k10s.launcher")
+            .resizable(false)
+            .exact_size(176.0)
+            .show(ui, |ui| {
+                launcher::show(ui, &self.workspace, &mut queued);
+            });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            window::show_canvas(ui, &self.workspace, &mut queued);
+        });
+
+        let context_change = context_change
+            .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));
+        if let Some(context) = context_change {
+            *selected_context = Some(context.clone());
+            queued.push(WorkspaceCommand::ContextSwitch { to: context });
+        }
+
+        if !queued.is_empty() {
+            for command in queued {
+                self.workspace.apply(command);
+            }
+            ui.ctx().request_repaint();
+        }
+    }
+}
