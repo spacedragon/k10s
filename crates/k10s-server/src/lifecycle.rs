@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -14,8 +15,13 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tower_http::services::{ServeDir, ServeFile};
 
-use crate::{config::ServerConfig, control::serve_socket};
+use crate::{
+    config::ServerConfig,
+    control::serve_socket,
+    probes::{Readiness, ReadinessState, health, ready},
+};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -24,7 +30,8 @@ struct AppState {
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
     shutdown: CancellationToken,
-    connections: TaskTracker,
+    connections: Arc<TaskTracker>,
+    readiness: Arc<Readiness>,
 }
 
 /// Handle for an embeddable loopback server.
@@ -69,26 +76,77 @@ pub async fn run(
     kernel: BackendKernel,
     cancel: CancellationToken,
 ) -> io::Result<()> {
+    run_with_assets(listener, config, kernel, cancel, None).await
+}
+
+/// Serve an existing listener and optionally host one exact Trunk distribution tree.
+pub async fn run_with_assets(
+    listener: TcpListener,
+    config: ServerConfig,
+    kernel: BackendKernel,
+    cancel: CancellationToken,
+    dist_dir: Option<PathBuf>,
+) -> io::Result<()> {
+    let readiness = Readiness::new();
+    let connections = Arc::new(TaskTracker::new());
+    let app = router(
+        config,
+        kernel,
+        cancel.clone(),
+        Arc::clone(&readiness),
+        Arc::clone(&connections),
+        dist_dir,
+    );
+    readiness.set(ReadinessState::Ready);
+    let draining = Arc::clone(&readiness);
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            cancel.cancelled_owned().await;
+            draining.set(ReadinessState::Draining);
+        })
+        .await;
+    // Axum does not drain upgraded WebSocket tasks; join them explicitly so
+    // callers cannot drop the runtime mid-shutdown-notice.
+    connections.close();
+    connections.wait().await;
+    result
+}
+
+/// Build the application router with independently testable readiness state.
+pub fn router(
+    config: ServerConfig,
+    kernel: BackendKernel,
+    cancel: CancellationToken,
+    readiness: Arc<Readiness>,
+    connections: Arc<TaskTracker>,
+    dist_dir: Option<PathBuf>,
+) -> Router {
     let state = AppState {
         unauthenticated: Arc::new(Semaphore::new(config.max_unauthenticated_connections)),
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
         config: Arc::new(config),
         kernel: Arc::new(kernel),
         shutdown: cancel.clone(),
-        connections: TaskTracker::new(),
+        connections,
+        readiness,
     };
-    let connections = state.connections.clone();
-    let app = Router::new()
+    let mut app = Router::new()
+        .route("/healthz", get(health))
+        .route("/readyz", get(ready_probe))
         .route(k10s_protocol::CONTROL_PATH, get(control_upgrade))
         .route(k10s_protocol::LOGS_PATH, get(not_implemented))
         .route(k10s_protocol::EXEC_PATH, get(not_implemented))
         .with_state(state);
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await;
-    connections.close();
-    connections.wait().await;
-    result
+    if let Some(dist_dir) = dist_dir {
+        let index = dist_dir.join("index.html");
+        app =
+            app.fallback_service(ServeDir::new(dist_dir).not_found_service(ServeFile::new(index)));
+    }
+    app
+}
+
+async fn ready_probe(State(state): State<AppState>) -> (StatusCode, &'static str) {
+    ready(Arc::clone(&state.readiness)).await
 }
 
 async fn not_implemented() -> StatusCode {
@@ -99,6 +157,9 @@ async fn control_upgrade(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    if state.readiness.state() != ReadinessState::Ready {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let permit = state
         .unauthenticated
         .clone()

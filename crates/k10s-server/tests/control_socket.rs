@@ -646,6 +646,46 @@ async fn graceful_shutdown_notifies_active_socket_and_joins() {
 }
 
 #[tokio::test]
+async fn shutdown_returns_only_after_socket_tasks_finish_their_graceful_flush() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            graceful_flush_timeout: Duration::from_secs(1),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(HugeKubernetes, "huge-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"request", "requestId":"huge",
+            "payload":{"kind":"bootstrap"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    // Give the huge response time to wedge the writer on TCP backpressure.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let shutdown = tokio::spawn(server.shutdown());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must wait for upgraded socket tasks, not just the listener"
+    );
+    drop(ws);
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown must finish once the flush window closes")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_fresh_clients_receive_distinct_session_ids() {
     let server = server().await;
     let mut third = connect(&server).await;
