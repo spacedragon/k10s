@@ -9,7 +9,8 @@ use k10s_backend::{
 };
 use k10s_protocol::{
     ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, SubscriptionId, Welcome, decode_client_frame,
+    Retryability, ServerFrame, ServerKind, SessionId, Subscribed, SubscriptionId, Welcome,
+    decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -164,6 +165,8 @@ pub(crate) async fn serve_socket(
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut request_tasks = JoinSet::new();
+    let mut last_sent_sequence = 0_u64;
+    let mut last_acked_sequence = 0_u64;
     loop {
         let next = tokio::select! {
             () = shutdown.cancelled() => {
@@ -310,17 +313,32 @@ pub(crate) async fn serve_socket(
                 } else if selector_kind == Some("bootstrapStatus") {
                     match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
                         Ok(_) => {
+                            let Some(sequence) = last_sent_sequence.checked_add(1) else {
+                                if send_error(
+                                    &outbound,
+                                    ErrorTarget::Session,
+                                    ErrorCode::Internal,
+                                    "connection sequence exhausted".into(),
+                                )
+                                .is_err()
+                                {
+                                    overload_close(&outbound);
+                                }
+                                break;
+                            };
                             let subscribed = ServerFrame {
                                 kind: ServerKind::Subscribed,
                                 request_id: None,
                                 subscription_id: Some(subscription_id),
-                                sequence: Some(1),
-                                payload: serde_json::json!({}),
+                                sequence: Some(sequence),
+                                payload: serde_json::to_value(Subscribed)
+                                    .expect("subscribed payload serializes"),
                             };
                             if send_frame(&outbound, subscribed, Priority::P1).is_err() {
                                 overload_close(&outbound);
                                 break;
                             }
+                            last_sent_sequence = sequence;
                         }
                         Err(error) => {
                             if send_backend_error(
@@ -349,6 +367,33 @@ pub(crate) async fn serve_socket(
                         break;
                     }
                 }
+            }
+            Ok(ClientPayload::Ack(ack)) => {
+                let cursor = ack.last_acked_sequence;
+                let valid = frame.sequence.is_none_or(|sequence| sequence == cursor)
+                    && cursor >= last_acked_sequence
+                    && cursor <= last_sent_sequence;
+                if !valid {
+                    if send_error(
+                        &outbound,
+                        ErrorTarget::Session,
+                        ErrorCode::InvalidRequest,
+                        "invalid acknowledgement cursor".into(),
+                    )
+                    .is_err()
+                    {
+                        overload_close(&outbound);
+                        break;
+                    }
+                    continue;
+                }
+                last_acked_sequence = cursor;
+                tracing::debug!(
+                    session_id = %session_id.as_str(),
+                    last_acked_sequence,
+                    last_sent_sequence,
+                    "control acknowledgement advanced"
+                );
             }
             Ok(ClientPayload::Ping(_)) => {
                 let pong = ServerFrame {

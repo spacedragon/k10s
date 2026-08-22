@@ -7,7 +7,7 @@ use k10s_backend::{
     QueryResult, Subscribe, SubscriptionHandle,
 };
 use k10s_protocol::{
-    ClientFrame, ClientKind, ErrorCode, RequestId, Retryability, ServerFrame, ServerKind,
+    Ack, ClientFrame, ClientKind, ErrorCode, RequestId, Retryability, ServerFrame, ServerKind,
     ServerPayload,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
@@ -250,7 +250,7 @@ async fn wrong_first_frame_is_explicitly_closed() {
     .await
     .unwrap();
     ws.send(Message::Text(
-        json!({"kind":"ping","payload":{}}).to_string().into(),
+        json!({"kind":"ping","payload":null}).to_string().into(),
     ))
     .await
     .unwrap();
@@ -290,6 +290,117 @@ async fn bootstrap_status_subscription_is_acknowledged() {
     assert_eq!(response.kind, ServerKind::Subscribed);
     assert_eq!(response.subscription_id.unwrap().as_str(), "sub-1");
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ack_cursor_must_match_envelope_and_be_monotonic_not_future() {
+    let server = server().await;
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"sub-1",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let first = receive_frame(&mut ws).await;
+    assert_eq!(first.sequence, Some(1));
+
+    send_ack(&mut ws, 2, 1).await;
+    assert_error_code(receive_frame(&mut ws).await, ErrorCode::InvalidRequest);
+    send_ack(&mut ws, 2, 2).await;
+    assert_error_code(receive_frame(&mut ws).await, ErrorCode::InvalidRequest);
+
+    send_ack(&mut ws, 1, 1).await;
+    assert_no_error_via_ping(&mut ws).await;
+    send_ack(&mut ws, 1, 1).await;
+    assert_no_error_via_ping(&mut ws).await;
+    send_ack_without_envelope_sequence(&mut ws, 1).await;
+    assert_no_error_via_ping(&mut ws).await;
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"sub-2",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let second = receive_frame(&mut ws).await;
+    assert_eq!(second.sequence, Some(2));
+    send_ack(&mut ws, 2, 2).await;
+    assert_no_error_via_ping(&mut ws).await;
+
+    send_ack(&mut ws, 1, 1).await;
+    assert_error_code(receive_frame(&mut ws).await, ErrorCode::InvalidRequest);
+    server.shutdown().await.unwrap();
+}
+
+async fn send_ack(ws: &mut Ws, envelope_sequence: u64, cursor: u64) {
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientFrame {
+            kind: ClientKind::Ack,
+            request_id: None,
+            subscription_id: None,
+            sequence: Some(envelope_sequence),
+            payload: serde_json::to_value(Ack {
+                last_acked_sequence: cursor,
+            })
+            .unwrap(),
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn send_ack_without_envelope_sequence(ws: &mut Ws, cursor: u64) {
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientFrame {
+            kind: ClientKind::Ack,
+            request_id: None,
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(Ack {
+                last_acked_sequence: cursor,
+            })
+            .unwrap(),
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+}
+
+fn assert_error_code(frame: ServerFrame, expected: ErrorCode) {
+    let ServerPayload::Error(error) = frame.decode_payload().unwrap() else {
+        panic!("expected structured error");
+    };
+    assert_eq!(error.code, expected);
+}
+
+async fn assert_no_error_via_ping(ws: &mut Ws) {
+    ws.send(Message::Text(
+        json!({"kind":"ping","payload":null}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let response = tokio::time::timeout(Duration::from_millis(200), ws.next())
+        .await
+        .expect("pong timeout")
+        .unwrap()
+        .unwrap();
+    let frame: ServerFrame = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(frame.kind, ServerKind::Pong, "unexpected frame: {frame:?}");
 }
 
 #[tokio::test]

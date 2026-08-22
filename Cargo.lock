@@ -410,6 +410,7 @@ dependencies = [
  "futures-util",
  "k10s-backend",
  "k10s-protocol",
+ "k10s-ui",
  "serde",
  "serde_json",
  "tokio",
