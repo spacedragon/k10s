@@ -52,6 +52,9 @@ impl KubernetesAccess for ClosingWatchKubernetes {
                     drop(sender);
                     Ok(SubscriptionHandle::with_events("closing-watch", receiver))
                 }
+                Subscribe::Infrastructure { .. } => {
+                    Err(BackendError::unsupported("infrastructure.watch"))
+                }
             }
         })
     }

@@ -12,6 +12,8 @@ use std::pin::Pin;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::catalog::CatalogSnapshot;
+
 /// A behavior-level query to the Kubernetes adapter.
 ///
 /// Unsupported variants return typed capability errors. Resource queries
@@ -35,6 +37,8 @@ pub enum Query {
     ResourceDetail { reference: ResourceRef },
     /// Fetch the availability-gated metrics sample for one pod.
     ResourceMetrics { reference: ResourceRef },
+    /// Fetch the complete Overview, Nodes, and Storage projection.
+    Infrastructure { context: String },
 }
 
 /// Kind of stream to open.
@@ -100,6 +104,8 @@ pub enum Subscribe {
         gvk: Gvk,
         namespace: Option<String>,
     },
+    /// Watch coalescible infrastructure telemetry for one context.
+    Infrastructure { context: String },
 }
 
 /// Result of a query to the Kubernetes adapter.
@@ -113,6 +119,8 @@ pub enum QueryResult {
     ResourceDetail(ResourceRecord),
     /// Availability-gated metrics sample for one pod.
     ResourceMetrics(MetricsSample),
+    /// Overview, Nodes, Storage, and cluster metrics catalog.
+    Infrastructure(CatalogSnapshot),
 }
 
 /// Backend-owned group/version/kind of a resource type.
@@ -255,6 +263,9 @@ pub enum BackendEvent {
         reference: ResourceRef,
         revision: u64,
     },
+    /// A complete infrastructure telemetry projection. The server coalesces
+    /// these by context on its bounded P2 scheduler.
+    Infrastructure(CatalogSnapshot),
 }
 
 /// Bootstrap information returned by the adapter.

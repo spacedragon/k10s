@@ -12,10 +12,10 @@ use k10s_backend::{
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResourceIdentity,
-    ResourceListRequest, ResourceRefRequest, ResumeStatus, Retryability, ServerFrame, ServerKind,
-    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
-    SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
+    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, RequestId,
+    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResumeStatus, Retryability,
+    ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd,
+    Subscribed, SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -56,7 +56,7 @@ struct WatchGeneration {
     recovery: WatchRecovery,
 }
 
-struct ActiveResourceSubscription {
+struct ActiveWatchSubscription {
     task_id: u128,
     cancel: CancellationToken,
 }
@@ -252,8 +252,7 @@ pub(crate) async fn serve_socket(
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let subscription_cancel = child.child_token();
     let watch_recovery = WatchRecovery::new();
-    let mut resource_subscriptions: HashMap<SubscriptionId, ActiveResourceSubscription> =
-        HashMap::new();
+    let mut watch_subscriptions: HashMap<SubscriptionId, ActiveWatchSubscription> = HashMap::new();
     let (forwarder_done_tx, mut forwarder_done_rx) =
         tokio::sync::mpsc::unbounded_channel::<(SubscriptionId, u128)>();
     let mut next_forwarder_id = 1_u128;
@@ -289,11 +288,11 @@ pub(crate) async fn serve_socket(
             () = async { drain_grace.as_mut().expect("grace window armed").await }, if drain_grace.is_some() => break,
             completed = forwarder_done_rx.recv() => {
                 if let Some((subscription_id, task_id)) = completed
-                    && resource_subscriptions
+                    && watch_subscriptions
                         .get(&subscription_id)
                         .is_some_and(|active| active.task_id == task_id)
                 {
-                    resource_subscriptions.remove(&subscription_id);
+                    watch_subscriptions.remove(&subscription_id);
                 }
                 continue;
             }
@@ -422,6 +421,11 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(KernelQueryResult::Infrastructure(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
                             Err(RequestFailure::Malformed(message)) => send_error(
                                 &task_outbound,
                                 ErrorTarget::Request(request_id.clone()),
@@ -463,63 +467,95 @@ pub(crate) async fn serve_socket(
                 let Some(subscription_id) = frame.subscription_id else {
                     continue;
                 };
-                let selector_kind = selector.0.get("kind").and_then(serde_json::Value::as_str);
-                let outcome = if selector_kind.is_none() {
-                    Err((
-                        ErrorCode::InvalidRequest,
-                        "invalid subscription payload".into(),
-                    ))
-                } else if selector_kind == Some("bootstrapStatus") {
-                    match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
-                        Ok(_) => Ok(None),
-                        Err(error) => Err(backend_rejection(&error)),
+                let selector_kind = selector
+                    .0
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                let outcome = match serde_json::from_value::<SubscriptionSelector>(selector.0) {
+                    Ok(SubscriptionSelector::BootstrapStatus) => {
+                        match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
+                            Ok(_) => Ok(None),
+                            Err(error) => Err(backend_rejection(&error)),
+                        }
                     }
-                } else if selector_kind == Some("resource") {
-                    match serde_json::from_value::<SubscriptionSelector>(selector.0.clone()) {
-                        Ok(SubscriptionSelector::Resource(spec)) => {
-                            if !resource_subscriptions.contains_key(&subscription_id)
-                                && resource_subscriptions.len()
-                                    >= config.max_resource_subscriptions_per_session
+                    Ok(SubscriptionSelector::Resource(spec)) => {
+                        if !watch_subscriptions.contains_key(&subscription_id)
+                            && watch_subscriptions.len()
+                                >= config.max_resource_subscriptions_per_session
+                        {
+                            Err((
+                                ErrorCode::Conflict,
+                                format!(
+                                    "watch subscription limit is {}",
+                                    config.max_resource_subscriptions_per_session
+                                ),
+                            ))
+                        } else {
+                            match kernel
+                                .subscribe(BackendSubscribe::ResourceWatch {
+                                    context: spec.context,
+                                    gvk: Gvk {
+                                        group: spec.gvk.group,
+                                        version: spec.gvk.version,
+                                        kind: spec.gvk.kind,
+                                    },
+                                    namespace: spec.namespace,
+                                })
+                                .await
                             {
-                                Err((
-                                    ErrorCode::Conflict,
-                                    format!(
-                                        "resource subscription limit is {}",
-                                        config.max_resource_subscriptions_per_session
-                                    ),
-                                ))
-                            } else {
-                                match kernel
-                                    .subscribe(BackendSubscribe::ResourceWatch {
-                                        context: spec.context,
-                                        gvk: Gvk {
-                                            group: spec.gvk.group,
-                                            version: spec.gvk.version,
-                                            kind: spec.gvk.kind,
-                                        },
-                                        namespace: spec.namespace,
-                                    })
-                                    .await
-                                {
-                                    Ok(handle) => Ok(Some(handle)),
-                                    Err(error) => Err(backend_rejection(&error)),
-                                }
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
                             }
                         }
-                        _ => Err((
-                            ErrorCode::InvalidRequest,
-                            "invalid resource subscription payload".into(),
-                        )),
                     }
-                } else {
-                    Err((
+                    Ok(SubscriptionSelector::Infrastructure(spec)) => {
+                        if !watch_subscriptions.contains_key(&subscription_id)
+                            && watch_subscriptions.len()
+                                >= config.max_resource_subscriptions_per_session
+                        {
+                            Err((
+                                ErrorCode::Conflict,
+                                format!(
+                                    "watch subscription limit is {}",
+                                    config.max_resource_subscriptions_per_session
+                                ),
+                            ))
+                        } else {
+                            match kernel
+                                .subscribe(BackendSubscribe::Infrastructure {
+                                    context: spec.context,
+                                })
+                                .await
+                            {
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
+                            }
+                        }
+                    }
+                    Err(_) if selector_kind.is_none() => Err((
+                        ErrorCode::InvalidRequest,
+                        "invalid subscription payload".into(),
+                    )),
+                    Err(_)
+                        if matches!(
+                            selector_kind.as_deref(),
+                            Some("bootstrapStatus" | "resource" | "infrastructure")
+                        ) =>
+                    {
+                        Err((
+                            ErrorCode::InvalidRequest,
+                            "invalid subscription payload".into(),
+                        ))
+                    }
+                    Err(_) => Err((
                         ErrorCode::UnsupportedMessage,
                         "unsupported subscription".into(),
-                    ))
+                    )),
                 };
                 match outcome {
                     Ok(mut handle) => {
-                        if let Some(previous) = resource_subscriptions.remove(&subscription_id) {
+                        if let Some(previous) = watch_subscriptions.remove(&subscription_id) {
                             previous.cancel.cancel();
                         }
                         let task_cancel =
@@ -531,9 +567,9 @@ pub(crate) async fn serve_socket(
                             task_id
                         });
                         if let (Some(cancel), Some(task_id)) = (&task_cancel, task_id) {
-                            resource_subscriptions.insert(
+                            watch_subscriptions.insert(
                                 subscription_id.clone(),
-                                ActiveResourceSubscription {
+                                ActiveWatchSubscription {
                                     task_id,
                                     cancel: cancel.clone(),
                                 },
@@ -604,7 +640,7 @@ pub(crate) async fn serve_socket(
             }
             Ok(ClientPayload::Unsubscribe(_)) => {
                 if let Some(subscription_id) = frame.subscription_id
-                    && let Some(active) = resource_subscriptions.remove(&subscription_id)
+                    && let Some(active) = watch_subscriptions.remove(&subscription_id)
                 {
                     active.cancel.cancel();
                 }
@@ -717,6 +753,13 @@ fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option
                 })
             })
             .map_err(|error| format!("invalid resource.metrics payload: {error}")),
+        "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload)
+            .map(|parsed| {
+                Some(Query::Infrastructure {
+                    context: parsed.context,
+                })
+            })
+            .map_err(|error| format!("invalid infrastructure.get payload: {error}")),
         _ => Ok(None),
     }
 }
@@ -764,7 +807,7 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
     }
 }
 
-/// Forward one resource watch from the backend to the client.
+/// Forward one resource or infrastructure watch from the backend to the client.
 ///
 /// Snapshots stream as lossless bounded `snapshot*` frames; deltas ride the
 /// bounded P2 scheduler coalesced by resource identity. A lagging backend
@@ -844,6 +887,32 @@ async fn stream_backend_events(
                         break;
                     }
                     Err(DeltaAdmission::Overloaded) => {
+                        overload_close(outbound);
+                        break;
+                    }
+                }
+            }
+            Ok(BackendEvent::Infrastructure(snapshot)) => {
+                let context = snapshot.context().to_owned();
+                let revision = snapshot.revision();
+                let payload = kernel.infrastructure_update(snapshot);
+                match enqueue_infrastructure(
+                    outbound,
+                    subscription_id,
+                    &context,
+                    revision,
+                    &payload,
+                    sequence_counter,
+                ) {
+                    Ok(()) => {}
+                    Err(EnqueueError::Coalesced) => {
+                        tracing::debug!(
+                            subscription_id = %subscription_id.as_str(),
+                            context,
+                            "infrastructure telemetry dropped under bounded P2 pressure"
+                        );
+                    }
+                    Err(EnqueueError::Overloaded) => {
                         overload_close(outbound);
                         break;
                     }
@@ -971,6 +1040,39 @@ fn enqueue_delta(
         Err(EnqueueError::Coalesced) => Err(DeltaAdmission::Dropped),
         Err(EnqueueError::Overloaded) => Err(DeltaAdmission::Overloaded),
     }
+}
+
+/// Enqueue one infrastructure telemetry update on the existing bounded P2
+/// partition, coalesced by subscription and context. Unlike resource
+/// revisions, telemetry may be dropped under pressure; the UI retains and
+/// explicitly marks its last timestamp rather than inventing a newer value.
+fn enqueue_infrastructure(
+    outbound: &Scheduler,
+    subscription_id: &SubscriptionId,
+    context: &str,
+    revision: u64,
+    payload: &impl serde::Serialize,
+    sequence_counter: &AtomicU64,
+) -> Result<(), EnqueueError> {
+    outbound.enqueue_p2_sequenced(subscription_id.as_str(), context, |queued_sequence| {
+        let sequence = match queued_sequence {
+            Some(sequence) => sequence,
+            None => allocate_sequence(sequence_counter).ok_or(EnqueueError::Overloaded)?,
+        };
+        let frame = ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload: serde_json::json!({
+                "kind": k10s_protocol::INFRASTRUCTURE_EVENT_UPDATED,
+                "revision": revision.to_string(),
+                "payload": payload,
+            }),
+        };
+        let text = serde_json::to_string(&frame).expect("server frame serializes");
+        Ok((sequence, Message::Text(text.into())))
+    })
 }
 
 /// Tell the client its revision stream can no longer be trusted. If the
@@ -1445,6 +1547,38 @@ mod tests {
             .apply(frames.into_iter().next().unwrap())
             .expect("coalesced full-row delta stays contiguous for the real client");
         assert_eq!(client.last_acked_sequence(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn infrastructure_updates_coalesce_by_context_without_a_sequence_gap() {
+        let scheduler = Scheduler::new(8, 2);
+        let subscription_id = SubscriptionId::new("infrastructure-1");
+        let counter = AtomicU64::new(0);
+
+        enqueue_infrastructure(
+            &scheduler,
+            &subscription_id,
+            "dev-local",
+            2_000,
+            &serde_json::json!({"metrics": "available"}),
+            &counter,
+        )
+        .unwrap();
+        enqueue_infrastructure(
+            &scheduler,
+            &subscription_id,
+            "dev-local",
+            2_001,
+            &serde_json::json!({"metrics": "partial"}),
+            &counter,
+        )
+        .unwrap();
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1, "one context occupies one bounded P2 slot");
+        assert_eq!(frames[0].sequence, Some(1));
+        assert_eq!(frames[0].payload["revision"], "2001");
+        assert_eq!(frames[0].payload["payload"]["metrics"], "partial");
     }
 
     #[tokio::test]

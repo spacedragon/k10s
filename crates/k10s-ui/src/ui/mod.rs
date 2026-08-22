@@ -1,6 +1,8 @@
 //! The fixed application shell rendered around the command-driven workspace.
 
+mod infrastructure;
 mod launcher;
+mod overview;
 mod theme;
 mod top_bar;
 mod window;
@@ -33,6 +35,7 @@ impl ConnectionState {
 #[derive(Debug)]
 pub struct UiShell<I> {
     workspace: WorkspaceState<I>,
+    infrastructure: infrastructure::InfrastructureUiState,
 }
 
 impl<I> Default for UiShell<I>
@@ -52,6 +55,7 @@ where
     pub fn new() -> Self {
         Self {
             workspace: WorkspaceState::new(),
+            infrastructure: infrastructure::InfrastructureUiState::default(),
         }
     }
 
@@ -78,20 +82,38 @@ where
         contexts: &[String],
         selected_context: &mut Option<String>,
     ) {
+        self.show_with_infrastructure(ui, connection, contexts, selected_context, None);
+    }
+
+    /// Render one frame with a protocol-owned infrastructure response.
+    /// Returns whether either Refresh control was activated.
+    pub fn show_with_infrastructure(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[String],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+    ) -> bool {
         theme::apply(ui.ctx());
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
         let selected = selected_context
             .as_deref()
-            .filter(|selected| contexts.iter().any(|context| context == selected))
+            .filter(|selected| {
+                contexts.is_empty() || contexts.iter().any(|context| context == selected)
+            })
             .or_else(|| contexts.first().map(String::as_str))
             .map(str::to_owned);
 
         let mut context_change = None;
+        let mut refresh_requested = false;
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
             .show(ui, |ui| {
-                context_change = top_bar::show(ui, connection, contexts, selected.as_deref());
+                let action = top_bar::show(ui, connection, contexts, selected.as_deref());
+                context_change = action.context_change;
+                refresh_requested |= action.refresh;
             });
 
         egui::Panel::left("k10s.launcher")
@@ -102,7 +124,16 @@ where
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            window::show_canvas(ui, &self.workspace, &mut queued);
+            let response =
+                response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
+            refresh_requested |= window::show_canvas(
+                ui,
+                &self.workspace,
+                &mut self.infrastructure,
+                response,
+                connection,
+                &mut queued,
+            );
         });
 
         let context_change = context_change
@@ -129,5 +160,6 @@ where
             }
             ui.ctx().request_repaint();
         }
+        refresh_requested
     }
 }

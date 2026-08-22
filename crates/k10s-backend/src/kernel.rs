@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use k10s_protocol::{
     BackendRevision, BootstrapResponse, Context, DetailRow, DetailSection, GroupVersionKind,
-    MetricsAvailability, PodMetrics, ProtocolVersion, ResourceCapabilities, ResourceDetailResponse,
-    ResourceIdentity, ResourceListResponse, ResourceListRow, ResourceMetricsResponse, ServerInfo,
-    WorkloadKind,
+    InfrastructureResponse, MetricsAvailability, PodMetrics, ProtocolVersion, ResourceCapabilities,
+    ResourceDetailResponse, ResourceIdentity, ResourceListResponse, ResourceListRow,
+    ResourceMetricsResponse, ServerInfo, WorkloadKind,
 };
 use uuid::Uuid;
 
@@ -104,6 +104,9 @@ impl BackendKernel {
                     sample,
                 ))
             }
+            QueryResult::Infrastructure(snapshot) => {
+                KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
+            }
         })
     }
 
@@ -173,6 +176,15 @@ impl BackendKernel {
             revision: BackendRevision::new(revision),
         }
     }
+
+    /// Map a backend infrastructure telemetry update to the wire payload.
+    #[must_use]
+    pub fn infrastructure_update(
+        &self,
+        snapshot: crate::catalog::CatalogSnapshot,
+    ) -> InfrastructureResponse {
+        snapshot.into_protocol()
+    }
 }
 
 /// Result of a kernel query.
@@ -186,6 +198,8 @@ pub enum KernelQueryResult {
     ResourceDetail(ResourceDetailResult),
     /// Availability-gated pod metrics result.
     ResourceMetrics(ResourceMetricsResult),
+    /// Overview, Nodes, Storage, and metrics result.
+    Infrastructure(InfrastructureResult),
 }
 
 impl KernelQueryResult {
@@ -209,6 +223,7 @@ impl KernelQueryResult {
             Self::ResourceList(r) => r.serialized(),
             Self::ResourceDetail(r) => r.serialized(),
             Self::ResourceMetrics(r) => r.serialized(),
+            Self::Infrastructure(r) => r.serialized(),
         }
     }
 
@@ -439,6 +454,34 @@ impl ResourceDetailResult {
 #[derive(Debug, Clone)]
 pub struct ResourceMetricsResult {
     payload: ResourceMetricsResponse,
+}
+
+/// Infrastructure catalog mapped for the protocol.
+#[derive(Debug, Clone)]
+pub struct InfrastructureResult {
+    payload: InfrastructureResponse,
+}
+
+impl InfrastructureResult {
+    /// Map a backend-owned catalog into the protocol-facing payload.
+    #[must_use]
+    pub fn new(snapshot: crate::catalog::CatalogSnapshot) -> Self {
+        Self {
+            payload: snapshot.into_protocol(),
+        }
+    }
+
+    /// Return the exact response payload for a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> InfrastructureResponse {
+        self.payload.clone()
+    }
+
+    /// Serialize the wire payload.
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("InfrastructureResponse must serialize")
+    }
 }
 
 impl ResourceMetricsResult {

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::broadcast;
 
+use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
     OperationId, OwnerRef, Query, QueryResult, ResourceListData, ResourceRecord, ResourceRef,
@@ -38,6 +39,37 @@ struct Watcher {
     sender: broadcast::Sender<crate::port::BackendEvent>,
 }
 
+/// A registered infrastructure telemetry watcher.
+#[derive(Debug)]
+struct InfrastructureWatcher {
+    context: String,
+    sender: broadcast::Sender<crate::port::BackendEvent>,
+}
+
+/// Deterministic fake cases for infrastructure metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeMetricsScenario {
+    /// All metrics are present and fresh.
+    Full,
+    /// Some metrics are absent.
+    Partial,
+    /// RBAC denied metrics collection.
+    Forbidden,
+    /// The last known sample is stale.
+    Stale,
+}
+
+impl From<FakeMetricsScenario> for CatalogMetricsScenario {
+    fn from(value: FakeMetricsScenario) -> Self {
+        match value {
+            FakeMetricsScenario::Full => Self::Full,
+            FakeMetricsScenario::Partial => Self::Partial,
+            FakeMetricsScenario::Forbidden => Self::Forbidden,
+            FakeMetricsScenario::Stale => Self::Stale,
+        }
+    }
+}
+
 /// Interior mutable fake world state shared by adapter clones.
 #[derive(Debug)]
 struct FakeState {
@@ -45,6 +77,8 @@ struct FakeState {
     records: Vec<ResourceRecord>,
     metrics: HashMap<String, MetricsSample>,
     watchers: Vec<Watcher>,
+    infrastructure_watchers: Vec<InfrastructureWatcher>,
+    metrics_scenario: FakeMetricsScenario,
     revision: u64,
 }
 
@@ -144,6 +178,12 @@ impl FakeKubernetes {
     /// objects, pods with owner references, and pod metrics samples.
     #[must_use]
     pub fn standard() -> Self {
+        Self::with_metrics_scenario(FakeMetricsScenario::Full)
+    }
+
+    /// Create the standard dataset with an explicit metrics failure mode.
+    #[must_use]
+    pub fn with_metrics_scenario(metrics_scenario: FakeMetricsScenario) -> Self {
         let contexts = vec![
             ContextInfo {
                 name: "dev-local".into(),
@@ -186,6 +226,8 @@ impl FakeKubernetes {
                 records,
                 metrics,
                 watchers: Vec::new(),
+                infrastructure_watchers: Vec::new(),
+                metrics_scenario,
                 revision: INITIAL_REVISION,
             })),
             #[cfg(test)]
@@ -203,6 +245,8 @@ impl FakeKubernetes {
                 records: Vec::new(),
                 metrics: HashMap::new(),
                 watchers: Vec::new(),
+                infrastructure_watchers: Vec::new(),
+                metrics_scenario: FakeMetricsScenario::Full,
                 revision: INITIAL_REVISION,
             })),
             #[cfg(test)]
@@ -254,6 +298,25 @@ impl FakeKubernetes {
         let reference = record.reference.clone();
         state.notify_matching(&reference, crate::port::BackendEvent::Changed(record));
         Some(revision)
+    }
+
+    /// Switch deterministic metrics behavior and publish one complete
+    /// telemetry update to every live watcher. The server remains
+    /// responsible for bounded P2 admission and context coalescing.
+    pub fn set_metrics_scenario(&self, scenario: FakeMetricsScenario) {
+        let mut state = self.lock();
+        state.metrics_scenario = scenario;
+        let revision = state.advance_revision();
+        state.infrastructure_watchers.retain(|watcher| {
+            if watcher.sender.receiver_count() == 0 {
+                return false;
+            }
+            let snapshot = CatalogSnapshot::fake(&watcher.context, revision, scenario.into());
+            let _ = watcher
+                .sender
+                .send(crate::port::BackendEvent::Infrastructure(snapshot));
+            true
+        });
     }
 
     fn lock(&self) -> MutexGuard<'_, FakeState> {
@@ -360,6 +423,21 @@ impl KubernetesAccess for FakeKubernetes {
                             .unwrap_or_default(),
                     ))
                 }
+                Query::Infrastructure { context } => {
+                    let state = self.lock();
+                    if !state
+                        .contexts
+                        .iter()
+                        .any(|candidate| candidate.name == context)
+                    {
+                        return Err(BackendError::NotFound);
+                    }
+                    Ok(QueryResult::Infrastructure(CatalogSnapshot::fake(
+                        context,
+                        state.current_revision(),
+                        state.metrics_scenario.into(),
+                    )))
+                }
             }
         })
     }
@@ -438,6 +516,24 @@ impl KubernetesAccess for FakeKubernetes {
                         gate.mutation_done.wait();
                     }
                     Ok(SubscriptionHandle::with_events("resource-watch", receiver))
+                }
+                Subscribe::Infrastructure { context } => {
+                    let (sender, receiver) = broadcast::channel(WATCH_CAPACITY);
+                    let mut state = self.lock();
+                    if !state
+                        .contexts
+                        .iter()
+                        .any(|candidate| candidate.name == context)
+                    {
+                        return Err(BackendError::NotFound);
+                    }
+                    state
+                        .infrastructure_watchers
+                        .push(InfrastructureWatcher { context, sender });
+                    Ok(SubscriptionHandle::with_events(
+                        "infrastructure-watch",
+                        receiver,
+                    ))
                 }
             }
         })

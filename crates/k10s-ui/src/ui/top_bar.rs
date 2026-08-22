@@ -4,13 +4,19 @@ use egui::{ComboBox, Layout, MenuBar, RichText, WidgetInfo, WidgetType};
 
 use super::{ConnectionState, theme};
 
+pub(super) struct TopBarAction {
+    pub(super) context_change: Option<String>,
+    pub(super) refresh: bool,
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     connection: ConnectionState,
     contexts: &[String],
     selected_context: Option<&str>,
-) -> Option<String> {
+) -> TopBarAction {
     let mut context_change = None;
+    let mut refresh = false;
 
     MenuBar::new().ui(ui, |ui| {
         ui.push_id("k10s.top_bar.menus", |ui| {
@@ -43,7 +49,19 @@ pub(super) fn show(
             });
 
             ui.push_id("k10s.top_bar.refresh", |ui| {
-                ui.button("Refresh").on_hover_text("Refresh all resources");
+                let label = if connection == ConnectionState::Connected {
+                    "Refresh"
+                } else {
+                    "Retry"
+                };
+                refresh = ui
+                    .button(label)
+                    .on_hover_text(if connection == ConnectionState::Connected {
+                        "Refresh all resources"
+                    } else {
+                        "Retry the control connection"
+                    })
+                    .clicked();
             });
 
             ui.separator();
@@ -64,5 +82,8 @@ pub(super) fn show(
         });
     });
 
-    context_change
+    TopBarAction {
+        context_change,
+        refresh,
+    }
 }

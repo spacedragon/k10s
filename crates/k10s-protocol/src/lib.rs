@@ -30,11 +30,17 @@ pub use envelope::{
 };
 pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};
 pub use ids::{CorrelationId, OperationId, RequestId, SessionId, SubscriptionId};
-pub use metrics::{MetricsAvailability, PodMetrics, ResourceMetricsResponse};
+pub use metrics::{
+    CapacityUsage, ClusterTotals, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
+    InfrastructureResponse, InfrastructureWatchSpec, MetricsAvailability, MetricsCondition,
+    MetricsStatus, PodMetrics, ResourceMetricsResponse,
+};
 pub use resource::{
-    BackendRevision, DetailRow, DetailSection, GroupVersionKind, OwnerReference,
-    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRequest,
-    ResourceListResponse, ResourceListRow, ResourceRefRequest, ResourceScope, WorkloadKind,
+    AttentionRow, BackendRevision, DetailRow, DetailSection, GroupVersionKind, HealthLevel,
+    NodeRow, OwnerReference, PersistentVolumeClaimRow, PersistentVolumeRow, ResourceCapabilities,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
+    ResourceListRow, ResourceRefRequest, ResourceScope, StorageClassRow, StorageInventory,
+    WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use subscription::{
