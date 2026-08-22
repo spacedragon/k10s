@@ -9,7 +9,8 @@ mod probes;
 
 pub use config::{ServerConfig, StandaloneConfig, StandaloneConfigError};
 pub use lifecycle::{
-    DrainSignals, MutationGate, ServerHandle, router, run, run_with_assets, spawn_loopback,
+    ConnectionTasks, DrainSignals, MutationGate, ServerHandle, UpgradeGate, router, run,
+    run_with_assets, spawn_loopback,
 };
 pub use outbound::{EnqueueError, Priority, RevisionGap, ScheduledItem, Scheduler};
 pub use probes::{Readiness, ReadinessState};

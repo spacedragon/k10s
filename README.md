@@ -73,9 +73,12 @@ a `k10s_server::lifecycle` log event:
    status reads keep working for a bounded grace window (`drain_grace_timeout`).
 4. Cancel watches/logs and terminate exec streams as each socket task unwinds.
 5. Drain tracked connection tasks under one absolute hard deadline
-   (`drain_timeout`); tasks that survive it are force-closed and `shutdown`
-   reports `TimedOut`.
-6. Close the listener last.
+   (`drain_timeout`); survivors are force-closed, any task that still ignores
+   the force signal is aborted and joined before returning, and `shutdown`
+   reports `TimedOut`. Upgrades accepted but not yet running hold a pending
+   registration so they cannot slip past the drain.
+6. Close the listener last — forced teardown completes inside the serving
+   lifetime, so `/healthz` stays reachable until the listener itself closes.
 
 Connection tasks are tracked with `tokio_util::TaskTracker`; in-flight requests
 observe cancellation and return structured errors. Access tokens are sent only

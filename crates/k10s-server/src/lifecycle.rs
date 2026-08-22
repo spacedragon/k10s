@@ -4,8 +4,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+
+use tokio::task::JoinHandle;
 
 use axum::{
     Router,
@@ -35,8 +37,85 @@ struct AppState {
     authenticated: Arc<Semaphore>,
     signals: DrainSignals,
     connections: Arc<TaskTracker>,
+    tasks: Arc<ConnectionTasks>,
+    upgrades: Arc<UpgradeGate>,
     readiness: Arc<Readiness>,
     gate: Arc<MutationGate>,
+}
+
+/// Registry of spawned connection tasks giving shutdown hard-abort ownership.
+///
+/// The tracker only counts tasks; it cannot stop one that ignores the force
+/// signal. Every connection task handle is retained here so forced teardown can
+/// abort and join any survivor before `shutdown` returns.
+#[derive(Debug, Default)]
+pub struct ConnectionTasks {
+    handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl ConnectionTasks {
+    /// Construct an empty registry.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn track(&self, handle: JoinHandle<()>) {
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles.retain(|handle| !handle.is_finished());
+        handles.push(handle);
+    }
+
+    fn take(&self) -> Vec<JoinHandle<()>> {
+        std::mem::take(
+            &mut *self
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+/// Counts accepted WebSocket upgrades that have not yet become tracked tasks.
+///
+/// `TaskTracker::close` does not refuse later spawns, so an upgrade accepted
+/// just before shutdown could register its task after the drain observed an
+/// empty tracker. The guard is taken synchronously before the upgrade response
+/// is returned and released only once the task has joined the tracker (or the
+/// upgrade future is dropped), closing that window.
+#[derive(Debug, Default)]
+pub struct UpgradeGate(AtomicUsize);
+
+impl UpgradeGate {
+    /// Construct an idle gate.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Number of accepted upgrades not yet running as tracked tasks.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn register(self: &Arc<Self>) -> UpgradeGuard {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        UpgradeGuard(Arc::clone(self))
+    }
+}
+
+/// Releases one [`UpgradeGate`] registration on drop.
+#[derive(Debug)]
+struct UpgradeGuard(Arc<UpgradeGate>);
+
+impl Drop for UpgradeGuard {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Ordered shutdown signals delivered to every connection task.
@@ -141,21 +220,30 @@ impl ShutdownCoordinator {
     }
 }
 
-/// Wait for tracked connection tasks until the absolute deadline.
+/// Wait for tracked connection tasks and pending upgrades until the deadline.
 ///
-/// Publishes whether the tracker actually emptied; the `TasksDrained` stage is
+/// Publishes whether everything actually drained; the `TasksDrained` stage is
 /// only advanced on success so telemetry never claims a drain that did not
 /// happen. Returns that outcome to the caller, which decides between reporting
 /// success and forcing teardown.
 async fn drain_tracked_tasks(
     deadline: tokio::time::Instant,
     connections: Arc<TaskTracker>,
+    upgrades: Arc<UpgradeGate>,
     drained_in_time: Arc<AtomicBool>,
 ) -> bool {
     connections.close();
-    let completed = tokio::time::timeout_at(deadline, connections.wait())
-        .await
-        .is_ok();
+    let completed = tokio::time::timeout_at(deadline, async {
+        // An upgrade accepted before shutdown holds a pending registration that
+        // only converts into a tracked task (or drops) later; waiting on the
+        // tracker alone would report an empty server while that socket was
+        // still about to start.
+        while !connections.is_empty() || upgrades.pending() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
     drained_in_time.store(completed, Ordering::Release);
     if !completed {
         tracing::warn!(
@@ -164,6 +252,34 @@ async fn drain_tracked_tasks(
         );
     }
     completed
+}
+
+/// Force-close every surviving connection task and join it.
+///
+/// The force signal lets well-behaved sockets unwind through their bounded
+/// flush path; anything still alive after the unwind window is aborted so no
+/// task can outlive `shutdown`.
+async fn abort_surviving_tasks(
+    connections: Arc<TaskTracker>,
+    tasks: Arc<ConnectionTasks>,
+    unwind_window: Duration,
+) {
+    let _ = tokio::time::timeout(unwind_window, connections.wait()).await;
+    let survivors = tasks.take();
+    if survivors.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "k10s_server::lifecycle",
+        count = survivors.len(),
+        "aborting connection tasks that ignored forced teardown"
+    );
+    for handle in &survivors {
+        handle.abort();
+    }
+    for handle in survivors {
+        let _ = handle.await;
+    }
 }
 
 /// Handle for an embeddable loopback server.
@@ -218,7 +334,9 @@ pub async fn run(
 /// refuses application upgrades, and only then fires the dedicated drain token
 /// observed by connection tasks. `drain_timeout` is one absolute deadline
 /// measured from shutdown start; if tracked tasks survive past it they are
-/// force-closed through the `force` signal and the server reports
+/// force-closed, remaining survivors are aborted and joined — all before the
+/// graceful-shutdown future completes, so the listener still closes last and
+/// `/healthz` stays reachable through forced teardown. The server then reports
 /// [`io::ErrorKind::TimedOut`].
 pub async fn run_with_assets(
     listener: TcpListener,
@@ -231,6 +349,8 @@ pub async fn run_with_assets(
     let flush_window = config.graceful_flush_timeout;
     let readiness = Readiness::new();
     let connections = Arc::new(TaskTracker::new());
+    let tasks = ConnectionTasks::new();
+    let upgrades = UpgradeGate::new();
     let gate = MutationGate::new();
     let signals = DrainSignals {
         drain: CancellationToken::new(),
@@ -241,6 +361,8 @@ pub async fn run_with_assets(
         kernel,
         Arc::clone(&readiness),
         Arc::clone(&connections),
+        Arc::clone(&tasks),
+        Arc::clone(&upgrades),
         Arc::clone(&gate),
         signals.clone(),
         dist_dir,
@@ -252,11 +374,14 @@ pub async fn run_with_assets(
         gate,
     }));
     let drained_in_time = Arc::new(AtomicBool::new(false));
-    let force = signals.force.clone();
     let root = cancel.clone();
     let coordinator_connections = Arc::clone(&connections);
+    let coordinator_tasks = Arc::clone(&tasks);
+    let coordinator_upgrades = Arc::clone(&upgrades);
     let coordinator_flag = Arc::clone(&drained_in_time);
     let shutdown_coordinator = Arc::clone(&coordinator);
+    // The whole teardown sequence runs inside this future so the listener only
+    // stops accepting once draining or forced teardown has finished.
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             root.cancelled().await;
@@ -272,41 +397,41 @@ pub async fn run_with_assets(
                 coordinator.send_notice_and_close_mutation_gate(&signals.drain);
                 coordinator.cancel_watches_logs_and_exec();
             }
-            let completed =
-                drain_tracked_tasks(deadline, coordinator_connections, coordinator_flag).await;
+            let completed = drain_tracked_tasks(
+                deadline,
+                coordinator_connections.clone(),
+                coordinator_upgrades,
+                coordinator_flag,
+            )
+            .await;
             if completed {
                 shutdown_coordinator
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .advance(ShutdownStage::TasksDrained);
+                return;
             }
+            tracing::warn!(
+                target: "k10s_server::lifecycle",
+                "drain deadline exceeded; forcing connection teardown"
+            );
+            signals.force.cancel();
+            abort_surviving_tasks(
+                coordinator_connections,
+                coordinator_tasks,
+                flush_window * 2 + Duration::from_millis(50),
+            )
+            .await;
+            shutdown_coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .advance(ShutdownStage::ForceClosed);
         })
         .await;
-    connections.close();
+    drop(connections);
     if drained_in_time.load(Ordering::Acquire) {
         return result;
     }
-    tracing::warn!(
-        target: "k10s_server::lifecycle",
-        "drain deadline exceeded; forcing connection teardown"
-    );
-    force.cancel();
-    // Force-close must complete before returning: every socket loop observes
-    // the force signal immediately and unwinds through its bounded flush path.
-    let unwind_window = flush_window.saturating_mul(2) + Duration::from_millis(50);
-    if tokio::time::timeout(unwind_window, connections.wait())
-        .await
-        .is_err()
-    {
-        tracing::error!(
-            target: "k10s_server::lifecycle",
-            "connection tasks survived forced teardown"
-        );
-    }
-    coordinator
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .advance(ShutdownStage::ForceClosed);
     Err(io::Error::from(io::ErrorKind::TimedOut))
 }
 
@@ -315,12 +440,17 @@ pub async fn run_with_assets(
 /// The `signals.drain` token is fired by the shutdown coordinator only after
 /// readiness has been marked draining and application upgrades have been
 /// refused; `signals.force` is reserved for the hard-deadline teardown.
+/// Accepted upgrades are registered through `upgrades` before the upgrade
+/// response is returned, and every spawned connection task handle is retained
+/// in `tasks` so forced teardown retains abort ownership.
 #[allow(clippy::too_many_arguments)]
 pub fn router(
     config: ServerConfig,
     kernel: BackendKernel,
     readiness: Arc<Readiness>,
     connections: Arc<TaskTracker>,
+    tasks: Arc<ConnectionTasks>,
+    upgrades: Arc<UpgradeGate>,
     gate: Arc<MutationGate>,
     signals: DrainSignals,
     dist_dir: Option<PathBuf>,
@@ -332,6 +462,8 @@ pub fn router(
         kernel: Arc::new(kernel),
         signals,
         connections,
+        tasks,
+        upgrades,
         readiness,
         gate,
     };
@@ -376,14 +508,19 @@ async fn control_upgrade(
     let signals = state.signals.clone();
     let gate = state.gate.clone();
     let connections = state.connections.clone();
+    let tasks = state.tasks.clone();
+    // Register the accepted upgrade before the response leaves the server so a
+    // shutdown racing this request can never observe an empty tracker while
+    // this socket is still about to start.
+    let upgrade_guard = state.upgrades.register();
     Ok(ws
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
         .on_upgrade(move |socket| async move {
-            let _ = connections
-                .spawn(serve_socket(
-                    socket, config, kernel, permit, auth, gate, signals,
-                ))
-                .await;
+            let handle = connections.spawn(serve_socket(
+                socket, config, kernel, permit, auth, gate, signals,
+            ));
+            tasks.track(handle);
+            drop(upgrade_guard);
         }))
 }

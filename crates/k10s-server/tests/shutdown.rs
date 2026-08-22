@@ -374,3 +374,155 @@ async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_windo
     );
     drop(ws);
 }
+
+#[tokio::test]
+async fn healthz_stays_reachable_through_forced_teardown() {
+    let (_capture, _) = install_capture();
+    let drain_timeout = Duration::from_millis(400);
+    let graceful_flush = ServerConfig::default().graceful_flush_timeout;
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: ACCESS_TOKEN.into(),
+            drain_grace_timeout: Duration::from_secs(30),
+            drain_timeout,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(FakeKubernetes::standard()),
+    )
+    .await
+    .unwrap();
+    let addr = server.addr();
+    let mut ws = connect_authenticated(addr).await;
+
+    let started = std::time::Instant::now();
+    let mut shutdown = tokio::spawn(server.shutdown());
+    let notice = receive_frame(&mut ws).await;
+    assert_eq!(notice.kind, ServerKind::ShutdownNotice);
+
+    // Probe /healthz until shutdown resolves: forced teardown must run while
+    // the listener is still serving, so at least one late probe succeeds.
+    let mut healthy_after_notice = false;
+    let outcome = loop {
+        if let Some((status, _)) = http_probe(addr, "/healthz").await {
+            assert_eq!(status, 200, "healthz must answer through forced teardown");
+            healthy_after_notice = true;
+        }
+        match tokio::time::timeout(Duration::from_millis(20), &mut shutdown).await {
+            Ok(joined) => break joined.unwrap(),
+            Err(_) => continue,
+        }
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(&outcome, Err(error) if error.kind() == std::io::ErrorKind::TimedOut),
+        "an abandoned socket must surface as a timed-out shutdown: {outcome:?}"
+    );
+    assert!(elapsed >= drain_timeout);
+    let bound = drain_timeout + graceful_flush * 2 + Duration::from_millis(500);
+    assert!(
+        elapsed < bound,
+        "shutdown exceeded the deadline plus one unwind window: {elapsed:?} (bound {bound:?})"
+    );
+    assert!(
+        healthy_after_notice,
+        "/healthz stopped answering before the listener closed"
+    );
+    drop(ws);
+
+    // Listener closes last: only after forced teardown has fully completed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tcp_connectable(addr).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!tcp_connectable(addr).await);
+    assert!(http_probe(addr, "/healthz").await.is_none());
+}
+
+#[tokio::test]
+async fn accepted_upgrade_racing_shutdown_cannot_outlive_it() {
+    let (_capture, _) = install_capture();
+    let drain_timeout = Duration::from_millis(300);
+    let graceful_flush = ServerConfig::default().graceful_flush_timeout;
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: ACCESS_TOKEN.into(),
+            drain_grace_timeout: Duration::from_secs(30),
+            drain_timeout,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(FakeKubernetes::standard()),
+    )
+    .await
+    .unwrap();
+    let addr = server.addr();
+
+    // A raw handshake request that reaches the control route but never turns
+    // into a speaking session: the accepted upgrade races shutdown itself.
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        k10s_protocol::CONTROL_PATH
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let response = read_response_head(&mut stream).await;
+    assert!(
+        response.starts_with("HTTP/1.1 101"),
+        "expected the upgrade to be accepted before shutdown: {response:?}"
+    );
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), server.shutdown())
+        .await
+        .expect("shutdown must stay bounded despite the racing upgrade");
+    let elapsed = started.elapsed();
+
+    // The racing upgrade is either swept into the drain (Ok) or, if it lands
+    // late enough, swept up by the hard deadline (TimedOut). Both outcomes are
+    // bounded; surviving past shutdown() is not acceptable.
+    assert!(
+        outcome.is_ok()
+            || matches!(&outcome, Err(error) if error.kind() == std::io::ErrorKind::TimedOut),
+        "unexpected shutdown outcome: {outcome:?}"
+    );
+    let bound = drain_timeout + graceful_flush * 3 + Duration::from_millis(500);
+    assert!(
+        elapsed < bound,
+        "shutdown exceeded the deadline plus one unwind window: {elapsed:?} (bound {bound:?})"
+    );
+
+    // The half-open racing session must observe teardown instead of lingering.
+    let tail = tokio::time::timeout(graceful_flush * 4, async {
+        let mut rest = Vec::new();
+        let _ = stream.read_to_end(&mut rest).await;
+    })
+    .await;
+    assert!(tail.is_ok(), "racing session outlived shutdown()");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tcp_connectable(addr).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!tcp_connectable(addr).await, "listener must be closed");
+}
+
+/// Read an HTTP response head byte-wise so a stalled handshake cannot hang the test.
+async fn read_response_head(stream: &mut TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 64];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("response head deadline")
+            .expect("response head read");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8(buffer).unwrap_or_default()
+}
