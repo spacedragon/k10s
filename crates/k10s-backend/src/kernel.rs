@@ -104,6 +104,9 @@ impl BackendKernel {
                     sample,
                 ))
             }
+            QueryResult::ResourceTypes(data) => {
+                KernelQueryResult::ResourceTypes(ResourceTypesResult::new(data))
+            }
             QueryResult::Infrastructure(snapshot) => {
                 KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
             }
@@ -198,6 +201,8 @@ pub enum KernelQueryResult {
     ResourceDetail(ResourceDetailResult),
     /// Availability-gated pod metrics result.
     ResourceMetrics(ResourceMetricsResult),
+    /// Selectable resource types for the GVK picker.
+    ResourceTypes(ResourceTypesResult),
     /// Overview, Nodes, Storage, and metrics result.
     Infrastructure(InfrastructureResult),
 }
@@ -223,6 +228,7 @@ impl KernelQueryResult {
             Self::ResourceList(r) => r.serialized(),
             Self::ResourceDetail(r) => r.serialized(),
             Self::ResourceMetrics(r) => r.serialized(),
+            Self::ResourceTypes(r) => r.serialized(),
             Self::Infrastructure(r) => r.serialized(),
         }
     }
@@ -454,6 +460,44 @@ impl ResourceDetailResult {
 #[derive(Debug, Clone)]
 pub struct ResourceMetricsResult {
     payload: ResourceMetricsResponse,
+}
+
+/// Selectable resource types (built-ins and CRDs) mapped for the protocol.
+#[derive(Debug, Clone)]
+pub struct ResourceTypesResult {
+    payload: k10s_protocol::ResourceTypesResponse,
+}
+
+impl ResourceTypesResult {
+    /// Map backend-owned type entries into the picker payload.
+    #[must_use]
+    pub fn new(data: crate::port::ResourceTypesData) -> Self {
+        Self {
+            payload: k10s_protocol::ResourceTypesResponse {
+                context: data.context,
+                types: data
+                    .types
+                    .into_iter()
+                    .map(|entry| k10s_protocol::ResourceTypeEntry {
+                        gvk: map_gvk(&entry.gvk),
+                        namespaced: entry.namespaced,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// Return the exact response payload for a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> k10s_protocol::ResourceTypesResponse {
+        self.payload.clone()
+    }
+
+    /// Serialize the wire payload to a JSON string.
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("ResourceTypesResponse must serialize")
+    }
 }
 
 /// Infrastructure catalog mapped for the protocol.

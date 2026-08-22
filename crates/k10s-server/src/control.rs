@@ -13,9 +13,9 @@ use k10s_backend::{
 };
 use k10s_protocol::{
     ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, RequestId,
-    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResumeStatus, Retryability,
-    ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd,
-    Subscribed, SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
+    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest, ResumeStatus,
+    Retryability, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk,
+    SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -421,6 +421,11 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(KernelQueryResult::ResourceTypes(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
                             Ok(KernelQueryResult::Infrastructure(value)) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
@@ -753,6 +758,13 @@ fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option
                 })
             })
             .map_err(|error| format!("invalid resource.metrics payload: {error}")),
+        "resource.types" => serde_json::from_value::<ResourceTypesRequest>(payload)
+            .map(|parsed| {
+                Some(Query::ResourceTypes {
+                    context: parsed.context,
+                })
+            })
+            .map_err(|error| format!("invalid resource.types payload: {error}")),
         "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload)
             .map(|parsed| {
                 Some(Query::Infrastructure {

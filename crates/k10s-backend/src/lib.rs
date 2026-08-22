@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod fake;
 pub mod kernel;
 pub mod port;
+pub mod watch;
 
 pub use catalog::CatalogSnapshot;
 pub use fake::{FakeKubernetes, FakeMetricsScenario};

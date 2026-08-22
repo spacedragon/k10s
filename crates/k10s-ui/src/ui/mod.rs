@@ -3,12 +3,16 @@
 mod infrastructure;
 mod launcher;
 mod overview;
+mod resource_table;
+mod resource_window;
+mod split;
 mod theme;
 mod top_bar;
 mod window;
 
+pub use resource_window::ResourceFeed;
+
 use std::fmt::Debug;
-use std::hash::Hash;
 
 use crate::workspace::{WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
@@ -36,11 +40,12 @@ impl ConnectionState {
 pub struct UiShell<I> {
     workspace: WorkspaceState<I>,
     infrastructure: infrastructure::InfrastructureUiState,
+    resources: resource_window::ResourceUiState,
 }
 
 impl<I> Default for UiShell<I>
 where
-    I: Clone + Eq + Hash + Debug,
+    I: resource_window::RowIdentity,
 {
     fn default() -> Self {
         Self::new()
@@ -49,13 +54,14 @@ where
 
 impl<I> UiShell<I>
 where
-    I: Clone + Eq + Hash + Debug,
+    I: resource_window::RowIdentity,
 {
     /// Create a shell around an Overview-only workspace.
     pub fn new() -> Self {
         Self {
             workspace: WorkspaceState::new(),
             infrastructure: infrastructure::InfrastructureUiState::default(),
+            resources: resource_window::ResourceUiState::default(),
         }
     }
 
@@ -95,6 +101,22 @@ where
         selected_context: &mut Option<String>,
         response: Option<&k10s_protocol::InfrastructureResponse>,
     ) -> bool {
+        let feed = resource_window::ResourceFeed::default();
+        self.show_with_resources(ui, connection, contexts, selected_context, response, &feed)
+    }
+
+    /// Render one frame with a protocol-owned infrastructure response and
+    /// the connected resource projections for every workload window.
+    /// Returns whether either Refresh control was activated.
+    pub fn show_with_resources(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[String],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+        feed: &resource_window::ResourceFeed,
+    ) -> bool {
         theme::apply(ui.ctx());
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
@@ -123,6 +145,7 @@ where
                 launcher::show(ui, &self.workspace, &mut queued);
             });
 
+        let mut resources = std::mem::take(&mut self.resources);
         egui::CentralPanel::default().show(ui, |ui| {
             let response =
                 response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
@@ -130,11 +153,15 @@ where
                 ui,
                 &self.workspace,
                 &mut self.infrastructure,
+                &mut resources,
                 response,
+                feed,
                 connection,
                 &mut queued,
             );
         });
+        resources.retain(|id| self.workspace.window(id).is_some());
+        self.resources = resources;
 
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));

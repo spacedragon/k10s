@@ -30,6 +30,9 @@ pub struct ResourceWindowState<I> {
     pub split_ratio: f32,
     /// Whether the detail pane is visible; hiding keeps the detail state.
     pub detail_visible: bool,
+    /// Selected type of a custom-resources window, as a canonical
+    /// `group/version/kind` key; `None` shows the GVK picker.
+    pub custom_kind: Option<String>,
     /// Integrated detail state, present exactly when `selection` is.
     pub detail: Option<DetailState<I>>,
 }
@@ -45,6 +48,7 @@ impl<I> Default for ResourceWindowState<I> {
             split_ratio: 0.5,
             detail_visible: true,
             detail: None,
+            custom_kind: None,
         }
     }
 }

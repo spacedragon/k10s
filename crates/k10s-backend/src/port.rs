@@ -37,8 +37,28 @@ pub enum Query {
     ResourceDetail { reference: ResourceRef },
     /// Fetch the availability-gated metrics sample for one pod.
     ResourceMetrics { reference: ResourceRef },
+    /// List the selectable resource types (built-ins and CRDs) of a context.
+    ResourceTypes { context: String },
     /// Fetch the complete Overview, Nodes, and Storage projection.
     Infrastructure { context: String },
+}
+
+/// One selectable resource type behind [`Query::ResourceTypes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeEntry {
+    /// Group/version/kind of the type.
+    pub gvk: Gvk,
+    /// Whether objects of this type live inside namespaces.
+    pub namespaced: bool,
+}
+
+/// Selectable resource types of one context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceTypesData {
+    /// Context the types were read from.
+    pub context: String,
+    /// Types sorted by group/version/kind.
+    pub types: Vec<TypeEntry>,
 }
 
 /// Kind of stream to open.
@@ -119,6 +139,8 @@ pub enum QueryResult {
     ResourceDetail(ResourceRecord),
     /// Availability-gated metrics sample for one pod.
     ResourceMetrics(MetricsSample),
+    /// Selectable resource types of one context.
+    ResourceTypes(ResourceTypesData),
     /// Overview, Nodes, Storage, and cluster metrics catalog.
     Infrastructure(CatalogSnapshot),
 }

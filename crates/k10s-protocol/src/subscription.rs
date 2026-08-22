@@ -46,6 +46,19 @@ impl ResourceWatchSpec {
     pub fn selector(&self) -> SubscriptionSelector {
         SubscriptionSelector::Resource(self.clone())
     }
+
+    /// Whether a resource identity belongs to this watch, honoring the
+    /// optional namespace restriction and cluster scope. Used by clients to
+    /// keep deltas from other selectors out of a retained list view.
+    #[must_use]
+    pub fn matches(&self, identity: &ResourceIdentity) -> bool {
+        self.context == identity.context
+            && self.gvk == identity.gvk
+            && self
+                .namespace
+                .as_ref()
+                .is_none_or(|wanted| Some(wanted.as_str()) == identity.namespace.as_deref())
+    }
 }
 
 /// One page of a chunked resource snapshot.
@@ -79,4 +92,36 @@ pub struct ResourceGone {
     pub identity: ResourceIdentity,
     /// Backend revision at which the removal happened.
     pub revision: BackendRevision,
+}
+
+/// Request payload listing the resource types available on one context.
+///
+/// Powers the searchable GVK picker of the custom-resources window; the
+/// entries cover built-in workload kinds and every CRD-backed type the
+/// adapter knows about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTypesRequest {
+    /// Context whose types are listed.
+    pub context: String,
+}
+
+/// One type selectable in the searchable GVK picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTypeEntry {
+    /// Group/version/kind of the selectable type.
+    pub gvk: GroupVersionKind,
+    /// Whether objects of this type live inside namespaces.
+    pub namespaced: bool,
+}
+
+/// Response payload for the searchable GVK picker query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTypesResponse {
+    /// Context the types were read from.
+    pub context: String,
+    /// Selectable types, sorted by group/version/kind.
+    pub types: Vec<ResourceTypeEntry>,
 }
