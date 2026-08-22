@@ -56,6 +56,11 @@ struct WatchGeneration {
     recovery: WatchRecovery,
 }
 
+struct ActiveResourceSubscription {
+    task_id: u128,
+    cancel: CancellationToken,
+}
+
 impl WatchRecovery {
     fn new() -> Self {
         Self {
@@ -247,7 +252,11 @@ pub(crate) async fn serve_socket(
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let subscription_cancel = child.child_token();
     let watch_recovery = WatchRecovery::new();
-    let mut subscription_cancels: HashMap<SubscriptionId, CancellationToken> = HashMap::new();
+    let mut resource_subscriptions: HashMap<SubscriptionId, ActiveResourceSubscription> =
+        HashMap::new();
+    let (forwarder_done_tx, mut forwarder_done_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(SubscriptionId, u128)>();
+    let mut next_forwarder_id = 1_u128;
     let mut last_acked_sequence = 0_u64;
     let mut noticed = false;
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
@@ -278,6 +287,16 @@ pub(crate) async fn serve_socket(
                 continue;
             }
             () = async { drain_grace.as_mut().expect("grace window armed").await }, if drain_grace.is_some() => break,
+            completed = forwarder_done_rx.recv() => {
+                if let Some((subscription_id, task_id)) = completed
+                    && resource_subscriptions
+                        .get(&subscription_id)
+                        .is_some_and(|active| active.task_id == task_id)
+                {
+                    resource_subscriptions.remove(&subscription_id);
+                }
+                continue;
+            }
             next = stream.next() => next,
             completed = request_tasks.join_next(), if !request_tasks.is_empty() => {
                 let _ = completed;
@@ -458,20 +477,33 @@ pub(crate) async fn serve_socket(
                 } else if selector_kind == Some("resource") {
                     match serde_json::from_value::<SubscriptionSelector>(selector.0.clone()) {
                         Ok(SubscriptionSelector::Resource(spec)) => {
-                            match kernel
-                                .subscribe(BackendSubscribe::ResourceWatch {
-                                    context: spec.context,
-                                    gvk: Gvk {
-                                        group: spec.gvk.group,
-                                        version: spec.gvk.version,
-                                        kind: spec.gvk.kind,
-                                    },
-                                    namespace: spec.namespace,
-                                })
-                                .await
+                            if !resource_subscriptions.contains_key(&subscription_id)
+                                && resource_subscriptions.len()
+                                    >= config.max_resource_subscriptions_per_session
                             {
-                                Ok(handle) => Ok(Some(handle)),
-                                Err(error) => Err(backend_rejection(&error)),
+                                Err((
+                                    ErrorCode::Conflict,
+                                    format!(
+                                        "resource subscription limit is {}",
+                                        config.max_resource_subscriptions_per_session
+                                    ),
+                                ))
+                            } else {
+                                match kernel
+                                    .subscribe(BackendSubscribe::ResourceWatch {
+                                        context: spec.context,
+                                        gvk: Gvk {
+                                            group: spec.gvk.group,
+                                            version: spec.gvk.version,
+                                            kind: spec.gvk.kind,
+                                        },
+                                        namespace: spec.namespace,
+                                    })
+                                    .await
+                                {
+                                    Ok(handle) => Ok(Some(handle)),
+                                    Err(error) => Err(backend_rejection(&error)),
+                                }
                             }
                         }
                         _ => Err((
@@ -487,14 +519,25 @@ pub(crate) async fn serve_socket(
                 };
                 match outcome {
                     Ok(mut handle) => {
-                        if let Some(previous) = subscription_cancels.remove(&subscription_id) {
-                            previous.cancel();
+                        if let Some(previous) = resource_subscriptions.remove(&subscription_id) {
+                            previous.cancel.cancel();
                         }
                         let task_cancel =
                             handle.as_ref().map(|_| subscription_cancel.child_token());
                         let task_generation = handle.as_ref().map(|_| watch_recovery.register());
-                        if let Some(cancel) = &task_cancel {
-                            subscription_cancels.insert(subscription_id.clone(), cancel.clone());
+                        let task_id = handle.as_ref().map(|_| {
+                            let task_id = next_forwarder_id;
+                            next_forwarder_id = next_forwarder_id.wrapping_add(1);
+                            task_id
+                        });
+                        if let (Some(cancel), Some(task_id)) = (&task_cancel, task_id) {
+                            resource_subscriptions.insert(
+                                subscription_id.clone(),
+                                ActiveResourceSubscription {
+                                    task_id,
+                                    cancel: cancel.clone(),
+                                },
+                            );
                         }
                         if send_sequenced(
                             &outbound,
@@ -517,6 +560,9 @@ pub(crate) async fn serve_socket(
                             let task_counter = Arc::clone(&last_sent_sequence);
                             let task_generation =
                                 task_generation.expect("resource watch has a generation");
+                            let task_id = task_id.expect("resource watch has a task ID");
+                            let task_done = forwarder_done_tx.clone();
+                            let completed_subscription_id = subscription_id.clone();
                             let forwarder_span = tracing::info_span!(
                                 "control_subscription",
                                 session_id = %session_id.as_str(),
@@ -535,6 +581,7 @@ pub(crate) async fn serve_socket(
                                         task_generation,
                                     )
                                     .await;
+                                    let _ = task_done.send((completed_subscription_id, task_id));
                                 }
                                 .instrument(forwarder_span),
                             );
@@ -557,9 +604,9 @@ pub(crate) async fn serve_socket(
             }
             Ok(ClientPayload::Unsubscribe(_)) => {
                 if let Some(subscription_id) = frame.subscription_id
-                    && let Some(cancel) = subscription_cancels.remove(&subscription_id)
+                    && let Some(active) = resource_subscriptions.remove(&subscription_id)
                 {
-                    cancel.cancel();
+                    active.cancel.cancel();
                 }
             }
             Ok(ClientPayload::Ack(ack)) => {

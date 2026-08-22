@@ -2,10 +2,13 @@
 //! streaming, monotonic revisions, and resource-gone deltas over a real
 //! control socket with the deterministic fake adapter.
 
-use std::time::Duration;
+use std::{future::Future, pin::Pin, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use k10s_backend::{BackendKernel, FakeKubernetes};
+use k10s_backend::{
+    BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
+    QueryResult, Subscribe, SubscriptionHandle,
+};
 use k10s_protocol::{
     GroupVersionKind, ResourceChanged, ResourceDetailResponse, ResourceGone, ResourceIdentity,
     ResourceListRequest, ResourceListResponse, ResourceRefRequest, ResourceSnapshotPage,
@@ -18,6 +21,41 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Debug, Clone)]
+struct ClosingWatchKubernetes;
+
+impl KubernetesAccess for ClosingWatchKubernetes {
+    fn query<'a>(
+        &'a self,
+        _: Query,
+    ) -> Pin<Box<dyn Future<Output = Result<QueryResult, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("query")) })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _: Command,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("execute")) })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        request: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            match request {
+                Subscribe::BootstrapStatus => Ok(SubscriptionHandle::new("bootstrap-status")),
+                Subscribe::ResourceWatch { .. } => {
+                    let (sender, receiver) = tokio::sync::broadcast::channel(1);
+                    drop(sender);
+                    Ok(SubscriptionHandle::with_events("closing-watch", receiver))
+                }
+            }
+        })
+    }
+}
 
 fn deployments() -> GroupVersionKind {
     GroupVersionKind {
@@ -496,11 +534,126 @@ async fn overlapping_resource_watches_each_receive_the_mutation() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn resource_watch_limit_rejects_new_ids_and_reuses_released_slots() {
+    let fake = FakeKubernetes::standard();
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            max_resource_subscriptions_per_session: 2,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(fake, "limited-resource-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect_authenticated(&server).await;
+
+    let _first = subscribe_default_pods(&mut ws, "limited-1").await;
+    let _second = subscribe_default_pods(&mut ws, "limited-2").await;
+
+    send_pod_subscribe(&mut ws, "limited-3", Some("default")).await;
+    let rejected = receive_frame(&mut ws).await;
+    assert_eq!(rejected.kind, ServerKind::Error, "{rejected:?}");
+    assert_eq!(
+        rejected.subscription_id.as_ref().map(|id| id.as_str()),
+        Some("limited-3")
+    );
+    assert_eq!(rejected.payload["code"], json!("conflict"));
+    assert_eq!(rejected.payload["scope"], json!("subscription"));
+
+    // Replacing an admitted ID does not consume another slot.
+    let _replacement = subscribe_default_pods(&mut ws, "limited-1").await;
+    ws.send(Message::Text(
+        json!({"kind":"ping", "payload":null}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Pong);
+
+    // Completion of the replaced forwarder must not release its replacement's slot.
+    send_pod_subscribe(&mut ws, "limited-4", Some("default")).await;
+    let still_full = receive_frame(&mut ws).await;
+    assert_eq!(still_full.kind, ServerKind::Error, "{still_full:?}");
+    assert_eq!(still_full.payload["code"], json!("conflict"));
+    assert_eq!(still_full.payload["scope"], json!("subscription"));
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"unsubscribe", "subscriptionId":"limited-2",
+            "payload":null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({"kind":"ping", "payload":null}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Pong);
+
+    // Unsubscribe releases capacity for a previously rejected unique ID.
+    let _reused = subscribe_default_pods(&mut ws, "limited-3").await;
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminated_resource_forwarder_releases_its_subscription_slot() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            max_resource_subscriptions_per_session: 1,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(ClosingWatchKubernetes, "closing-watch-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect_authenticated(&server).await;
+
+    send_pod_subscribe(&mut ws, "closed-1", Some("default")).await;
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
+    // The backend sender is already gone. A ping makes the socket loop observe
+    // the forwarder's completion before it handles the next client frame.
+    ws.send(Message::Text(
+        json!({"kind":"ping", "payload":null}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Pong);
+
+    send_pod_subscribe(&mut ws, "closed-2", Some("default")).await;
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
+    server.shutdown().await.unwrap();
+}
+
 async fn subscribe_default_pods(ws: &mut Ws, subscription_id: &str) -> u64 {
     subscribe_pods(ws, subscription_id, Some("default")).await
 }
 
 async fn subscribe_pods(ws: &mut Ws, subscription_id: &str, namespace: Option<&str>) -> u64 {
+    send_pod_subscribe(ws, subscription_id, namespace).await;
+    assert_eq!(receive_frame(ws).await.kind, ServerKind::Subscribed);
+    let begin = receive_frame(ws).await;
+    assert_eq!(begin.kind, ServerKind::SnapshotBegin);
+    let total_chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
+        .unwrap()
+        .total_chunks;
+    for _ in 0..total_chunks {
+        assert_eq!(receive_frame(ws).await.kind, ServerKind::SnapshotChunk);
+    }
+    let end = receive_frame(ws).await;
+    assert_eq!(end.kind, ServerKind::SnapshotEnd);
+    end.sequence.expect("snapshot end is sequenced")
+}
+
+async fn send_pod_subscribe(ws: &mut Ws, subscription_id: &str, namespace: Option<&str>) {
     ws.send(Message::Text(
         json!({
             "kind":"subscribe", "subscriptionId":subscription_id,
@@ -516,18 +669,6 @@ async fn subscribe_pods(ws: &mut Ws, subscription_id: &str, namespace: Option<&s
     ))
     .await
     .unwrap();
-    assert_eq!(receive_frame(ws).await.kind, ServerKind::Subscribed);
-    let begin = receive_frame(ws).await;
-    assert_eq!(begin.kind, ServerKind::SnapshotBegin);
-    let total_chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
-        .unwrap()
-        .total_chunks;
-    for _ in 0..total_chunks {
-        assert_eq!(receive_frame(ws).await.kind, ServerKind::SnapshotChunk);
-    }
-    let end = receive_frame(ws).await;
-    assert_eq!(end.kind, ServerKind::SnapshotEnd);
-    end.sequence.expect("snapshot end is sequenced")
 }
 
 #[tokio::test]
