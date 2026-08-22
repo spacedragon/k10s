@@ -1,6 +1,6 @@
 //! Axum-based control server lifecycle with ordered graceful shutdown.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -108,24 +108,12 @@ pub struct Admission(Mutex<AdmissionState>);
 struct AdmissionState {
     closed: bool,
     next_id: u64,
-    entries: HashMap<u64, AdmissionEntry>,
-}
-
-#[derive(Debug)]
-enum AdmissionEntry {
-    /// Accepted, upgrade callback not yet running.
-    Pending,
-    /// Running as a spawned session task; abort ownership is retained.
-    Running(tokio::task::AbortHandle),
-}
-
-impl AdmissionEntry {
-    fn is_live(&self) -> bool {
-        match self {
-            Self::Pending => true,
-            Self::Running(abort) => !abort.is_finished(),
-        }
-    }
+    /// Ids of accepted upgrades that have not finished their session task.
+    ///
+    /// An id is inserted at acceptance and removed exactly once the upgrade is
+    /// withdrawn or its session task completes, so the set only ever holds
+    /// live work — completed connections never accumulate.
+    live: HashSet<u64>,
 }
 
 impl Admission {
@@ -149,7 +137,7 @@ impl Admission {
         }
         let id = state.next_id;
         state.next_id += 1;
-        state.entries.insert(id, AdmissionEntry::Pending);
+        state.live.insert(id);
         Some(AdmissionGuard {
             id: Some(id),
             admission: Arc::clone(self),
@@ -171,25 +159,23 @@ impl Admission {
         state.closed = true;
     }
 
-    /// Convert a pending registration into a running tracked task.
-    fn confirm_running(&self, id: u64, handle: &JoinHandle<()>) {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state
-            .entries
-            .insert(id, AdmissionEntry::Running(handle.abort_handle()));
-    }
-
     /// Whether any pending upgrade or running session task is still live.
     fn has_live(&self) -> bool {
-        let mut state = self
+        !self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.entries.retain(|_, entry| entry.is_live());
-        !state.entries.is_empty()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live
+            .is_empty()
+    }
+
+    /// Retire one admission id.
+    fn retire(&self, id: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live
+            .remove(&id);
     }
 }
 
@@ -210,26 +196,53 @@ impl std::fmt::Debug for AdmissionGuard {
 impl AdmissionGuard {
     /// Hand ownership over to the spawned session task.
     ///
-    /// The pending entry becomes a live running entry observed through the
-    /// same lock, so the drain can never miss this task; dropping afterwards
-    /// no longer withdraws anything.
-    pub(crate) fn confirm_running(mut self, handle: &JoinHandle<()>) {
-        if let Some(id) = self.id {
-            self.admission.confirm_running(id, handle);
+    /// The returned [`RunningGuard`] must be moved into the session task's
+    /// future so the entry retires when that task completes — normally,
+    /// aborted, or dropped — without any shutdown-time scanning.
+    pub(crate) fn confirm_running(mut self) -> RunningGuard {
+        let id = self.id.take();
+        if let Some(id) = id {
+            return RunningGuard {
+                id: Some(id),
+                admission: Arc::clone(&self.admission),
+            };
         }
-        self.id = None;
+        RunningGuard {
+            id: None,
+            admission: Arc::clone(&self.admission),
+        }
     }
 }
 
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
-        if let Some(id) = self.id {
-            let mut state = self
-                .admission
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.entries.remove(&id);
+        if let Some(id) = self.id.take() {
+            self.admission.retire(id);
+        }
+    }
+}
+
+/// Keeps one admission entry alive for the lifetime of its session task.
+///
+/// Held inside the spawned future: dropping it — on completion, abort, or
+/// cancellation — retires the entry under the admission lock.
+pub(crate) struct RunningGuard {
+    id: Option<u64>,
+    admission: Arc<Admission>,
+}
+
+impl std::fmt::Debug for RunningGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningGuard")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.admission.retire(id);
         }
     }
 }
@@ -635,19 +648,25 @@ async fn control_upgrade(
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
         .on_upgrade(move |socket| async move {
-            // Retain the session task's own handle for abort ownership; the
-            // session task registers its writer task in the same registry.
-            let handle = connections.spawn(serve_socket(
-                socket,
-                config,
-                kernel,
-                permit,
-                auth,
-                gate,
-                signals,
-                Arc::clone(&tasks),
-            ));
-            upgrade_guard.confirm_running(&handle);
+            // The running guard lives inside the session future, retiring the
+            // admission entry whenever the task ends; the registry retains
+            // abort handles for both this task and its writer.
+            let running_guard = upgrade_guard.confirm_running();
+            let tasks_for_session = Arc::clone(&tasks);
+            let handle = connections.spawn(async move {
+                let _running = running_guard;
+                serve_socket(
+                    socket,
+                    config,
+                    kernel,
+                    permit,
+                    auth,
+                    gate,
+                    signals,
+                    tasks_for_session,
+                )
+                .await;
+            });
             tasks.track(&handle);
         }))
 }
@@ -740,12 +759,11 @@ mod tests {
             let guard = admission
                 .try_register(&readiness)
                 .expect("open barrier admits a ready upgrade");
-            assert!(admission.has_live(), "pending entry must count as live");
-            let handle = tokio::spawn(std::future::ready(()));
-            guard.confirm_running(&handle);
-            assert!(admission.has_live(), "running entry must count as live");
+            let running = guard.confirm_running();
+            let handle = tokio::spawn(async move {
+                let _running = running;
+            });
             let _ = handle.await;
-            assert!(!admission.has_live(), "finished task must retire its entry");
         }
 
         let state = admission
@@ -753,9 +771,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
-            state.entries.is_empty(),
+            state.live.is_empty(),
             "registry must return to zero after churn: {:?}",
-            state.entries.len()
+            state.live.len()
         );
     }
 }
