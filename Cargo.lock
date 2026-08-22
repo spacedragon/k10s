@@ -393,6 +393,16 @@ dependencies = [
 [[package]]
 name = "k10s-desktop"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.3.4",
+ "k10s-backend",
+ "k10s-protocol",
+ "k10s-server",
+ "k10s-ui",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "k10s-protocol"

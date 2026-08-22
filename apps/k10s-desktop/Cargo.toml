@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+k10s-backend = { path = "../../crates/k10s-backend" }
+k10s-protocol = { path = "../../crates/k10s-protocol" }
+k10s-server = { path = "../../crates/k10s-server" }
+k10s-ui = { path = "../../crates/k10s-ui" }
+base64 = "0.22.1"
+getrandom = "0.3.4"
+tokio = { version = "1.53.1", features = ["net", "rt", "sync"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
 
 [lints]
 workspace = true
