@@ -28,6 +28,8 @@ pub enum StandaloneConfigError {
     TokenRequired,
     /// Asset directories are filesystem paths, not credential-bearing URLs.
     InvalidDistDirectory,
+    /// Tokens above the comparison bound would defeat constant-time checks.
+    OversizedToken,
 }
 
 impl std::fmt::Display for StandaloneConfigError {
@@ -37,6 +39,10 @@ impl std::fmt::Display for StandaloneConfigError {
                 formatter.write_str("an explicit access token is required for non-loopback bind")
             }
             Self::InvalidDistDirectory => formatter.write_str("invalid Trunk distribution path"),
+            Self::OversizedToken => formatter.write_str(&format!(
+                "the configured access token exceeds the {max}-byte security bound",
+                max = crate::auth::MAX_ACCESS_TOKEN_BYTES
+            )),
         }
     }
 }
@@ -53,6 +59,9 @@ impl StandaloneConfig {
         let access_token = access_token.unwrap_or_default();
         if !bind_addr.ip().is_loopback() && access_token.is_empty() {
             return Err(StandaloneConfigError::TokenRequired);
+        }
+        if access_token.len() > crate::auth::MAX_ACCESS_TOKEN_BYTES {
+            return Err(StandaloneConfigError::OversizedToken);
         }
         let path = dist_dir.to_string_lossy();
         if path.is_empty() || path.contains(['?', '#']) {
@@ -85,7 +94,7 @@ impl StandaloneConfig {
 }
 
 /// Runtime limits for the control server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Shared bearer secret accepted in the first `Hello` frame.
     pub access_token: String,
@@ -129,5 +138,166 @@ impl Default for ServerConfig {
             drain_timeout: Duration::from_secs(10),
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],
         }
+    }
+}
+
+/// Redacted debug view of [`ServerConfig`] so the shared secret never appears
+/// in logs, panics, or test output.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("access_token", &"[REDACTED]")
+            .field("hello_timeout", &self.hello_timeout)
+            .field("graceful_flush_timeout", &self.graceful_flush_timeout)
+            .field("max_frame_size", &self.max_frame_size)
+            .field("max_message_size", &self.max_message_size)
+            .field(
+                "max_unauthenticated_connections",
+                &self.max_unauthenticated_connections,
+            )
+            .field(
+                "max_authenticated_connections",
+                &self.max_authenticated_connections,
+            )
+            .field("outbound_queue_capacity", &self.outbound_queue_capacity)
+            .field("drain_grace_timeout", &self.drain_grace_timeout)
+            .field("drain_timeout", &self.drain_timeout)
+            .field("capabilities", &self.capabilities)
+            .finish()
+    }
+}
+
+/// Safe rejection of an invalid or unreadable access-token source.
+#[derive(Debug, Clone)]
+pub enum AccessTokenSourceError {
+    /// The configured token file cannot be read.
+    UnreadableFile(PathBuf),
+    /// The configured token is empty after trimming surrounding whitespace.
+    EmptyToken,
+    /// The resolved token exceeds the comparison bound enforced at startup.
+    OversizedToken,
+}
+
+impl std::fmt::Display for AccessTokenSourceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnreadableFile(path) => write!(
+                formatter,
+                "cannot read the access token file at {}",
+                path.display()
+            ),
+            Self::EmptyToken => formatter.write_str("the configured access token is empty"),
+            Self::OversizedToken => {
+                // Naming the bound lets operators fix the secret without any
+                // of its content appearing in diagnostics.
+                write!(
+                    formatter,
+                    "the configured access token exceeds the {}-byte security bound",
+                    crate::auth::MAX_ACCESS_TOKEN_BYTES
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AccessTokenSourceError {}
+
+/// Resolve the access token from validated sources.
+///
+/// Documented precedence: an explicitly configured token file always wins over
+/// the environment value — a file is the recommended secret mechanism, and an
+/// operator configuring both has most likely rotated to the file while leaving
+/// a stale env value behind. With no source configured the result is `None`,
+/// which only loopback-only configurations may run (see
+/// [`StandaloneConfig::new`]). File contents are trimmed of surrounding
+/// whitespace so trailing newlines in generated secret files never leak into
+/// the compared credential.
+pub fn resolve_access_token(
+    env_token: Option<&str>,
+    token_file_path: Option<&Path>,
+) -> Result<Option<String>, AccessTokenSourceError> {
+    let resolved = if let Some(path) = token_file_path {
+        let content = std::fs::read_to_string(path)
+            .map_err(|_| AccessTokenSourceError::UnreadableFile(path.to_path_buf()))?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(AccessTokenSourceError::EmptyToken);
+        }
+        Some(trimmed.to_owned())
+    } else {
+        env_token
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+    };
+    let Some(token) = resolved else {
+        return Ok(None);
+    };
+    if token.len() > crate::auth::MAX_ACCESS_TOKEN_BYTES {
+        // Refuse startup instead of weakening the fixed-iteration comparison.
+        return Err(AccessTokenSourceError::OversizedToken);
+    }
+    Ok(Some(token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::MAX_ACCESS_TOKEN_BYTES;
+
+    #[test]
+    fn server_config_debug_is_redacted() {
+        let config = ServerConfig {
+            access_token: "unit-probe-secret".into(),
+            ..ServerConfig::default()
+        };
+        assert!(!format!("{config:?}").contains("unit-probe-secret"));
+    }
+
+    #[test]
+    fn empty_env_value_counts_as_absent() {
+        assert_eq!(resolve_access_token(Some(""), None).unwrap(), None);
+        assert_eq!(resolve_access_token(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn oversized_tokens_are_refused_before_startup() {
+        let too_long = "x".repeat(MAX_ACCESS_TOKEN_BYTES + 1);
+        // Oversized env token refuses startup.
+        assert!(matches!(
+            resolve_access_token(Some(&too_long), None),
+            Err(AccessTokenSourceError::OversizedToken)
+        ));
+        // Oversized file token is refused the same way.
+        let dir = std::env::temp_dir().join(format!("k10s-config-test-{}", std::process::id()));
+        let path = dir.join("oversized-token.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, &too_long).unwrap();
+        assert!(matches!(
+            resolve_access_token(None, Some(&path)),
+            Err(AccessTokenSourceError::OversizedToken)
+        ));
+    }
+
+    #[test]
+    fn token_at_the_bound_is_accepted() {
+        let exact = "x".repeat(MAX_ACCESS_TOKEN_BYTES);
+        assert_eq!(
+            resolve_access_token(Some(&exact), None).unwrap().as_deref(),
+            Some(exact.as_str())
+        );
+    }
+
+    #[test]
+    fn standalone_config_refuses_oversized_tokens() {
+        let too_long = "x".repeat(MAX_ACCESS_TOKEN_BYTES + 1);
+        assert!(matches!(
+            StandaloneConfig::new(
+                "127.0.0.1:8080".parse().unwrap(),
+                Some(too_long),
+                PathBuf::from("dist")
+            ),
+            Err(StandaloneConfigError::OversizedToken)
+        ));
     }
 }

@@ -47,9 +47,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr: SocketAddr = env::var("K10S_BIND_ADDR")
         .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned())
         .parse()?;
-    let access_token = env::var("K10S_ACCESS_TOKEN")
+    // Documented precedence (see README security section): an explicitly
+    // configured token file always wins over the environment value.
+    let access_token_env = env::var("K10S_ACCESS_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
+    let token_file_raw = env::var("K10S_ACCESS_TOKEN_FILE").unwrap_or_default();
+    let token_file_path =
+        (!token_file_raw.trim().is_empty()).then(|| PathBuf::from(token_file_raw));
+    let access_token =
+        k10s_server::resolve_access_token(access_token_env.as_deref(), token_file_path.as_deref())?;
     let dist_dir =
         PathBuf::from(env::var("K10S_DIST_DIR").unwrap_or_else(|_| DEFAULT_DIST_DIR.to_owned()));
 

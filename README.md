@@ -35,10 +35,49 @@ Standalone server environment:
 
 - `K10S_BIND_ADDR` — listener address (default `127.0.0.1:8080`)
 - `K10S_DIST_DIR` — exact Trunk output tree to host (default `dist`)
-- `K10S_ACCESS_TOKEN` — required for non-loopback binds; loopback defaults to an empty token
+- `K10S_ACCESS_TOKEN_FILE` — path of a file containing the access token
+  (surrounding whitespace trimmed). When set, it always takes precedence over
+  `K10S_ACCESS_TOKEN`. An empty or unreadable file refuses startup.
+- `K10S_ACCESS_TOKEN` — inline access token. Required for non-loopback binds;
+  loopback defaults to an empty token.
 
 The server logs structured, credential-free telemetry to stderr at `info`
 level. `SIGINT`/`SIGTERM` trigger the ordered drain described below.
+
+## Security model
+
+**Access tokens.** The token travels exclusively in the first protocol `Hello`
+it is accepted on, and it must never reach URLs, built assets,
+localStorage-style persistence, logs, or error payloads:
+
+- Server config types redact the token from every `Debug` rendering.
+- The web gate holds the entered value only in an ephemeral form buffer and
+  hands it straight to the protocol client as connection state; on successful
+  authentication the buffer is discarded. Persisted settings carry only the
+  credential-free endpoint URL, and the transport rejects any WebSocket URL
+  containing userinfo, query strings, or fragments.
+- Secret sources resolve with documented precedence: `K10S_ACCESS_TOKEN_FILE`
+  wins over `K10S_ACCESS_TOKEN`; empty files refuse to start; no source at all
+  is only valid for loopback-only development binds (`StandaloneConfig` still
+  rejects non-loopback listeners without an explicit token).
+- Token comparison inside the control socket uses a constant-time byte compare,
+  and connections are bounded before authentication completes (unauthenticated
+  connection cap, first-frame deadline, frame/message size limits).
+
+**Same-origin enforcement.** Control-socket upgrades that carry a browser
+`Origin` header must match the request's own `Host` authority (default ports
+80/443 compare equal to their implicit form); anything else is rejected with
+HTTP 403. Native desktop clients send no `Origin` and are unconstrained, so
+they keep working unchanged. Browsers enforce no reliable same-origin policy
+on WebSocket connections, so this server-side check is the enforcement point,
+not defense in depth; clients must not rely on browser behavior for it.
+
+**Reverse proxies / trusted headers.** k10s never infers client identity or
+trust from request headers: `X-Forwarded-*`, `X-Real-Ip`, and similar are
+ignored by default. When placing the server behind a TLS/auth-terminating
+reverse proxy, enforce authentication there and keep the host/origin seen by
+k10s identical to what the browser uses (same host end-to-end); otherwise the
+same-origin check will refuse upgrades.
 
 ## Web development
 

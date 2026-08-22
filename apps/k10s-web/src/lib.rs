@@ -78,6 +78,11 @@ impl Runtime {
         match outcome {
             Some(AppView::Connecting) | None => {}
             Some(AppView::Ready { context_names, .. }) => {
+                if self.stage != Stage::Ready {
+                    // Authentication completed: mark the gate lifecycle done and
+                    // discard any residual credential bytes in its buffer.
+                    self.gate.authentication_succeeded();
+                }
                 self.render_ready(&context_names);
             }
             // Terminal authentication rejection returns the user to the gate.
