@@ -41,24 +41,25 @@ struct Runtime {
 
 impl Runtime {
     /// Submit the current input buffer through the gate and open the client.
+    ///
+    /// An empty buffer connects as-is so tokenless loopback development servers
+    /// remain reachable from the served page.
     fn begin_connection(&mut self) {
         if self.stage == Stage::Ready || self.stage == Stage::Connecting {
             return;
         }
         let token = self.token_input_value();
         self.gate.set_token_input(token);
-        match self.gate.begin_connection() {
-            Ok(target) => match K10sApp::connect(target) {
-                Ok(app) => {
-                    self.app = Some(app);
-                    self.render_connecting();
-                }
-                Err(error) => {
-                    self.app = None;
-                    self.render_failure(&error.to_string());
-                }
-            },
-            Err(_) => self.render_gate(),
+        let target = self.gate.begin_connection();
+        match K10sApp::connect(target) {
+            Ok(app) => {
+                self.app = Some(app);
+                self.render_connecting();
+            }
+            Err(error) => {
+                self.app = None;
+                self.render_failure(&error.to_string());
+            }
         }
     }
 

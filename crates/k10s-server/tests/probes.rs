@@ -5,6 +5,7 @@ use axum::http::{Request, StatusCode};
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_server::{Readiness, ReadinessState, ServerConfig, router};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
 async fn probe(readiness: &Arc<Readiness>, path: &str) -> (StatusCode, String) {
@@ -13,6 +14,7 @@ async fn probe(readiness: &Arc<Readiness>, path: &str) -> (StatusCode, String) {
         BackendKernel::new(FakeKubernetes::standard()),
         CancellationToken::new(),
         Arc::clone(readiness),
+        Arc::new(TaskTracker::new()),
         None,
     );
     let response = app

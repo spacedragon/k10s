@@ -1,5 +1,5 @@
 use k10s_protocol::CONTROL_PATH;
-use k10s_ui::{ConnectionGate, GateError, derive_control_url};
+use k10s_ui::{ConnectionGate, derive_control_url};
 
 #[test]
 fn fresh_web_app_shows_an_empty_token_gate() {
@@ -14,7 +14,7 @@ fn fresh_web_app_shows_an_empty_token_gate() {
 fn wrong_token_returns_to_a_clean_gate() {
     let mut gate = ConnectionGate::new("ws://example.test/api/v1/control");
     gate.set_token_input("wrong-secret");
-    let _target = gate.begin_connection().unwrap();
+    let _target = gate.begin_connection();
 
     gate.authentication_rejected();
 
@@ -27,7 +27,7 @@ fn wrong_token_returns_to_a_clean_gate() {
 fn successful_authentication_clears_the_input_buffer() {
     let mut gate = ConnectionGate::new("ws://example.test/api/v1/control");
     gate.set_token_input("secret");
-    let target = gate.begin_connection().unwrap();
+    let target = gate.begin_connection();
 
     gate.authentication_succeeded();
 
@@ -37,11 +37,13 @@ fn successful_authentication_clears_the_input_buffer() {
 }
 
 #[test]
-fn empty_token_stays_at_the_gate() {
-    let mut gate = ConnectionGate::new("ws://example.test/api/v1/control");
+fn empty_submission_stays_usable_for_tokenless_loopback_servers() {
+    let mut gate = ConnectionGate::new("ws://127.0.0.1:8080/api/v1/control");
 
-    assert_eq!(gate.begin_connection(), Err(GateError::EmptyToken));
-    assert!(gate.is_visible());
+    let target = gate.begin_connection();
+
+    assert_eq!(target.url(), "ws://127.0.0.1:8080/api/v1/control");
+    assert!(!gate.is_visible());
 }
 
 #[test]

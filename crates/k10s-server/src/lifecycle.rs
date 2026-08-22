@@ -30,7 +30,7 @@ struct AppState {
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
     shutdown: CancellationToken,
-    connections: TaskTracker,
+    connections: Arc<TaskTracker>,
     readiness: Arc<Readiness>,
 }
 
@@ -88,21 +88,28 @@ pub async fn run_with_assets(
     dist_dir: Option<PathBuf>,
 ) -> io::Result<()> {
     let readiness = Readiness::new();
+    let connections = Arc::new(TaskTracker::new());
     let app = router(
         config,
         kernel,
         cancel.clone(),
         Arc::clone(&readiness),
+        Arc::clone(&connections),
         dist_dir,
     );
     readiness.set(ReadinessState::Ready);
     let draining = Arc::clone(&readiness);
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             cancel.cancelled_owned().await;
             draining.set(ReadinessState::Draining);
         })
-        .await
+        .await;
+    // Axum does not drain upgraded WebSocket tasks; join them explicitly so
+    // callers cannot drop the runtime mid-shutdown-notice.
+    connections.close();
+    connections.wait().await;
+    result
 }
 
 /// Build the application router with independently testable readiness state.
@@ -111,6 +118,7 @@ pub fn router(
     kernel: BackendKernel,
     cancel: CancellationToken,
     readiness: Arc<Readiness>,
+    connections: Arc<TaskTracker>,
     dist_dir: Option<PathBuf>,
 ) -> Router {
     let state = AppState {
@@ -119,7 +127,7 @@ pub fn router(
         config: Arc::new(config),
         kernel: Arc::new(kernel),
         shutdown: cancel.clone(),
-        connections: TaskTracker::new(),
+        connections,
         readiness,
     };
     let mut app = Router::new()

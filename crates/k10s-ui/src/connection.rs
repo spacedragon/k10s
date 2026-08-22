@@ -11,23 +11,6 @@ pub struct PersistedSettings {
     control_url: String,
 }
 
-/// A connection-gate validation failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateError {
-    /// Authentication requires a non-empty token.
-    EmptyToken,
-}
-
-impl std::fmt::Display for GateError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyToken => formatter.write_str("Enter an access token."),
-        }
-    }
-}
-
-impl std::error::Error for GateError {}
-
 /// Ephemeral web authentication form state.
 pub struct ConnectionGate {
     settings: PersistedSettings,
@@ -87,15 +70,15 @@ impl ConnectionGate {
     }
 
     /// Move the token directly into a protocol connection target and clear the form buffer.
-    pub fn begin_connection(&mut self) -> Result<ConnectTarget, GateError> {
-        if self.token_input.is_empty() {
-            self.error = Some(GateError::EmptyToken.to_string());
-            return Err(GateError::EmptyToken);
-        }
+    ///
+    /// An empty buffer is submitted as-is: standalone servers started without a token
+    /// accept unauthenticated control connections for loopback development, so the
+    /// default gate must stay usable there.
+    pub fn begin_connection(&mut self) -> ConnectTarget {
+        let token = std::mem::take(&mut self.token_input);
         self.visible = false;
         self.error = None;
-        let token = std::mem::take(&mut self.token_input);
-        Ok(ConnectTarget::new(self.settings.control_url.clone(), token))
+        ConnectTarget::new(self.settings.control_url.clone(), token)
     }
 
     /// Return to a blank gate after the server rejects authentication.
