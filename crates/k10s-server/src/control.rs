@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
-use crate::lifecycle::MutationGate;
+use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
 
 pub(crate) async fn serve_socket(
@@ -29,8 +29,9 @@ pub(crate) async fn serve_socket(
     unauthenticated: OwnedSemaphorePermit,
     authenticated_slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<MutationGate>,
-    drain: CancellationToken,
+    signals: crate::lifecycle::DrainSignals,
 ) {
+    let DrainSignals { drain, force } = signals;
     let (mut sink, mut stream) = socket.split();
     let outbound = Scheduler::new(
         config.outbound_queue_capacity,
@@ -60,6 +61,8 @@ pub(crate) async fn serve_socket(
         }
     });
     let first = tokio::select! {
+        biased;
+        () = force.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
         () = drain.cancelled() => return close_and_join(outbound, child, writer, "server shutdown", config.graceful_flush_timeout).await,
         first = tokio::time::timeout(config.hello_timeout, stream.next()) => first,
     };
@@ -173,6 +176,8 @@ pub(crate) async fn serve_socket(
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         let next = tokio::select! {
+            biased;
+            () = force.cancelled() => break,
             () = drain.cancelled(), if !noticed => {
                 noticed = true;
                 tracing::info!(

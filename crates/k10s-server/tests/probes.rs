@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use k10s_backend::{BackendKernel, FakeKubernetes};
-use k10s_server::{MutationGate, Readiness, ReadinessState, ServerConfig, router};
+use k10s_server::{DrainSignals, MutationGate, Readiness, ReadinessState, ServerConfig, router};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
@@ -15,7 +15,10 @@ async fn probe(readiness: &Arc<Readiness>, path: &str) -> (StatusCode, String) {
         Arc::clone(readiness),
         Arc::new(TaskTracker::new()),
         MutationGate::new(),
-        CancellationToken::new(),
+        DrainSignals {
+            drain: CancellationToken::new(),
+            force: CancellationToken::new(),
+        },
         None,
     );
     let response = app

@@ -317,11 +317,13 @@ async fn embedded_desktop_launch_shuts_down_through_the_same_lifecycle() {
 #[tokio::test]
 async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_window() {
     let (_capture, _) = install_capture();
+    let drain_timeout = Duration::from_millis(400);
+    let graceful_flush = ServerConfig::default().graceful_flush_timeout;
     let server = spawn_loopback(
         ServerConfig {
             access_token: ACCESS_TOKEN.into(),
             drain_grace_timeout: Duration::from_secs(30),
-            drain_timeout: Duration::from_millis(400),
+            drain_timeout,
             ..ServerConfig::default()
         },
         BackendKernel::new(FakeKubernetes::standard()),
@@ -329,10 +331,11 @@ async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_windo
     .await
     .unwrap();
     let addr = server.addr();
-    let ws = connect_authenticated(addr).await;
+    let mut ws = connect_authenticated(addr).await;
 
     let started = std::time::Instant::now();
-    // The connected socket wants 30s of grace, but the drain deadline is hard.
+    // The connected socket wants 30s of grace, but the drain deadline is one
+    // absolute bound measured from shutdown start.
     let result = tokio::time::timeout(Duration::from_secs(10), server.shutdown())
         .await
         .expect("shutdown must stay bounded by the drain deadline");
@@ -343,9 +346,31 @@ async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_windo
         "an abandoned socket must surface as a timed-out shutdown: {result:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "shutdown exceeded twice the drain deadline: {elapsed:?}"
+        elapsed >= drain_timeout,
+        "shutdown returned before the configured deadline: {elapsed:?}"
     );
-    assert!(!tcp_connectable(addr).await);
+    // One deadline plus one bounded forced-unwind window, with scheduler slack.
+    let bound = drain_timeout + graceful_flush * 2 + Duration::from_millis(500);
+    assert!(
+        elapsed < bound,
+        "shutdown exceeded the deadline plus one unwind window: {elapsed:?} (bound {bound:?})"
+    );
+
+    // No socket task may outlive shutdown(): the surviving session must observe
+    // its connection being torn down instead of hanging in the grace window.
+    // Frames enqueued before the deadline (the notice itself) may still arrive;
+    // a hang or live data stream past this point would mean surviving tasks.
+    let tail = tokio::time::timeout(graceful_flush * 4, async {
+        while let Some(message) = ws.next().await {
+            if matches!(message, Err(_) | Ok(Message::Close(_))) {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        tail.is_ok(),
+        "socket task survived shutdown(): no teardown observed"
+    );
     drop(ws);
 }

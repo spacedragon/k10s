@@ -72,7 +72,9 @@ a `k10s_server::lifecycle` log event:
 3. Send `ShutdownNotice` to connected sessions and close the mutation gate;
    status reads keep working for a bounded grace window (`drain_grace_timeout`).
 4. Cancel watches/logs and terminate exec streams as each socket task unwinds.
-5. Drain tracked connection tasks under a hard deadline (`drain_timeout`).
+5. Drain tracked connection tasks under one absolute hard deadline
+   (`drain_timeout`); tasks that survive it are force-closed and `shutdown`
+   reports `TimedOut`.
 6. Close the listener last.
 
 Connection tasks are tracked with `tokio_util::TaskTracker`; in-flight requests
