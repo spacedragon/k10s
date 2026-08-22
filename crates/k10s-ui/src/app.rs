@@ -1,6 +1,6 @@
 //! Minimal application state driven exclusively through the shared protocol client.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{ClientFrame, ServerFrame};
@@ -181,6 +181,12 @@ impl K10sApp {
     #[must_use]
     pub fn connection_url(&self) -> &str {
         &self.connection_url
+    }
+
+    /// Whether authentication was terminally rejected and the web host must show its gate.
+    #[must_use]
+    pub fn requires_connection_gate(&self) -> bool {
+        self.client.phase() == ClientPhase::WebGate
     }
 
     /// Render the minimal foundation view as text.
