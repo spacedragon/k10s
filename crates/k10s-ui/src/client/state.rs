@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use k10s_protocol::{
-    Ack, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode, ErrorFrame,
-    ErrorScope, Hello, PROTOCOL_MAJOR, PROTOCOL_MINOR, Request, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
+    Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
+    ErrorFrame, ErrorScope, Hello, PROTOCOL_MAJOR, PROTOCOL_MINOR, RESOURCE_EVENT_CHANGED,
+    RESOURCE_EVENT_GONE, Request, RequestId, ResourceListRequest, ResourceListResponse,
+    ResourceListRow, ResumeStatus, Retryability, ServerFrame, ServerKind, ServerPayload, SessionId,
+    Subscribe, SubscriptionId, SubscriptionSelector,
 };
 
 /// Client connection lifecycle.
@@ -162,10 +164,27 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 /// Request behaviors supported by the foundation client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Query {
     /// Retrieve server identity and safe Kubernetes contexts.
     Bootstrap,
+    /// Retrieve a normalized resource list for one type on one context.
+    ResourceList(ResourceListQuery),
+}
+
+/// Selector for a normalized resource list query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceListQuery {
+    /// Kubernetes context to read from.
+    pub context: String,
+    /// API group, empty for the core group.
+    pub group: String,
+    /// API version within the group.
+    pub version: String,
+    /// Kubernetes kind, such as `Deployment`.
+    pub kind: String,
+    /// Optional namespace restriction.
+    pub namespace: Option<String>,
 }
 
 /// A completed query value.
@@ -173,6 +192,17 @@ pub enum Query {
 pub enum QueryResult {
     /// Bootstrap query result.
     Bootstrap(BootstrapResponse),
+    /// Normalized resource list result.
+    ResourceList(ResourceListResponse),
+}
+
+/// A reassembled resource snapshot delivered for one subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSnapshot {
+    /// Backend revision covering the snapshot.
+    pub revision: BackendRevision,
+    /// Sorted normalized rows.
+    pub rows: Vec<ResourceListRow>,
 }
 
 /// Opaque handle used to retrieve or cancel one request.
@@ -227,6 +257,15 @@ struct PendingEntry {
     deadline_at_ms: Option<u64>,
 }
 
+/// In-progress reassembly of one chunked resource snapshot.
+#[derive(Debug)]
+struct SnapshotAssembly {
+    total_chunks: u32,
+    received_chunks: u32,
+    revision: BackendRevision,
+    rows: Vec<ResourceListRow>,
+}
+
 /// Pure client protocol state.
 pub struct ClientState {
     config: ClientConfig,
@@ -244,6 +283,8 @@ pub struct ClientState {
     next_subscription_id: u128,
     live_subscriptions: HashMap<SubscriptionId, serde_json::Value>,
     active_subscriptions: HashSet<SubscriptionId>,
+    snapshot_assemblies: HashMap<SubscriptionId, SnapshotAssembly>,
+    completed_snapshots: HashMap<SubscriptionId, ResourceSnapshot>,
     server_bootstrap: Option<BootstrapResponse>,
     server_state_invalid: bool,
     local_ui: LocalUiState,
@@ -268,6 +309,8 @@ impl std::fmt::Debug for ClientState {
             .field("last_acked_sequence", &self.last_acked_sequence)
             .field("live_subscriptions_len", &self.live_subscriptions.len())
             .field("active_subscriptions_len", &self.active_subscriptions.len())
+            .field("snapshot_assemblies_len", &self.snapshot_assemblies.len())
+            .field("completed_snapshots_len", &self.completed_snapshots.len())
             .field("server_state_invalid", &self.server_state_invalid)
             .field("local_ui", &self.local_ui)
             .field("session_id", &self.session_id)
@@ -297,6 +340,8 @@ impl ClientState {
             next_subscription_id: 1,
             live_subscriptions: HashMap::new(),
             active_subscriptions: HashSet::new(),
+            snapshot_assemblies: HashMap::new(),
+            completed_snapshots: HashMap::new(),
             server_bootstrap: None,
             server_state_invalid: true,
             local_ui: LocalUiState::default(),
@@ -399,6 +444,50 @@ impl ClientState {
         self.live_subscriptions.insert(id.clone(), selector);
         self.refresh_server_validity();
         Ok(LiveSubscription { id })
+    }
+
+    /// Start and remember a normalized resource watch subscription.
+    ///
+    /// The desired selector is retained so recovery resubscribes it after a
+    /// reconnect, exactly like the bootstrap-status subscription.
+    pub fn subscribe_resource(
+        &mut self,
+        context: impl Into<String>,
+        group: impl Into<String>,
+        version: impl Into<String>,
+        kind: impl Into<String>,
+        namespace: Option<String>,
+    ) -> Result<LiveSubscription, ClientError> {
+        if self.phase != ClientPhase::Ready {
+            return Err(ClientError::InvalidState("client is not ready"));
+        }
+        let limit = self.live_subscription_limit();
+        if self.live_subscriptions.len() >= limit {
+            return Err(ClientError::LiveSubscriptionLimit { limit });
+        }
+        let id = SubscriptionId::new(format!("resource-{}", self.next_subscription_id));
+        self.next_subscription_id = self.next_subscription_id.saturating_add(1);
+        let selector = serde_json::to_value(SubscriptionSelector::Resource(
+            k10s_protocol::ResourceWatchSpec {
+                context: context.into(),
+                gvk: k10s_protocol::GroupVersionKind {
+                    group: group.into(),
+                    version: version.into(),
+                    kind: kind.into(),
+                },
+                namespace,
+            },
+        ))
+        .map_err(|error| ClientError::Protocol(format!("could not encode selector: {error}")))?;
+        self.queue_subscribe(id.clone(), selector.clone())?;
+        self.live_subscriptions.insert(id.clone(), selector);
+        self.refresh_server_validity();
+        Ok(LiveSubscription { id })
+    }
+
+    /// Take the completed snapshot reassembled for one subscription.
+    pub fn take_resource_snapshot(&mut self, id: &SubscriptionId) -> Option<ResourceSnapshot> {
+        self.completed_snapshots.remove(id)
     }
 
     fn queue_subscribe(
@@ -587,12 +676,27 @@ impl ClientState {
         let id = RequestId::from_u128(self.next_request_id);
         self.next_request_id = self.next_request_id.saturating_add(1);
         let payload = Request {
-            request_kind: match query {
+            request_kind: match &query {
                 Query::Bootstrap => "bootstrap".to_owned(),
+                Query::ResourceList(_) => "resource.list".to_owned(),
             },
             deadline: relative_deadline_ms,
             idempotency_key: None,
-            payload: serde_json::Value::Null,
+            payload: match &query {
+                Query::Bootstrap => serde_json::Value::Null,
+                Query::ResourceList(selector) => serde_json::to_value(ResourceListRequest {
+                    context: selector.context.clone(),
+                    gvk: k10s_protocol::GroupVersionKind {
+                        group: selector.group.clone(),
+                        version: selector.version.clone(),
+                        kind: selector.kind.clone(),
+                    },
+                    namespace: selector.namespace.clone(),
+                })
+                .map_err(|error| {
+                    ClientError::Protocol(format!("could not encode request: {error}"))
+                })?,
+            },
         };
         let frame = ClientFrame {
             kind: ClientKind::Request,
@@ -692,7 +796,7 @@ impl ClientState {
             let query = self
                 .pending
                 .get(&id)
-                .map(|pending| pending.query)
+                .map(|pending| pending.query.clone())
                 .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
             let result = match query {
                 Query::Bootstrap => {
@@ -702,6 +806,12 @@ impl ClientState {
                     self.server_bootstrap = Some(bootstrap.clone());
                     self.refresh_server_validity();
                     QueryResult::Bootstrap(bootstrap)
+                }
+                Query::ResourceList(_) => {
+                    let list: ResourceListResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::ResourceList(list)
                 }
             };
             let _pending = self.pending.remove(&id);
@@ -767,7 +877,75 @@ impl ClientState {
                 self.refresh_server_validity();
                 Ok(())
             }
-            ServerPayload::Event(_) => Ok(()),
+            ServerPayload::Event(event) => match event.event_kind.as_str() {
+                RESOURCE_EVENT_CHANGED => {
+                    let _: k10s_protocol::ResourceChanged =
+                        serde_json::from_value(event.payload)
+                            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    Ok(())
+                }
+                RESOURCE_EVENT_GONE => {
+                    let _: k10s_protocol::ResourceGone = serde_json::from_value(event.payload)
+                        .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            ServerPayload::SnapshotBegin(begin) => {
+                if let Some(id) = self.owned_subscription(&frame) {
+                    self.snapshot_assemblies.insert(
+                        id,
+                        SnapshotAssembly {
+                            total_chunks: begin.total_chunks,
+                            received_chunks: 0,
+                            revision: BackendRevision::new(0),
+                            rows: Vec::new(),
+                        },
+                    );
+                }
+                Ok(())
+            }
+            ServerPayload::SnapshotChunk(chunk) => {
+                let Some(id) = self.owned_subscription(&frame) else {
+                    return Ok(());
+                };
+                let page: k10s_protocol::ResourceSnapshotPage = serde_json::from_value(chunk.data)
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                let Some(assembly) = self.snapshot_assemblies.get_mut(&id) else {
+                    return Ok(());
+                };
+                if chunk.chunk_index != assembly.received_chunks
+                    || assembly.received_chunks >= assembly.total_chunks
+                {
+                    return Err(ClientError::Protocol(
+                        "snapshot chunk out of order".to_owned(),
+                    ));
+                }
+                assembly.received_chunks += 1;
+                assembly.revision = assembly.revision.max(page.revision);
+                assembly.rows.extend(page.rows);
+                if assembly.received_chunks == assembly.total_chunks {
+                    let rows = std::mem::take(&mut assembly.rows);
+                    let revision = assembly.revision;
+                    self.completed_snapshots
+                        .insert(id, ResourceSnapshot { revision, rows });
+                }
+                Ok(())
+            }
+            ServerPayload::SnapshotEnd(_end) => {
+                let Some(id) = self.owned_subscription(&frame) else {
+                    return Ok(());
+                };
+                match self.snapshot_assemblies.remove(&id) {
+                    Some(assembly) if assembly.received_chunks == assembly.total_chunks => {
+                        debug_assert!(self.completed_snapshots.contains_key(&id));
+                        Ok(())
+                    }
+                    Some(_) | None => Err(ClientError::Protocol(
+                        "snapshot ended before all chunks arrived".to_owned(),
+                    )),
+                }
+            }
             ServerPayload::ResyncRequired(_) => {
                 self.rebuild_server_state(usize::from(sequence.is_some()))
             }
@@ -852,9 +1030,18 @@ impl ClientState {
         self.server_bootstrap = None;
         self.server_state_invalid = true;
         self.active_subscriptions.clear();
+        self.snapshot_assemblies.clear();
+        self.completed_snapshots.clear();
         self.pending.clear();
         self.completed.clear();
         self.rebuilt_bootstrap = None;
+    }
+
+    /// Return the subscription ID when the frame belongs to a desired
+    /// subscription; frames from torn-down subscriptions are ignored.
+    fn owned_subscription(&self, frame: &ServerFrame) -> Option<SubscriptionId> {
+        let id = frame.subscription_id.clone()?;
+        self.live_subscriptions.contains_key(&id).then_some(id)
     }
 
     fn rebuild_server_state(&mut self, reserved_outbound: usize) -> Result<(), ClientError> {

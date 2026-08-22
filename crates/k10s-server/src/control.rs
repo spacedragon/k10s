@@ -1,16 +1,21 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{
-    BackendError, BackendKernel, KernelQueryResult, Query, Subscribe as BackendSubscribe,
+    BackendError, BackendEvent, BackendKernel, Gvk, KernelQueryResult, Query,
+    Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, ShutdownNotice, Subscribed, SubscriptionId,
-    Welcome, decode_client_frame,
+    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, RequestId, ResourceIdentity,
+    ResourceListRequest, ResourceRefRequest, ResumeStatus, Retryability, ServerFrame, ServerKind,
+    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+    SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -21,6 +26,15 @@ use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
 use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
+
+/// Rows carried by one bounded snapshot chunk frame.
+const RESOURCE_ROWS_PER_CHUNK: usize = 16;
+
+/// A request failure that is not attributable to the backend adapter.
+enum RequestFailure {
+    Backend(BackendError),
+    Malformed(String),
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_socket(
@@ -173,7 +187,8 @@ pub(crate) async fn serve_socket(
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut request_tasks = JoinSet::new();
-    let mut last_sent_sequence = 0_u64;
+    let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let subscription_cancel = child.child_token();
     let mut last_acked_sequence = 0_u64;
     let mut noticed = false;
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
@@ -287,21 +302,21 @@ pub(crate) async fn serve_socket(
                 );
                 request_tasks.spawn(
                     async move {
-                        let query = async {
-                            if request.request_kind == "bootstrap" {
-                                task_kernel
-                                    .query_with_deadline(
-                                        Query::Bootstrap,
-                                        request.deadline.map(Duration::from_millis),
-                                    )
-                                    .await
-                            } else {
-                                Err(BackendError::unsupported(request.request_kind))
+                        let parsed = parse_resource_query(&request.request_kind, request.payload);
+                        let result: Result<KernelQueryResult, RequestFailure> = match parsed {
+                            Ok(Some(query)) => {
+                                let deadline = request.deadline.map(Duration::from_millis);
+                                tokio::select! {
+                                    () = request_cancel.cancelled() =>
+                                        Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                    result = task_kernel.query_with_deadline(query, deadline) =>
+                                        result.map_err(RequestFailure::Backend),
+                                }
                             }
-                        };
-                        let result = tokio::select! {
-                            () = request_cancel.cancelled() => Err(BackendError::Cancelled),
-                            result = query => result,
+                            Ok(None) => Err(RequestFailure::Backend(BackendError::unsupported(
+                                request.request_kind,
+                            ))),
+                            Err(message) => Err(RequestFailure::Malformed(message)),
                         };
                         let sent = match result {
                             Ok(KernelQueryResult::Bootstrap(value)) => {
@@ -314,7 +329,28 @@ pub(crate) async fn serve_socket(
                                     Priority::P1,
                                 )
                             }
-                            Err(error) => send_backend_error(
+                            Ok(KernelQueryResult::ResourceList(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(KernelQueryResult::ResourceDetail(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(KernelQueryResult::ResourceMetrics(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Err(RequestFailure::Malformed(message)) => send_error(
+                                &task_outbound,
+                                ErrorTarget::Request(request_id.clone()),
+                                ErrorCode::InvalidRequest,
+                                message,
+                            ),
+                            Err(RequestFailure::Backend(error)) => send_backend_error(
                                 &task_outbound,
                                 ErrorTarget::Request(request_id.clone()),
                                 &task_session_id,
@@ -350,81 +386,121 @@ pub(crate) async fn serve_socket(
                     continue;
                 };
                 let selector_kind = selector.0.get("kind").and_then(serde_json::Value::as_str);
-                if selector_kind.is_none() {
-                    if send_error(
-                        &outbound,
-                        ErrorTarget::Subscription(subscription_id),
+                let outcome = if selector_kind.is_none() {
+                    Err((
                         ErrorCode::InvalidRequest,
                         "invalid subscription payload".into(),
-                    )
-                    .is_err()
-                    {
-                        overload_close(&outbound);
-                        break;
-                    }
+                    ))
                 } else if selector_kind == Some("bootstrapStatus") {
                     match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
-                        Ok(_) => {
-                            let Some(sequence) = last_sent_sequence.checked_add(1) else {
-                                if send_error(
-                                    &outbound,
-                                    ErrorTarget::Session,
-                                    ErrorCode::Internal,
-                                    "connection sequence exhausted".into(),
-                                )
-                                .is_err()
-                                {
-                                    overload_close(&outbound);
-                                }
-                                break;
-                            };
-                            let subscribed = ServerFrame {
-                                kind: ServerKind::Subscribed,
-                                request_id: None,
-                                subscription_id: Some(subscription_id),
-                                sequence: Some(sequence),
-                                payload: serde_json::to_value(Subscribed)
-                                    .expect("subscribed payload serializes"),
-                            };
-                            if send_frame(&outbound, subscribed, Priority::P1).is_err() {
-                                overload_close(&outbound);
-                                break;
+                        Ok(_) => Ok(None),
+                        Err(error) => Err(backend_rejection(&error)),
+                    }
+                } else if selector_kind == Some("resource") {
+                    match serde_json::from_value::<SubscriptionSelector>(selector.0.clone()) {
+                        Ok(SubscriptionSelector::Resource(spec)) => {
+                            match kernel
+                                .subscribe(BackendSubscribe::ResourceWatch {
+                                    context: spec.context,
+                                    gvk: Gvk {
+                                        group: spec.gvk.group,
+                                        version: spec.gvk.version,
+                                        kind: spec.gvk.kind,
+                                    },
+                                    namespace: spec.namespace,
+                                })
+                                .await
+                            {
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
                             }
-                            last_sent_sequence = sequence;
                         }
-                        Err(error) => {
-                            if send_backend_error(
+                        _ => Err((
+                            ErrorCode::InvalidRequest,
+                            "invalid resource subscription payload".into(),
+                        )),
+                    }
+                } else {
+                    Err((
+                        ErrorCode::UnsupportedMessage,
+                        "unsupported subscription".into(),
+                    ))
+                };
+                match outcome {
+                    Ok(handle) => {
+                        let Some(sequence) = allocate_sequence(&last_sent_sequence) else {
+                            if send_error(
                                 &outbound,
-                                ErrorTarget::Subscription(subscription_id),
-                                &session_id,
-                                error,
+                                ErrorTarget::Session,
+                                ErrorCode::Internal,
+                                "connection sequence exhausted".into(),
                             )
                             .is_err()
                             {
                                 overload_close(&outbound);
-                                break;
                             }
+                            break;
+                        };
+                        let subscribed = ServerFrame {
+                            kind: ServerKind::Subscribed,
+                            request_id: None,
+                            subscription_id: Some(subscription_id.clone()),
+                            sequence: Some(sequence),
+                            payload: serde_json::to_value(Subscribed)
+                                .expect("subscribed payload serializes"),
+                        };
+                        if send_frame(&outbound, subscribed, Priority::P1).is_err() {
+                            overload_close(&outbound);
+                            break;
+                        }
+                        if let Some(mut handle) = handle {
+                            let task_outbound = outbound.clone();
+                            let task_kernel = Arc::clone(&kernel);
+                            let task_cancel = subscription_cancel.child_token();
+                            let task_counter = Arc::clone(&last_sent_sequence);
+                            let forwarder_span = tracing::info_span!(
+                                "control_subscription",
+                                session_id = %session_id.as_str(),
+                                subscription_id = %subscription_id.as_str(),
+                                backend_subscription_id = %handle.id,
+                            );
+                            request_tasks.spawn(
+                                async move {
+                                    stream_backend_events(
+                                        &task_outbound,
+                                        &task_kernel,
+                                        &subscription_id,
+                                        handle.take_events(),
+                                        &task_counter,
+                                        &task_cancel,
+                                    )
+                                    .await;
+                                }
+                                .instrument(forwarder_span),
+                            );
                         }
                     }
-                } else {
-                    if send_error(
-                        &outbound,
-                        ErrorTarget::Subscription(subscription_id),
-                        ErrorCode::UnsupportedMessage,
-                        "unsupported subscription".into(),
-                    )
-                    .is_err()
-                    {
-                        overload_close(&outbound);
-                        break;
+                    Err((code, message)) => {
+                        if send_error(
+                            &outbound,
+                            ErrorTarget::Subscription(subscription_id),
+                            code,
+                            message,
+                        )
+                        .is_err()
+                        {
+                            overload_close(&outbound);
+                            break;
+                        }
                     }
                 }
             }
             Ok(ClientPayload::Ack(ack)) => {
                 let cursor = ack.last_acked_sequence;
+                let sent_so_far = last_sent_sequence.load(Ordering::Acquire);
                 let valid = frame.sequence.is_none_or(|sequence| sequence == cursor)
                     && cursor >= last_acked_sequence
-                    && cursor <= last_sent_sequence;
+                    && cursor <= sent_so_far;
                 if !valid {
                     if send_error(
                         &outbound,
@@ -443,7 +519,7 @@ pub(crate) async fn serve_socket(
                 tracing::debug!(
                     session_id = %session_id.as_str(),
                     last_acked_sequence,
-                    last_sent_sequence,
+                    last_sent_sequence = sent_so_far,
                     "control acknowledgement advanced"
                 );
             }
@@ -488,10 +564,299 @@ pub(crate) async fn serve_socket(
     {
         token.cancel();
     }
+    subscription_cancel.cancel();
     while request_tasks.join_next().await.is_some() {}
     drop(authenticated);
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
 }
+
+/// Outcome of mapping a request kind and payload onto a backend query.
+///
+/// `Ok(None)` marks the bootstrap request, which needs no payload parsing.
+fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option<Query>, String> {
+    match kind {
+        "bootstrap" => Ok(Some(Query::Bootstrap)),
+        "resource.list" => serde_json::from_value::<ResourceListRequest>(payload)
+            .map(|parsed| {
+                Some(Query::ResourceList {
+                    context: parsed.context,
+                    gvk: Gvk {
+                        group: parsed.gvk.group,
+                        version: parsed.gvk.version,
+                        kind: parsed.gvk.kind,
+                    },
+                    namespace: parsed.namespace,
+                })
+            })
+            .map_err(|error| format!("invalid resource.list payload: {error}")),
+        "resource.detail" => serde_json::from_value::<ResourceRefRequest>(payload)
+            .map(|parsed| {
+                Some(Query::ResourceDetail {
+                    reference: backend_reference(parsed.identity),
+                })
+            })
+            .map_err(|error| format!("invalid resource.detail payload: {error}")),
+        "resource.metrics" => serde_json::from_value::<ResourceRefRequest>(payload)
+            .map(|parsed| {
+                Some(Query::ResourceMetrics {
+                    reference: backend_reference(parsed.identity),
+                })
+            })
+            .map_err(|error| format!("invalid resource.metrics payload: {error}")),
+        _ => Ok(None),
+    }
+}
+
+fn backend_reference(identity: ResourceIdentity) -> k10s_backend::ResourceRef {
+    k10s_backend::ResourceRef {
+        context: identity.context,
+        gvk: Gvk {
+            group: identity.gvk.group,
+            version: identity.gvk.version,
+            kind: identity.gvk.kind,
+        },
+        namespace: identity.namespace,
+        name: identity.name,
+        uid: identity.uid,
+    }
+}
+
+/// Allocate the next monotonic connection sequence.
+fn allocate_sequence(counter: &AtomicU64) -> Option<u64> {
+    let mut observed = counter.load(Ordering::Acquire);
+    loop {
+        let next = observed.checked_add(1)?;
+        match counter.compare_exchange(observed, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(next),
+            Err(current) => observed = current,
+        }
+    }
+}
+
+/// Map a backend failure onto a safe subscription-scoped error.
+fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
+    match error {
+        BackendError::Unsupported { capability } => (
+            ErrorCode::UnsupportedMessage,
+            format!("unsupported capability: {capability}"),
+        ),
+        BackendError::NotFound => (
+            ErrorCode::NotFound,
+            "context or resource not found".to_owned(),
+        ),
+        BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
+        BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
+        BackendError::Internal(_) => (ErrorCode::Internal, "internal server error".to_owned()),
+    }
+}
+
+/// Forward one resource watch from the backend to the client.
+///
+/// Snapshots stream as lossless bounded `snapshot*` frames; deltas ride the
+/// bounded P2 scheduler coalesced by resource identity. A lagging backend
+/// consumer demands a resync rather than silently dropping deltas.
+async fn stream_backend_events(
+    outbound: &Scheduler,
+    kernel: &BackendKernel,
+    subscription_id: &SubscriptionId,
+    events: Option<tokio::sync::broadcast::Receiver<BackendEvent>>,
+    sequence_counter: &AtomicU64,
+    cancel: &CancellationToken,
+) {
+    let mut events = match events {
+        Some(events) => events,
+        None => return,
+    };
+    loop {
+        let event = tokio::select! {
+            () = cancel.cancelled() => break,
+            event = events.recv() => event,
+        };
+        match event {
+            Ok(BackendEvent::Snapshot(data)) => {
+                if stream_snapshot(outbound, kernel, subscription_id, data, sequence_counter)
+                    .await
+                    .is_err()
+                {
+                    overload_close(outbound);
+                    break;
+                }
+            }
+            Ok(BackendEvent::Changed(record)) => {
+                let revision = record.revision;
+                let delta = kernel.changed_delta(&record);
+                let resource = record.reference.coalescing_key();
+                if enqueue_delta(
+                    outbound,
+                    subscription_id,
+                    &resource,
+                    k10s_protocol::RESOURCE_EVENT_CHANGED,
+                    revision,
+                    &delta,
+                    sequence_counter,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(BackendEvent::Gone {
+                reference,
+                revision,
+            }) => {
+                let delta = kernel.gone_delta(&reference, revision);
+                let resource = reference.coalescing_key();
+                if enqueue_delta(
+                    outbound,
+                    subscription_id,
+                    &resource,
+                    k10s_protocol::RESOURCE_EVENT_GONE,
+                    revision,
+                    &delta,
+                    sequence_counter,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                tracing::warn!(
+                    subscription_id = %subscription_id.as_str(),
+                    dropped,
+                    "subscription consumer lagged; demanding resync"
+                );
+                if let Some(sequence) = allocate_sequence(sequence_counter) {
+                    let frame = ServerFrame {
+                        kind: ServerKind::ResyncRequired,
+                        request_id: None,
+                        subscription_id: None,
+                        sequence: Some(sequence),
+                        payload: serde_json::json!({"reason": "subscription fell behind"}),
+                    };
+                    let _ = send_frame(outbound, frame, Priority::P0);
+                }
+                break;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Stream a snapshot as bounded `snapshotBegin`/`snapshotChunk`/
+/// `snapshotEnd` frames with contiguous connection sequences and a
+/// deterministic checksum over the chunk pages.
+async fn stream_snapshot(
+    outbound: &Scheduler,
+    kernel: &BackendKernel,
+    subscription_id: &SubscriptionId,
+    data: k10s_backend::ResourceListData,
+    sequence_counter: &AtomicU64,
+) -> Result<(), EnqueueError> {
+    let total_chunks = data.rows.len().div_ceil(RESOURCE_ROWS_PER_CHUNK).max(1);
+    let begin_payload = SnapshotBegin {
+        total_chunks: total_chunks as u32,
+    };
+    send_sequenced(
+        outbound,
+        subscription_id,
+        ServerKind::SnapshotBegin,
+        serde_json::to_value(begin_payload).expect("begin payload serializes"),
+        sequence_counter,
+    )
+    .await?;
+
+    let mut checksum: u64 = FNV_OFFSET_BASIS;
+    for (index, chunk) in data.rows.chunks(RESOURCE_ROWS_PER_CHUNK).enumerate() {
+        let page = kernel.snapshot_page(data.revision, chunk);
+        let page_bytes = serde_json::to_vec(&page).expect("snapshot page serializes");
+        for byte in &page_bytes {
+            checksum = (checksum ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+        let payload = SnapshotChunk {
+            chunk_index: index as u32,
+            data: serde_json::to_value(page).expect("snapshot page serializes"),
+        };
+        send_sequenced(
+            outbound,
+            subscription_id,
+            ServerKind::SnapshotChunk,
+            serde_json::to_value(payload).expect("chunk payload serializes"),
+            sequence_counter,
+        )
+        .await?;
+    }
+
+    let end_payload = SnapshotEnd {
+        checksum: format!("fnv-64:{checksum:016x}"),
+    };
+    send_sequenced(
+        outbound,
+        subscription_id,
+        ServerKind::SnapshotEnd,
+        serde_json::to_value(end_payload).expect("end payload serializes"),
+        sequence_counter,
+    )
+    .await
+}
+
+/// Enqueue one resource delta on the bounded P2 scheduler, coalesced by
+/// resource identity. Deltas are droppable: the scheduler gap tracker and a
+/// subsequent resync repair any skipped revision.
+fn enqueue_delta(
+    outbound: &Scheduler,
+    subscription_id: &SubscriptionId,
+    resource: &str,
+    event_kind: &'static str,
+    revision: u64,
+    payload: &impl serde::Serialize,
+    sequence_counter: &AtomicU64,
+) -> Result<(), EnqueueError> {
+    let Some(sequence) = allocate_sequence(sequence_counter) else {
+        return Err(EnqueueError::Overloaded);
+    };
+    let frame = ServerFrame {
+        kind: ServerKind::Event,
+        request_id: None,
+        subscription_id: Some(subscription_id.clone()),
+        sequence: Some(sequence),
+        payload: serde_json::json!({
+            "kind": event_kind,
+            "revision": revision.to_string(),
+            "payload": payload,
+        }),
+    };
+    let text = serde_json::to_string(&frame).expect("server frame serializes");
+    outbound.enqueue_p2(resource, revision, Message::Text(text.into()))
+}
+
+/// Enqueue one sequenced snapshot frame at lossless priority.
+fn send_sequenced<'a>(
+    outbound: &'a Scheduler,
+    subscription_id: &'a SubscriptionId,
+    kind: ServerKind,
+    payload: serde_json::Value,
+    sequence_counter: &'a AtomicU64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EnqueueError>> + Send + 'a>> {
+    Box::pin(async move {
+        let Some(sequence) = allocate_sequence(sequence_counter) else {
+            return Err(EnqueueError::Overloaded);
+        };
+        let frame = ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        let text = serde_json::to_string(&frame).expect("server frame serializes");
+        outbound.enqueue(Priority::P1, Message::Text(text.into()))
+    })
+}
+
+/// FNV-1a 64-bit constants for the deterministic snapshot checksum.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 async fn terminal_auth_error_and_close(
     outbound: Scheduler,
@@ -635,6 +1000,10 @@ fn send_backend_error(
     error: BackendError,
 ) -> Result<(), EnqueueError> {
     let (code, safe_message) = match error {
+        BackendError::NotFound => (
+            ErrorCode::NotFound,
+            "context or resource not found".to_owned(),
+        ),
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Unsupported { capability } => (
