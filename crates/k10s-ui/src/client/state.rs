@@ -235,6 +235,7 @@ pub struct ClientState {
     next_request_id: u128,
     pending: BTreeMap<RequestId, PendingEntry>,
     completed: BTreeMap<RequestId, QueryResult>,
+    rebuilt_bootstrap: Option<PendingRequest>,
     target: Option<ConnectTarget>,
     retry_attempt: u32,
     retry: Option<RetrySchedule>,
@@ -259,6 +260,7 @@ impl std::fmt::Debug for ClientState {
             .field("outbound_len", &self.outbound.len())
             .field("pending_len", &self.pending.len())
             .field("completed_len", &self.completed.len())
+            .field("rebuilt_bootstrap", &self.rebuilt_bootstrap)
             .field("target", &self.target)
             .field("retry_attempt", &self.retry_attempt)
             .field("retry", &self.retry)
@@ -286,6 +288,7 @@ impl ClientState {
             next_request_id: 1,
             pending: BTreeMap::new(),
             completed: BTreeMap::new(),
+            rebuilt_bootstrap: None,
             target: None,
             retry_attempt: 0,
             retry: None,
@@ -622,6 +625,11 @@ impl ClientState {
         self.completed.remove(request.id())
     }
 
+    /// Take the bootstrap request created internally during recovery or resynchronization.
+    pub(crate) fn take_rebuilt_bootstrap(&mut self) -> Option<PendingRequest> {
+        self.rebuilt_bootstrap.take()
+    }
+
     /// Cancel a live request. Repeated cancellation is a no-op.
     pub fn cancel(&mut self, request: &PendingRequest) -> Result<bool, ClientError> {
         if !self.pending.contains_key(request.id()) {
@@ -846,6 +854,7 @@ impl ClientState {
         self.active_subscriptions.clear();
         self.pending.clear();
         self.completed.clear();
+        self.rebuilt_bootstrap = None;
     }
 
     fn rebuild_server_state(&mut self, reserved_outbound: usize) -> Result<(), ClientError> {
@@ -861,7 +870,8 @@ impl ClientState {
         }
         self.outbound.clear();
         self.invalidate_server_state();
-        let _bootstrap = self.begin(Query::Bootstrap)?;
+        let bootstrap = self.begin(Query::Bootstrap)?;
+        self.rebuilt_bootstrap = Some(bootstrap);
         let subscriptions: Vec<_> = self
             .live_subscriptions
             .iter()
