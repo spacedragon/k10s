@@ -102,14 +102,14 @@ jobs:
             release-${{ matrix.target }}-
 
       - name: Build release binaries
-        run: cargo build --locked --release -p k10s-desktop -p k10s-server-app
+        run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
 
       - name: Package (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/k10s-desktop.exe, target/release/k10s-server.exe `
+          Compress-Archive -Path target/${{ matrix.target }}/release/k10s-desktop.exe, target/${{ matrix.target }}/release/k10s-server.exe `
             -DestinationPath dist/k10s-${{ matrix.target }}.zip
 
       - name: Package (tar.gz)
@@ -117,7 +117,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -czf dist/k10s-${{ matrix.target }}.tar.gz \
-            -C target/release k10s-desktop k10s-server
+            -C target/${{ matrix.target }}/release k10s-desktop k10s-server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
