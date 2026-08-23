@@ -47,6 +47,22 @@ impl RevisionCounter {
     }
 }
 
+/// Stamp one normalized row into its published record form at `revision`.
+///
+/// Shared by cache replacement, live deltas, and on-demand list reads so
+/// every published row carries exactly the same shape.
+pub(crate) fn record_from_row(row: &WatchRow, revision: u64) -> ResourceRecord {
+    ResourceRecord {
+        reference: row.reference.clone(),
+        revision,
+        labels: row.labels.clone(),
+        summary: row.summary.clone(),
+        created_at: row.created_at.clone(),
+        owner_references: row.owner_references.clone(),
+        events: Vec::new(),
+    }
+}
+
 /// The last known normalized rows of one supervised selection.
 ///
 /// All mutation funnels through one interior mutex whose critical sections
@@ -122,15 +138,7 @@ impl SummaryCache {
         let stamped: BTreeMap<ResourceRef, ResourceRecord> = rows
             .into_iter()
             .map(|row| {
-                let record = ResourceRecord {
-                    reference: row.reference.clone(),
-                    revision,
-                    labels: row.labels,
-                    summary: row.summary,
-                    created_at: row.created_at,
-                    owner_references: row.owner_references,
-                    events: Vec::new(),
-                };
+                let record = record_from_row(&row, revision);
                 (record.reference.clone(), record)
             })
             .collect();
@@ -154,15 +162,7 @@ impl SummaryCache {
         match update {
             crate::runtime::supervisor::WatchUpdate::Upsert(row) => {
                 let revision = revisions.next();
-                let record = ResourceRecord {
-                    reference: row.reference.clone(),
-                    revision,
-                    labels: row.labels,
-                    summary: row.summary,
-                    created_at: row.created_at,
-                    owner_references: row.owner_references,
-                    events: Vec::new(),
-                };
+                let record = record_from_row(&row, revision);
                 self.rows
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)

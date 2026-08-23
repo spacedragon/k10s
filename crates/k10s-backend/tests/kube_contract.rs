@@ -262,6 +262,121 @@ async fn fake_and_kube_adapters_agree_on_resource_types_shape() {
     }
 }
 
+/// Shared resource-list golden contract: the fake adapter's stored rows and
+/// the real kube adapter (driven by a recorded pod list cut) must map onto
+/// the same wire shape through the kernel — same keys, same row projection,
+/// and no opaque Kubernetes resourceVersion anywhere.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
+    use k10s_backend::{Gvk, Query};
+
+    let pods_gvk = Gvk::core("v1", "Pod");
+    let recorded_pod_list = r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"41"},"items":[
+      {"metadata":{"name":"web","uid":"uid-web","namespace":"default","creationTimestamp":"2026-08-21T00:00:00Z","labels":{"app":"web"}},
+       "status":{"phase":"Running"}}
+    ]}"#;
+
+    async fn list_wire_payload(kernel: &BackendKernel, context: &str, gvk: &Gvk) -> Value {
+        let namespace = Some("default".to_owned());
+        match kernel
+            .query(Query::ResourceList {
+                context: context.into(),
+                gvk: gvk.clone(),
+                namespace,
+            })
+            .await
+            .expect("resource list succeeds")
+        {
+            KernelQueryResult::ResourceList(result) => {
+                serde_json::to_value(result.wire_payload()).expect("payload serializes")
+            }
+            other => panic!("kernel must map the list into its wire payload, got {other:?}"),
+        }
+    }
+
+    // Fake side: the standard dataset lists its pods.
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+    let fake_payload = list_wire_payload(&fake_kernel, "dev-local", &pods_gvk).await;
+
+    // Real side: one recorded pod list cut served by the tower-level fixture.
+    let server = RecordedApiServer::standard();
+    server.set_response("/api/v1/namespaces/default/pods", 200, recorded_pod_list);
+    let client = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+    let kube_payload = list_wire_payload(&kube_kernel, "contract-mock", &pods_gvk).await;
+
+    for (label, payload) in [("fake", &fake_payload), ("kube", &kube_payload)] {
+        let keys = payload
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: payload is an object"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "capabilities",
+                "context",
+                "generatedAt",
+                "gvk",
+                "namespace",
+                "revision",
+                "rows"
+            ]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+            "{label}: resource-list top-level keys drifted"
+        );
+        let text = payload.to_string();
+        assert!(!text.contains("resourceVersion"), "{label}: rv leaked");
+        assert!(!text.contains("resource_version"), "{label}: rv leaked");
+    }
+
+    // Row-level shape parity (row counts differ by dataset design).
+    let fake_rows = fake_payload["rows"].as_array().unwrap();
+    let kube_rows = kube_payload["rows"].as_array().unwrap();
+    assert!(!fake_rows.is_empty() && !kube_rows.is_empty());
+    let row_keys = |row: &Value| {
+        row.as_object()
+            .unwrap_or_else(|| panic!("row is an object: {row:?}"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for kube_row in kube_rows {
+        assert_eq!(
+            row_keys(&fake_rows[0]),
+            row_keys(kube_row),
+            "row keys drifted between adapters"
+        );
+        let identity_keys = |row: &Value| {
+            row["identity"]
+                .as_object()
+                .expect("identity is an object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(identity_keys(&fake_rows[0]), identity_keys(kube_row));
+    }
+
+    // Both adapters produce honest summaries on the same projection: the
+    // kube pod carries the phase from its recorded status.
+    assert_eq!(kube_rows[0]["summary"], "Running");
+}
+
 /// Shared resource-watch wire contract: the fake adapter and the real kube
 /// adapter (driven by a fully scripted watch source, no cluster) must
 /// normalize identical backend types, so the kernel maps both onto the same

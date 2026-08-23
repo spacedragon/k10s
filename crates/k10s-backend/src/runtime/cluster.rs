@@ -141,6 +141,14 @@ impl ClusterWatches {
         receiver
     }
 
+    /// Allocate one revision from the same global monotonic counter the
+    /// supervised watch publications use, so on-demand list snapshots can
+    /// never move the system-wide revision stream backwards.
+    #[must_use]
+    pub fn next_revision(&self) -> u64 {
+        self.revisions.next()
+    }
+
     /// Current phase of one selection, when it exists.
     #[must_use]
     pub fn phase(&self, selector: &WatchSelector) -> Option<WatchPhase> {
