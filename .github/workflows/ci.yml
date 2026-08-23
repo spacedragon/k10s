@@ -34,6 +34,10 @@ jobs:
         run: sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
       - name: Cache cargo registry and target
+        # Exact-match key only (no restore-keys fallback): layering a stale
+        # warm `target` from other branches on top of the kube client stack's
+        # artifacts exceeds hosted runner disk budgets mid-link. Repeated
+        # pushes with an unchanged lock still hit this exact cache.
         uses: actions/cache@v4
         with:
           path: |
@@ -42,8 +46,6 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
 
       - name: Format check
         run: cargo fmt --all -- --check

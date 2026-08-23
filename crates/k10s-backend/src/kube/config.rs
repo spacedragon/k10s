@@ -13,10 +13,11 @@ use kube::config::{Config, Kubeconfig, KubeconfigError};
 use crate::port::{AdapterError, ContextInfo};
 
 /// Load credential-free context summaries from an explicit kubeconfig path or
-/// standard discovery (`KUBECONFIG`, then `~/.kube/config`).
-pub(crate) fn load_context_summaries(
+/// standard discovery (`KUBECONFIG`, then `~/.kube/config`), along with the
+/// parsed kube-rs config that seeds per-context cluster client construction.
+pub(crate) fn load_with_source(
     explicit_path: Option<&Path>,
-) -> Result<Vec<ContextInfo>, AdapterError> {
+) -> Result<(Vec<ContextInfo>, Kubeconfig), AdapterError> {
     let (kubeconfig, source) = match explicit_path {
         Some(path) => Kubeconfig::read_from(path)
             .map(|kubeconfig| (kubeconfig, path.display().to_string()))
@@ -26,7 +27,7 @@ pub(crate) fn load_context_summaries(
             .map_err(normalize_discovery_error),
     }?;
 
-    validate_and_map(&kubeconfig, &source)
+    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig))
 }
 
 /// Describe where standard discovery looked, for operator-facing errors.

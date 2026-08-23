@@ -51,12 +51,20 @@ pub enum Query {
 }
 
 /// One selectable resource type behind [`Query::ResourceTypes`].
+///
+/// Normalized discovery data only: adapters translate cluster responses into
+/// this descriptor so Kubernetes client and openapi types never cross the seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeEntry {
+pub struct ApiResourceDescriptor {
     /// Group/version/kind of the type.
     pub gvk: Gvk,
+    /// Plural API name used in cluster resource paths (for example
+    /// `deployments`), normalized from discovery for every adapter.
+    pub plural: String,
     /// Whether objects of this type live inside namespaces.
     pub namespaced: bool,
+    /// Whether the cluster exposes a scale subresource for this type.
+    pub supports_scale: bool,
 }
 
 /// Selectable resource types of one context.
@@ -65,7 +73,30 @@ pub struct ResourceTypesData {
     /// Context the types were read from.
     pub context: String,
     /// Types sorted by group/version/kind.
-    pub types: Vec<TypeEntry>,
+    pub types: Vec<ApiResourceDescriptor>,
+}
+
+impl ResourceTypesData {
+    /// Resolve one type by exact kind match in catalog order.
+    #[must_use]
+    pub fn find_kind(&self, kind: &str) -> Option<&ApiResourceDescriptor> {
+        self.types.iter().find(|entry| entry.gvk.kind == kind)
+    }
+
+    /// Resolve one type by exact plural name match in catalog order.
+    #[must_use]
+    pub fn find_plural(&self, plural: &str) -> Option<&ApiResourceDescriptor> {
+        self.types.iter().find(|entry| entry.plural == plural)
+    }
+
+    /// All types of one group/version slice, keeping catalog order.
+    #[must_use]
+    pub fn of_group_version(&self, group: &str, version: &str) -> Vec<&ApiResourceDescriptor> {
+        self.types
+            .iter()
+            .filter(|entry| entry.gvk.group == group && entry.gvk.version == version)
+            .collect()
+    }
 }
 
 /// Kind of stream to open.

@@ -7,7 +7,10 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use k10s_backend::{BackendKernel, FakeKubernetes, KernelQueryResult, KubeAdapter, Query};
+use k10s_backend::testkit::RecordedApiServer;
+use k10s_backend::{
+    BackendKernel, ContextInfo, FakeKubernetes, KernelQueryResult, KubeAdapter, Query,
+};
 use serde_json::Value;
 
 /// Real-kubeconfig fixture carrying credential material that must never reach
@@ -161,5 +164,100 @@ fn fake_and_kube_adapters_agree_on_bootstrap_shape() {
             !serialized.contains(marker),
             "credential material leaked: {marker}"
         );
+    }
+}
+
+/// Shared resource-types wire payload one adapter must produce; ignores values.
+async fn resource_types_wire_payload(kernel: BackendKernel, context: &str) -> Value {
+    match kernel
+        .query(Query::ResourceTypes {
+            context: context.into(),
+        })
+        .await
+        .expect("resource types succeed")
+    {
+        KernelQueryResult::ResourceTypes(types) => {
+            serde_json::to_value(types.wire_payload()).expect("payload serializes")
+        }
+        other => panic!("kernel must map discovery into its wire payload, got {other:?}"),
+    }
+}
+
+/// Pin the shared resource-types wire shape; ignores values.
+fn assert_resource_types_shape(payload: &Value, label: &str) {
+    let keys = payload
+        .as_object()
+        .unwrap_or_else(|| panic!("{label}: payload is an object"))
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        ["context", "types"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        "{label}: top-level keys drifted"
+    );
+    let types = payload["types"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: types must be an array"));
+    assert!(!types.is_empty(), "{label}: catalog must not be empty");
+
+    // Every entry shares the normalized camelCase shape; nothing else may appear.
+    let allowed: std::collections::BTreeSet<String> = ["gvk", "namespaced"]
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    for entry in types {
+        assert!(
+            entry
+                .as_object()
+                .expect("entries are objects")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                == allowed,
+            "{label}: entry keys drifted: {entry:?}"
+        );
+    }
+
+    // Raw kube-rs discovery vocabulary never crosses the seam.
+    let wire = payload.to_string();
+    for marker in ["APIResourceList", "singularName", "verbs"] {
+        assert!(
+            !wire.contains(marker),
+            "{label}: raw discovery leaked: {marker}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_resource_types_shape() {
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+
+    // The real adapter answers from a recorded tower-level Kubernetes service.
+    // Client construction and the query both run inside this test's runtime,
+    // as kube-rs requires for raising its client stack.
+    let server = RecordedApiServer::standard();
+    let client = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds around the recorded server");
+
+    let fake_payload = resource_types_wire_payload(fake_kernel, "dev-local").await;
+    let kube_kernel = BackendKernel::new_with_instance_id(kube_adapter, "contract-instance");
+    let kube_payload = resource_types_wire_payload(kube_kernel, "contract-mock").await;
+
+    for (label, payload) in [("fake", &fake_payload), ("kube", &kube_payload)] {
+        assert_resource_types_shape(payload, label);
     }
 }
