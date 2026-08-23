@@ -12,7 +12,7 @@ use crate::client::{
     LiveSubscription, PendingRequest, Query, QueryResult, StreamRoute, StreamSession, StreamSignal,
     TransportError, WebSocketTransport,
 };
-use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
+use crate::ui::{ConnectionState as ShellConnectionState, UiShell, tools::ShellPhase};
 use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
@@ -614,7 +614,9 @@ impl K10sApp {
             }
         }
         // Guard resolution: a workspace that resolved DisconnectShell (or
-        // lost its detail) must not keep a live terminal.
+        // lost its guarded detail) must not keep an ATTACHED terminal. A
+        // session still connecting has not engaged the guard yet, so it is
+        // left alone until its Ready signal arrives.
         let exec_windows: Vec<WindowId> = self
             .stream_sessions
             .range(..)
@@ -622,19 +624,31 @@ impl K10sApp {
             .map(|((window, _), _)| *window)
             .collect();
         for window in exec_windows {
-            let still_guarded = self
+            // Integrated resource windows carry their detail inside the
+            // resource state; dedicated windows are Detail directly.
+            let guard = self
                 .shell
                 .workspace()
                 .window(window)
                 .and_then(|w| match &w.content {
                     crate::workspace::WindowContent::Detail(detail) => Some(detail.shell.connected),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            if !still_guarded
-                && let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Exec))
-            {
-                session.disconnect();
+                    crate::workspace::WindowContent::Resource(resource) => resource
+                        .detail
+                        .as_ref()
+                        .map(|detail| detail.shell.connected),
+                });
+            let attached = self
+                .shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .is_some_and(|shell| matches!(shell.phase(), ShellPhase::Attached));
+            if attached && guard != Some(true) {
+                self.release_shell_guard(window);
+                if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Exec))
+                {
+                    session.disconnect();
+                }
             }
         }
     }
