@@ -20,9 +20,10 @@ use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
     OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup,
-    ResourceListData, ResourceRecord, ResourceRef, ResourceTypesData, Subscribe,
+    ResourceListData, ResourceRecord, ResourceRef, ResourceTypesData, StreamInput, Subscribe,
     SubscriptionHandle, TypeEntry,
 };
+use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
 
 /// Unix seconds for the fixed fake epoch `2026-08-21T00:00:00Z`.
@@ -83,6 +84,8 @@ struct FakeState {
     ticket_order: std::collections::VecDeque<String>,
     next_ticket: u64,
     next_operation: u64,
+    /// Kernel-owned stream hub: single-use stream tickets and fake sessions.
+    streams: StreamHub,
 }
 
 #[cfg(test)]
@@ -289,6 +292,7 @@ impl FakeKubernetes {
                 ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
+                streams: StreamHub::new(),
             })),
             #[cfg(test)]
             subscription_cut_gate: Arc::new(Mutex::new(None)),
@@ -312,6 +316,7 @@ impl FakeKubernetes {
                 ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
+                streams: StreamHub::new(),
             })),
             #[cfg(test)]
             subscription_cut_gate: Arc::new(Mutex::new(None)),
@@ -539,6 +544,29 @@ impl FakeKubernetes {
             mutation_done,
         });
     }
+
+    /// Advance one explicit test tick on a live stream session. Sessions
+    /// never advance on their own: no wall clock, no process, no command.
+    pub fn tick_stream(&self, ticket_id: &str) {
+        self.lock().streams.tick(ticket_id);
+    }
+
+    /// Terminate a stream session with an explicit exit code.
+    pub fn finish_stream(&self, ticket_id: &str, exit_code: i32) {
+        self.lock().streams.finish(ticket_id, exit_code);
+    }
+
+    /// Number of live stream sessions; observability for disconnect tests.
+    #[must_use]
+    pub fn live_stream_sessions(&self) -> usize {
+        self.lock().streams.live_session_count()
+    }
+
+    /// Last recorded terminal resize of a live session.
+    #[must_use]
+    pub fn last_stream_resize(&self, ticket_id: &str) -> Option<(u32, u32)> {
+        self.lock().streams.last_resize(ticket_id)
+    }
 }
 
 impl Default for FakeKubernetes {
@@ -643,7 +671,61 @@ impl KubernetesAccess for FakeKubernetes {
                         },
                     ))
                 }
-                Query::StreamTicket { .. } => Err(BackendError::unsupported("stream.ticket")),
+                Query::StreamTicket { stream } => {
+                    let mut state = self.lock();
+                    let (context, namespace, pod, container) = match &stream {
+                        crate::port::StreamKind::Logs {
+                            context,
+                            namespace,
+                            pod,
+                            container,
+                        } => (context, namespace, pod, container),
+                        crate::port::StreamKind::Exec {
+                            context,
+                            namespace,
+                            pod,
+                            container,
+                            ..
+                        } => (context, namespace, pod, container),
+                    };
+                    // Context existence and RBAC policy come first.
+                    if !state.contexts.iter().any(|c| c.name == context.as_str()) {
+                        return Err(BackendError::NotFound);
+                    }
+                    if context == "prod-readonly" {
+                        return Err(BackendError::Forbidden);
+                    }
+                    // The pod must exist with its stable identity.
+                    let pod_gvk = Gvk::core("v1", "Pod");
+                    let exists = state.records.iter().any(|record| {
+                        let reference = &record.reference;
+                        reference.context == context.as_str()
+                            && reference.gvk == pod_gvk
+                            && reference.namespace.as_deref() == Some(namespace.as_str())
+                            && reference.name == pod.as_str()
+                    });
+                    if !exists {
+                        return Err(BackendError::NotFound);
+                    }
+                    // Container fixtures: `app` is the runnable container,
+                    // `distroless` exists but has no executable binary, any
+                    // other name does not exist.
+                    match container.as_str() {
+                        "app" => {}
+                        "distroless" => {
+                            return Err(BackendError::Conflict(format!(
+                                "container \"{container}\" has no executable binary"
+                            )));
+                        }
+                        _ => return Err(BackendError::NotFound),
+                    }
+                    let revision = state.current_revision();
+                    let ticket_id = state.streams.issue_ticket(stream.clone(), revision)?;
+                    Ok(QueryResult::StreamTicket(crate::port::StreamGrant {
+                        ticket_id,
+                        stream,
+                    }))
+                }
                 Query::ResourceList {
                     context,
                     gvk,
@@ -781,6 +863,22 @@ impl KubernetesAccess for FakeKubernetes {
         })
     }
 
+    fn stream_input<'a>(
+        &'a self,
+        ticket_id: &'a str,
+        input: StreamInput,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut state = self.lock();
+            match input {
+                StreamInput::Stdin(line) => state.streams.queue_stdin(ticket_id, line),
+                StreamInput::Resize { cols, rows } => {
+                    state.streams.record_resize(ticket_id, cols, rows)
+                }
+            }
+        })
+    }
+
     fn subscribe<'a>(
         &'a self,
         req: Subscribe,
@@ -855,6 +953,13 @@ impl KubernetesAccess for FakeKubernetes {
                         "infrastructure-watch",
                         receiver,
                     ))
+                }
+                Subscribe::StreamRedeem { ticket_id, route } => {
+                    let mut state = self.lock();
+                    let revision = state.current_revision();
+                    let (receiver, bound) = state.streams.redeem(&ticket_id, route, revision)?;
+                    Ok(SubscriptionHandle::with_events("stream-session", receiver)
+                        .with_stream(bound))
                 }
             }
         })

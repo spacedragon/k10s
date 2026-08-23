@@ -58,6 +58,14 @@ impl KubernetesAccess for HugeKubernetes {
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
     }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
+    }
 }
 
 impl KubernetesAccess for SensitiveKubernetes {
@@ -91,6 +99,14 @@ impl KubernetesAccess for SensitiveKubernetes {
             ))
         })
     }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
+    }
 }
 
 impl KubernetesAccess for SlowKubernetes {
@@ -121,6 +137,14 @@ impl KubernetesAccess for SlowKubernetes {
         _: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }
 
@@ -185,13 +209,28 @@ fn assert_close_reason(message: Message, reason: &str) {
 }
 
 #[tokio::test]
-async fn mounts_only_control_as_websocket() {
+async fn dedicated_stream_routes_are_websocket_upgrades() {
     let server = server().await;
     for path in [k10s_protocol::LOGS_PATH, k10s_protocol::EXEC_PATH] {
-        let error = connect_async(format!("ws://{}{}", server.addr(), path))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("501"), "{error}");
+        // The dedicated routes are live WebSocket upgrades now: a connection
+        // succeeds but is closed because the mandatory hello never arrives
+        // (or arrives invalid), never a plain HTTP error like 501.
+        let outcome = connect_async(format!("ws://{}{}", server.addr(), path)).await;
+        match outcome {
+            Ok((mut ws, _)) => {
+                ws.send(Message::Text(r#"{"kind":"status"}"#.to_owned().into()))
+                    .await
+                    .unwrap();
+                let reply = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("stream route answers within timeout");
+                assert!(
+                    reply.is_some(),
+                    "the stream route must answer before closing: {path}"
+                );
+            }
+            Err(error) => panic!("dedicated stream route {path} must upgrade: {error}"),
+        }
     }
     server.shutdown().await.unwrap();
 }

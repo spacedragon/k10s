@@ -126,6 +126,9 @@ impl BackendKernel {
             QueryResult::YamlValidation(data) => {
                 KernelQueryResult::YamlValidate(crate::operation::YamlValidateResult::new(data))
             }
+            QueryResult::StreamTicket(grant) => {
+                KernelQueryResult::StreamTicket(crate::stream::StreamTicketResult::new(grant))
+            }
             QueryResult::ResourceRelations(_) => {
                 // Relations are an internal composition of resource.detail
                 // and are never exposed as a standalone kernel result.
@@ -183,6 +186,15 @@ impl BackendKernel {
     /// Subscriptions are long-lived; deadlines do not apply.
     pub async fn subscribe(&self, req: Subscribe) -> Result<SubscriptionHandle, BackendError> {
         self.adapter.subscribe(req).await
+    }
+
+    /// Forward inbound user input into a redeemed stream session.
+    pub async fn stream_input(
+        &self,
+        ticket_id: &str,
+        input: crate::port::StreamInput,
+    ) -> Result<(), BackendError> {
+        self.adapter.stream_input(ticket_id, input).await
     }
 
     /// Map a snapshot slice into a normalized protocol page.
@@ -247,6 +259,8 @@ pub enum KernelQueryResult {
     Infrastructure(InfrastructureResult),
     /// Guarded YAML validation outcome with its issued ticket when valid.
     YamlValidate(crate::operation::YamlValidateResult),
+    /// A granted single-use stream ticket.
+    StreamTicket(crate::stream::StreamTicketResult),
 }
 
 impl KernelQueryResult {
@@ -273,6 +287,7 @@ impl KernelQueryResult {
             Self::ResourceTypes(r) => r.serialized(),
             Self::Infrastructure(r) => r.serialized(),
             Self::YamlValidate(r) => r.serialized(),
+            Self::StreamTicket(r) => r.serialized(),
         }
     }
 

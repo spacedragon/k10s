@@ -7,7 +7,8 @@ use k10s_protocol::{
     PROTOCOL_MINOR, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
     ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
     ResourceListRow, ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
+    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
+    StreamTicketRequest, StreamTicketResponse, StreamType, Subscribe, SubscriptionId,
     SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
 
@@ -187,6 +188,17 @@ pub enum Query {
         /// The exact YAML text to validate.
         yaml: String,
     },
+    /// Issue a single-use stream ticket for a dedicated logs/exec socket.
+    /// The ticket is redeemed in the stream socket's first `hello`, never
+    /// placed in any URL.
+    StreamTicket {
+        /// Pod/container to attach to.
+        target: StreamTarget,
+        /// Whether this opens logs or an exec session.
+        stream_type: StreamType,
+        /// Exec mode: interactive TTY shell vs separated stdout/stderr.
+        tty: bool,
+    },
 }
 
 /// Command behaviors: mutations that return an `OperationId`.
@@ -232,6 +244,8 @@ pub enum QueryResult {
     Infrastructure(Box<InfrastructureResponse>),
     /// Guarded YAML validation outcome; `Valid` carries the ticket.
     YamlValidate(Box<YamlOutcome>),
+    /// A granted single-use stream ticket for a dedicated logs/exec socket.
+    StreamTicket(Box<StreamTicketResponse>),
     /// An accepted apply command with its background operation ID.
     Applied(OperationAccepted),
 }
@@ -361,6 +375,7 @@ impl PendingAction {
             Self::Query(Query::ResourceTypes(_)) => "resource.types",
             Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
             Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
+            Self::Query(Query::StreamTicket { .. }) => k10s_protocol::REQUEST_STREAM_TICKET,
             Self::Command(Command::YamlApply { .. }) => "yaml.apply",
         }
     }
@@ -390,6 +405,15 @@ impl PendingAction {
             Self::Query(Query::YamlValidate { context, yaml }) => encode(YamlValidateRequest {
                 context: context.clone(),
                 yaml: yaml.clone(),
+            }),
+            Self::Query(Query::StreamTicket {
+                target,
+                stream_type,
+                tty,
+            }) => encode(StreamTicketRequest {
+                target: target.clone(),
+                stream_type: *stream_type,
+                tty: *tty,
             }),
             Self::Command(Command::YamlApply { request, .. }) => encode(request),
         }
@@ -1082,6 +1106,12 @@ impl ClientState {
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::YamlValidate(Box::new(outcome))
+                }
+                PendingAction::Query(Query::StreamTicket { .. }) => {
+                    let granted: StreamTicketResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::StreamTicket(Box::new(granted))
                 }
                 PendingAction::Command(Command::YamlApply { .. }) => {
                     let accepted: OperationAccepted = frame
