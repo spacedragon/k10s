@@ -88,6 +88,13 @@ impl ConnectTarget {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    /// The first-frame credential. It travels only inside the serialized
+    /// `Hello` — never in URLs, debug output, or logs.
+    #[must_use]
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
 }
 
 /// A safe client-state error.

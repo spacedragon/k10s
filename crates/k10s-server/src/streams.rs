@@ -84,16 +84,17 @@ fn redemption_error(error: &BackendError) -> Message {
 
 /// Serve one dedicated stream socket until either side ends it.
 ///
-/// The connection semaphore permit is held for the socket's whole life.
-/// Stream sessions are cancelled during shutdown: both the drain window and
-/// forced teardown end them promptly so the approved drain can complete.
+/// The unauthenticated-control permit is released the moment the `hello`
+/// authenticates; from then on only the dedicated stream-cap permit is
+/// held, so live streams cannot starve control authentication.
 pub(crate) async fn serve_stream(
     socket: WebSocket,
     config: Arc<ServerConfig>,
     kernel: Arc<BackendKernel>,
     route: StreamRoute,
     signals: crate::lifecycle::DrainSignals,
-    _permit: OwnedSemaphorePermit,
+    unauthenticated_permit: OwnedSemaphorePermit,
+    _stream_permit: OwnedSemaphorePermit,
 ) {
     let (mut sink, mut inbound) = socket.split();
     if signals.force.is_cancelled() || signals.drain.is_cancelled() {
@@ -159,6 +160,9 @@ pub(crate) async fn serve_stream(
         let _ = sink.send(Message::Close(None)).await;
         return;
     }
+    // Authenticated: the stream no longer needs the shared unauthenticated
+    // pool; the dedicated stream-cap permit carries it for its lifetime.
+    drop(unauthenticated_permit);
     if protocol_major != k10s_protocol::PROTOCOL_MAJOR {
         let _ = sink
             .send(error_message(

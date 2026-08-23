@@ -112,8 +112,18 @@ impl WebSocketTransport {
     pub fn send_frame(&mut self, frame: &ClientFrame) -> Result<(), TransportError> {
         let json = serde_json::to_string(frame)
             .map_err(|error| TransportError(format!("could not encode client frame: {error}")))?;
-        self.sender.send(WsMessage::Text(json));
+        self.send_text(json);
         Ok(())
+    }
+
+    /// Send one raw text message (used by dedicated stream sockets).
+    pub fn send_text(&mut self, text: String) {
+        self.sender.send(WsMessage::Text(text));
+    }
+
+    /// Send one raw binary message (used by dedicated stream sockets).
+    pub fn send_binary(&mut self, bytes: Vec<u8>) {
+        self.sender.send(WsMessage::Binary(bytes));
     }
 
     /// Explicitly close the underlying WebSocket.

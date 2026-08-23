@@ -37,6 +37,7 @@ pub(crate) struct AppState {
     kernel: Arc<BackendKernel>,
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
+    streams: Arc<Semaphore>,
     signals: DrainSignals,
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
@@ -588,6 +589,7 @@ pub fn router(
     let state = AppState {
         unauthenticated: Arc::new(Semaphore::new(config.max_unauthenticated_connections)),
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
+        streams: Arc::new(Semaphore::new(config.max_stream_connections)),
         config: Arc::new(config),
         kernel: Arc::new(kernel),
         signals,
@@ -663,9 +665,20 @@ pub(crate) async fn stream_upgrade(
     let Some(upgrade_guard) = state.admission.try_register(&state.readiness) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+    // The dedicated stream cap is enforced independently of the control
+    // pool: a live authenticated stream holds no unauthenticated-control
+    // permit, so streams can never starve new control authentication.
+    let stream_permit = match state.streams.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            drop(upgrade_guard);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
     let permit = match state.unauthenticated.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
+            drop(stream_permit);
             drop(upgrade_guard);
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -681,7 +694,16 @@ pub(crate) async fn stream_upgrade(
             let running_guard = upgrade_guard.confirm_running();
             connections.spawn(async move {
                 let _running = running_guard;
-                crate::streams::serve_stream(socket, config, kernel, route, signals, permit).await;
+                crate::streams::serve_stream(
+                    socket,
+                    config,
+                    kernel,
+                    route,
+                    signals,
+                    permit,
+                    stream_permit,
+                )
+                .await;
             });
         }))
 }

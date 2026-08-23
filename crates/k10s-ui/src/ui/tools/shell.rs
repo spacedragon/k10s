@@ -154,3 +154,157 @@ impl ShellTool {
         }
     }
 }
+
+use std::collections::HashMap;
+
+use egui::{RichText, ScrollArea};
+
+use crate::workspace::WindowId;
+
+/// Per-window terminal sessions plus rendering-time queues. Owned by the UI
+/// shell: the application drains connect requests and stdin/resize actions,
+/// forwards them into live [`crate::client::StreamSession`]s, and projects
+/// [`crate::client::StreamSignal`]s back into these sessions.
+#[derive(Debug, Default)]
+pub struct ShellSessions {
+    sessions: HashMap<WindowId, ShellTool>,
+    input_buffers: HashMap<WindowId, String>,
+    connects: Vec<(WindowId, StreamTarget)>,
+}
+
+impl ShellSessions {
+    /// Lazily ensure the terminal for `window`, bound to `target`.
+    pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut ShellTool {
+        self.sessions
+            .entry(window)
+            .or_insert_with(|| ShellTool::new(target))
+    }
+
+    /// Session access for signal projection.
+    #[must_use]
+    pub fn get_mut(&mut self, window: WindowId) -> Option<&mut ShellTool> {
+        self.sessions.get_mut(&window)
+    }
+
+    /// Mark every session failed (control transport loss).
+    pub fn connection_lost(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.connection_lost();
+        }
+    }
+
+    /// Drop entries for closed windows.
+    pub fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
+        self.sessions.retain(|id, _| live(*id));
+        self.input_buffers.retain(|id, _| live(*id));
+    }
+
+    /// Drain queued stdin/resize actions from every window's terminal.
+    pub fn drain_actions(&mut self) -> Vec<(WindowId, ShellAction)> {
+        let mut drained = Vec::new();
+        for (window, session) in self.sessions.iter_mut() {
+            for action in session.drain_actions() {
+                drained.push((*window, action));
+            }
+        }
+        drained
+    }
+
+    /// Queue one explicit shell-connect request produced during rendering.
+    pub fn queue_connect(&mut self, window: WindowId, target: StreamTarget) {
+        self.connects.push((window, target));
+    }
+
+    /// Drain every queued explicit connect request.
+    pub fn drain_connects(&mut self) -> Vec<(WindowId, StreamTarget)> {
+        std::mem::take(&mut self.connects)
+    }
+
+    /// The pending single-line input buffer of one window.
+    #[must_use]
+    pub fn input_buffer(&self, window: WindowId) -> &str {
+        self.input_buffers
+            .get(&window)
+            .map(String::as_str)
+            .unwrap_or_default()
+    }
+
+    /// Replace the pending single-line input buffer of one window.
+    pub fn set_input_buffer(&mut self, window: WindowId, text: String) {
+        self.input_buffers.insert(window, text);
+    }
+
+    /// Take (clear) the pending input buffer of one window.
+    pub fn take_input_buffer(&mut self, window: WindowId) -> String {
+        self.input_buffers.remove(&window).unwrap_or_default()
+    }
+}
+
+/// Render the connected Shell tab content for one detail view.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    sessions: &mut ShellSessions,
+    target: Option<StreamTarget>,
+) {
+    let Some(target) = target else {
+        ui.label("Select a pod to open a shell");
+        return;
+    };
+    let mut connect_requested = false;
+    let mut pending_input = sessions.take_input_buffer(window_id);
+    {
+        let session = sessions.ensure(window_id, target.clone());
+        match session.phase().clone() {
+            ShellPhase::Disconnected => {
+                let button = ui.button("Connect shell");
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "Connect shell".to_owned(),
+                    )
+                });
+                connect_requested = button.clicked();
+                ui.label(RichText::new("Disconnected").weak());
+            }
+            ShellPhase::Connecting => {
+                ui.label("Connecting");
+            }
+            ShellPhase::Attached => {
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut pending_input).hint_text("Type a command"),
+                    );
+                    if edit.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                        && !pending_input.trim().is_empty()
+                    {
+                        session.send_input(pending_input.trim());
+                        pending_input.clear();
+                    }
+                });
+            }
+            ShellPhase::Exited(code) => {
+                ui.label(format!("Session exited with code {code}"));
+            }
+            ShellPhase::Failed(reason) => {
+                ui.label(RichText::new(format!("Session failed: {reason}")));
+            }
+        }
+        ScrollArea::vertical()
+            .id_salt(("shell.terminal", window_id.0))
+            .show(ui, |ui| {
+                for line in session.buffer() {
+                    ui.label(RichText::new(line.as_str()).monospace());
+                }
+                if session.buffer_is_empty() {
+                    ui.label(RichText::new("No output yet").weak());
+                }
+            });
+    }
+    sessions.set_input_buffer(window_id, pending_input);
+    if connect_requested {
+        sessions.queue_connect(window_id, target);
+    }
+}

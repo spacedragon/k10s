@@ -14,7 +14,11 @@ use k10s_protocol::{
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::{Value, json};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::Message,
+    tungstenite::protocol::frame::{Frame, coding::Data, coding::OpCode},
+};
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -186,6 +190,26 @@ fn decode_binary(message: Message) -> (u8, String) {
         decoded.kind,
         String::from_utf8(decoded.data.to_vec()).expect("utf8 stream payload"),
     )
+}
+
+/// Send one logical text message as real WebSocket fragmentation so the
+/// server-side assembled-message limits are exercised across continuations.
+async fn send_fragmented_text(ws: &mut Ws, parts: &[&str]) {
+    for (index, part) in parts.iter().enumerate() {
+        let is_final = index == parts.len() - 1;
+        let opcode = if index == 0 {
+            OpCode::Data(Data::Text)
+        } else {
+            OpCode::Data(Data::Continue)
+        };
+        ws.send(Message::Frame(Frame::message(
+            part.as_bytes().to_vec(),
+            opcode,
+            is_final,
+        )))
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -515,6 +539,18 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
     let code = expect_request_error(&mut control, "no-binary").await;
     assert_eq!(code, json!(ErrorCode::Conflict), "missing binary denial");
 
+    // Binary availability is exec-only: the distroless container's LOGS
+    // remain readable.
+    let ticket = issue_ticket(
+        &mut control,
+        "distroless-logs",
+        &web_target("distroless"),
+        StreamType::Logs,
+        false,
+    )
+    .await;
+    assert!(!ticket.is_empty());
+
     server.shutdown().await.unwrap();
 }
 
@@ -558,7 +594,7 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
         stream_rate_budget_bytes_per_sec: 64,
         ..ServerConfig::default()
     };
-    let (server, fake) = spawn_server_with(config).await;
+    let (server, _fake) = spawn_server_with(config).await;
     let mut control = connect_control(&server).await;
     let ticket = issue_ticket(
         &mut control,
@@ -576,7 +612,9 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
     assert_eq!(receive_text(&mut ws).await["kind"], json!("ready"));
     let (_, banner) = decode_binary(receive_message(&mut ws).await);
 
-    // Flood well past the configured inbound byte budget.
+    // Flood well past the configured inbound byte budget. The server must
+    // answer with an explicit budget/overload error and close; silence or
+    // continued streaming would fail this test.
     for _ in 0..8 {
         ws.send(Message::Binary(
             k10s_protocol::encode_stream_payload(
@@ -588,27 +626,35 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
         .await
         .unwrap();
     }
-    let mut saw_overload = false;
-    for _ in 0..16 {
-        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
-            Err(_) | Ok(None) | Ok(Some(Err(_))) => break,
-            Ok(Some(Ok(Message::Close(_)))) => break,
+    let mut saw_overload_error = false;
+    let mut saw_close = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Err(_) => panic!("the server must close a flooding socket explicitly"),
+            Ok(None) | Ok(Some(Err(_))) => break,
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                saw_close = true;
+                if frame.is_some_and(|frame| frame.reason.contains("budget")) {
+                    saw_overload_error = true;
+                }
+                break;
+            }
             Ok(Some(Ok(Message::Text(text)))) => {
                 let value: Value = serde_json::from_str(&text).unwrap();
                 if value["message"].as_str().is_some_and(|message| {
-                    message.contains("overload") || message.contains("budget")
+                    message.contains("budget") || message.contains("overload")
                 }) {
-                    saw_overload = true;
-                    break;
+                    saw_overload_error = true;
                 }
             }
             Ok(Some(Ok(_))) => continue,
         }
     }
     assert!(
-        saw_overload || fake.last_stream_resize(&ticket).is_none() || !banner.is_empty(),
-        "the flood must end in an explicit overload closure"
+        saw_overload_error && saw_close,
+        "the flood must end in an explicit overload closure (error={saw_overload_error}, close={saw_close})"
     );
+    let _ = banner;
 
     server.shutdown().await.unwrap();
 }
@@ -720,6 +766,202 @@ async fn client_state_seam_issues_stream_tickets_without_token_urls() {
     assert!(!granted.ticket_id.is_empty());
     assert_eq!(granted.stream_type, StreamType::Logs);
     assert_eq!(granted.target.pod, WEB_POD);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Fragmented messages are reassembled before limits are applied: a hello
+/// split across continuations still authenticates, while one whose
+/// assembled size exceeds the message bound is rejected on both routes.
+#[tokio::test]
+async fn fragmented_messages_are_assembled_and_enforced() {
+    let config = ServerConfig {
+        max_stream_frame_size: 128,
+        max_stream_message_size: 256,
+        ..ServerConfig::default()
+    };
+    let (server, fake) = spawn_server_with(config).await;
+    let mut control = connect_control(&server).await;
+    let ticket = issue_ticket(
+        &mut control,
+        "t",
+        &web_target(WEB_CONTAINER),
+        StreamType::Logs,
+        false,
+    )
+    .await;
+
+    // A fragmented hello under the assembled bound authenticates fine: the
+    // wrong token proves the frame was actually decoded after assembly.
+    for path in [LOGS_PATH, EXEC_PATH] {
+        let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), path))
+            .await
+            .unwrap();
+        send_fragmented_text(
+            &mut ws,
+            &[
+                r#"{"kind":"hello","protocolMajor":1,"#,
+                r#"  "accessToken":"wrong-token","#,
+                &format!(r#""streamTicket":"{ticket}"}}"#),
+            ],
+        )
+        .await;
+        let frame = receive_text(&mut ws).await;
+        assert_eq!(frame["kind"], json!("error"), "{frame:?}");
+        assert_eq!(frame["code"], json!(ErrorCode::Unauthorized));
+        receive_close(&mut ws).await;
+    }
+
+    // A fragmented hello whose ASSEMBLED size exceeds the message bound is
+    // rejected on both routes, even though every individual fragment is
+    // far below the frame limit.
+    for path in [LOGS_PATH, EXEC_PATH] {
+        let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), path))
+            .await
+            .unwrap();
+        let padding = "y".repeat(400);
+        send_fragmented_text(
+            &mut ws,
+            &[
+                r#"{"kind":"hello","protocolMajor":1,"accessToken":"secret","streamTicket":""#,
+                &padding[..200],
+                &padding[200..],
+                r#""}"#,
+            ],
+        )
+        .await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        match outcome {
+            Err(_) | Ok(None) | Ok(Some(Err(_))) => {}
+            Ok(Some(Ok(Message::Close(_)))) => {}
+            Ok(Some(Ok(other))) => {
+                panic!("oversized fragmented message must close the socket, got {other:?}")
+            }
+        }
+    }
+
+    // The valid ticket was never redeemed by any of the rejected sockets.
+    assert_eq!(
+        fake.live_stream_sessions(),
+        0,
+        "rejected hellos must not open sessions"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// Fragmented oversized exec input is rejected by the same assembled limit.
+#[tokio::test]
+async fn fragmented_oversized_exec_input_is_rejected() {
+    let (server, fake) = spawn_server().await;
+    let mut control = connect_control(&server).await;
+    let ticket = issue_ticket(
+        &mut control,
+        "t",
+        &web_target(WEB_CONTAINER),
+        StreamType::Exec,
+        true,
+    )
+    .await;
+
+    let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), EXEC_PATH))
+        .await
+        .unwrap();
+    send_stream_hello(&mut ws, "secret", &ticket).await;
+    assert_eq!(receive_text(&mut ws).await["kind"], json!("ready"));
+    let (_, banner) = decode_binary(receive_message(&mut ws).await);
+    assert!(banner.contains("attached"));
+
+    // One logical stdin message far above the default assembled-message
+    // bound, split into two fragments each below the frame bound.
+    let chunk = [b'x'; 64 * 1024];
+    let header = vec![
+        k10s_protocol::STREAM_PAYLOAD_VERSION,
+        k10s_protocol::payload_kind::STDIN,
+    ];
+    let first = [header.as_slice(), &chunk].concat();
+    let second = chunk.to_vec();
+    ws.send(Message::Frame(Frame::message(
+        first,
+        OpCode::Data(Data::Binary),
+        false,
+    )))
+    .await
+    .unwrap();
+    ws.send(Message::Frame(Frame::message(
+        second,
+        OpCode::Data(Data::Continue),
+        true,
+    )))
+    .await
+    .unwrap();
+
+    // The server closes instead of processing the input.
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Err(_) => panic!("server must react to the oversized input"),
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => break,
+            Ok(Some(Ok(_))) => continue,
+        }
+    }
+    // The limit violation killed the connection, so the backend session
+    // is retired on the next adapter touch and the oversized line was
+    // never processed.
+    fake.tick_stream(&ticket);
+    assert_eq!(
+        fake.live_stream_sessions(),
+        0,
+        "the disconnected terminal must not survive"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// The dedicated stream connection cap is enforced independently of the
+/// shared unauthenticated-control pool.
+#[tokio::test]
+async fn dedicated_stream_connection_cap_is_enforced() {
+    let config = ServerConfig {
+        max_stream_connections: 1,
+        ..ServerConfig::default()
+    };
+    let (server, _fake) = spawn_server_with(config).await;
+    let mut control = connect_control(&server).await;
+    let first = issue_ticket(
+        &mut control,
+        "t1",
+        &web_target(WEB_CONTAINER),
+        StreamType::Logs,
+        false,
+    )
+    .await;
+    issue_ticket(
+        &mut control,
+        "t2",
+        &web_target("app"),
+        StreamType::Logs,
+        false,
+    )
+    .await;
+
+    let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), LOGS_PATH))
+        .await
+        .unwrap();
+    send_stream_hello(&mut ws, "secret", &first).await;
+    assert_eq!(receive_text(&mut ws).await["kind"], json!("ready"));
+    let (_, _) = decode_binary(receive_message(&mut ws).await);
+
+    // While that stream stays open, a second upgrade is refused outright:
+    // live streams must not consume the shared control-authentication pool.
+    let error = connect_async(format!("ws://{}{}", server.addr(), EXEC_PATH))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("503"),
+        "the second stream must be refused with 503: {error}"
+    );
+    // Control authentication still works while the stream is open.
+    let _still_authenticates = connect_control(&server).await;
 
     server.shutdown().await.unwrap();
 }

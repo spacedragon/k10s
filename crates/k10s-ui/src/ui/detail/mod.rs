@@ -63,13 +63,15 @@ fn tab_label(tab: DetailTab) -> &'static str {
 /// `view` is the backend-resolved response for that identity, when it has
 /// arrived yet; until then the header still renders from the pinned
 /// identity and the content area shows a loading state. All interactions
-/// are queued as workspace commands.
+/// are queued as workspace commands or stream actions.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     detail: &DetailState<I>,
     view: Option<&ResourceDetailResponse>,
     yaml: &mut tools::YamlEditors,
+    streams: &mut tools::StreamStores,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -149,12 +151,33 @@ pub(super) fn show<I>(
             }
         }
         DetailTab::Logs => {
-            ui.label("Log streaming is not connected yet");
+            tools::logs::show(ui, window_id, &mut streams.logs, stream_target(detail));
         }
         DetailTab::Shell => {
-            ui.label("Shell sessions are not connected yet");
+            tools::shell::show(ui, window_id, &mut streams.shells, stream_target(detail));
         }
     }
+}
+
+/// The default pod container streamed by the connected tools.
+const DEFAULT_CONTAINER: &str = "app";
+
+/// Resolve a pod/container stream target from the pinned identity. Only pod
+/// identities can stream; anything else yields no target.
+fn stream_target<I>(detail: &DetailState<I>) -> Option<k10s_protocol::StreamTarget>
+where
+    I: RowIdentity,
+{
+    let identity = detail.identity.as_row_identity()?;
+    Some(k10s_protocol::StreamTarget {
+        context: identity.context.clone(),
+        namespace: identity
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+        pod: identity.name.clone(),
+        container: DEFAULT_CONTAINER.to_owned(),
+    })
 }
 
 fn detail_identity_gvk<I>(detail: &DetailState<I>) -> GroupVersionKind

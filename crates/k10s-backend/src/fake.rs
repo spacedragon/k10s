@@ -707,15 +707,20 @@ impl KubernetesAccess for FakeKubernetes {
                     if !exists {
                         return Err(BackendError::NotFound);
                     }
-                    // Container fixtures: `app` is the runnable container,
-                    // `distroless` exists but has no executable binary, any
-                    // other name does not exist.
+                    // Container fixtures: every pod runs the `app` container;
+                    // `distroless` exists too (so its logs remain readable)
+                    // but carries no executable binary, making exec fail.
+                    // Any other name does not exist. Binary availability is
+                    // an exec-only validation.
                     match container.as_str() {
                         "app" => {}
                         "distroless" => {
-                            return Err(BackendError::Conflict(format!(
-                                "container \"{container}\" has no executable binary"
-                            )));
+                            let exec = matches!(&stream, crate::port::StreamKind::Exec { .. });
+                            if exec {
+                                return Err(BackendError::Conflict(format!(
+                                    "container \"{container}\" has no executable binary"
+                                )));
+                            }
                         }
                         _ => return Err(BackendError::NotFound),
                     }

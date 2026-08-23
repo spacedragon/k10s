@@ -7,9 +7,12 @@
 //! reserved for autoscroll behavior in the renderer, and find filters the
 //! retained buffer without destroying it.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
+use egui::{RichText, ScrollArea};
 use k10s_protocol::StreamTarget;
+
+use crate::workspace::WindowId;
 
 /// Hard character cap applied to each retained line; longer source lines are
 /// truncated with [`LogsTool::TRUNCATION_MARKER`].
@@ -161,6 +164,12 @@ impl LogsTool {
         };
     }
 
+    /// The active find filter, if any.
+    #[must_use]
+    pub fn find(&self) -> Option<&str> {
+        self.find.as_deref()
+    }
+
     /// Retained lines matching the active find filter.
     pub fn find_matches(&self) -> Vec<&String> {
         match &self.find {
@@ -178,5 +187,155 @@ impl LogsTool {
     pub fn connection_lost(&mut self) {
         self.phase = LogsPhase::Disconnected;
         self.paused = false;
+    }
+}
+
+/// Protocol action queued by one log view during rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogsAction {
+    /// Request a stream ticket and open the dedicated logs socket.
+    OpenLogs {
+        /// Window that owns the view.
+        window: WindowId,
+        /// Target resolved from the window's pinned identity.
+        target: StreamTarget,
+    },
+}
+
+/// Per-window connected log views plus the actions queued during rendering.
+/// Owned by the UI shell; the application drains actions each frame and
+/// feeds [`StreamSignal`]s back into the views.
+#[derive(Debug, Default)]
+pub struct LogsViews {
+    views: HashMap<WindowId, LogsTool>,
+    actions: Vec<(WindowId, LogsAction)>,
+}
+
+impl LogsViews {
+    /// Lazily ensure the view for `window`, bound to `target`.
+    pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut LogsTool {
+        self.views
+            .entry(window)
+            .or_insert_with(|| LogsTool::new(target, DEFAULT_TAIL_CAPACITY))
+    }
+
+    /// View access for signal projection.
+    #[must_use]
+    pub fn get_mut(&mut self, window: WindowId) -> Option<&mut LogsTool> {
+        self.views.get_mut(&window)
+    }
+
+    /// Queue one protocol action produced during rendering.
+    pub fn queue(&mut self, window: WindowId, action: LogsAction) {
+        self.actions.push((window, action));
+    }
+
+    /// Drain every queued protocol action with its owning window.
+    pub fn drain_actions(&mut self) -> Vec<(WindowId, LogsAction)> {
+        std::mem::take(&mut self.actions)
+    }
+
+    /// Mark every view disconnected (control transport loss).
+    pub fn connection_lost(&mut self) {
+        for view in self.views.values_mut() {
+            if view.phase() == LogsPhase::Streaming || view.phase() == LogsPhase::Connecting {
+                view.connection_lost();
+            }
+        }
+    }
+
+    /// Drop entries for closed windows.
+    pub fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
+        self.views.retain(|id, _| live(*id));
+    }
+}
+
+/// Tail capacity used by detail-view log panes.
+pub const DEFAULT_TAIL_CAPACITY: usize = 512;
+
+/// Render the connected Logs tab content for one detail view.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    views: &mut LogsViews,
+    target: Option<StreamTarget>,
+) {
+    let Some(target) = target else {
+        ui.label("Select a pod to stream logs");
+        return;
+    };
+    let mut connect_requested = false;
+    {
+        let view = views.ensure(window_id, target.clone());
+        ui.horizontal(|ui| {
+            match view.phase() {
+                LogsPhase::Disconnected => {
+                    let button = ui.button("Connect logs");
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            "Connect logs".to_owned(),
+                        )
+                    });
+                    connect_requested = button.clicked();
+                    ui.label(RichText::new("Disconnected").weak());
+                }
+                LogsPhase::Connecting => {
+                    ui.label("Connecting");
+                }
+                LogsPhase::Streaming => {
+                    let pause_label = if view.is_paused() { "Resume" } else { "Pause" };
+                    if ui.button(pause_label).clicked() {
+                        if view.is_paused() {
+                            view.resume();
+                        } else {
+                            view.pause();
+                        }
+                    }
+                    if view.is_paused() {
+                        ui.label(RichText::new("Paused").weak());
+                    }
+                    let follow = view.follows();
+                    if ui.checkbox(&mut { follow }, "Follow").changed() {
+                        view.set_follow(!follow);
+                    }
+                }
+            }
+            let mut find = view.find().unwrap_or_default().to_owned();
+            let find_edit = ui.add(egui::TextEdit::singleline(&mut find).hint_text("Find"));
+            find_edit.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::TextEdit,
+                    true,
+                    "Find in logs".to_owned(),
+                )
+            });
+            if find_edit.changed() {
+                view.set_find(Some(&find));
+            }
+        });
+        ScrollArea::vertical()
+            .id_salt(("logs.stream", window_id.0))
+            .show(ui, |ui| {
+                for line in view.visible_lines() {
+                    ui.label(RichText::new(line.as_str()).monospace());
+                }
+                if view.truncated_lines() > 0 {
+                    ui.label(
+                        RichText::new(format!("{} older lines truncated", view.truncated_lines()))
+                            .weak(),
+                    );
+                }
+            });
+    }
+    if connect_requested {
+        views.queue(
+            window_id,
+            LogsAction::OpenLogs {
+                window: window_id,
+                target,
+            },
+        );
     }
 }

@@ -2,15 +2,18 @@
 
 use web_time::Instant;
 
+use std::collections::BTreeMap;
+
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{ClientFrame, InfrastructureRequest, ResourceIdentity, ServerFrame};
 
 use crate::client::{
     BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
-    LiveSubscription, PendingRequest, Query, QueryResult, TransportError, WebSocketTransport,
+    LiveSubscription, PendingRequest, Query, QueryResult, StreamRoute, StreamSession, StreamSignal,
+    TransportError, WebSocketTransport,
 };
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
-use crate::workspace::WorkspaceState;
+use crate::workspace::{WindowId, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -79,6 +82,7 @@ pub enum AppView {
 /// Minimal shared k10s application.
 pub struct K10sApp {
     connection_url: String,
+    access_token: String,
     client: ClientState,
     factory: Box<dyn ConnectionFactory>,
     connection: Option<Box<dyn AppConnection>>,
@@ -86,6 +90,8 @@ pub struct K10sApp {
     infrastructure_request: Option<PendingRequest>,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
+    stream_sessions: BTreeMap<WindowId, StreamSession>,
+    pending_stream_tickets: BTreeMap<k10s_protocol::RequestId, PendingStreamTicket>,
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
@@ -93,11 +99,22 @@ pub struct K10sApp {
     jitter_counter: u64,
 }
 
+/// A window's in-flight dedicated-stream ticket request.
+#[derive(Debug)]
+struct PendingStreamTicket {
+    request: PendingRequest,
+    route: StreamRoute,
+    window: WindowId,
+}
+
 impl std::fmt::Debug for K10sApp {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The access token is deliberately omitted: it never appears in
+        // debug output, URLs, or logs.
         formatter
             .debug_struct("K10sApp")
             .field("connection_url", &self.connection_url)
+            .field("access_token", &"[REDACTED]")
             .field("client", &self.client)
             .field("connection_active", &self.connection.is_some())
             .field("bootstrap", &self.bootstrap)
@@ -107,6 +124,8 @@ impl std::fmt::Debug for K10sApp {
                 &self.infrastructure_subscription,
             )
             .field("infrastructure_context", &self.infrastructure_context)
+            .field("stream_sessions", &self.stream_sessions.len())
+            .field("pending_stream_tickets", &self.pending_stream_tickets.len())
             .field("recovering", &self.recovering)
             .field("view", &self.view)
             .field("shell", &self.shell)
@@ -125,13 +144,16 @@ impl K10sApp {
         mut factory: Box<dyn ConnectionFactory>,
     ) -> Result<Self, TransportError> {
         let connection_url = target.url().to_owned();
+        let target_token = target.access_token().to_owned();
         let mut client = ClientState::new(ClientConfig::default());
         client
             .connect(target)
             .map_err(|error| TransportError(error.to_string()))?;
         let connection = factory.connect(&connection_url)?;
+        let access_token = target_token.clone();
         Ok(Self {
             connection_url,
+            access_token,
             client,
             factory,
             connection: Some(connection),
@@ -139,6 +161,8 @@ impl K10sApp {
             infrastructure_request: None,
             infrastructure_subscription: None,
             infrastructure_context: None,
+            stream_sessions: BTreeMap::new(),
+            pending_stream_tickets: BTreeMap::new(),
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
@@ -186,6 +210,7 @@ impl K10sApp {
             self.transient_loss(now_ms, entropy);
         }
         self.reconnect_if_due(now_ms, entropy);
+        self.poll_stream_sessions();
     }
 
     /// Current user-visible state.
@@ -248,6 +273,10 @@ impl K10sApp {
                     .map_err(|error| ClientError::Protocol(format!("{error:?}")))
             })
         };
+        let request_result = request_result.and_then(|()| {
+            self.process_stream_requests()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+        });
         if let Err(error) = request_result {
             self.terminal_failure(error.to_string());
         }
@@ -441,6 +470,7 @@ impl K10sApp {
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
+        self.teardown_stream_sessions();
         self.recovering = true;
         self.view = AppView::Connecting;
     }
@@ -463,7 +493,17 @@ impl K10sApp {
         if let Some(mut connection) = self.connection.take() {
             connection.close();
         }
+        self.teardown_stream_sessions();
         self.view = AppView::Failed { message };
+    }
+
+    /// Close every dedicated stream session and mark its tool disconnected.
+    fn teardown_stream_sessions(&mut self) {
+        for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
+            session.disconnect();
+        }
+        self.pending_stream_tickets.clear();
+        self.shell.stream_stores_mut().connection_lost();
     }
 
     fn terminal_phase(phase: ClientPhase) -> bool {
@@ -472,6 +512,174 @@ impl K10sApp {
             ClientPhase::WebGate | ClientPhase::UpgradeRequired | ClientPhase::Closed
         )
     }
+
+    /// Drain rendering-time stream actions: ticket requests for new log
+    /// views and explicit shell connects, plus stdin/resize forwarding into
+    /// live sessions.
+    fn process_stream_requests(&mut self) -> Result<(), ClientError> {
+        for (window, action) in self.shell.drain_log_actions() {
+            let request = self.client.begin(Query::StreamTicket {
+                target: match action {
+                    crate::ui::tools::LogsAction::OpenLogs { target, .. } => target,
+                },
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+            })?;
+            self.pending_stream_tickets.insert(
+                request.id().clone(),
+                PendingStreamTicket {
+                    request,
+                    route: StreamRoute::Logs,
+                    window,
+                },
+            );
+        }
+        for (window, target) in self.shell.drain_shell_connects() {
+            let request = self.client.begin(Query::StreamTicket {
+                target: target.clone(),
+                stream_type: k10s_protocol::StreamType::Exec,
+                tty: true,
+            })?;
+            self.pending_stream_tickets.insert(
+                request.id().clone(),
+                PendingStreamTicket {
+                    request,
+                    route: StreamRoute::Exec,
+                    window,
+                },
+            );
+        }
+        // Forward terminal stdin/resize into live exec sessions.
+        for (window, action) in self.shell.drain_shell_actions() {
+            if let Some(session) = self.stream_sessions.get_mut(&window)
+                && session.is_live()
+            {
+                match action {
+                    crate::ui::tools::ShellAction::Input(line) => session.send_stdin(&line),
+                    crate::ui::tools::ShellAction::Resize { cols, rows } => {
+                        session.send_resize(cols, rows);
+                    }
+                }
+            }
+        }
+        self.flush_outbound()
+            .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+    }
+
+    /// Complete in-flight stream ticket requests and open their sockets.
+    fn finish_stream_tickets(&mut self) {
+        while let Some(id) = self
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let Some(entry) = self.pending_stream_tickets.remove(&id) else {
+                unreachable!("key came from this map");
+            };
+            let PendingStreamTicket {
+                request,
+                route,
+                window,
+            } = entry;
+            if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
+                && session_open(
+                    &mut self.stream_sessions,
+                    window,
+                    route,
+                    *granted,
+                    &self.connection_url,
+                    &self.access_token,
+                )
+                .is_ok()
+            {
+                // The session is now live and polling.
+            }
+        }
+    }
+
+    /// Project dedicated-socket events into the connected tools.
+    fn poll_stream_sessions(&mut self) {
+        self.finish_stream_tickets();
+        let windows: Vec<WindowId> = self.stream_sessions.keys().copied().collect();
+        for window in windows {
+            let Some(session) = self.stream_sessions.get_mut(&window) else {
+                continue;
+            };
+            let route = session.route();
+            let signals = session.poll();
+            if signals.is_empty() {
+                continue;
+            }
+            let stores = self.shell.stream_stores_mut();
+            for signal in signals {
+                match signal {
+                    StreamSignal::Ready { .. } => match route {
+                        StreamRoute::Logs => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.attach();
+                            }
+                        }
+                        StreamRoute::Exec => {
+                            if let Some(shell) = stores.shells.get_mut(window) {
+                                shell.attach();
+                            }
+                        }
+                    },
+                    StreamSignal::Output(text) => match route {
+                        StreamRoute::Logs => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.append(&text);
+                            }
+                        }
+                        StreamRoute::Exec => {
+                            if let Some(shell) = stores.shells.get_mut(window) {
+                                shell.apply_output(&text);
+                            }
+                        }
+                    },
+                    StreamSignal::Status(_message) => {}
+                    StreamSignal::Exited(code) => {
+                        if let Some(shell) = stores.shells.get_mut(window) {
+                            shell.exit(code);
+                        }
+                    }
+                    StreamSignal::Rejected(_reason) => match route {
+                        StreamRoute::Logs => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.connection_lost();
+                            }
+                            self.stream_sessions.remove(&window);
+                        }
+                        StreamRoute::Exec => {
+                            if let Some(shell) = stores.shells.get_mut(window) {
+                                shell.connection_lost();
+                            }
+                            self.stream_sessions.remove(&window);
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Open a dedicated socket with a granted ticket and register the session
+/// under its owning window. Failures leave no half-open state behind.
+fn session_open(
+    sessions: &mut BTreeMap<WindowId, StreamSession>,
+    window: WindowId,
+    route: StreamRoute,
+    granted: k10s_protocol::StreamTicketResponse,
+    connection_url: &str,
+    access_token: &str,
+) -> Result<(), ()> {
+    let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
+    session
+        .open_with_ticket(connection_url, access_token, &granted.ticket_id)
+        .map_err(|_| ())?;
+    sessions.insert(window, session);
+    Ok(())
 }
 
 #[derive(Debug)]

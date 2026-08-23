@@ -307,3 +307,94 @@ fn welcome_frame() -> k10s_protocol::ServerFrame {
 fn json_str(value: &str) -> serde_json::Value {
     serde_json::Value::String(value.to_owned())
 }
+
+/// The dedicated-stream session glue: derive_stream_url keeps credentials
+/// out of URLs, and a session projects server frames into signals.
+#[test]
+fn stream_sessions_derive_credential_free_urls_and_project_signals() {
+    use ewebsock::{WsEvent, WsMessage};
+    use k10s_ui::client::{StreamRoute, StreamSession, StreamSignal, derive_stream_url};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+
+    let url = derive_stream_url("ws://127.0.0.1:1/api/v1/control", StreamRoute::Logs).unwrap();
+    assert_eq!(url, "ws://127.0.0.1:1/api/v1/logs");
+    assert!(!url.contains("secret"));
+    assert!(derive_stream_url("ws://127.0.0.1:1/other", StreamRoute::Exec).is_err());
+
+    // A scripted socket proves hello/stdin framing and signal projection
+    // without any network.
+    #[derive(Debug)]
+    struct ScriptedSocket {
+        sent_text: Arc<Mutex<Vec<String>>>,
+        sent_binary: Arc<Mutex<Vec<Vec<u8>>>>,
+        events: mpsc::Receiver<WsEvent>,
+    }
+    impl k10s_ui::client::StreamIo for ScriptedSocket {
+        fn try_recv(&mut self) -> Option<WsEvent> {
+            self.events.try_recv().ok()
+        }
+        fn send_text(&mut self, text: String) {
+            self.sent_text.lock().unwrap().push(text);
+        }
+        fn send_binary(&mut self, bytes: Vec<u8>) {
+            self.sent_binary.lock().unwrap().push(bytes);
+        }
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let mut session = StreamSession::new(
+        StreamRoute::Exec,
+        StreamTarget {
+            context: "dev-local".into(),
+            namespace: "default".into(),
+            pod: "db-postgres-0".into(),
+            container: "app".into(),
+        },
+        true,
+    );
+
+    // Before open_with_ticket the session cannot be driven; inject the
+    // scripted transport directly through the test seam.
+    let sent_text = Arc::new(Mutex::new(Vec::new()));
+    let sent_binary = Arc::new(Mutex::new(Vec::new()));
+    session.inject_for_test(ScriptedSocket {
+        sent_text: Arc::clone(&sent_text),
+        sent_binary: Arc::clone(&sent_binary),
+        events: rx,
+    });
+
+    tx.send(WsEvent::Message(WsMessage::Text(
+        r#"{"kind":"ready","streamType":"exec","tty":true,"container":"app"}"#.to_owned(),
+    )))
+    .unwrap();
+    tx.send(WsEvent::Message(WsMessage::Binary(vec![
+        k10s_protocol::STREAM_PAYLOAD_VERSION,
+        k10s_protocol::payload_kind::TTY_OUTPUT,
+        b'$',
+        b' ',
+        b'o',
+        b'k',
+    ])))
+    .unwrap();
+
+    let signals = session.poll();
+    assert_eq!(
+        signals,
+        vec![
+            StreamSignal::Ready {
+                stream_type: StreamType::Exec,
+                tty: true,
+                container: "app".into(),
+            },
+            StreamSignal::Output("$ ok".to_owned()),
+        ]
+    );
+
+    session.send_stdin("ls");
+    let binary = sent_binary.lock().unwrap();
+    assert_eq!(binary.len(), 1);
+    let decoded = k10s_protocol::decode_stream_payload(&binary[0]).unwrap();
+    assert_eq!(decoded.kind, k10s_protocol::payload_kind::STDIN);
+    assert_eq!(decoded.data, b"ls\n");
+}
