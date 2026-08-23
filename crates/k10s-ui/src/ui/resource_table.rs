@@ -118,24 +118,35 @@ where
 
     // Rows are virtualized: only the visible window of rows is laid out
     // per frame, so frame cost stays bounded by the viewport rather than
-    // the snapshot size.
-    let row_height = ui.text_style_height(&egui::TextStyle::Body);
+    // the snapshot size. Virtual row 0 is the sticky header; data rows
+    // follow at offset 1. Row height matches what a Grid row actually
+    // measures: rows contain buttons, so they are at least one interact
+    // size tall, not one text line.
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    let header_rows = 1_usize;
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
-        .show_rows(ui, row_height, rows.len(), |ui, range| {
+        .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
                 .min_col_width(72.0)
                 .show(ui, |ui| {
-                    for (visible, key) in COLUMNS {
-                        if visible == "Namespace" && !namespaced {
-                            continue;
+                    if range.start < header_rows {
+                        for (visible, key) in COLUMNS {
+                            if visible == "Namespace" && !namespaced {
+                                continue;
+                            }
+                            sort_header(ui, title, visible, key, sort, &mut actions);
                         }
-                        sort_header(ui, title, visible, key, sort, &mut actions);
+                        ui.end_row();
                     }
-                    ui.end_row();
 
-                    for row in &rows[range] {
+                    for index in range.start.max(header_rows)..range.end {
+                        let row = &rows[index - header_rows];
                         if namespaced {
                             ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                         }

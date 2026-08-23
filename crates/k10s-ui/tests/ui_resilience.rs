@@ -111,6 +111,43 @@ fn deployment_row(name: &str, summary: &str) -> ResourceListRow {
     }
 }
 
+/// A backend-resolved deployment response carrying the full mutation
+/// surface, so the cached-view path of the gone projection is exercised.
+fn deployment_detail(name: &str) -> ResourceDetailResponse {
+    ResourceDetailResponse {
+        identity: ResourceIdentity {
+            context: CONTEXT.to_owned(),
+            gvk: GroupVersionKind {
+                group: "apps".to_owned(),
+                version: "v1".to_owned(),
+                kind: "Deployment".to_owned(),
+            },
+            namespace: Some("default".to_owned()),
+            name: name.to_owned(),
+            uid: format!("uid-{CONTEXT}-deployment-default-{name}"),
+        },
+        revision: BackendRevision::new(1_010),
+        created_at: "2026-08-21T00:00:00Z".to_owned(),
+        owner_references: Vec::new(),
+        sections: vec![DetailSection {
+            title: "Overview".to_owned(),
+            rows: vec![DetailRow {
+                label: "Status".to_owned(),
+                value: "2/2 ready".to_owned(),
+            }],
+        }],
+        events: Vec::new(),
+        related: Vec::new(),
+        capabilities: ResourceCapabilities {
+            can_scale: true,
+            can_delete: true,
+            can_edit_yaml: true,
+            ..ResourceCapabilities::default()
+        },
+        manifest: format!("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n"),
+    }
+}
+
 /// A minimal backend-resolved pod response so the runtime tool tabs render.
 fn pod_detail(name: &str) -> ResourceDetailResponse {
     ResourceDetailResponse {
@@ -440,13 +477,85 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
             .is_none(),
         "the gone row must leave the table"
     );
-    window.get_by_label("Details");
+    // Gone renders only the pinned identity header plus the banner.
+    window.get_by_label("Kind Deployment");
     window.get_by_label("This resource no longer exists");
     assert!(
         window.query_by_label("Loading details").is_none(),
         "gone must never be presented as still loading"
     );
     // The user can dismiss the pinned selection themselves.
+    window
+        .get_by_role_and_label(Role::Button, "Clear selection")
+        .click();
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(window.query_by_label("Details").is_none());
+}
+
+#[test]
+fn a_gone_selection_beats_any_cached_detail_response() {
+    let mut harness = harness();
+    let selected_row = deployment_row("web-frontend", "20/20 ready");
+    harness.state_mut().feed.lists.insert(
+        WorkspaceWorkload::Deployments,
+        vec![
+            deployment_row("api-server", "2/2 ready"),
+            selected_row.clone(),
+        ],
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Deployments),
+    );
+    let id = workload_id(harness.state(), WorkspaceWorkload::Deployments);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(tall_detail_pane(id));
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    // The detail response resolved BEFORE the deletion: production caches
+    // it, and the gone state must still take precedence.
+    harness.state_mut().feed.details.insert(
+        selected_row.identity.clone(),
+        deployment_detail("web-frontend"),
+    );
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Created 2026-08-21T00:00:00Z");
+    window.get_by_role_and_label(Role::Button, "Scale workload");
+
+    // The object is deleted behind the watch while the cache is hot.
+    harness.state_mut().feed.lists.insert(
+        WorkspaceWorkload::Deployments,
+        vec![deployment_row("api-server", "2/2 ready")],
+    );
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "web-frontend")
+            .is_none(),
+        "the gone row must leave the table"
+    );
+    window.get_by_label("This resource no longer exists");
+    for stale_control in ["Scale workload", "Delete resource", "Loading details"] {
+        assert!(
+            window.query_by_label(stale_control).is_none()
+                && window
+                    .query_by_role_and_label(Role::Button, stale_control)
+                    .is_none(),
+            "a gone resource must not keep its {stale_control} control"
+        );
+    }
     window
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();

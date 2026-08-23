@@ -13,6 +13,9 @@ web-time = "=1.1.0"
 
 [dev-dependencies]
 egui_kittest = "=0.36.1"
+# Direct kittest access for the capacity benchmark's accessibility-tree
+# assertions (kittest is already in the lockfile as an egui_kittest dep).
+kittest = "=0.4.0"
 
 [[bench]]
 name = "ui_capacity"

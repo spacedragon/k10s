@@ -98,23 +98,28 @@ fn snapshot_tree(harness: &Harness<Fixture>, name: &str) {
 
     let dir = std::path::Path::new("tests").join("snapshots");
     let path = dir.join(format!("{name}.txt"));
-    let update = std::env::var_os("K10S_UPDATE_SNAPSHOTS").is_some();
-    match std::fs::read_to_string(&path) {
-        Ok(expected) if !update => {
-            assert!(
-                expected == actual,
-                "accessibility snapshot {name} drifted.\n\
-                 If the change is intentional, regenerate with \
-                 K10S_UPDATE_SNAPSHOTS=1 cargo test -p k10s-ui --test ui_snapshots\n\
-                 --- diff ---\n{}",
-                diff_summary(&expected, &actual)
-            );
-        }
-        _ => {
-            std::fs::create_dir_all(&dir).expect("snapshot directory");
-            std::fs::write(&path, actual).expect("snapshot write");
-        }
+    if std::env::var_os("K10S_UPDATE_SNAPSHOTS").is_some() {
+        std::fs::create_dir_all(&dir).expect("snapshot directory");
+        std::fs::write(&path, actual).expect("snapshot write");
+        return;
     }
+    // Normal mode never writes: a missing or misnamed baseline must fail
+    // loudly instead of being silently recreated in CI.
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "snapshot baseline {} is missing ({error}); regenerate intentionally \
+             with K10S_UPDATE_SNAPSHOTS=1 cargo test -p k10s-ui --test ui_snapshots",
+            path.display()
+        )
+    });
+    assert!(
+        expected == actual,
+        "accessibility snapshot {name} drifted.\n\
+         If the change is intentional, regenerate with \
+         K10S_UPDATE_SNAPSHOTS=1 cargo test -p k10s-ui --test ui_snapshots\n\
+         --- diff ---\n{}",
+        diff_summary(&expected, &actual)
+    );
 }
 
 fn diff_summary(expected: &str, actual: &str) -> String {

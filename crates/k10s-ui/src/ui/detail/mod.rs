@@ -79,6 +79,15 @@ pub(super) fn show<I>(
 ) where
     I: RowIdentity,
 {
+    // A gone resource renders only its pinned identity header plus the
+    // gone message: no cached response may resurrect Scale/Delete/YAML or
+    // stream controls for an object the authoritative rows dropped.
+    if gone && let Some(identity) = detail.identity.as_row_identity() {
+        show_header(ui, identity, None);
+        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
+        return;
+    }
+
     ui.horizontal(|ui| {
         ui.heading(RichText::new("Details").strong());
         for tab in tabs_for_kind(&detail_identity_gvk(detail)) {
@@ -111,18 +120,10 @@ pub(super) fn show<I>(
     show_header(ui, identity, view);
 
     let Some(view) = view else {
-        if gone {
-            // The authoritative rows dropped this identity: it is gone,
-            // not loading. The pinned header stays for reference.
-            ui.label(
-                RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING),
-            );
-        } else {
-            ui.horizontal(|ui| {
-                ui.add(Spinner::new());
-                ui.label("Loading details");
-            });
-        }
+        ui.horizontal(|ui| {
+            ui.add(Spinner::new());
+            ui.label("Loading details");
+        });
         return;
     };
 
