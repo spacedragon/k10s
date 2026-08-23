@@ -44,6 +44,10 @@ impl std::fmt::Debug for KubeWatchSource {
 impl KubeWatchSource {
     /// Bind one selection to `client`. `plural` comes from the context's
     /// discovery catalog; `namespace` scopes the selection when set.
+    ///
+    /// A namespace on a cluster-scoped type is canonicalized away so the
+    /// source's stream can never disagree with its own scope, whatever the
+    /// caller passed in.
     #[must_use]
     pub fn new(
         client: kube::Client,
@@ -53,6 +57,7 @@ impl KubeWatchSource {
         namespaced: bool,
         namespace: Option<String>,
     ) -> Self {
+        let namespace = if namespaced { namespace } else { None };
         Self {
             client,
             context: context.into(),
