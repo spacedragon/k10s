@@ -550,13 +550,93 @@ impl K10sApp {
     /// focus-raising events matter at this layer.
     fn handle_workspace_event(&mut self, _event: WorkspaceEvent<ResourceIdentity>) {}
 
-    /// Close every dedicated stream session and mark its tool disconnected.
+    /// Close every dedicated stream session, release any connected-shell
+    /// guards it held, and mark its tool disconnected.
     fn teardown_stream_sessions(&mut self) {
+        let exec_windows: Vec<WindowId> = self
+            .stream_sessions
+            .keys()
+            .filter(|(_, route)| *route == StreamRoute::Exec)
+            .map(|(window, _)| *window)
+            .collect();
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
             session.disconnect();
         }
+        for window in exec_windows {
+            for event in self
+                .shell
+                .apply_workspace_command(WorkspaceCommand::DisconnectShell(window))
+            {
+                self.handle_workspace_event(event);
+            }
+        }
         self.pending_stream_tickets.clear();
         self.shell.stream_stores_mut().connection_lost();
+    }
+
+    /// Reconcile live sessions against their tools: a window whose pinned
+    /// identity rebinds to another pod must never keep the old pod's
+    /// socket, and a guard resolved away (DisconnectShell) closes its
+    /// terminal.
+    fn reconcile_sessions(&mut self) {
+        // Target rebinding: compare each session's bound target with what
+        // its window's tool now resolves to.
+        {
+            let stores = self.shell.stream_stores_mut();
+            let stale: Vec<(WindowId, StreamRoute)> = self
+                .stream_sessions
+                .iter()
+                .filter(|((window, route), session)| {
+                    let bound = match route {
+                        StreamRoute::Logs => stores.logs.target_of(*window),
+                        StreamRoute::Exec => stores.shells.target_of(*window),
+                    };
+                    bound.as_ref() != Some(session.target())
+                })
+                .map(|(key, _)| *key)
+                .collect();
+            for key in stale {
+                if let Some(mut session) = self.stream_sessions.remove(&key) {
+                    session.disconnect();
+                    match key.1 {
+                        StreamRoute::Logs => {
+                            if let Some(view) = stores.logs.get_mut(key.0) {
+                                view.fail("the log target changed");
+                            }
+                        }
+                        StreamRoute::Exec => {
+                            if let Some(shell) = stores.shells.get_mut(key.0) {
+                                shell.fail("the shell target changed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Guard resolution: a workspace that resolved DisconnectShell (or
+        // lost its detail) must not keep a live terminal.
+        let exec_windows: Vec<WindowId> = self
+            .stream_sessions
+            .range(..)
+            .filter(|((_, route), _)| *route == StreamRoute::Exec)
+            .map(|((window, _), _)| *window)
+            .collect();
+        for window in exec_windows {
+            let still_guarded = self
+                .shell
+                .workspace()
+                .window(window)
+                .and_then(|w| match &w.content {
+                    crate::workspace::WindowContent::Detail(detail) => Some(detail.shell.connected),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            if !still_guarded
+                && let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Exec))
+            {
+                session.disconnect();
+            }
+        }
     }
 
     fn terminal_phase(phase: ClientPhase) -> bool {
@@ -664,6 +744,7 @@ impl K10sApp {
     /// Project dedicated-socket events into the connected tools.
     fn poll_stream_sessions(&mut self) {
         self.finish_stream_tickets();
+        self.reconcile_sessions();
         let keys: Vec<(WindowId, StreamRoute)> = self.stream_sessions.keys().copied().collect();
         for key in keys {
             let (window, route) = key;

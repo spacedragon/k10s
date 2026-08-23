@@ -182,10 +182,22 @@ pub struct ShellSessions {
 
 impl ShellSessions {
     /// Lazily ensure the terminal for `window`, bound to `target`.
+    ///
+    /// The terminal is rebound when its window's identity changes so one
+    /// pod's session can never be presented under another pod's detail.
     pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut ShellTool {
+        if self.target_of(window).as_ref() != Some(&target) {
+            self.sessions.insert(window, ShellTool::new(target.clone()));
+        }
         self.sessions
-            .entry(window)
-            .or_insert_with(|| ShellTool::new(target))
+            .get_mut(&window)
+            .expect("session just ensured")
+    }
+
+    /// Bound target of one terminal, if it exists.
+    #[must_use]
+    pub fn target_of(&self, window: WindowId) -> Option<StreamTarget> {
+        self.sessions.get(&window).map(|s| s.target().clone())
     }
 
     /// Session access for signal projection.

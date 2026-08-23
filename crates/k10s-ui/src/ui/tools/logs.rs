@@ -263,10 +263,22 @@ pub struct LogsViews {
 
 impl LogsViews {
     /// Lazily ensure the view for `window`, bound to `target`.
+    ///
+    /// The view is rebound whenever its window's pinned identity resolves
+    /// to a different pod/container: history from one pod must never be
+    /// displayed under another pod's identity.
     pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut LogsTool {
-        self.views
-            .entry(window)
-            .or_insert_with(|| LogsTool::new(target, DEFAULT_TAIL_CAPACITY))
+        if self.target_of(window).as_ref() != Some(&target) {
+            self.views
+                .insert(window, LogsTool::new(target.clone(), DEFAULT_TAIL_CAPACITY));
+        }
+        self.views.get_mut(&window).expect("view just ensured")
+    }
+
+    /// Bound target of one view, if it exists.
+    #[must_use]
+    pub fn target_of(&self, window: WindowId) -> Option<StreamTarget> {
+        self.views.get(&window).map(|view| view.target().clone())
     }
 
     /// View access for signal projection.
