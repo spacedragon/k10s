@@ -12,7 +12,7 @@ pub mod tools;
 mod top_bar;
 mod window;
 
-pub use resource_window::ResourceFeed;
+pub use resource_window::{ResourceFeed, RowIdentity};
 
 use std::fmt::Debug;
 

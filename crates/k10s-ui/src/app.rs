@@ -5,14 +5,18 @@ use web_time::Instant;
 use std::collections::BTreeMap;
 
 use ewebsock::{Options, WsEvent, WsMessage};
-use k10s_protocol::{ClientFrame, InfrastructureRequest, ResourceIdentity, ServerFrame};
+use k10s_protocol::{
+    ClientFrame, InfrastructureRequest, ResourceIdentity, ServerFrame, StreamTarget,
+};
 
 use crate::client::{
     BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
     LiveSubscription, PendingRequest, Query, QueryResult, StreamRoute, StreamSession, StreamSignal,
     TransportError, WebSocketTransport,
 };
-use crate::ui::{ConnectionState as ShellConnectionState, UiShell, tools::ShellPhase};
+use crate::ui::RowIdentity;
+use crate::ui::tools::ShellPhase;
+use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
 use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
@@ -535,6 +539,47 @@ impl K10sApp {
         self.view = AppView::Failed { message };
     }
 
+    /// The pod/container a stream tool of `window` must be bound to,
+    /// derived from the CURRENT workspace detail identity (integrated
+    /// resource windows carry their detail inside the resource state;
+    /// dedicated windows are Detail directly). This is the authoritative
+    /// target even when the rendered tool cache lags one frame behind.
+    fn workspace_stream_target(&self, window: WindowId) -> Option<StreamTarget> {
+        let detail = self
+            .shell
+            .workspace()
+            .window(window)
+            .and_then(|w| match &w.content {
+                crate::workspace::WindowContent::Detail(detail) => Some(detail),
+                crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
+            })?;
+        let identity = k10s_ui_row_identity(&detail.identity)?;
+        Some(StreamTarget {
+            context: identity.context.clone(),
+            namespace: identity
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "default".to_owned()),
+            pod: identity.name.clone(),
+            container: "app".to_owned(),
+        })
+    }
+
+    /// Whether the window's workspace shell guard is currently engaged.
+    fn shell_guard_connected(&self, window: WindowId) -> bool {
+        self.shell
+            .workspace()
+            .window(window)
+            .and_then(|w| match &w.content {
+                crate::workspace::WindowContent::Detail(detail) => Some(detail.shell.connected),
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.shell.connected),
+            })
+            .unwrap_or(false)
+    }
+
     /// Release the workspace connected-shell guard once a terminal is no
     /// longer live (exit, rejection, or transport loss).
     fn release_shell_guard(&mut self, window: WindowId) {
@@ -574,80 +619,65 @@ impl K10sApp {
         self.shell.stream_stores_mut().connection_lost();
     }
 
-    /// Reconcile live sessions against their tools: a window whose pinned
-    /// identity rebinds to another pod must never keep the old pod's
-    /// socket, and a guard resolved away (DisconnectShell) closes its
-    /// terminal.
+    /// Reconcile live sessions against the authoritative workspace state:
+    /// a window whose pinned identity rebinds to another pod must never
+    /// keep the old pod's socket, and a guard resolved away
+    /// (DisconnectShell) closes its attached terminal. Tool phases are
+    /// always kept consistent with transport ownership.
     fn reconcile_sessions(&mut self) {
-        // Target rebinding: compare each session's bound target with what
-        // its window's tool now resolves to.
-        {
+        // Pass 1 (immutable): decide what must be torn down.
+        let mut stale: Vec<((WindowId, StreamRoute), bool, &'static str)> = Vec::new();
+        let attached_exec: std::collections::HashSet<WindowId> = {
             let stores = self.shell.stream_stores_mut();
-            let stale: Vec<(WindowId, StreamRoute)> = self
-                .stream_sessions
-                .iter()
-                .filter(|((window, route), session)| {
-                    let bound = match route {
-                        StreamRoute::Logs => stores.logs.target_of(*window),
-                        StreamRoute::Exec => stores.shells.target_of(*window),
-                    };
-                    bound.as_ref() != Some(session.target())
+            self.stream_sessions
+                .keys()
+                .filter(|(_, route)| *route == StreamRoute::Exec)
+                .filter_map(|(window, _)| {
+                    stores
+                        .shells
+                        .get_mut(*window)
+                        .filter(|shell| matches!(shell.phase(), ShellPhase::Attached))
+                        .map(|_| *window)
                 })
-                .map(|(key, _)| *key)
-                .collect();
-            for key in stale {
-                if let Some(mut session) = self.stream_sessions.remove(&key) {
-                    session.disconnect();
-                    match key.1 {
-                        StreamRoute::Logs => {
-                            if let Some(view) = stores.logs.get_mut(key.0) {
-                                view.fail("the log target changed");
-                            }
-                        }
-                        StreamRoute::Exec => {
-                            if let Some(shell) = stores.shells.get_mut(key.0) {
-                                shell.fail("the shell target changed");
-                            }
-                        }
-                    }
-                }
+                .collect()
+        };
+        for (key, session) in self.stream_sessions.iter() {
+            let (window, route) = *key;
+            let target_matches =
+                self.workspace_stream_target(window).as_ref() == Some(session.target());
+            if !target_matches {
+                // The selection moved on while this session existed. If it
+                // had already engaged the guard, release that guard too.
+                let release = route == StreamRoute::Exec && self.shell_guard_connected(window);
+                stale.push((*key, release, "the shell target changed"));
+            } else if route == StreamRoute::Exec
+                && attached_exec.contains(&window)
+                && !self.shell_guard_connected(window)
+            {
+                // The guard was resolved away without an exit signal.
+                stale.push((*key, false, "shell session closed"));
             }
         }
-        // Guard resolution: a workspace that resolved DisconnectShell (or
-        // lost its guarded detail) must not keep an ATTACHED terminal. A
-        // session still connecting has not engaged the guard yet, so it is
-        // left alone until its Ready signal arrives.
-        let exec_windows: Vec<WindowId> = self
-            .stream_sessions
-            .range(..)
-            .filter(|((_, route), _)| *route == StreamRoute::Exec)
-            .map(|((window, _), _)| *window)
-            .collect();
-        for window in exec_windows {
-            // Integrated resource windows carry their detail inside the
-            // resource state; dedicated windows are Detail directly.
-            let guard = self
-                .shell
-                .workspace()
-                .window(window)
-                .and_then(|w| match &w.content {
-                    crate::workspace::WindowContent::Detail(detail) => Some(detail.shell.connected),
-                    crate::workspace::WindowContent::Resource(resource) => resource
-                        .detail
-                        .as_ref()
-                        .map(|detail| detail.shell.connected),
-                });
-            let attached = self
-                .shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .is_some_and(|shell| matches!(shell.phase(), ShellPhase::Attached));
-            if attached && guard != Some(true) {
+        // Pass 2 (mutable): tear down atomically - transport, tool phase,
+        // and workspace guard together.
+        for ((window, route), release_guard, reason) in stale {
+            if release_guard {
                 self.release_shell_guard(window);
-                if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Exec))
-                {
-                    session.disconnect();
+            }
+            if let Some(mut session) = self.stream_sessions.remove(&(window, route)) {
+                session.disconnect();
+            }
+            let stores = self.shell.stream_stores_mut();
+            match route {
+                StreamRoute::Logs => {
+                    if let Some(view) = stores.logs.get_mut(window) {
+                        view.fail(reason);
+                    }
+                }
+                StreamRoute::Exec => {
+                    if let Some(shell) = stores.shells.get_mut(window) {
+                        shell.fail(reason);
+                    }
                 }
             }
         }
@@ -769,10 +799,17 @@ impl K10sApp {
             if signals.is_empty() {
                 continue;
             }
+            // The workspace identity is the authority for attach: a Ready
+            // that arrives after the selection moved on must not engage
+            // the new pod's guard or attach the old session.
+            let bound_target = session.target().clone();
+            let target_current =
+                self.workspace_stream_target(window).as_ref() == Some(&bound_target);
             // Guard transitions are collected while the tool stores are
             // borrowed and applied afterwards.
             let mut guard_connected = false;
             let mut guard_released = false;
+            let mut stale_handshake = false;
             // Tool projections run inside this block so the store borrow
             // ends before workspace commands are applied.
             let stores = self.shell.stream_stores_mut();
@@ -781,11 +818,21 @@ impl K10sApp {
                     match signal {
                         StreamSignal::Ready { .. } => match route {
                             StreamRoute::Logs => {
+                                if !target_current {
+                                    continue;
+                                }
                                 if let Some(view) = stores.logs.get_mut(window) {
                                     view.attach();
                                 }
                             }
                             StreamRoute::Exec => {
+                                if !target_current {
+                                    if let Some(shell) = stores.shells.get_mut(window) {
+                                        shell.fail("the shell target changed");
+                                    }
+                                    stale_handshake = true;
+                                    continue;
+                                }
                                 if let Some(shell) = stores.shells.get_mut(window) {
                                     shell.attach();
                                 }
@@ -842,8 +889,16 @@ impl K10sApp {
             if guard_released {
                 self.release_shell_guard(window);
             }
+            if stale_handshake {
+                self.stream_sessions.remove(&key);
+            }
         }
     }
+}
+
+/// Recover the protocol identity behind a workspace row identity.
+fn k10s_ui_row_identity(identity: &ResourceIdentity) -> Option<&ResourceIdentity> {
+    RowIdentity::as_row_identity(identity)
 }
 
 /// Open a dedicated socket with a granted ticket and register the session
@@ -897,7 +952,7 @@ mod tests {
     use crate::client::{ClientPhase, ConnectTarget, TransportError};
 
     #[derive(Debug, Default)]
-    struct FactoryState {
+    pub(super) struct FactoryState {
         connect_count: usize,
         sent: Vec<ClientFrame>,
         received: usize,
@@ -905,7 +960,7 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct ConnectionScript {
+    pub(super) struct ConnectionScript {
         events: VecDeque<WsEvent>,
         overflowed: bool,
     }
@@ -958,7 +1013,7 @@ mod tests {
         }
     }
 
-    fn test_app(scripts: Vec<ConnectionScript>) -> (K10sApp, Rc<RefCell<FactoryState>>) {
+    pub(super) fn test_app(scripts: Vec<ConnectionScript>) -> (K10sApp, Rc<RefCell<FactoryState>>) {
         let state = Rc::new(RefCell::new(FactoryState {
             connections: scripts.into(),
             ..FactoryState::default()
@@ -1292,5 +1347,234 @@ mod tests {
         assert_eq!(harness.state().client.phase(), ClientPhase::Authenticating);
         assert_eq!(harness.state().view(), &AppView::Connecting);
         assert!(harness.state().infrastructure_request.is_none());
+    }
+}
+
+#[cfg(test)]
+mod stream_lifecycle_tests {
+    use std::sync::mpsc;
+
+    use ewebsock::{WsEvent, WsMessage};
+    use k10s_protocol::{GroupVersionKind, ResourceIdentity, StreamTarget, StreamType};
+
+    use super::K10sApp;
+    use super::tests::test_app;
+    use crate::client::{StreamIo, StreamRoute, StreamSession};
+    use crate::ui::tools::ShellPhase;
+    use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
+
+    #[derive(Debug)]
+    struct ScriptStream {
+        events: mpsc::Receiver<WsEvent>,
+    }
+
+    impl StreamIo for ScriptStream {
+        fn try_recv(&mut self) -> Option<WsEvent> {
+            self.events.try_recv().ok()
+        }
+        fn send_text(&mut self, _text: String) {}
+        fn send_binary(&mut self, _bytes: Vec<u8>) {}
+    }
+
+    fn pod(name: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        }
+    }
+
+    fn target_for(pod_name: &str) -> StreamTarget {
+        StreamTarget {
+            context: "dev-local".into(),
+            namespace: "default".into(),
+            pod: pod_name.into(),
+            container: "app".into(),
+        }
+    }
+
+    fn ready_signal(tx: &mpsc::Sender<WsEvent>, container: &str) {
+        tx.send(WsEvent::Message(WsMessage::Text(
+            serde_json::to_string(&k10s_protocol::StreamServerMessage::Ready {
+                stream_type: StreamType::Exec,
+                tty: true,
+                container: container.to_owned(),
+            })
+            .unwrap(),
+        )))
+        .unwrap();
+    }
+
+    fn open_pod_detail(app: &mut K10sApp, pod: &ResourceIdentity) -> crate::workspace::WindowId {
+        let events = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let window = events
+            .iter()
+            .find_map(|event| match event {
+                crate::workspace::WorkspaceEvent::Opened(id) => Some(*id),
+                _ => None,
+            })
+            .expect("workload window opens");
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod.clone()));
+        window
+    }
+
+    fn attach_session(
+        app: &mut K10sApp,
+        window: crate::workspace::WindowId,
+        pod: &ResourceIdentity,
+    ) -> mpsc::Sender<WsEvent> {
+        let (tx, rx) = mpsc::channel();
+        // Production renders the Shell tab first, creating the tool, and
+        // process_stream_requests moves it to Connecting on connect; mirror
+        // both here.
+        {
+            let stores = app.shell.stream_stores_mut();
+            stores
+                .shells
+                .ensure(window, target_for(&pod.name))
+                .connect();
+        }
+        let mut session = StreamSession::new(StreamRoute::Exec, target_for(&pod.name), true);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Exec), session);
+        tx
+    }
+
+    /// Ready attaches the terminal and engages the guard; resolving the
+    /// guard closes the transport and fails the tool atomically; selection
+    /// can then move on without a ghost session or a stuck guard.
+    #[test]
+    fn exec_ready_engages_guard_and_disconnect_resolution_closes_the_transport() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod_a = pod("pod-a");
+        let pod_b = pod("pod-b");
+        let window = open_pod_detail(&mut app, &pod_a);
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-a"))
+        );
+
+        // Connecting session becomes Ready: attach + guard.
+        let tx = attach_session(&mut app, window, &pod_a);
+        ready_signal(&tx, "app");
+        app.poll_stream_sessions();
+        assert!(
+            app.shell_guard_connected(window),
+            "Ready must engage the guard"
+        );
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
+        );
+
+        // Navigation to pod B is blocked while the shell is connected...
+        let blocked = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
+        assert!(
+            blocked
+                .iter()
+                .any(|event| matches!(event, crate::workspace::WorkspaceEvent::Blocked(_)))
+        );
+
+        // ...resolving DisconnectShell commits the navigation to pod B,
+        // clearing the guard...
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ResolveBlock(
+                crate::workspace::BlockResolution::DisconnectShell { window },
+            ));
+        assert!(!app.shell_guard_connected(window));
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-b"))
+        );
+        // ...and reconciliation then closes the attached transport and
+        // fails the tool atomically.
+        app.poll_stream_sessions();
+        assert!(!app.shell_guard_connected(window));
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Failed("the shell target changed".to_owned())
+        );
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(window, StreamRoute::Exec)),
+            "the resolved-away terminal must lose its transport"
+        );
+
+        // Navigation now succeeds and the workspace rebinds to pod B; no
+        // stale session survives for the old pod.
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-b"))
+        );
+    }
+
+    /// A Ready arriving after the selection moved on is dropped: it never
+    /// attaches the old pod's session nor engages the new pod's guard.
+    #[test]
+    fn stale_handshake_ready_never_attaches_or_guards() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod_a = pod("pod-a");
+        let pod_b = pod("pod-b");
+        let window = open_pod_detail(&mut app, &pod_a);
+
+        // A connecting session for pod A...
+        let tx = attach_session(&mut app, window, &pod_a);
+
+        // ...and the user moves on to pod B before the handshake completes.
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-b"))
+        );
+
+        ready_signal(&tx, "app");
+        app.poll_stream_sessions();
+
+        // The stale Ready is discarded outright.
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(window, StreamRoute::Exec)),
+            "the superseded session must be dropped"
+        );
+        assert!(
+            !app.shell_guard_connected(window),
+            "pod B's guard must never engage for pod A's session"
+        );
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Failed("the shell target changed".to_owned())
+        );
+        // The detail tab state stays consistent for the next connect attempt.
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-b"))
+        );
+        let _ = DetailTab::Shell;
     }
 }
