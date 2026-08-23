@@ -371,6 +371,8 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
             can_view_logs: false,
             can_exec: false,
         },
+        manifest: "apiVersion: apps/v1\nkind: ReplicaSet\nmetadata:\n  name: web-frontend-7d9f8\n"
+            .into(),
     };
     let encoded = round_trip(&response);
     assert_eq!(encoded["ownerReferences"][0]["controller"], json!(true));

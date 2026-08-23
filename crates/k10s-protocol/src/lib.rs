@@ -16,6 +16,7 @@ pub mod envelope;
 pub mod error;
 pub mod ids;
 pub mod metrics;
+pub mod operation;
 pub mod resource;
 pub mod route;
 pub mod subscription;
@@ -34,6 +35,10 @@ pub use metrics::{
     CapacityUsage, ClusterTotals, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
     InfrastructureResponse, InfrastructureWatchSpec, MetricsAvailability, MetricsCondition,
     MetricsStatus, PodMetrics, ResourceMetricsResponse,
+};
+pub use operation::{
+    OperationAccepted, REQUEST_YAML_APPLY, REQUEST_YAML_VALIDATE, ValidationTicket,
+    YamlApplyRequest, YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
 };
 pub use resource::{
     AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,

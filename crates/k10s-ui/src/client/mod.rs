@@ -4,7 +4,7 @@ mod state;
 mod transport;
 
 pub use state::{
-    ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, LiveSubscription,
+    ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, LiveSubscription,
     LocalUiState, PendingRequest, Query, QueryResult, ResourceListQuery, ResourceListState,
     ResourceSnapshot, RetrySchedule,
 };

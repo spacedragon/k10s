@@ -7,12 +7,14 @@
 pub mod catalog;
 pub mod fake;
 pub mod kernel;
+pub mod operation;
 pub mod port;
 pub mod watch;
 
 pub use catalog::CatalogSnapshot;
 pub use fake::{FakeKubernetes, FakeMetricsScenario};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
+pub use operation::YamlValidationData;
 pub use port::{
     BackendError, BackendEvent, Command, Gvk, KubernetesAccess, MetricsSample, OperationId,
     OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,

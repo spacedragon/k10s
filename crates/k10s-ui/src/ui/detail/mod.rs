@@ -14,6 +14,7 @@ mod related;
 use egui::{RichText, Spinner};
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
 
+use crate::ui::tools;
 use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use crate::ui::resource_window::RowIdentity;
@@ -68,6 +69,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     detail: &DetailState<I>,
     view: Option<&ResourceDetailResponse>,
+    yaml: &mut tools::YamlEditors,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -133,7 +135,18 @@ pub(super) fn show<I>(
         DetailTab::Pods => related::show(ui, window_id, &view.related, queued),
         DetailTab::Events => events::show(ui, window_id, &view.events),
         DetailTab::Yaml => {
-            ui.label("YAML editing follows the guarded workflow");
+            if !view.capabilities.can_edit_yaml {
+                ui.label("This kind cannot be edited");
+            } else {
+                tools::yaml::show(
+                    ui,
+                    window_id,
+                    yaml,
+                    detail.identity.as_row_identity(),
+                    Some(view.manifest.as_str()),
+                    queued,
+                );
+            }
         }
         DetailTab::Logs => {
             ui.label("Log streaming is not connected yet");

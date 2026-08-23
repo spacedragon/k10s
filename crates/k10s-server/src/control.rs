@@ -8,14 +8,16 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{
-    BackendError, BackendEvent, BackendKernel, Gvk, KernelQueryResult, Query,
+    BackendError, BackendEvent, BackendKernel, Command, Gvk, KernelQueryResult, Query,
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, RequestId,
-    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk,
-    SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome, decode_client_frame,
+    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest,
+    OperationAccepted, OperationId, RequestId, ResourceIdentity, ResourceListRequest,
+    ResourceRefRequest, ResourceTypesRequest, ResumeStatus, Retryability, ServerFrame, ServerKind,
+    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+    SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
+    decode_client_frame,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
@@ -379,15 +381,39 @@ pub(crate) async fn serve_socket(
                 );
                 request_tasks.spawn(
                     async move {
-                        let parsed = parse_resource_query(&request.request_kind, request.payload);
-                        let result: Result<KernelQueryResult, RequestFailure> = match parsed {
-                            Ok(Some(query)) => {
+                        let parsed = parse_request(&request.request_kind, request.payload);
+                        let result: Result<RequestOutcome, RequestFailure> = match parsed {
+                            Ok(Some(ParsedRequest::Query(query))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
                                 tokio::select! {
                                     () = request_cancel.cancelled() =>
                                         Err(RequestFailure::Backend(BackendError::Cancelled)),
                                     result = task_kernel.query_with_deadline(query, deadline) =>
-                                        result.map_err(RequestFailure::Backend),
+                                        result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                }
+                            }
+                            Ok(Some(ParsedRequest::Apply(apply))) => {
+                                let command = Command::Apply {
+                                    context: apply.context,
+                                    yaml: apply.yaml,
+                                    idempotency_key: request
+                                        .idempotency_key
+                                        .clone()
+                                        .unwrap_or_else(|| apply.ticket_id.clone()),
+                                    ticket_id: apply.ticket_id,
+                                    buffer_hash: apply.buffer_hash,
+                                };
+                                let deadline = request.deadline.map(Duration::from_millis);
+                                tokio::select! {
+                                    () = request_cancel.cancelled() =>
+                                        Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                    result = task_kernel.execute_with_deadline(command, deadline) =>
+                                        result.map(|operation_id| {
+                                            RequestOutcome::Applied(OperationAccepted {
+                                                operation_id: OperationId::new(operation_id.as_str()),
+                                            })
+                                        })
+                                        .map_err(RequestFailure::Backend),
                                 }
                             }
                             Ok(None) => Err(RequestFailure::Backend(BackendError::unsupported(
@@ -396,7 +422,7 @@ pub(crate) async fn serve_socket(
                             Err(message) => Err(RequestFailure::Malformed(message)),
                         };
                         let sent = match result {
-                            Ok(KernelQueryResult::Bootstrap(value)) => {
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::Bootstrap(value))) => {
                                 let mut payload = value.wire_payload();
                                 payload.protocol = task_protocol;
                                 payload.capabilities = task_capabilities;
@@ -406,29 +432,39 @@ pub(crate) async fn serve_socket(
                                     Priority::P1,
                                 )
                             }
-                            Ok(KernelQueryResult::ResourceList(value)) => send_frame(
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceList(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
-                            Ok(KernelQueryResult::ResourceDetail(value)) => send_frame(
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceDetail(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
-                            Ok(KernelQueryResult::ResourceMetrics(value)) => send_frame(
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceMetrics(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
-                            Ok(KernelQueryResult::ResourceTypes(value)) => send_frame(
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceTypes(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
-                            Ok(KernelQueryResult::Infrastructure(value)) => send_frame(
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::Infrastructure(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::YamlValidate(value))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(RequestOutcome::Applied(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value),
                                 Priority::P1,
                             ),
                             Err(RequestFailure::Malformed(message)) => send_error(
@@ -725,15 +761,43 @@ pub(crate) async fn serve_socket(
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
 }
 
-/// Outcome of mapping a request kind and payload onto a backend query.
+/// Outcome of mapping a request kind and payload onto backend behavior.
+enum ParsedRequest {
+    /// A behavior-level query.
+    Query(Query),
+    /// A guarded YAML apply routed through the command port.
+    Apply(YamlApplyRequest),
+}
+
+/// Outcome of one dispatched control request.
+#[allow(clippy::large_enum_variant)]
+enum RequestOutcome {
+    /// A completed kernel query.
+    Kernel(KernelQueryResult),
+    /// An accepted background operation.
+    Applied(OperationAccepted),
+}
+
+/// Map a request kind and payload onto a backend behavior.
 ///
 /// `Ok(None)` marks the bootstrap request, which needs no payload parsing.
-fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option<Query>, String> {
+fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<ParsedRequest>, String> {
     match kind {
-        "bootstrap" => Ok(Some(Query::Bootstrap)),
+        "bootstrap" => Ok(Some(ParsedRequest::Query(Query::Bootstrap))),
+        "yaml.validate" => serde_json::from_value::<YamlValidateRequest>(payload)
+            .map(|parsed| {
+                Some(ParsedRequest::Query(Query::ValidateApply {
+                    context: parsed.context,
+                    yaml: parsed.yaml,
+                }))
+            })
+            .map_err(|error| format!("invalid yaml.validate payload: {error}")),
+        "yaml.apply" => serde_json::from_value::<YamlApplyRequest>(payload)
+            .map(|request| Some(ParsedRequest::Apply(request)))
+            .map_err(|error| format!("invalid yaml.apply payload: {error}")),
         "resource.list" => serde_json::from_value::<ResourceListRequest>(payload)
             .map(|parsed| {
-                Some(Query::ResourceList {
+                Some(ParsedRequest::Query(Query::ResourceList {
                     context: parsed.context,
                     gvk: Gvk {
                         group: parsed.gvk.group,
@@ -741,35 +805,35 @@ fn parse_resource_query(kind: &str, payload: serde_json::Value) -> Result<Option
                         kind: parsed.gvk.kind,
                     },
                     namespace: parsed.namespace,
-                })
+                }))
             })
             .map_err(|error| format!("invalid resource.list payload: {error}")),
         "resource.detail" => serde_json::from_value::<ResourceRefRequest>(payload)
             .map(|parsed| {
-                Some(Query::ResourceDetail {
+                Some(ParsedRequest::Query(Query::ResourceDetail {
                     reference: backend_reference(parsed.identity),
-                })
+                }))
             })
             .map_err(|error| format!("invalid resource.detail payload: {error}")),
         "resource.metrics" => serde_json::from_value::<ResourceRefRequest>(payload)
             .map(|parsed| {
-                Some(Query::ResourceMetrics {
+                Some(ParsedRequest::Query(Query::ResourceMetrics {
                     reference: backend_reference(parsed.identity),
-                })
+                }))
             })
             .map_err(|error| format!("invalid resource.metrics payload: {error}")),
         "resource.types" => serde_json::from_value::<ResourceTypesRequest>(payload)
             .map(|parsed| {
-                Some(Query::ResourceTypes {
+                Some(ParsedRequest::Query(Query::ResourceTypes {
                     context: parsed.context,
-                })
+                }))
             })
             .map_err(|error| format!("invalid resource.types payload: {error}")),
         "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload)
             .map(|parsed| {
-                Some(Query::Infrastructure {
+                Some(ParsedRequest::Query(Query::Infrastructure {
                     context: parsed.context,
-                })
+                }))
             })
             .map_err(|error| format!("invalid infrastructure.get payload: {error}")),
         _ => Ok(None),
@@ -813,6 +877,7 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
             ErrorCode::NotFound,
             "context or resource not found".to_owned(),
         ),
+        BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Internal(_) => (ErrorCode::Internal, "internal server error".to_owned()),
@@ -1286,6 +1351,7 @@ fn send_backend_error(
             ErrorCode::NotFound,
             "context or resource not found".to_owned(),
         ),
+        BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Unsupported { capability } => (
