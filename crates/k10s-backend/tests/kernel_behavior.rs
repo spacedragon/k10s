@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use k10s_backend::{
-    BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
-    QueryResult, Subscribe, SubscriptionHandle,
+    BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, Gvk, KubernetesAccess,
+    OperationId, Query, QueryResult, Subscribe, SubscriptionHandle,
 };
 use k10s_protocol::{
     RequestId, ServerFrame, ServerKind, decode_server_frame, validate_bootstrap_response,
@@ -57,23 +57,52 @@ async fn unsupported_commands_return_typed_capability_errors() {
 }
 
 #[tokio::test]
-async fn unsupported_subscriptions_return_typed_capability_errors() {
+async fn resource_watch_subscriptions_open_with_a_bounded_snapshot_stream() {
+    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let mut handle = kernel
+        .subscribe(Subscribe::ResourceWatch {
+            context: "dev-local".into(),
+            gvk: Gvk::core("v1", "Pod"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .unwrap();
+    let mut events = handle
+        .take_events()
+        .expect("resource watches stream events");
+    match events.recv().await.unwrap() {
+        BackendEvent::Snapshot(data) => {
+            assert_eq!(data.context, "dev-local");
+            assert_eq!(data.gvk.kind, "Pod");
+            assert!(!data.rows.is_empty());
+            assert!(data.rows.iter().all(|row| row.revision <= data.revision));
+        }
+        other => panic!("expected snapshot event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unknown_context_queries_and_watches_are_not_found() {
     let kernel = BackendKernel::new(FakeKubernetes::standard());
     let err = kernel
-        .subscribe(Subscribe::ResourceList {
-            context: "dev-local".into(),
-            kind: "Pod".into(),
+        .query(Query::ResourceList {
+            context: "missing".into(),
+            gvk: Gvk::core("v1", "Pod"),
             namespace: None,
         })
         .await
         .unwrap_err();
+    assert_eq!(err, BackendError::NotFound);
 
-    assert_eq!(
-        err,
-        BackendError::Unsupported {
-            capability: "resource.list".into()
-        }
-    );
+    let err = kernel
+        .subscribe(Subscribe::ResourceWatch {
+            context: "missing".into(),
+            gvk: Gvk::core("v1", "Pod"),
+            namespace: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err, BackendError::NotFound);
 }
 
 #[tokio::test]

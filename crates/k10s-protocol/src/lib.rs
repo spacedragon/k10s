@@ -15,7 +15,10 @@ pub mod bootstrap;
 pub mod envelope;
 pub mod error;
 pub mod ids;
+pub mod metrics;
+pub mod resource;
 pub mod route;
+pub mod subscription;
 
 pub use bootstrap::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
 pub use envelope::{
@@ -27,7 +30,24 @@ pub use envelope::{
 };
 pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};
 pub use ids::{CorrelationId, OperationId, RequestId, SessionId, SubscriptionId};
+pub use metrics::{
+    CapacityUsage, ClusterTotals, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
+    InfrastructureResponse, InfrastructureWatchSpec, MetricsAvailability, MetricsCondition,
+    MetricsStatus, PodMetrics, ResourceMetricsResponse,
+};
+pub use resource::{
+    AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,
+    HealthLevel, NodeRow, OwnerReference, PersistentVolumeClaimRow, PersistentVolumeRow,
+    RelatedGroup, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
+    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceRefRequest, ResourceScope,
+    StorageClassRow, StorageInventory, WorkloadHealth, WorkloadKind,
+};
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
+pub use subscription::{
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, ResourceChanged, ResourceGone,
+    ResourceSnapshotPage, ResourceTypeEntry, ResourceTypesRequest, ResourceTypesResponse,
+    ResourceWatchSpec, SubscriptionSelector,
+};
 
 /// Major protocol version.
 pub const PROTOCOL_MAJOR: u16 = 1;

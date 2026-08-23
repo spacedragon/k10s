@@ -48,3 +48,85 @@ jobs:
 
       - name: Unit tests
         run: cargo test --locked --workspace --all-targets
+
+  # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
+  wasm:
+    name: WASM check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain-file: rust-toolchain.toml
+
+      - name: Rust version
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-wasm-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Check k10s-web for wasm32-unknown-unknown
+        run: cargo check --locked -p k10s-web --target wasm32-unknown-unknown
+
+  # Web foundation gate: pinned Trunk build plus the Chromium browser smoke.
+  web:
+    name: Web foundation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain-file: rust-toolchain.toml
+
+      - name: Rust version
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/trunk
+            target
+          key: cargo-web-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-web-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Install pinned Trunk 0.21.14
+        run: |
+          curl -fsSL -o /tmp/trunk.tar.gz \
+            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSL -o /tmp/trunk.sha256 \
+            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz.sha256
+          echo "$(cat /tmp/trunk.sha256)  /tmp/trunk.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trunk.tar.gz -C "$HOME/.cargo/bin"
+          trunk --version
+
+      - name: Build the wasm distribution
+        run: trunk build --release
+
+      - name: Build the standalone server ahead of the smoke
+        run: cargo build --locked --release -p k10s-server-app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Playwright dependencies
+        run: npm ci && npx playwright install chromium --with-deps
+
+      - name: Browser foundation smoke
+        run: npx playwright test tests/browser/foundation.spec.ts --project=chromium

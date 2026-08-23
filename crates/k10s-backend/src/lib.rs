@@ -4,13 +4,17 @@
 //! sole protocol-facing interface and maps to normalized protocol payloads.
 //! Fake data never escapes as fixture types.
 
+pub mod catalog;
 pub mod fake;
 pub mod kernel;
 pub mod port;
+pub mod watch;
 
-pub use fake::FakeKubernetes;
-pub use kernel::{BackendKernel, BootstrapResult, KernelQueryResult};
+pub use catalog::CatalogSnapshot;
+pub use fake::{FakeKubernetes, FakeMetricsScenario};
+pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
 pub use port::{
-    BackendError, Command, KubernetesAccess, OperationId, Query, QueryResult, StreamKind,
-    Subscribe, SubscriptionHandle,
+    BackendError, BackendEvent, Command, Gvk, KubernetesAccess, MetricsSample, OperationId,
+    OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,
+    ResourceRecord, ResourceRef, StreamKind, Subscribe, SubscriptionHandle,
 };

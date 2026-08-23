@@ -37,7 +37,19 @@ Plans are sequential. Each plan must pass its verification gate before the next 
 - All protocol queues and stream buffers are bounded from their first implementation.
 - Commit `Cargo.lock` and `package-lock.json`; every Cargo CI/release command uses `--locked`, and Trunk builds with its locked Cargo mode.
 - Baseline reconnect/full-resync ships in Plan 1; Plan 5 journal replay is only an optimization and must always fall back safely.
-- Do not start a later plan by bypassing an unfinished verification gate.
+- Do not start a later plan by bypassing an unfinished verification gate, except for tasks marked below as early-start eligible.
+- **Early-start eligibility.** A later-plan task may begin before its plan's gate when ALL of the following hold: (1) every dependency it builds on (files and behaviors) is merged to `main`; (2) it has no file overlap with any in-flight work; (3) it is listed in the early-start table. Everything else in this roadmap — task ordering within a plan, TDD, per-task commits, and verification gates — is unchanged.
+
+| Early-start task | Real dependencies | Can start once |
+| --- | --- | --- |
+| P2-T1 resource/subscription contracts | P1 T2–T5 | P1 T5 merged |
+| P2-T2 workspace/window state (pure) | P1 T1 (`k10s-ui` skeleton) | P1 T6 merged |
+| P3-T1 kubeconfig + `BackendMode` factory | P1 T3–T6 | P1 T6 merged; coordinate with P2-T1 (both touch `k10s-backend/src/{port,kernel}.rs`) |
+| P4-T2 operation engine hardening | P2-T9 | P2-T9 merged |
+| P5-T1 resume journals | P2-T9 | P2-T9 merged |
+| P5-T3 token security | P1 T7 | P1 T7 merged |
+| P5-T7 packaging | P2 web build + entry points | P2 gate passed |
+
 - The superseded `2026-08-21-k10s-egui-static-prototype.md` is reference material only and must not be executed.
 
 ## Final system verification

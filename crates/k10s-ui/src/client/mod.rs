@@ -5,7 +5,8 @@ mod transport;
 
 pub use state::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, LiveSubscription,
-    LocalUiState, PendingRequest, Query, QueryResult, RetrySchedule,
+    LocalUiState, PendingRequest, Query, QueryResult, ResourceListQuery, ResourceListState,
+    ResourceSnapshot, RetrySchedule,
 };
 pub use transport::{
     BoundedEventCallback, BoundedInbox, TransportError, WebSocketTransport, bounded_event_callback,

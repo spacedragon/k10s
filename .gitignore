@@ -1,3 +1,9 @@
 .DS_Store
 .superpowers/
 target/
+node_modules/
+/dist/
+apps/k10s-web/dist/
+test-results/
+playwright-report/
+

@@ -1,7 +1,9 @@
 use k10s_protocol::{
-    BootstrapResponse, ClientKind, ErrorCode, ErrorFrame, ErrorScope, Event, ProtocolVersion,
-    RequestId, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, Subscribed,
-    SubscriptionId, Welcome,
+    BackendRevision, BootstrapResponse, CapacityUsage, ClientKind, ClusterTotals, ErrorCode,
+    ErrorFrame, ErrorScope, Event, InfrastructureRequest, InfrastructureResponse,
+    MetricsAvailability, MetricsCondition, MetricsStatus, ProtocolVersion, RequestId, ResumeStatus,
+    Retryability, ServerFrame, ServerKind, SessionId, StorageInventory, Subscribed, SubscriptionId,
+    Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, Query, QueryResult,
@@ -99,6 +101,81 @@ fn cancellation_is_idempotent_and_deadlines_cancel_pending_requests() {
     let cancel = client.take_outbound().unwrap();
     assert_eq!(cancel.kind, ClientKind::CancelRequest);
     assert_eq!(cancel.request_id(), Some(expiring.id()));
+}
+
+#[test]
+fn cancelled_request_terminal_frames_are_consumed_without_becoming_unknown() {
+    let mut client = ready_client();
+    let response_request = client.begin(Query::Bootstrap).unwrap();
+    let _request = client.take_outbound().unwrap();
+    assert!(client.cancel(&response_request).unwrap());
+    let _cancel = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            response_request.id().clone(),
+            BootstrapResponse::fixture(),
+        ))
+        .expect("a response already queued before cancellation is consumed");
+    assert!(client.take(response_request).is_none());
+
+    let error_request = client.begin(Query::Bootstrap).unwrap();
+    let _request = client.take_outbound().unwrap();
+    assert!(client.cancel(&error_request).unwrap());
+    let _cancel = client.take_outbound().unwrap();
+    client
+        .apply(request_error_frame(
+            error_request.id(),
+            ErrorCode::Cancelled,
+            Retryability::Never,
+        ))
+        .expect("the cancellation error closes the tombstone without failing the session");
+    assert!(client.take(error_request).is_none());
+}
+
+#[test]
+fn late_infrastructure_response_cannot_regress_newer_telemetry() {
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _request = client.take_outbound().unwrap();
+    let subscription = client.subscribe_infrastructure("dev-local").unwrap();
+    let _subscribe = client.take_outbound().unwrap();
+    client.apply(subscribed(subscription.id(), 1)).unwrap();
+    let _ack = client.take_outbound().unwrap();
+
+    let newer = infrastructure_response(2, MetricsAvailability::Partial);
+    client
+        .apply(ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: Some(2),
+            payload: serde_json::to_value(Event {
+                event_kind: k10s_protocol::INFRASTRUCTURE_EVENT_UPDATED.into(),
+                revision: Some("2".into()),
+                payload: serde_json::to_value(newer).unwrap(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    let _ack = client.take_outbound().unwrap();
+
+    let older = infrastructure_response(1, MetricsAvailability::Available);
+    client
+        .apply(ServerFrame::response(request.id().clone(), older))
+        .unwrap();
+
+    assert_eq!(
+        client.infrastructure("dev-local").unwrap().revision,
+        BackendRevision::new(2)
+    );
+    let QueryResult::Infrastructure(completed) = client.take(request).unwrap() else {
+        panic!("query still completes with its own response");
+    };
+    assert_eq!(completed.revision, BackendRevision::new(1));
 }
 
 #[test]
@@ -807,6 +884,36 @@ fn event(id: &SubscriptionId, sequence: u64) -> ServerFrame {
             payload: serde_json::json!({"ready": true}),
         })
         .unwrap(),
+    }
+}
+
+fn infrastructure_response(
+    revision: u64,
+    availability: MetricsAvailability,
+) -> InfrastructureResponse {
+    InfrastructureResponse {
+        context: "dev-local".into(),
+        revision: BackendRevision::new(revision),
+        generated_at: format!("2026-08-21T01:0{revision}:00Z"),
+        totals: ClusterTotals::default(),
+        cluster_cpu: CapacityUsage::default(),
+        cluster_memory: CapacityUsage::default(),
+        pod_capacity: CapacityUsage::default(),
+        metrics: MetricsStatus {
+            availability,
+            condition: if availability == MetricsAvailability::Partial {
+                MetricsCondition::Partial
+            } else {
+                MetricsCondition::Fresh
+            },
+            source: "metrics.k8s.io".into(),
+            source_updated_at: None,
+            detail: "test metrics".into(),
+        },
+        workload_health: Vec::new(),
+        attention: Vec::new(),
+        nodes: Vec::new(),
+        storage: StorageInventory::default(),
     }
 }
 

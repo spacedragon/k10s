@@ -1,0 +1,6 @@
+# Build the wasm entry crate and fingerprint assets into the exact tree the
+# standalone server hosts.
+[build]
+target = "apps/k10s-web/index.html"
+dist = "dist"
+locked = true
