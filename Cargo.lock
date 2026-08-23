@@ -1577,6 +1577,7 @@ name = "k10s-backend"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http",
  "http-body-util",
  "k10s-backend",
@@ -1586,6 +1587,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tower",
  "uuid",
 ]

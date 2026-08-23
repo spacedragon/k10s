@@ -6,7 +6,10 @@
 //! factory never silently downgrades a failing kube launch into fake data —
 //! configuration errors surface as typed startup failures instead.
 
+mod cache;
+pub(crate) mod cluster;
 mod context;
+pub(crate) mod supervisor;
 
 use std::path::PathBuf;
 
@@ -15,7 +18,23 @@ use crate::kernel::BackendKernel;
 use crate::kube::KubeAdapter;
 use crate::port::AdapterError;
 
+pub use self::cache::{INITIAL_WATCH_REVISION, RevisionCounter, SummaryCache};
+pub use self::cluster::{ClusterWatches, WATCH_LINGER};
 pub use self::context::ContextRegistry;
+pub use self::supervisor::{
+    ListedState, SelectionPublisher, WatchPhase, WatchRow, WatchSource, WatchUpdate,
+};
+
+/// A test-only scripted source factory: given a selection's GVK and optional
+/// namespace, return a [`WatchSource`] to drive it (`None` falls back to the
+/// real kube-rs path). Wired through
+/// `KubeAdapter::with_scripted_watches` under the `testkit` feature.
+#[cfg(feature = "testkit")]
+pub type RuntimeWatchScript = std::sync::Arc<
+    dyn Fn(&crate::port::Gvk, Option<&str>) -> Option<std::sync::Arc<dyn WatchSource>>
+        + Send
+        + Sync,
+>;
 
 /// Which Kubernetes adapter backs a running server instance.
 #[derive(Debug, Clone, PartialEq)]
