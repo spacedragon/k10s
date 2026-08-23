@@ -18,6 +18,8 @@ pub struct Ticket {
     pub target: crate::port::ResourceRef,
     /// Backend revision the validation is bound to.
     pub resource_revision: u64,
+    /// Backend revision at which the ticket was issued; drives expiry.
+    pub issued_revision: u64,
     /// Content hash of the validated buffer.
     pub buffer_hash: String,
     /// Whether applying restarts existing workload pods.

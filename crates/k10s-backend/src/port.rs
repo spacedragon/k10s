@@ -91,8 +91,10 @@ pub enum StreamKind {
 pub enum Command {
     /// Apply a YAML manifest through a previously issued validation ticket.
     ///
-    /// The adapter re-checks the ticket binding (target identity, backend
-    /// revision, and buffer hash) before the apply runs; the ticket is
+    /// The adapter re-checks every binding before the apply runs — the
+    /// ticket must exist unconsumed and unexpired, the declared target
+    /// identity and buffer hash must match the ticket exactly, and the
+    /// target revision must equal the validated revision. The ticket is
     /// consumed single-use.
     Apply {
         context: String,
@@ -100,6 +102,7 @@ pub enum Command {
         idempotency_key: String,
         ticket_id: String,
         buffer_hash: String,
+        target: ResourceRef,
     },
     /// Scale a deployment or replicaset.
     Scale {

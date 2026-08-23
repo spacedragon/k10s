@@ -16,22 +16,23 @@ pub const REQUEST_YAML_VALIDATE: &str = "yaml.validate";
 /// Request kind carrying a [`YamlApplyRequest`] payload.
 pub const REQUEST_YAML_APPLY: &str = "yaml.apply";
 
-/// FNV-1a 64-bit constants for the deterministic buffer hash.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
 /// Deterministic content hash of one YAML edit buffer.
 ///
-/// Both the client and the backend compute this over the exact bytes, so a
-/// ticket can only ever apply to the buffer that was validated.
+/// The buffer identity is an authorization boundary between validation and
+/// apply, so it uses a collision-resistant digest (SHA-256) with the
+/// algorithm tagged in the encoding. Both the client and the backend
+/// compute this over the exact bytes, so a ticket can only ever apply to
+/// the buffer that was validated.
 #[must_use]
 pub fn buffer_hash(input: &str) -> String {
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(input.as_bytes());
+    let mut encoded = String::with_capacity(8 + 2 * digest.len());
+    encoded.push_str("sha-256:");
+    for byte in digest {
+        encoded.push_str(&format!("{byte:02x}"));
     }
-    format!("fnv-64:{hash:016x}")
+    encoded
 }
 
 /// Request payload validating a YAML manifest without submitting it.
@@ -139,7 +140,7 @@ mod tests {
         let second = buffer_hash("kind: Deployment\n");
         assert_eq!(first, second);
         assert_ne!(first, buffer_hash("kind: Deployment"));
-        assert!(first.starts_with("fnv-64:"));
+        assert!(first.starts_with("sha-256:"));
     }
 
     #[test]

@@ -29,6 +29,10 @@ use crate::watch::{WatchHub, WatchSelector};
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
 /// Revision assigned to every object in the pristine dataset.
 const INITIAL_REVISION: u64 = 1_000;
+/// Hard bound on unredeemed validation tickets kept per process.
+const TICKET_CAPACITY: usize = 32;
+/// A ticket older than this many backend revisions has expired.
+const TICKET_MAX_AGE_REVISIONS: u64 = 128;
 
 /// A registered infrastructure telemetry watcher.
 #[derive(Debug)]
@@ -72,7 +76,8 @@ struct FakeState {
     metrics_scenario: FakeMetricsScenario,
     revision: u64,
     /// Live validation tickets by ID, consumed single-use by apply.
-    tickets: HashMap<String, crate::operation::Ticket>,
+    /// Ordered so capacity eviction removes the oldest deterministically.
+    tickets: std::collections::BTreeMap<String, crate::operation::Ticket>,
     next_ticket: u64,
     next_operation: u64,
 }
@@ -277,7 +282,7 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario,
                 revision: INITIAL_REVISION,
-                tickets: HashMap::new(),
+                tickets: std::collections::BTreeMap::new(),
                 next_ticket: 1,
                 next_operation: 1,
             })),
@@ -299,7 +304,7 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario: FakeMetricsScenario::Full,
                 revision: INITIAL_REVISION,
-                tickets: HashMap::new(),
+                tickets: std::collections::BTreeMap::new(),
                 next_ticket: 1,
                 next_operation: 1,
             })),
@@ -392,8 +397,13 @@ impl FakeKubernetes {
         yaml: String,
         ticket_id: String,
         buffer_hash: String,
+        declared_target: ResourceRef,
     ) -> Result<OperationId, BackendError> {
-        let _ = context;
+        if context != declared_target.context {
+            return Err(BackendError::Conflict(
+                "the apply request declares a different context than its target".into(),
+            ));
+        }
         if k10s_protocol::buffer_hash(&yaml) != buffer_hash {
             return Err(BackendError::Conflict(
                 "the edited buffer no longer matches the validated ticket".into(),
@@ -401,18 +411,37 @@ impl FakeKubernetes {
         }
         let (ticket, operation_id) = {
             let mut state = self.lock();
-            let Some(ticket) = state.tickets.remove(&ticket_id) else {
+            // Verify every binding before consuming: a rejected envelope
+            // must leave the ticket intact.
+            let Some(ticket) = state.tickets.get(&ticket_id).cloned() else {
                 return Err(BackendError::Conflict(
-                    "the validation ticket is unknown or already used".into(),
+                    "the validation ticket is unknown, expired, or already used".into(),
                 ));
             };
+            // The declared identity must match the ticket exactly: a client
+            // cannot redeem one resource's ticket against another.
+            if declared_target != ticket.target {
+                return Err(BackendError::Conflict(
+                    "the apply request does not match the validated ticket's target".into(),
+                ));
+            }
             if ticket.buffer_hash != buffer_hash {
                 return Err(BackendError::Conflict(
                     "the validation ticket belongs to a different buffer".into(),
                 ));
             }
+            if state
+                .current_revision()
+                .saturating_sub(ticket.issued_revision)
+                > TICKET_MAX_AGE_REVISIONS
+            {
+                return Err(BackendError::Conflict(
+                    "the validation ticket has expired".into(),
+                ));
+            }
             let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
             state.next_operation += 1;
+            state.tickets.remove(&ticket_id);
             (ticket, operation_id)
         };
 
@@ -582,11 +611,24 @@ impl KubernetesAccess for FakeKubernetes {
                     };
                     let ticket_id = format!("ticket-{:04}", state.next_ticket);
                     state.next_ticket += 1;
+                    // Bounded retention: evict the oldest unredeemed
+                    // tickets first so repeated validation without apply
+                    // cannot grow the store without limit.
+                    while state.tickets.len() >= TICKET_CAPACITY {
+                        let oldest = state
+                            .tickets
+                            .keys()
+                            .min()
+                            .expect("capacity is positive")
+                            .clone();
+                        state.tickets.remove(&oldest);
+                    }
                     let ticket = crate::operation::Ticket {
                         id: ticket_id.clone(),
                         buffer_hash: k10s_protocol::buffer_hash(&yaml),
                         disruptive: exists && crate::operation::is_disruptive_kind(&gvk),
                         resource_revision,
+                        issued_revision: state.current_revision(),
                         target: reference,
                     };
                     state.tickets.insert(ticket.id.clone(), ticket.clone());
@@ -723,7 +765,11 @@ impl KubernetesAccess for FakeKubernetes {
                     idempotency_key: _,
                     ticket_id,
                     buffer_hash,
-                } => self.apply_yaml(context, yaml, ticket_id, buffer_hash).await,
+                    target,
+                } => {
+                    self.apply_yaml(context, yaml, ticket_id, buffer_hash, target)
+                        .await
+                }
                 Command::Scale { .. } | Command::Delete { .. } => {
                     Err(BackendError::unsupported("execute"))
                 }

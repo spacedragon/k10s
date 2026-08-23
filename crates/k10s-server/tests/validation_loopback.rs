@@ -572,3 +572,202 @@ async fn client_state_seam_drives_validation_and_survives_a_forced_reconnect() {
     drop(client);
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn apply_envelopes_are_rejected_when_the_declared_target_differs_from_the_ticket() {
+    let (server, _fake) = spawn_server().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    // Validate web-frontend, then declare api-server as the apply target
+    // while reusing web-frontend's ticket and hash verbatim.
+    let outcome = validate(&mut ws, "validate", "dev-local", WEB_FRONTEND_MANIFEST).await;
+    let YamlOutcome::Valid { ticket } = &outcome else {
+        unreachable!()
+    };
+    let mut forged = YamlApplyRequest {
+        context: "dev-local".into(),
+        ticket_id: ticket.id.clone(),
+        target: ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "api-server".into(),
+            uid: "uid-dev-local-deployment-default-api-server".into(),
+        },
+        buffer_hash: ticket.buffer_hash.clone(),
+        yaml: WEB_FRONTEND_MANIFEST.to_owned(),
+    };
+    send_apply(&mut ws, "forged-name", &forged).await;
+    let message = expect_error(&mut ws, "forged-name", ErrorCode::Conflict).await;
+    assert!(
+        message.contains("target"),
+        "a mismatched declared target is rejected: {message}"
+    );
+
+    // A different context with the same ticket is equally rejected.
+    forged.target.name = ticket.target.name.clone();
+    forged.context = "prod-readonly".into();
+    send_apply(&mut ws, "forged-context", &forged).await;
+    expect_error(&mut ws, "forged-context", ErrorCode::Conflict).await;
+
+    // The honest envelope still applies: nothing was mutated by the forgeries.
+    send_apply(
+        &mut ws,
+        "honest",
+        &YamlApplyRequest {
+            context: "dev-local".into(),
+            ticket_id: ticket.id.clone(),
+            target: ticket.target.clone(),
+            buffer_hash: ticket.buffer_hash.clone(),
+            yaml: WEB_FRONTEND_MANIFEST.to_owned(),
+        },
+    )
+    .await;
+    let frame = receive_frame(&mut ws).await;
+    assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
+
+    server.shutdown().await.unwrap();
+}
+
+/// The buffer identity is an authorization boundary between validation and
+/// apply, so it must be a collision-resistant digest preserved end to end.
+#[tokio::test]
+async fn buffer_digest_is_collision_resistant_and_stable_across_the_stack() {
+    let (server, _fake) = spawn_server().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    let outcome = validate(&mut ws, "validate", "dev-local", WEB_FRONTEND_MANIFEST).await;
+    let YamlOutcome::Valid { ticket } = &outcome else {
+        panic!("expected a valid outcome");
+    };
+    // SHA-256 tagged encoding, stable across client and backend computation.
+    assert_eq!(
+        ticket.buffer_hash,
+        k10s_protocol::buffer_hash(WEB_FRONTEND_MANIFEST)
+    );
+    assert!(
+        ticket.buffer_hash.starts_with("sha-256:")
+            && ticket.buffer_hash.len() == "sha-256:".len() + 64,
+        "the digest carries its algorithm tag and full 256-bit width"
+    );
+    // The exact validated bytes redeem the ticket.
+    let operation_id = apply_ticket(&mut ws, "apply", &outcome).await;
+    assert!(!operation_id.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unredeemed_tickets_expire_and_cannot_accumulate_without_bound() {
+    let (server, fake) = spawn_server().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    // Issue one ticket and let it age past the expiry window through real
+    // backend mutations; it must no longer be redeemable afterwards.
+    let outcome = validate(&mut ws, "validate-1", "dev-local", WEB_FRONTEND_MANIFEST).await;
+    let YamlOutcome::Valid { ticket } = &outcome else {
+        unreachable!()
+    };
+    for _ in 0..200 {
+        fake.touch_resource(
+            "dev-local",
+            &Gvk::new("apps", "v1", "Deployment"),
+            Some("default"),
+            "web-frontend",
+        )
+        .expect("target exists");
+    }
+    send_apply(
+        &mut ws,
+        "expired",
+        &YamlApplyRequest {
+            context: "dev-local".into(),
+            ticket_id: ticket.id.clone(),
+            target: ticket.target.clone(),
+            buffer_hash: ticket.buffer_hash.clone(),
+            yaml: WEB_FRONTEND_MANIFEST.to_owned(),
+        },
+    )
+    .await;
+    let message = expect_error(&mut ws, "expired", ErrorCode::Conflict).await;
+    assert!(
+        message.to_lowercase().contains("expire") || message.to_lowercase().contains("unknown"),
+        "an aged-out ticket is rejected as expired or gone: {message}"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ticket_store_evicts_oldest_unredeemed_tickets_under_capacity_pressure() {
+    let (server, _fake) = spawn_server().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    // Fill the bounded store well past capacity with fresh validations of
+    // the same buffer (no mutations happen, so only eviction can retire).
+    let first = validate(
+        &mut ws,
+        "validate-first",
+        "dev-local",
+        WEB_FRONTEND_MANIFEST,
+    )
+    .await;
+    let YamlOutcome::Valid {
+        ticket: first_ticket,
+    } = &first
+    else {
+        unreachable!()
+    };
+    let mut last_outcome = None;
+    for index in 0..(64 + 8) {
+        last_outcome = Some(
+            validate(
+                &mut ws,
+                &format!("validate-{index}"),
+                "dev-local",
+                WEB_FRONTEND_MANIFEST,
+            )
+            .await,
+        );
+    }
+    let Some(YamlOutcome::Valid {
+        ticket: last_ticket,
+    }) = last_outcome.as_ref()
+    else {
+        panic!("the newest validation still issues a ticket under pressure");
+    };
+    assert_ne!(last_ticket.id, first_ticket.id);
+
+    // The oldest ticket was evicted and cannot be redeemed anymore.
+    send_apply(
+        &mut ws,
+        "evicted",
+        &YamlApplyRequest {
+            context: "dev-local".into(),
+            ticket_id: first_ticket.id.clone(),
+            target: first_ticket.target.clone(),
+            buffer_hash: first_ticket.buffer_hash.clone(),
+            yaml: WEB_FRONTEND_MANIFEST.to_owned(),
+        },
+    )
+    .await;
+    expect_error(&mut ws, "evicted", ErrorCode::Conflict).await;
+
+    // The newest ticket remains redeemable.
+    let apply = YamlApplyRequest {
+        context: last_ticket.target.context.clone(),
+        ticket_id: last_ticket.id.clone(),
+        target: last_ticket.target.clone(),
+        buffer_hash: last_ticket.buffer_hash.clone(),
+        yaml: WEB_FRONTEND_MANIFEST.to_owned(),
+    };
+    send_apply(&mut ws, "newest", &apply).await;
+    let frame = receive_frame(&mut ws).await;
+    assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
+
+    server.shutdown().await.unwrap();
+}

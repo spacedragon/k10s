@@ -402,6 +402,7 @@ pub(crate) async fn serve_socket(
                                         .unwrap_or_else(|| apply.ticket_id.clone()),
                                     ticket_id: apply.ticket_id,
                                     buffer_hash: apply.buffer_hash,
+                                    target: backend_reference(apply.target),
                                 };
                                 let deadline = request.deadline.map(Duration::from_millis);
                                 tokio::select! {
