@@ -53,6 +53,9 @@ pub enum WorkspaceCommand<I> {
     SetSort(WindowId, Option<SortSpec>),
     SetSplitRatio(WindowId, f32),
     ToggleDetailPane(WindowId),
+    /// Pick (or clear) the resource type of a custom-resources window. The
+    /// key is the canonical `group/version/kind` string of a picker entry.
+    SetCustomKind(WindowId, Option<String>),
     /// Single-click row selection; updates the integrated detail pane.
     SelectRow(WindowId, I),
     ClearSelection(WindowId),
@@ -156,6 +159,15 @@ where
         self.yaml_owner.get(identity).copied()
     }
 
+    /// The list-window-local resource state of one window, if it is a
+    /// resource list.
+    pub fn resource_state(&self, id: WindowId) -> Option<&ResourceWindowState<I>> {
+        match self.window(id).map(|window| &window.content) {
+            Some(WindowContent::Resource(resource)) => Some(resource),
+            _ => None,
+        }
+    }
+
     /// Number of open list-window instances for a workload kind.
     pub fn instance_count(&self, kind: WorkloadKind) -> usize {
         self.windows
@@ -237,6 +249,12 @@ where
             WorkspaceCommand::ToggleDetailPane(id) => {
                 self.with_resource_mut(id, |resource| {
                     resource.detail_visible = !resource.detail_visible;
+                });
+                Vec::new()
+            }
+            WorkspaceCommand::SetCustomKind(id, kind) => {
+                self.with_resource_mut(id, |resource| {
+                    resource.custom_kind = kind;
                 });
                 Vec::new()
             }

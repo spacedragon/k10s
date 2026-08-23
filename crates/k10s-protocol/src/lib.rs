@@ -45,7 +45,8 @@ pub use resource::{
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use subscription::{
     RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, ResourceChanged, ResourceGone,
-    ResourceSnapshotPage, ResourceWatchSpec, SubscriptionSelector,
+    ResourceSnapshotPage, ResourceTypeEntry, ResourceTypesRequest, ResourceTypesResponse,
+    ResourceWatchSpec, SubscriptionSelector,
 };
 
 /// Major protocol version.

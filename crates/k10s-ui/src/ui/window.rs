@@ -1,30 +1,30 @@
 //! Standard egui windows placed on the free canvas to the launcher's right.
 
-use std::fmt::Debug;
-use std::hash::Hash;
-
 use egui::{Id, LayerId, Order, Pos2, Rect, Vec2};
 
 use crate::workspace::{
-    Window, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
+    Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
 };
 
-use super::{ConnectionState, infrastructure::InfrastructureUiState};
+use super::{ConnectionState, infrastructure::InfrastructureUiState, resource_window};
 
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn show_canvas<I>(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState<I>,
     infrastructure: &mut InfrastructureUiState,
+    resources: &mut resource_window::ResourceUiState,
     response: Option<&k10s_protocol::InfrastructureResponse>,
+    feed: &resource_window::ResourceFeed,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
 where
-    I: Clone + Eq + Hash + Debug,
+    I: resource_window::RowIdentity,
 {
     let canvas = ui.available_rect_before_wrap();
     let navigation_queued = queued.iter().any(|command| {
@@ -45,6 +45,8 @@ where
             canvas,
             window,
             infrastructure,
+            resources,
+            feed,
             response,
             connection,
             queued,
@@ -68,17 +70,20 @@ where
     refresh_requested
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_window<I>(
     ui: &mut egui::Ui,
     canvas: Rect,
     state: &Window<I>,
     infrastructure: &mut InfrastructureUiState,
+    resources: &mut resource_window::ResourceUiState,
+    feed: &resource_window::ResourceFeed,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
 where
-    I: Clone,
+    I: resource_window::RowIdentity,
 {
     let mut open = true;
     let position = Pos2::new(
@@ -90,6 +95,14 @@ where
         WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => Vec2::new(480.0, 320.0),
     };
     let id = layer_id(state.id).id;
+
+    // Workload windows render from a mutable clone of their list state and
+    // queue the resulting commands; the workspace stays immutable during
+    // rendering.
+    let mut resource_state = match &state.content {
+        WindowContent::Resource(resource) => Some(resource.clone()),
+        WindowContent::Detail(_) => None,
+    };
 
     let response = egui::Window::new(state.title.as_str())
         .id(id)
@@ -104,19 +117,36 @@ where
         .constrain_to(canvas)
         .show(ui.ctx(), |ui| {
             ui.set_min_size(min_size - Vec2::new(24.0, 48.0));
-            match state.kind {
-                WindowKind::Overview => super::overview::show(ui, response, connection),
-                WindowKind::Nodes => {
-                    super::infrastructure::show_nodes(ui, infrastructure, response, connection);
-                    false
-                }
-                WindowKind::Storage => {
-                    super::infrastructure::show_storage(ui, infrastructure, response, connection);
-                    false
-                }
-                WindowKind::Workload(_) | WindowKind::Detail => {
-                    ui.label(window_placeholder(state.kind));
-                    false
+            if let (Some(resource), WindowKind::Workload(kind)) =
+                (resource_state.as_mut(), state.kind)
+            {
+                super::resource_window::show(
+                    ui, resources, state.id, kind, resource, feed, connection, queued,
+                );
+                false
+            } else {
+                match state.kind {
+                    WindowKind::Overview => super::overview::show(ui, response, connection),
+                    WindowKind::Nodes => {
+                        super::infrastructure::show_nodes(ui, infrastructure, response, connection);
+                        false
+                    }
+                    WindowKind::Storage => {
+                        super::infrastructure::show_storage(
+                            ui,
+                            infrastructure,
+                            response,
+                            connection,
+                        );
+                        false
+                    }
+                    WindowKind::Workload(_) => {
+                        unreachable!("workload windows render through resource_window")
+                    }
+                    WindowKind::Detail => {
+                        ui.label("Resource detail");
+                        false
+                    }
                 }
             }
         });
@@ -144,14 +174,4 @@ where
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)
-}
-
-fn window_placeholder(kind: WindowKind) -> &'static str {
-    match kind {
-        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => {
-            unreachable!("infrastructure windows have concrete renderers")
-        }
-        WindowKind::Workload(_) => "Resource list",
-        WindowKind::Detail => "Resource detail",
-    }
 }

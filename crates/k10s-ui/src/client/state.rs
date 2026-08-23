@@ -4,9 +4,10 @@ use k10s_protocol::{
     Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
     ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
     InfrastructureResponse, InfrastructureWatchSpec, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceListRequest,
-    ResourceListResponse, ResourceListRow, ResumeStatus, Retryability, ServerFrame, ServerKind,
-    ServerPayload, SessionId, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceIdentity,
+    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceTypesRequest,
+    ResourceTypesResponse, ResumeStatus, Retryability, ServerFrame, ServerKind, ServerPayload,
+    SessionId, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
 };
 
 /// Client connection lifecycle.
@@ -171,6 +172,8 @@ pub enum Query {
     Bootstrap,
     /// Retrieve a normalized resource list for one type on one context.
     ResourceList(ResourceListQuery),
+    /// List the selectable resource types of one context.
+    ResourceTypes(ResourceTypesRequest),
     /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
     Infrastructure(InfrastructureRequest),
 }
@@ -197,8 +200,65 @@ pub enum QueryResult {
     Bootstrap(BootstrapResponse),
     /// Normalized resource list result.
     ResourceList(ResourceListResponse),
+    /// Selectable resource types of one context (built-ins and CRDs).
+    ResourceTypes(Box<ResourceTypesResponse>),
     /// Complete infrastructure projection.
     Infrastructure(Box<InfrastructureResponse>),
+}
+
+/// The retained, applied list view of one resource watch subscription.
+///
+/// The view starts from a completed chunked snapshot and then applies only
+/// contiguous revisions: a delta whose revision is not strictly newer than
+/// the last applied revision is stale or out of order and is ignored, so a
+/// replayed frame can never regress the list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceListState {
+    revision: Option<BackendRevision>,
+    rows: BTreeMap<ResourceIdentity, ResourceListRow>,
+}
+
+impl ResourceListState {
+    /// Revision of the last applied snapshot page or delta; `None` until a
+    /// snapshot has completed for this watch.
+    #[must_use]
+    pub fn revision(&self) -> Option<BackendRevision> {
+        self.revision
+    }
+
+    /// Retained rows sorted by stable resource identity.
+    pub fn rows(&self) -> impl Iterator<Item = &ResourceListRow> {
+        self.rows.values()
+    }
+
+    fn apply_snapshot(&mut self, revision: BackendRevision, rows: Vec<ResourceListRow>) {
+        self.revision = Some(revision);
+        self.rows = rows
+            .into_iter()
+            .map(|row| (row.identity.clone(), row))
+            .collect();
+    }
+
+    /// Apply one changed delta when its revision is strictly newer than the
+    /// last applied revision; anything else is stale and ignored. Deltas
+    /// that arrive before any snapshot are dropped the same way: there is
+    /// no baseline to be contiguous with.
+    fn apply_changed(&mut self, identity: ResourceIdentity, row: ResourceListRow) {
+        if self.revision.is_none_or(|applied| row.revision <= applied) {
+            return;
+        }
+        self.revision = Some(row.revision);
+        self.rows.insert(identity, row);
+    }
+
+    /// Apply one gone delta under the same contiguous-revision rule.
+    fn apply_gone(&mut self, identity: ResourceIdentity, revision: BackendRevision) {
+        if self.revision.is_none_or(|applied| revision <= applied) {
+            return;
+        }
+        self.revision = Some(revision);
+        self.rows.remove(&identity);
+    }
 }
 
 /// A reassembled resource snapshot delivered for one subscription.
@@ -289,8 +349,12 @@ pub struct ClientState {
     next_subscription_id: u128,
     live_subscriptions: HashMap<SubscriptionId, serde_json::Value>,
     active_subscriptions: HashSet<SubscriptionId>,
+    /// Typed selectors of live resource watches, used to filter deltas.
+    resource_specs: HashMap<SubscriptionId, k10s_protocol::ResourceWatchSpec>,
     snapshot_assemblies: HashMap<SubscriptionId, SnapshotAssembly>,
     completed_snapshots: HashMap<SubscriptionId, ResourceSnapshot>,
+    /// Retained applied list views, one per live resource watch.
+    resource_lists: HashMap<SubscriptionId, ResourceListState>,
     infrastructure: HashMap<String, InfrastructureResponse>,
     server_bootstrap: Option<BootstrapResponse>,
     server_state_invalid: bool,
@@ -318,6 +382,7 @@ impl std::fmt::Debug for ClientState {
             .field("active_subscriptions_len", &self.active_subscriptions.len())
             .field("snapshot_assemblies_len", &self.snapshot_assemblies.len())
             .field("completed_snapshots_len", &self.completed_snapshots.len())
+            .field("resource_lists_len", &self.resource_lists.len())
             .field("infrastructure_len", &self.infrastructure.len())
             .field("server_state_invalid", &self.server_state_invalid)
             .field("local_ui", &self.local_ui)
@@ -350,6 +415,8 @@ impl ClientState {
             active_subscriptions: HashSet::new(),
             snapshot_assemblies: HashMap::new(),
             completed_snapshots: HashMap::new(),
+            resource_specs: HashMap::new(),
+            resource_lists: HashMap::new(),
             infrastructure: HashMap::new(),
             server_bootstrap: None,
             server_state_invalid: true,
@@ -476,20 +543,21 @@ impl ClientState {
         }
         let id = SubscriptionId::new(format!("resource-{}", self.next_subscription_id));
         self.next_subscription_id = self.next_subscription_id.saturating_add(1);
-        let selector = serde_json::to_value(SubscriptionSelector::Resource(
-            k10s_protocol::ResourceWatchSpec {
-                context: context.into(),
-                gvk: k10s_protocol::GroupVersionKind {
-                    group: group.into(),
-                    version: version.into(),
-                    kind: kind.into(),
-                },
-                namespace,
+        let spec = k10s_protocol::ResourceWatchSpec {
+            context: context.into(),
+            gvk: k10s_protocol::GroupVersionKind {
+                group: group.into(),
+                version: version.into(),
+                kind: kind.into(),
             },
-        ))
-        .map_err(|error| ClientError::Protocol(format!("could not encode selector: {error}")))?;
+            namespace,
+        };
+        let selector = serde_json::to_value(SubscriptionSelector::Resource(spec.clone())).map_err(
+            |error| ClientError::Protocol(format!("could not encode selector: {error}")),
+        )?;
         self.queue_subscribe(id.clone(), selector.clone())?;
         self.live_subscriptions.insert(id.clone(), selector);
+        self.resource_specs.insert(id.clone(), spec);
         self.refresh_server_validity();
         Ok(LiveSubscription { id })
     }
@@ -533,8 +601,10 @@ impl ClientState {
         })?;
         self.live_subscriptions.remove(subscription.id());
         self.active_subscriptions.remove(subscription.id());
+        self.resource_specs.remove(subscription.id());
         self.snapshot_assemblies.remove(subscription.id());
         self.completed_snapshots.remove(subscription.id());
+        self.resource_lists.remove(subscription.id());
         self.refresh_server_validity();
         Ok(true)
     }
@@ -550,6 +620,15 @@ impl ClientState {
     /// Take the completed snapshot reassembled for one subscription.
     pub fn take_resource_snapshot(&mut self, id: &SubscriptionId) -> Option<ResourceSnapshot> {
         self.completed_snapshots.remove(id)
+    }
+
+    /// The retained, applied list view of one live resource watch. The view
+    /// starts from the latest completed snapshot and reflects every applied
+    /// contiguous delta; it survives until the subscription is dropped or
+    /// the connection generation is torn down.
+    #[must_use]
+    pub fn resource_list(&self, id: &SubscriptionId) -> Option<&ResourceListState> {
+        self.resource_lists.get(id)
     }
 
     fn queue_subscribe(
@@ -741,6 +820,7 @@ impl ClientState {
             request_kind: match &query {
                 Query::Bootstrap => "bootstrap".to_owned(),
                 Query::ResourceList(_) => "resource.list".to_owned(),
+                Query::ResourceTypes(_) => "resource.types".to_owned(),
                 Query::Infrastructure(_) => "infrastructure.get".to_owned(),
             },
             deadline: relative_deadline_ms,
@@ -759,6 +839,11 @@ impl ClientState {
                 .map_err(|error| {
                     ClientError::Protocol(format!("could not encode request: {error}"))
                 })?,
+                Query::ResourceTypes(request) => {
+                    serde_json::to_value(request).map_err(|error| {
+                        ClientError::Protocol(format!("could not encode request: {error}"))
+                    })?
+                }
                 Query::Infrastructure(request) => {
                     serde_json::to_value(request).map_err(|error| {
                         ClientError::Protocol(format!("could not encode request: {error}"))
@@ -901,6 +986,12 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceList(list)
                 }
+                Query::ResourceTypes(_) => {
+                    let types: ResourceTypesResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::ResourceTypes(Box::new(types))
+                }
                 Query::Infrastructure(_) => {
                     let response: InfrastructureResponse = frame
                         .decode_response_payload()
@@ -981,14 +1072,35 @@ impl ClientState {
             }
             ServerPayload::Event(event) => match event.event_kind.as_str() {
                 RESOURCE_EVENT_CHANGED => {
-                    let _: k10s_protocol::ResourceChanged =
+                    let delta: k10s_protocol::ResourceChanged =
                         serde_json::from_value(event.payload)
                             .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    let id = self.owned_subscription(&frame);
+                    if id
+                        .as_ref()
+                        .is_some_and(|id| self.spec_matches(id, &delta.identity))
+                        && let Some(state) =
+                            id.as_ref().and_then(|id| self.resource_lists.get_mut(id))
+                    {
+                        // Before the first snapshot completes there is no
+                        // baseline and the delta is dropped: the snapshot
+                        // supersedes it.
+                        state.apply_changed(delta.identity, delta.row);
+                    }
                     Ok(())
                 }
                 RESOURCE_EVENT_GONE => {
-                    let _: k10s_protocol::ResourceGone = serde_json::from_value(event.payload)
+                    let delta: k10s_protocol::ResourceGone = serde_json::from_value(event.payload)
                         .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    let id = self.owned_subscription(&frame);
+                    if id
+                        .as_ref()
+                        .is_some_and(|id| self.spec_matches(id, &delta.identity))
+                        && let Some(state) =
+                            id.as_ref().and_then(|id| self.resource_lists.get_mut(id))
+                    {
+                        state.apply_gone(delta.identity, delta.revision);
+                    }
                     Ok(())
                 }
                 INFRASTRUCTURE_EVENT_UPDATED => {
@@ -1043,10 +1155,20 @@ impl ClientState {
                 assembly.revision = assembly.revision.max(page.revision);
                 assembly.rows.extend(page.rows);
                 if assembly.received_chunks == assembly.total_chunks {
-                    let rows = std::mem::take(&mut assembly.rows);
                     let revision = assembly.revision;
-                    self.completed_snapshots
-                        .insert(id, ResourceSnapshot { revision, rows });
+                    let rows = std::mem::take(&mut assembly.rows);
+                    self.completed_snapshots.insert(
+                        id.clone(),
+                        ResourceSnapshot {
+                            revision,
+                            rows: rows.clone(),
+                        },
+                    );
+                    // The completed snapshot starts — or after a resync
+                    // fully replaces — the retained applied view.
+                    let mut state = ResourceListState::default();
+                    state.apply_snapshot(revision, rows);
+                    self.resource_lists.insert(id, state);
                 }
                 Ok(())
             }
@@ -1157,9 +1279,22 @@ impl ClientState {
         self.active_subscriptions.clear();
         self.snapshot_assemblies.clear();
         self.completed_snapshots.clear();
+        self.resource_specs.clear();
+        self.resource_lists.clear();
         self.pending.clear();
         self.completed.clear();
         self.rebuilt_bootstrap = None;
+    }
+
+    /// Whether the watch behind `id` selected `identity`.
+    fn spec_matches(
+        &self,
+        id: &SubscriptionId,
+        identity: &k10s_protocol::ResourceIdentity,
+    ) -> bool {
+        self.resource_specs
+            .get(id)
+            .is_some_and(|spec| spec.matches(identity))
     }
 
     /// Return the subscription ID when the frame belongs to a desired
@@ -1190,6 +1325,13 @@ impl ClientState {
             .map(|(id, selector)| (id.clone(), selector.clone()))
             .collect();
         for (id, selector) in subscriptions {
+            // Restore the typed watch selectors so retained list views keep
+            // receiving filtered deltas on the rebuilt connection.
+            if let Ok(SubscriptionSelector::Resource(spec)) =
+                serde_json::from_value::<SubscriptionSelector>(selector.clone())
+            {
+                self.resource_specs.insert(id.clone(), spec);
+            }
             self.queue_subscribe(id, selector)?;
         }
         Ok(())

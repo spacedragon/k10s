@@ -20,24 +20,14 @@ use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
     OperationId, OwnerRef, Query, QueryResult, ResourceListData, ResourceRecord, ResourceRef,
-    Subscribe, SubscriptionHandle,
+    ResourceTypesData, Subscribe, SubscriptionHandle, TypeEntry,
 };
+use crate::watch::{WatchHub, WatchSelector};
 
 /// Unix seconds for the fixed fake epoch `2026-08-21T00:00:00Z`.
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
 /// Revision assigned to every object in the pristine dataset.
 const INITIAL_REVISION: u64 = 1_000;
-/// Broadcast capacity per resource watch; bounded like every other queue.
-const WATCH_CAPACITY: usize = 128;
-
-/// A registered resource watcher.
-#[derive(Debug)]
-struct Watcher {
-    context: String,
-    gvk: Gvk,
-    namespace: Option<String>,
-    sender: broadcast::Sender<crate::port::BackendEvent>,
-}
 
 /// A registered infrastructure telemetry watcher.
 #[derive(Debug)]
@@ -76,7 +66,7 @@ struct FakeState {
     contexts: Vec<ContextInfo>,
     records: Vec<ResourceRecord>,
     metrics: HashMap<String, MetricsSample>,
-    watchers: Vec<Watcher>,
+    watches: WatchHub,
     infrastructure_watchers: Vec<InfrastructureWatcher>,
     metrics_scenario: FakeMetricsScenario,
     revision: u64,
@@ -143,21 +133,8 @@ impl FakeState {
     }
 
     fn notify_matching(&mut self, reference: &ResourceRef, event: crate::port::BackendEvent) {
-        self.watchers.retain(|watcher| {
-            if watcher.sender.receiver_count() == 0 {
-                return false;
-            }
-            if watcher.context == reference.context
-                && watcher.gvk == reference.gvk
-                && watcher
-                    .namespace
-                    .as_ref()
-                    .is_none_or(|watched| Some(watched.as_str()) == reference.namespace.as_deref())
-            {
-                let _ = watcher.sender.send(event.clone());
-            }
-            true
-        });
+        self.watches
+            .broadcast(event, |selector| selector.matches(reference));
     }
 }
 
@@ -225,7 +202,7 @@ impl FakeKubernetes {
                 contexts,
                 records,
                 metrics,
-                watchers: Vec::new(),
+                watches: WatchHub::default(),
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario,
                 revision: INITIAL_REVISION,
@@ -244,7 +221,7 @@ impl FakeKubernetes {
                 contexts,
                 records: Vec::new(),
                 metrics: HashMap::new(),
-                watchers: Vec::new(),
+                watches: WatchHub::default(),
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario: FakeMetricsScenario::Full,
                 revision: INITIAL_REVISION,
@@ -328,7 +305,7 @@ impl FakeKubernetes {
     /// Number of registered watchers; test-only observability for pruning.
     #[cfg(test)]
     fn watcher_count(&self) -> usize {
-        self.lock().watchers.len()
+        self.lock().watches.live_count()
     }
 
     /// Coordinate a test mutation at the registration/snapshot cut.
@@ -423,6 +400,32 @@ impl KubernetesAccess for FakeKubernetes {
                             .unwrap_or_default(),
                     ))
                 }
+                Query::ResourceTypes { context } => {
+                    let state = self.lock();
+                    if !state.contexts.iter().any(|c| c.name == context) {
+                        return Err(BackendError::NotFound);
+                    }
+                    let mut types: Vec<TypeEntry> = Vec::new();
+                    for record in &state.records {
+                        if record.reference.context != context {
+                            continue;
+                        }
+                        let gvk = record.reference.gvk.clone();
+                        if types.iter().any(|entry| entry.gvk == gvk) {
+                            continue;
+                        }
+                        let namespaced = state.records.iter().any(|candidate| {
+                            candidate.reference.gvk == gvk
+                                && candidate.reference.namespace.is_some()
+                        });
+                        types.push(TypeEntry { gvk, namespaced });
+                    }
+                    types.sort_by(|left, right| left.gvk.cmp(&right.gvk));
+                    Ok(QueryResult::ResourceTypes(ResourceTypesData {
+                        context,
+                        types,
+                    }))
+                }
                 Query::Infrastructure { context } => {
                     let state = self.lock();
                     if !state
@@ -467,44 +470,37 @@ impl KubernetesAccess for FakeKubernetes {
                     gvk,
                     namespace,
                 } => {
-                    let (sender, receiver) = broadcast::channel(WATCH_CAPACITY);
-                    {
-                        let mut state = self.lock();
-                        if !state.contexts.iter().any(|c| c.name == context) {
-                            return Err(BackendError::NotFound);
-                        }
-                        let rows: Vec<ResourceRecord> = state
-                            .records
-                            .iter()
-                            .filter(|record| {
-                                state.matches_selector(
-                                    &record.reference,
-                                    &context,
-                                    &gvk,
-                                    &namespace,
-                                )
-                            })
-                            .cloned()
-                            .collect();
-                        let snapshot = ResourceListData {
-                            revision: state.current_revision(),
-                            rows,
-                            namespace: namespace.clone(),
-                            gvk: gvk.clone(),
-                            context: context.clone(),
-                            generated_at: rfc3339(FAKE_EPOCH_SECS + 60),
-                        };
-                        state.watchers.push(Watcher {
-                            context,
-                            gvk,
-                            namespace,
-                            sender: sender.clone(),
-                        });
-                        // Publish while the state lock still protects the
-                        // snapshot cut: later mutations can only enqueue
-                        // deltas after this initial event.
-                        let _ = sender.send(crate::port::BackendEvent::Snapshot(snapshot));
+                    let mut state = self.lock();
+                    if !state.contexts.iter().any(|c| c.name == context) {
+                        return Err(BackendError::NotFound);
                     }
+                    let rows: Vec<ResourceRecord> = state
+                        .records
+                        .iter()
+                        .filter(|record| {
+                            state.matches_selector(&record.reference, &context, &gvk, &namespace)
+                        })
+                        .cloned()
+                        .collect();
+                    let snapshot = ResourceListData {
+                        revision: state.current_revision(),
+                        rows,
+                        namespace: namespace.clone(),
+                        gvk: gvk.clone(),
+                        context: context.clone(),
+                        generated_at: rfc3339(FAKE_EPOCH_SECS + 60),
+                    };
+                    // The first subscriber starts the fake watch. The initial
+                    // snapshot is published while the state lock still
+                    // protects the snapshot cut, so later mutations can only
+                    // enqueue deltas after this initial event.
+                    let (sender, receiver) = state.watches.register(WatchSelector {
+                        context,
+                        gvk,
+                        namespace,
+                    });
+                    let _ = sender.send(crate::port::BackendEvent::Snapshot(snapshot));
+                    drop(state);
                     #[cfg(test)]
                     if let Some(gate) = self
                         .subscription_cut_gate
@@ -518,7 +514,7 @@ impl KubernetesAccess for FakeKubernetes {
                     Ok(SubscriptionHandle::with_events("resource-watch", receiver))
                 }
                 Subscribe::Infrastructure { context } => {
-                    let (sender, receiver) = broadcast::channel(WATCH_CAPACITY);
+                    let (sender, receiver) = broadcast::channel(crate::watch::WATCH_CAPACITY);
                     let mut state = self.lock();
                     if !state
                         .contexts
