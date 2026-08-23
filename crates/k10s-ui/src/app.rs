@@ -499,6 +499,11 @@ impl K10sApp {
                     };
                     self.recovering = false;
                     if let Some(context) = selected {
+                        // The bootstrap answer already wrote the selection,
+                        // so the render-time context-change path would skip
+                        // it: reconcile the resource streams here.
+                        self.ensure_resource_streams(&context)
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.select_infrastructure_context(&context)
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                     }
@@ -1491,8 +1496,8 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get"],
-            "recovery loads bootstrap then exactly one infrastructure snapshot"
+            ["bootstrap", "resource.types", "infrastructure.get"],
+            "recovery loads bootstrap, per-kind streams/types, and one infrastructure snapshot"
         );
         assert_eq!(app.client.outbound_len(), 0);
     }
@@ -1529,7 +1534,7 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get"],
+            ["bootstrap", "resource.types", "infrastructure.get"],
             "subscription acknowledgement must not re-bootstrap or restart the snapshot"
         );
     }
@@ -1570,7 +1575,12 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get", "bootstrap"],
+            [
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get",
+                "bootstrap"
+            ],
             "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
         );
         assert_eq!(app.client.outbound_len(), 0);
