@@ -123,6 +123,9 @@ impl BackendKernel {
             QueryResult::Infrastructure(snapshot) => {
                 KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
             }
+            QueryResult::YamlValidation(data) => {
+                KernelQueryResult::YamlValidate(crate::operation::YamlValidateResult::new(data))
+            }
             QueryResult::ResourceRelations(_) => {
                 // Relations are an internal composition of resource.detail
                 // and are never exposed as a standalone kernel result.
@@ -242,6 +245,8 @@ pub enum KernelQueryResult {
     ResourceTypes(ResourceTypesResult),
     /// Overview, Nodes, Storage, and metrics result.
     Infrastructure(InfrastructureResult),
+    /// Guarded YAML validation outcome with its issued ticket when valid.
+    YamlValidate(crate::operation::YamlValidateResult),
 }
 
 impl KernelQueryResult {
@@ -267,6 +272,7 @@ impl KernelQueryResult {
             Self::ResourceMetrics(r) => r.serialized(),
             Self::ResourceTypes(r) => r.serialized(),
             Self::Infrastructure(r) => r.serialized(),
+            Self::YamlValidate(r) => r.serialized(),
         }
     }
 
@@ -392,6 +398,7 @@ impl ResourceDetailResult {
     #[must_use]
     pub fn new(record: ResourceRecord, related: RelatedData) -> Self {
         let identity = map_identity(&record.reference);
+        let manifest = crate::operation::manifest_for(&record);
         let mut sections = vec![DetailSection {
             title: "Overview".into(),
             rows: vec![
@@ -494,6 +501,7 @@ impl ResourceDetailResult {
                     })
                     .collect(),
                 capabilities,
+                manifest,
                 identity,
             },
         }

@@ -19,9 +19,13 @@ use k10s_protocol::{
 async fn unsupported_queries_return_typed_capability_errors() {
     let kernel = BackendKernel::new(FakeKubernetes::standard());
     let err = kernel
-        .query(Query::ValidateApply {
-            context: "dev-local".into(),
-            yaml: "kind: ConfigMap".into(),
+        .query(Query::StreamTicket {
+            stream: k10s_backend::StreamKind::Logs {
+                context: "dev-local".into(),
+                namespace: "default".into(),
+                pod: "web-frontend-7d9f8-00001".into(),
+                container: "app".into(),
+            },
         })
         .await
         .unwrap_err();
@@ -29,7 +33,7 @@ async fn unsupported_queries_return_typed_capability_errors() {
     assert_eq!(
         err,
         BackendError::Unsupported {
-            capability: "validate.apply".into()
+            capability: "stream.ticket".into()
         }
     );
 }

@@ -18,6 +18,7 @@ pub(super) fn show_canvas<I>(
     workspace: &WorkspaceState<I>,
     infrastructure: &mut InfrastructureUiState,
     resources: &mut resource_window::ResourceUiState,
+    yaml: &mut super::tools::YamlEditors,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     feed: &resource_window::ResourceFeed,
     connection: ConnectionState,
@@ -46,6 +47,7 @@ where
             window,
             infrastructure,
             resources,
+            yaml,
             feed,
             response,
             connection,
@@ -77,6 +79,7 @@ fn show_window<I>(
     state: &Window<I>,
     infrastructure: &mut InfrastructureUiState,
     resources: &mut resource_window::ResourceUiState,
+    yaml: &mut super::tools::YamlEditors,
     feed: &resource_window::ResourceFeed,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     connection: ConnectionState,
@@ -121,7 +124,7 @@ where
                 (resource_state.as_mut(), state.kind)
             {
                 super::resource_window::show(
-                    ui, resources, state.id, kind, resource, feed, connection, queued,
+                    ui, resources, state.id, kind, resource, yaml, feed, connection, queued,
                 );
                 false
             } else {
@@ -152,7 +155,7 @@ where
                                 .identity
                                 .as_row_identity()
                                 .and_then(|identity| feed.details.get(identity));
-                            super::detail::show(ui, state.id, detail, view, queued);
+                            super::detail::show(ui, state.id, detail, view, yaml, queued);
                         }
                         false
                     }

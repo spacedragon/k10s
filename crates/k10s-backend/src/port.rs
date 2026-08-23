@@ -89,11 +89,20 @@ pub enum StreamKind {
 /// errors. `execute(Command)` always returns an `OperationId` when supported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Apply a YAML manifest.
+    /// Apply a YAML manifest through a previously issued validation ticket.
+    ///
+    /// The adapter re-checks every binding before the apply runs — the
+    /// ticket must exist unconsumed and unexpired, the declared target
+    /// identity and buffer hash must match the ticket exactly, and the
+    /// target revision must equal the validated revision. The ticket is
+    /// consumed single-use.
     Apply {
         context: String,
         yaml: String,
         idempotency_key: String,
+        ticket_id: String,
+        buffer_hash: String,
+        target: ResourceRef,
     },
     /// Scale a deployment or replicaset.
     Scale {
@@ -148,6 +157,8 @@ pub enum QueryResult {
     ResourceTypes(ResourceTypesData),
     /// Overview, Nodes, Storage, and cluster metrics catalog.
     Infrastructure(CatalogSnapshot),
+    /// Guarded YAML validation outcome with an issued ticket when valid.
+    YamlValidation(crate::operation::YamlValidationData),
 }
 
 /// Backend-owned group/version/kind of a resource type.
@@ -371,6 +382,9 @@ pub enum BackendError {
     Unsupported { capability: String },
     /// The addressed context or object does not exist.
     NotFound,
+    /// The target changed since validation, or the ticket is stale,
+    /// consumed, or tampered. Safe reason attached.
+    Conflict(String),
     /// The request timed out.
     Timeout,
     /// The request was cancelled.
@@ -403,6 +417,7 @@ impl std::fmt::Display for BackendError {
         match self {
             Self::Unsupported { capability } => write!(f, "unsupported capability: {capability}"),
             Self::NotFound => write!(f, "context or resource not found"),
+            Self::Conflict(reason) => write!(f, "conflict: {reason}"),
             Self::Timeout => write!(f, "request timed out"),
             Self::Cancelled => write!(f, "request was cancelled"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),

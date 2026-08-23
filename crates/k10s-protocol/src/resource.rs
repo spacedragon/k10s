@@ -339,6 +339,10 @@ pub struct ResourceDetailResponse {
     pub related: Vec<RelatedGroup>,
     /// Capabilities asserted for this kind.
     pub capabilities: ResourceCapabilities,
+    /// The current server-side YAML manifest of the object, rendered
+    /// read-only and used as the base of guarded edits. Authored entirely by
+    /// the backend; clients never synthesize it.
+    pub manifest: String,
 }
 
 /// Whether a workload-health bucket is healthy, warning, or failing.

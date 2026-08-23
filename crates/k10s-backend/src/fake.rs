@@ -29,6 +29,10 @@ use crate::watch::{WatchHub, WatchSelector};
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
 /// Revision assigned to every object in the pristine dataset.
 const INITIAL_REVISION: u64 = 1_000;
+/// Hard bound on unredeemed validation tickets kept per process.
+const TICKET_CAPACITY: usize = 32;
+/// A ticket older than this many backend revisions has expired.
+const TICKET_MAX_AGE_REVISIONS: u64 = 128;
 
 /// A registered infrastructure telemetry watcher.
 #[derive(Debug)]
@@ -71,6 +75,14 @@ struct FakeState {
     infrastructure_watchers: Vec<InfrastructureWatcher>,
     metrics_scenario: FakeMetricsScenario,
     revision: u64,
+    /// Live validation tickets by ID, consumed single-use by apply.
+    /// `ticket_order` mirrors the live keys in issuance order so capacity
+    /// eviction removes the oldest deterministically regardless of ID
+    /// formatting.
+    tickets: HashMap<String, crate::operation::Ticket>,
+    ticket_order: std::collections::VecDeque<String>,
+    next_ticket: u64,
+    next_operation: u64,
 }
 
 #[cfg(test)]
@@ -116,6 +128,24 @@ impl FakeState {
                 && candidate.namespace == reference.namespace
                 && candidate.name == reference.name
                 && candidate.uid == reference.uid
+        })
+    }
+
+    /// Resolve a record by identity fields without the UID, used by the
+    /// guarded apply to detect recreations and deletions.
+    fn find_by_name(
+        &self,
+        context: &str,
+        gvk: &Gvk,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Option<&ResourceRecord> {
+        self.records.iter().find(|record| {
+            let candidate = &record.reference;
+            candidate.context == context
+                && &candidate.gvk == gvk
+                && candidate.namespace.as_deref() == namespace
+                && candidate.name == name
         })
     }
 
@@ -255,6 +285,10 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario,
                 revision: INITIAL_REVISION,
+                tickets: HashMap::new(),
+                ticket_order: std::collections::VecDeque::new(),
+                next_ticket: 1,
+                next_operation: 1,
             })),
             #[cfg(test)]
             subscription_cut_gate: Arc::new(Mutex::new(None)),
@@ -274,6 +308,10 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario: FakeMetricsScenario::Full,
                 revision: INITIAL_REVISION,
+                tickets: HashMap::new(),
+                ticket_order: std::collections::VecDeque::new(),
+                next_ticket: 1,
+                next_operation: 1,
             })),
             #[cfg(test)]
             subscription_cut_gate: Arc::new(Mutex::new(None)),
@@ -351,6 +389,135 @@ impl FakeKubernetes {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Apply a validated YAML buffer through its single-use ticket.
+    ///
+    /// Every binding is re-checked before anything mutates: the ticket must
+    /// exist unconsumed, the buffer hash must match, the target identity
+    /// must still resolve, and the backend revision must equal the revision
+    /// the validation was issued against. On success the ticket is consumed,
+    /// the fake state advances, and watchers receive the changed row.
+    async fn apply_yaml(
+        &self,
+        context: String,
+        yaml: String,
+        ticket_id: String,
+        buffer_hash: String,
+        declared_target: ResourceRef,
+    ) -> Result<OperationId, BackendError> {
+        if context != declared_target.context {
+            return Err(BackendError::Conflict(
+                "the apply request declares a different context than its target".into(),
+            ));
+        }
+        if k10s_protocol::buffer_hash(&yaml) != buffer_hash {
+            return Err(BackendError::Conflict(
+                "the edited buffer no longer matches the validated ticket".into(),
+            ));
+        }
+        let (ticket, operation_id) = {
+            let mut state = self.lock();
+            // Verify every binding before consuming: a rejected envelope
+            // must leave the ticket intact.
+            let Some(ticket) = state.tickets.get(&ticket_id).cloned() else {
+                return Err(BackendError::Conflict(
+                    "the validation ticket is unknown, expired, or already used".into(),
+                ));
+            };
+            // The declared identity must match the ticket exactly: a client
+            // cannot redeem one resource's ticket against another.
+            if declared_target != ticket.target {
+                return Err(BackendError::Conflict(
+                    "the apply request does not match the validated ticket's target".into(),
+                ));
+            }
+            if ticket.buffer_hash != buffer_hash {
+                return Err(BackendError::Conflict(
+                    "the validation ticket belongs to a different buffer".into(),
+                ));
+            }
+            if state
+                .current_revision()
+                .saturating_sub(ticket.issued_revision)
+                > TICKET_MAX_AGE_REVISIONS
+            {
+                return Err(BackendError::Conflict(
+                    "the validation ticket has expired".into(),
+                ));
+            }
+            let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
+            state.next_operation += 1;
+            state.tickets.remove(&ticket_id);
+            state.ticket_order.retain(|id| *id != ticket_id);
+            (ticket, operation_id)
+        };
+
+        let mut state = self.lock();
+        match state.find_index(
+            &ticket.target.context,
+            &ticket.target.gvk,
+            ticket.target.namespace.as_deref(),
+            &ticket.target.name,
+        ) {
+            // Update: the object must still be the same instance at exactly
+            // the validated revision.
+            Some(index) => {
+                if state.records[index].reference.uid != ticket.target.uid {
+                    return Err(BackendError::Conflict(
+                        "the target was recreated since validation".into(),
+                    ));
+                }
+                if state.records[index].revision != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the target changed since validation".into(),
+                    ));
+                }
+                let revision = state.advance_revision();
+                state.records[index].revision = revision;
+                let record = state.records[index].clone();
+                let reference = record.reference.clone();
+                state.notify_matching(&reference, crate::port::BackendEvent::Changed(record));
+            }
+            // Create: the world may not have moved since validation.
+            None => {
+                if state.current_revision() != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the cluster changed since validation".into(),
+                    ));
+                }
+                if state
+                    .contexts
+                    .iter()
+                    .all(|candidate| candidate.name != ticket.target.context)
+                {
+                    return Err(BackendError::NotFound);
+                }
+                let revision = state.advance_revision();
+                let record = ResourceRecord {
+                    reference: ticket.target.clone(),
+                    revision,
+                    labels: BTreeMap::new(),
+                    summary: "Applied".to_owned(),
+                    created_at: rfc3339(FAKE_EPOCH_SECS),
+                    owner_references: Vec::new(),
+                    events: Vec::new(),
+                };
+                let changed = ResourceRecord {
+                    reference: ticket.target.clone(),
+                    revision,
+                    labels: BTreeMap::new(),
+                    summary: "Applied".to_owned(),
+                    created_at: rfc3339(FAKE_EPOCH_SECS),
+                    owner_references: Vec::new(),
+                    events: Vec::new(),
+                };
+                let reference = ticket.target.clone();
+                state.records.push(record);
+                state.notify_matching(&reference, crate::port::BackendEvent::Changed(changed));
+            }
+        }
+        Ok(operation_id)
+    }
+
     /// Number of registered watchers; test-only observability for pruning.
     #[cfg(test)]
     fn watcher_count(&self) -> usize {
@@ -391,7 +558,91 @@ impl KubernetesAccess for FakeKubernetes {
                 Query::Bootstrap => Ok(QueryResult::Bootstrap(BootstrapInfo {
                     contexts: self.lock().contexts.clone(),
                 })),
-                Query::ValidateApply { .. } => Err(BackendError::unsupported("validate.apply")),
+                Query::ValidateApply { context, yaml } => {
+                    if !self.lock().contexts.iter().any(|c| c.name == context) {
+                        return Err(BackendError::NotFound);
+                    }
+                    let manifest = crate::operation::parse_manifest(&yaml);
+                    let gvk = match manifest.resolve_gvk() {
+                        Ok(gvk) => gvk,
+                        Err(diagnostics) => {
+                            return Ok(QueryResult::YamlValidation(
+                                crate::operation::YamlValidationData {
+                                    context,
+                                    outcome: crate::operation::OutcomeData::Invalid { diagnostics },
+                                },
+                            ));
+                        }
+                    };
+                    let name = manifest
+                        .metadata_name
+                        .clone()
+                        .and_then(|field| field.value)
+                        .unwrap_or_default();
+                    // Deterministic dry-run against current adapter state:
+                    // updates bind to the object's revision and are
+                    // disruptive for workload controllers; creates bind to
+                    // the cluster revision.
+                    let mut state = self.lock();
+                    let (reference, exists) = match state.find_by_name(
+                        &context,
+                        &gvk,
+                        manifest.metadata_namespace.as_deref(),
+                        &name,
+                    ) {
+                        Some(record) => (record.reference.clone(), true),
+                        None => (
+                            ResourceRef {
+                                uid: uid(
+                                    &context,
+                                    &gvk.kind,
+                                    manifest.metadata_namespace.as_deref(),
+                                    &name,
+                                ),
+                                context: context.clone(),
+                                gvk: gvk.clone(),
+                                namespace: manifest.metadata_namespace.clone(),
+                                name,
+                            },
+                            false,
+                        ),
+                    };
+                    let resource_revision = if exists {
+                        state
+                            .find_record(&reference)
+                            .map(|record| record.revision)
+                            .unwrap_or_default()
+                    } else {
+                        state.current_revision()
+                    };
+                    let ticket_id = format!("ticket-{:04}", state.next_ticket);
+                    state.next_ticket += 1;
+                    let ticket = crate::operation::Ticket {
+                        id: ticket_id.clone(),
+                        buffer_hash: k10s_protocol::buffer_hash(&yaml),
+                        disruptive: exists && crate::operation::is_disruptive_kind(&gvk),
+                        resource_revision,
+                        issued_revision: state.current_revision(),
+                        target: reference,
+                    };
+                    // Bounded retention: evict the oldest unredeemed
+                    // tickets (by issuance order) first so repeated
+                    // validation without apply cannot grow the store
+                    // without limit.
+                    state.tickets.insert(ticket.id.clone(), ticket.clone());
+                    state.ticket_order.push_back(ticket.id.clone());
+                    while state.tickets.len() > TICKET_CAPACITY {
+                        if let Some(oldest) = state.ticket_order.pop_front() {
+                            state.tickets.remove(&oldest);
+                        }
+                    }
+                    Ok(QueryResult::YamlValidation(
+                        crate::operation::YamlValidationData {
+                            context,
+                            outcome: crate::operation::OutcomeData::Valid { ticket },
+                        },
+                    ))
+                }
                 Query::StreamTicket { .. } => Err(BackendError::unsupported("stream.ticket")),
                 Query::ResourceList {
                     context,
@@ -511,8 +762,22 @@ impl KubernetesAccess for FakeKubernetes {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<OperationId, BackendError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let _ = cmd;
-            Err(BackendError::unsupported("execute"))
+            match cmd {
+                Command::Apply {
+                    context,
+                    yaml,
+                    idempotency_key: _,
+                    ticket_id,
+                    buffer_hash,
+                    target,
+                } => {
+                    self.apply_yaml(context, yaml, ticket_id, buffer_hash, target)
+                        .await
+                }
+                Command::Scale { .. } | Command::Delete { .. } => {
+                    Err(BackendError::unsupported("execute"))
+                }
+            }
         })
     }
 
@@ -918,6 +1183,86 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::port::BackendEvent;
+
+    /// Regression: capacity eviction must follow issuance order even across
+    /// the `ticket-{:04}` digit-width transition (ids 9999 → 10000), where
+    /// lexicographic ID ordering no longer matches age.
+    #[tokio::test]
+    async fn ticket_eviction_stays_fifo_across_the_digit_width_transition() {
+        use crate::port::Command;
+
+        let fake = FakeKubernetes::with_contexts(vec![ContextInfo {
+            name: "dev-local".into(),
+            cluster: "dev-cluster".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }]);
+        {
+            let mut state = fake.lock();
+            state.next_ticket = 9_998;
+        }
+        const MANIFEST: &str =
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: brand-new\n";
+        let validate_once = || async {
+            fake.query(Query::ValidateApply {
+                context: "dev-local".into(),
+                yaml: MANIFEST.to_owned(),
+            })
+            .await
+        };
+        // Issue past the width boundary and well past capacity.
+        let mut first_ticket = None;
+        let mut last_ticket = None;
+        for _ in 0..40 {
+            let ticket = match validate_once().await.unwrap() {
+                QueryResult::YamlValidation(data) => match data.outcome {
+                    crate::operation::OutcomeData::Valid { ticket } => ticket,
+                    other => panic!("expected a valid outcome, got {other:?}"),
+                },
+                other => panic!("expected validation, got {other:?}"),
+            };
+            if first_ticket.is_none() {
+                first_ticket = Some(ticket.clone());
+            }
+            last_ticket = Some(ticket);
+        }
+        let first = first_ticket.expect("at least one ticket");
+        let last = last_ticket.expect("at least one ticket");
+        assert_eq!(first.id, "ticket-9998");
+        assert_eq!(last.id, "ticket-10037");
+
+        // The oldest ticket was evicted even though its ID sorts last.
+        let rejected = fake
+            .execute(Command::Apply {
+                context: first.target.context.clone(),
+                yaml: MANIFEST.to_owned(),
+                idempotency_key: "idem-evicted".into(),
+                ticket_id: first.id.clone(),
+                buffer_hash: first.buffer_hash.clone(),
+                target: first.target.clone(),
+            })
+            .await;
+        assert!(
+            matches!(rejected, Err(BackendError::Conflict(_))),
+            "the pre-transition ticket must be evicted, got {rejected:?}"
+        );
+
+        // The newest ticket remains redeemable.
+        let accepted = fake
+            .execute(Command::Apply {
+                context: last.target.context.clone(),
+                yaml: MANIFEST.to_owned(),
+                idempotency_key: "idem-newest".into(),
+                ticket_id: last.id.clone(),
+                buffer_hash: last.buffer_hash.clone(),
+                target: last.target.clone(),
+            })
+            .await;
+        assert!(
+            accepted.is_ok(),
+            "the newest ticket still applies: {accepted:?}"
+        );
+    }
 
     #[test]
     fn rfc3339_formats_the_fixed_fake_epoch() {

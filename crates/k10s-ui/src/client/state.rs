@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use k10s_protocol::{
     Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
     ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
-    InfrastructureResponse, InfrastructureWatchSpec, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
-    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
-    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
-    ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
-    SubscriptionSelector, Unsubscribe,
+    InfrastructureResponse, InfrastructureWatchSpec, OperationAccepted, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
+    ResourceListRow, ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus,
+    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
+    SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -179,6 +179,26 @@ pub enum Query {
     ResourceTypes(ResourceTypesRequest),
     /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
     Infrastructure(InfrastructureRequest),
+    /// Validate a YAML buffer without submitting it; a valid outcome carries
+    /// the backend-issued single-use ticket.
+    YamlValidate {
+        /// Kubernetes context the manifest targets.
+        context: String,
+        /// The exact YAML text to validate.
+        yaml: String,
+    },
+}
+
+/// Command behaviors: mutations that return an `OperationId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Apply a previously validated YAML buffer through its ticket.
+    YamlApply {
+        /// The validated apply request.
+        request: YamlApplyRequest,
+        /// Idempotency key for safe retries.
+        idempotency_key: String,
+    },
 }
 
 /// Selector for a normalized resource list query.
@@ -210,6 +230,10 @@ pub enum QueryResult {
     ResourceTypes(Box<ResourceTypesResponse>),
     /// Complete infrastructure projection.
     Infrastructure(Box<InfrastructureResponse>),
+    /// Guarded YAML validation outcome; `Valid` carries the ticket.
+    YamlValidate(Box<YamlOutcome>),
+    /// An accepted apply command with its background operation ID.
+    Applied(OperationAccepted),
 }
 
 /// The retained, applied list view of one resource watch subscription.
@@ -322,9 +346,68 @@ impl PendingRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+enum PendingAction {
+    Query(Query),
+    Command(Command),
+}
+
+impl PendingAction {
+    fn request_kind(&self) -> &'static str {
+        match self {
+            Self::Query(Query::Bootstrap) => "bootstrap",
+            Self::Query(Query::ResourceList(_)) => "resource.list",
+            Self::Query(Query::ResourceDetail(_)) => "resource.detail",
+            Self::Query(Query::ResourceTypes(_)) => "resource.types",
+            Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
+            Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
+            Self::Command(Command::YamlApply { .. }) => "yaml.apply",
+        }
+    }
+
+    fn encode_payload(&self) -> Result<serde_json::Value, ClientError> {
+        fn encode(value: impl serde::Serialize) -> Result<serde_json::Value, ClientError> {
+            serde_json::to_value(value).map_err(|error| {
+                ClientError::Protocol(format!("could not encode request: {error}"))
+            })
+        }
+        match self {
+            Self::Query(Query::Bootstrap) => Ok(serde_json::Value::Null),
+            Self::Query(Query::ResourceList(selector)) => encode(ResourceListRequest {
+                context: selector.context.clone(),
+                gvk: k10s_protocol::GroupVersionKind {
+                    group: selector.group.clone(),
+                    version: selector.version.clone(),
+                    kind: selector.kind.clone(),
+                },
+                namespace: selector.namespace.clone(),
+            }),
+            Self::Query(Query::ResourceDetail(identity)) => encode(ResourceRefRequest {
+                identity: identity.clone(),
+            }),
+            Self::Query(Query::ResourceTypes(request)) => encode(request),
+            Self::Query(Query::Infrastructure(request)) => encode(request),
+            Self::Query(Query::YamlValidate { context, yaml }) => encode(YamlValidateRequest {
+                context: context.clone(),
+                yaml: yaml.clone(),
+            }),
+            Self::Command(Command::YamlApply { request, .. }) => encode(request),
+        }
+    }
+
+    fn idempotency_key(&self) -> Option<String> {
+        match self {
+            Self::Command(Command::YamlApply {
+                idempotency_key, ..
+            }) => Some(idempotency_key.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PendingEntry {
-    query: Query,
+    action: PendingAction,
     deadline_at_ms: Option<u64>,
     cancelled: bool,
 }
@@ -789,7 +872,12 @@ impl ClientState {
 
     /// Begin a query without a client-side deadline.
     pub fn begin(&mut self, query: Query) -> Result<PendingRequest, ClientError> {
-        self.begin_inner(query, None, None)
+        self.begin_inner(PendingAction::Query(query), None, None)
+    }
+
+    /// Begin a command (mutation) that returns an `OperationId`.
+    pub fn begin_command(&mut self, command: Command) -> Result<PendingRequest, ClientError> {
+        self.begin_inner(PendingAction::Command(command), None, None)
     }
 
     /// Begin a query with a relative deadline measured against `now_ms`.
@@ -800,7 +888,7 @@ impl ClientState {
         relative_ms: u64,
     ) -> Result<PendingRequest, ClientError> {
         self.begin_inner(
-            query,
+            PendingAction::Query(query),
             Some(now_ms.saturating_add(relative_ms)),
             Some(relative_ms),
         )
@@ -808,7 +896,7 @@ impl ClientState {
 
     fn begin_inner(
         &mut self,
-        query: Query,
+        action: PendingAction,
         deadline_at_ms: Option<u64>,
         relative_deadline_ms: Option<u64>,
     ) -> Result<PendingRequest, ClientError> {
@@ -823,46 +911,10 @@ impl ClientState {
         let id = RequestId::from_u128(self.next_request_id);
         self.next_request_id = self.next_request_id.saturating_add(1);
         let payload = Request {
-            request_kind: match &query {
-                Query::Bootstrap => "bootstrap".to_owned(),
-                Query::ResourceList(_) => "resource.list".to_owned(),
-                Query::ResourceDetail(_) => "resource.detail".to_owned(),
-                Query::ResourceTypes(_) => "resource.types".to_owned(),
-                Query::Infrastructure(_) => "infrastructure.get".to_owned(),
-            },
+            request_kind: action.request_kind().to_owned(),
             deadline: relative_deadline_ms,
-            idempotency_key: None,
-            payload: match &query {
-                Query::Bootstrap => serde_json::Value::Null,
-                Query::ResourceList(selector) => serde_json::to_value(ResourceListRequest {
-                    context: selector.context.clone(),
-                    gvk: k10s_protocol::GroupVersionKind {
-                        group: selector.group.clone(),
-                        version: selector.version.clone(),
-                        kind: selector.kind.clone(),
-                    },
-                    namespace: selector.namespace.clone(),
-                })
-                .map_err(|error| {
-                    ClientError::Protocol(format!("could not encode request: {error}"))
-                })?,
-                Query::ResourceDetail(identity) => serde_json::to_value(ResourceRefRequest {
-                    identity: identity.clone(),
-                })
-                .map_err(|error| {
-                    ClientError::Protocol(format!("could not encode request: {error}"))
-                })?,
-                Query::ResourceTypes(request) => {
-                    serde_json::to_value(request).map_err(|error| {
-                        ClientError::Protocol(format!("could not encode request: {error}"))
-                    })?
-                }
-                Query::Infrastructure(request) => {
-                    serde_json::to_value(request).map_err(|error| {
-                        ClientError::Protocol(format!("could not encode request: {error}"))
-                    })?
-                }
-            },
+            idempotency_key: action.idempotency_key(),
+            payload: action.encode_payload()?,
         };
         let frame = ClientFrame {
             kind: ClientKind::Request,
@@ -877,7 +929,7 @@ impl ClientState {
         self.pending.insert(
             id.clone(),
             PendingEntry {
-                query,
+                action,
                 deadline_at_ms,
                 cancelled: false,
             },
@@ -974,18 +1026,18 @@ impl ClientState {
                 .request_id
                 .clone()
                 .ok_or_else(|| ClientError::Protocol("response missing request ID".to_owned()))?;
-            let query = self
+            let action = self
                 .pending
                 .get(&id)
-                .map(|pending| (pending.query.clone(), pending.cancelled))
+                .map(|pending| (pending.action.clone(), pending.cancelled))
                 .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
-            let (query, cancelled) = query;
+            let (action, cancelled) = action;
             if cancelled {
                 self.pending.remove(&id);
                 return Ok(());
             }
-            let result = match query {
-                Query::Bootstrap => {
+            let result = match &action {
+                PendingAction::Query(Query::Bootstrap) => {
                     let bootstrap: BootstrapResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
@@ -993,25 +1045,25 @@ impl ClientState {
                     self.refresh_server_validity();
                     QueryResult::Bootstrap(bootstrap)
                 }
-                Query::ResourceList(_) => {
+                PendingAction::Query(Query::ResourceList(_)) => {
                     let list: ResourceListResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceList(list)
                 }
-                Query::ResourceDetail(_) => {
+                PendingAction::Query(Query::ResourceDetail(_)) => {
                     let detail: ResourceDetailResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceDetail(Box::new(detail))
                 }
-                Query::ResourceTypes(_) => {
+                PendingAction::Query(Query::ResourceTypes(_)) => {
                     let types: ResourceTypesResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceTypes(Box::new(types))
                 }
-                Query::Infrastructure(_) => {
+                PendingAction::Query(Query::Infrastructure(_)) => {
                     let response: InfrastructureResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
@@ -1024,6 +1076,18 @@ impl ClientState {
                             .insert(response.context.clone(), response.clone());
                     }
                     QueryResult::Infrastructure(Box::new(response))
+                }
+                PendingAction::Query(Query::YamlValidate { .. }) => {
+                    let outcome: YamlOutcome = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::YamlValidate(Box::new(outcome))
+                }
+                PendingAction::Command(Command::YamlApply { .. }) => {
+                    let accepted: OperationAccepted = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::Applied(accepted)
                 }
             };
             let _pending = self.pending.remove(&id);

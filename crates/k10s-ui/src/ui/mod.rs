@@ -8,6 +8,7 @@ mod resource_table;
 mod resource_window;
 mod split;
 mod theme;
+pub mod tools;
 mod top_bar;
 mod window;
 
@@ -15,7 +16,7 @@ pub use resource_window::ResourceFeed;
 
 use std::fmt::Debug;
 
-use crate::workspace::{WorkspaceCommand, WorkspaceEvent, WorkspaceState};
+use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 /// User-visible state of the shared control connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct UiShell<I> {
     workspace: WorkspaceState<I>,
     infrastructure: infrastructure::InfrastructureUiState,
     resources: resource_window::ResourceUiState,
+    yaml: tools::YamlEditors,
 }
 
 impl<I> Default for UiShell<I>
@@ -63,6 +65,7 @@ where
             workspace: WorkspaceState::new(),
             infrastructure: infrastructure::InfrastructureUiState::default(),
             resources: resource_window::ResourceUiState::default(),
+            yaml: tools::YamlEditors::default(),
         }
     }
 
@@ -78,6 +81,17 @@ where
         command: WorkspaceCommand<I>,
     ) -> Vec<WorkspaceEvent<I>> {
         self.workspace.apply(command)
+    }
+
+    /// Drain the protocol actions queued by YAML editors during rendering.
+    pub fn drain_yaml_actions(&mut self) -> Vec<(WindowId, tools::YamlAction)> {
+        self.yaml.drain_actions()
+    }
+
+    /// Mutable access to the per-window guarded YAML editors, so the
+    /// application layer can feed backend outcomes into them.
+    pub fn yaml_editors_mut(&mut self) -> &mut tools::YamlEditors {
+        &mut self.yaml
     }
 
     /// Render one frame. All mutations are queued while immutable workspace
@@ -155,6 +169,7 @@ where
                 &self.workspace,
                 &mut self.infrastructure,
                 &mut resources,
+                &mut self.yaml,
                 response,
                 feed,
                 connection,
@@ -163,6 +178,7 @@ where
         });
         resources.retain(|id| self.workspace.window(id).is_some());
         self.resources = resources;
+        self.yaml.retain(|id| self.workspace.window(id).is_some());
 
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));

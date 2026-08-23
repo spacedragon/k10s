@@ -125,6 +125,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     kind: WorkloadKind,
     state: &mut ResourceWindowState<I>,
+    yaml: &mut super::tools::YamlEditors,
     feed: &ResourceFeed,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
@@ -274,7 +275,7 @@ pub(super) fn show<I>(
                 if ui.button("Clear selection").clicked() {
                     queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
-                super::detail::show(ui, window_id, detail, detail_view, queued);
+                super::detail::show(ui, window_id, detail, detail_view, yaml, queued);
             }
         },
     );

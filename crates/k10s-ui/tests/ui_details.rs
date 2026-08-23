@@ -169,6 +169,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
             can_scale: true,
             ..ResourceCapabilities::default()
         },
+        manifest: format!("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n"),
     }
 }
 
@@ -191,6 +192,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             can_exec: true,
             ..ResourceCapabilities::default()
         },
+        manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
     }
 }
 
