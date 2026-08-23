@@ -3,17 +3,33 @@ name = "k10s-backend"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Test-only surface for integration tests that record Kubernetes API traffic at the tower Service layer.
+testkit = ["dep:tower", "dep:http-body-util", "dep:bytes", "dep:http"]
+
 [dependencies]
 k10s-protocol = { path = "../k10s-protocol" }
 # Feature pin only: kube-rs requires exactly one Kubernetes API version to be
 # enabled somewhere in the dependency graph; this internal workspace crate is
 # where k10s makes that choice.
 k8s-openapi = { version = "0.28", features = ["v1_36"] }
-kube = { version = "4.2", default-features = false, features = ["config"] }
+# config (kubeconfig loading) plus client/discovery so the real adapter can run kube-rs API discovery; rustls/ring match kube's default TLS backend for production connectors.
+kube = { version = "4.2", default-features = false, features = ["config", "client", "rustls-tls", "ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "time"] }
 uuid = { version = "1.24.1", features = ["v4"] }
+# Test-only transport dependencies, enabled exclusively through the `testkit` feature.
+tower = { version = "0.5.3", optional = true }
+http-body-util = { version = "0.1.5", optional = true }
+bytes = { version = "1.12.1", optional = true }
+http = { version = "1.5.0", optional = true }
+
+[dev-dependencies]
+# Integration tests enable the crate's own testkit surface.
+k10s-backend = { path = ".", features = ["testkit"] }
+# Discovery refresh tests drive tokio's mock clock (pause/advance).
+tokio = { version = "1.49.0", features = ["test-util"] }
 
 [lints]
 workspace = true

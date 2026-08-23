@@ -14,19 +14,22 @@ pub mod watch;
 
 mod kube;
 pub mod runtime;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 
 pub use catalog::CatalogSnapshot;
 pub use fake::{FakeKubernetes, FakeMetricsScenario};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
-pub use kube::KubeAdapter;
+pub use kube::{DISCOVERY_TTL, KubeAdapter, MAX_CACHED_CONTEXTS};
 pub use operation::{
     OperationEvent, OperationState, OperationStatusData, Propagation, YamlValidationData,
 };
 pub use port::{
-    AdapterError, BackendError, BackendEvent, Command, ContextInfo, Gvk, KubernetesAccess,
-    MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData,
-    RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef, StreamGrant, StreamInput,
-    StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle,
+    AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextInfo, Gvk,
+    KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
+    RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
+    ResourceTypesData, StreamGrant, StreamInput, StreamKind, StreamRouteKind, Subscribe,
+    SubscriptionHandle,
 };
 pub use runtime::{BackendMode, ContextRegistry, build_kernel};
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

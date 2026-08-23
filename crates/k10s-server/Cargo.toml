@@ -20,6 +20,8 @@ tower-http = { version = "0.6.8", features = ["fs"] }
 workspace = true
 
 [dev-dependencies]
+# Integration tests record Kubernetes discovery traffic at the tower layer.
+k10s-backend = { version = "0.1.0", path = "../k10s-backend", features = ["testkit"] }
 k10s-ui = { version = "0.1.0", path = "../k10s-ui" }
 tokio-tungstenite = "0.29.0"
 tracing-subscriber = "0.3.22"

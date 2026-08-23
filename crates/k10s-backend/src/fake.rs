@@ -18,10 +18,10 @@ use tokio::sync::broadcast;
 
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
-    BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup,
-    ResourceListData, ResourceRecord, ResourceRef, ResourceTypesData, StreamInput, Subscribe,
-    SubscriptionHandle, TypeEntry,
+    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
+    KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
+    RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
+    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
@@ -1151,7 +1151,7 @@ impl KubernetesAccess for FakeKubernetes {
                     if !state.contexts.iter().any(|c| c.name == context) {
                         return Err(BackendError::NotFound);
                     }
-                    let mut types: Vec<TypeEntry> = Vec::new();
+                    let mut types: Vec<ApiResourceDescriptor> = Vec::new();
                     for record in &state.records {
                         if record.reference.context != context {
                             continue;
@@ -1164,7 +1164,12 @@ impl KubernetesAccess for FakeKubernetes {
                             candidate.reference.gvk == gvk
                                 && candidate.reference.namespace.is_some()
                         });
-                        types.push(TypeEntry { gvk, namespaced });
+                        types.push(ApiResourceDescriptor {
+                            plural: plural_name(&gvk.kind),
+                            supports_scale: scale_exposed(&gvk),
+                            gvk,
+                            namespaced,
+                        });
                     }
                     types.sort_by(|left, right| left.gvk.cmp(&right.gvk));
                     Ok(QueryResult::ResourceTypes(ResourceTypesData {
@@ -1470,6 +1475,39 @@ fn pod_key(name: &str) -> String {
         uid: String::new(),
     }
     .coalescing_key()
+}
+
+/// Kubernetes-style plural name of one deterministic dataset kind.
+fn plural_name(kind: &str) -> String {
+    let word = kind.to_lowercase();
+    // The API server keeps these plurals verbatim.
+    if matches!(word.as_str(), "endpoints" | "nodes" | "pods") {
+        return word;
+    }
+    // Consonant+y becomes -ies (dashboard -> dashboards).
+    if let Some(prefix) = word.strip_suffix('y')
+        && !matches!(prefix.chars().last(), Some('a' | 'e' | 'i' | 'o' | 'u'))
+    {
+        return format!("{prefix}ies");
+    }
+    // s/x/z and ch/sh endings take -es (storageclass -> storageclasses).
+    if matches!(word.chars().last(), Some('s' | 'x' | 'z'))
+        || word.ends_with("ch")
+        || word.ends_with("sh")
+    {
+        return format!("{word}es");
+    }
+    format!("{word}s")
+}
+
+/// Whether real clusters expose /scale for one workload kind; the fake world
+/// mirrors what discovery reports instead of assuming from names.
+fn scale_exposed(gvk: &Gvk) -> bool {
+    gvk.group == "apps"
+        && matches!(
+            gvk.kind.as_str(),
+            "Deployment" | "ReplicaSet" | "StatefulSet"
+        )
 }
 
 fn deployment_gvk() -> Gvk {
