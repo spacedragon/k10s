@@ -190,11 +190,15 @@ fn cronjob_summary(cronjob: &k8s_openapi::api::batch::v1::CronJob) -> String {
 }
 
 fn pod_summary(pod: &k8s_openapi::api::core::v1::Pod) -> String {
-    let statuses = pod
-        .status
-        .as_ref()
-        .and_then(|status| status.container_statuses.as_deref())
-        .unwrap_or_default();
+    let status = match pod.status.as_ref() {
+        Some(status) => status,
+        None => return "Unknown".into(),
+    };
+    let statuses = status
+        .init_container_statuses
+        .iter()
+        .flatten()
+        .chain(status.container_statuses.iter().flatten());
     for status in statuses {
         let waiting_reason = status
             .state

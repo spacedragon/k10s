@@ -370,6 +370,10 @@ async fn pods_normalize_phase_and_crashloop() {
         plural: "pods",
         namespace: Some("default"),
         list_body: r#"{"kind":"PodList","apiVersion":"v1","items":[
+          {"metadata":{"name":"init-loop","uid":"uid-init-loop","namespace":"default","creationTimestamp":"2026-08-21T03:00:00Z"},
+           "status":{"phase":"Pending",
+             "initContainerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}],
+             "containerStatuses":[{"state":{"waiting":{"reason":"PodInitializing"}}}]}},
           {"metadata":{"name":"running","uid":"uid-running","namespace":"default","creationTimestamp":"2026-08-21T00:00:00Z","labels":{"tier":"frontend"}},
            "status":{"phase":"Running"}},
           {"metadata":{"name":"looping","uid":"uid-looping","namespace":"default","creationTimestamp":"2026-08-21T02:00:00Z",
@@ -377,6 +381,15 @@ async fn pods_normalize_phase_and_crashloop() {
            "status":{"phase":"Running","containerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}
         ]}"#,
         expect: vec![
+            ExpectedRow {
+                name: "init-loop",
+                uid: "uid-init-loop",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "CrashLoopBackOff",
+                created_at_prefix: "2026-08-21T03:00:00",
+                owner: None,
+            },
             ExpectedRow {
                 name: "looping",
                 uid: "uid-looping",
