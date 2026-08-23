@@ -4,10 +4,11 @@ use k10s_protocol::{
     Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
     ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
     InfrastructureResponse, InfrastructureWatchSpec, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceIdentity,
-    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceTypesRequest,
-    ResourceTypesResponse, ResumeStatus, Retryability, ServerFrame, ServerKind, ServerPayload,
-    SessionId, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
+    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
+    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
+    ServerFrame, ServerKind, ServerPayload, SessionId, Subscribe, SubscriptionId,
+    SubscriptionSelector, Unsubscribe,
 };
 
 /// Client connection lifecycle.
@@ -172,6 +173,8 @@ pub enum Query {
     Bootstrap,
     /// Retrieve a normalized resource list for one type on one context.
     ResourceList(ResourceListQuery),
+    /// Retrieve normalized details for one resource identity.
+    ResourceDetail(ResourceIdentity),
     /// List the selectable resource types of one context.
     ResourceTypes(ResourceTypesRequest),
     /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
@@ -200,6 +203,9 @@ pub enum QueryResult {
     Bootstrap(BootstrapResponse),
     /// Normalized resource list result.
     ResourceList(ResourceListResponse),
+    /// Normalized single-resource detail result with backend-resolved
+    /// events and related rows.
+    ResourceDetail(Box<ResourceDetailResponse>),
     /// Selectable resource types of one context (built-ins and CRDs).
     ResourceTypes(Box<ResourceTypesResponse>),
     /// Complete infrastructure projection.
@@ -820,6 +826,7 @@ impl ClientState {
             request_kind: match &query {
                 Query::Bootstrap => "bootstrap".to_owned(),
                 Query::ResourceList(_) => "resource.list".to_owned(),
+                Query::ResourceDetail(_) => "resource.detail".to_owned(),
                 Query::ResourceTypes(_) => "resource.types".to_owned(),
                 Query::Infrastructure(_) => "infrastructure.get".to_owned(),
             },
@@ -835,6 +842,12 @@ impl ClientState {
                         kind: selector.kind.clone(),
                     },
                     namespace: selector.namespace.clone(),
+                })
+                .map_err(|error| {
+                    ClientError::Protocol(format!("could not encode request: {error}"))
+                })?,
+                Query::ResourceDetail(identity) => serde_json::to_value(ResourceRefRequest {
+                    identity: identity.clone(),
                 })
                 .map_err(|error| {
                     ClientError::Protocol(format!("could not encode request: {error}"))
@@ -985,6 +998,12 @@ impl ClientState {
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::ResourceList(list)
+                }
+                Query::ResourceDetail(_) => {
+                    let detail: ResourceDetailResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::ResourceDetail(Box::new(detail))
                 }
                 Query::ResourceTypes(_) => {
                     let types: ResourceTypesResponse = frame

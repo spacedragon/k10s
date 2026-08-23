@@ -19,8 +19,9 @@ use tokio::sync::broadcast;
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, OwnerRef, Query, QueryResult, ResourceListData, ResourceRecord, ResourceRef,
-    ResourceTypesData, Subscribe, SubscriptionHandle, TypeEntry,
+    OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup,
+    ResourceListData, ResourceRecord, ResourceRef, ResourceTypesData, Subscribe,
+    SubscriptionHandle, TypeEntry,
 };
 use crate::watch::{WatchHub, WatchSelector};
 
@@ -116,6 +117,54 @@ impl FakeState {
                 && candidate.name == reference.name
                 && candidate.uid == reference.uid
         })
+    }
+
+    /// Resolve every transitive controller-owned descendant of `reference`
+    /// by matching controller owner UIDs, grouped by type in deterministic
+    /// order. This is the Deployment → ReplicaSet → Pod traversal used by
+    /// detail related tabs.
+    fn find_related(&self, reference: &ResourceRef) -> Vec<RelatedRecordGroup> {
+        let mut groups: Vec<RelatedRecordGroup> = Vec::new();
+        let mut visited: Vec<String> = vec![reference.uid.clone()];
+        loop {
+            let frontier: Vec<String> = visited.clone();
+            let mut discovered = false;
+            for record in &self.records {
+                let candidate = &record.reference;
+                if candidate.context != reference.context
+                    || candidate.namespace != reference.namespace
+                    || visited.contains(&candidate.uid)
+                {
+                    continue;
+                }
+                let owned = record
+                    .owner_references
+                    .iter()
+                    .any(|owner| owner.controller && frontier.contains(&owner.uid));
+                if !owned {
+                    continue;
+                }
+                visited.push(candidate.uid.clone());
+                discovered = true;
+                match groups.iter_mut().find(|group| group.gvk == candidate.gvk) {
+                    Some(group) => group.records.push(record.clone()),
+                    None => groups.push(RelatedRecordGroup {
+                        gvk: candidate.gvk.clone(),
+                        records: vec![record.clone()],
+                    }),
+                }
+            }
+            if !discovered {
+                break;
+            }
+        }
+        for group in &mut groups {
+            group
+                .records
+                .sort_by(|left, right| left.reference.cmp(&right.reference));
+        }
+        groups.sort_by(|left, right| left.gvk.cmp(&right.gvk));
+        groups
     }
 
     fn matches_selector(
@@ -387,6 +436,17 @@ impl KubernetesAccess for FakeKubernetes {
                         .map(QueryResult::ResourceDetail)
                         .ok_or(BackendError::NotFound)
                 }
+                Query::ResourceRelations { reference } => {
+                    let state = self.lock();
+                    if state.find_record(&reference).is_none() {
+                        return Err(BackendError::NotFound);
+                    }
+                    let groups = state.find_related(&reference);
+                    Ok(QueryResult::ResourceRelations(RelatedData {
+                        reference,
+                        groups,
+                    }))
+                }
                 Query::ResourceMetrics { reference } => {
                     let state = self.lock();
                     if state.find_record(&reference).is_none() {
@@ -558,6 +618,7 @@ struct RecordSeed<'a> {
 
 /// Build one deterministic record with a derived stable UID.
 fn record(seed: RecordSeed<'_>) -> ResourceRecord {
+    let events = synthetic_events(&seed.gvk.kind, seed.summary, seed.offset_secs);
     ResourceRecord {
         reference: ResourceRef {
             uid: uid(seed.context, &seed.gvk.kind, seed.namespace, seed.name),
@@ -575,7 +636,36 @@ fn record(seed: RecordSeed<'_>) -> ResourceRecord {
         summary: seed.summary.to_owned(),
         created_at: rfc3339(FAKE_EPOCH_SECS + seed.offset_secs),
         owner_references: seed.owner_references,
+        events,
     }
+}
+
+/// Deterministic events derived from the observed status so every detail
+/// view has backend-resolved event rows without per-seed fixtures.
+fn synthetic_events(kind: &str, summary: &str, offset_secs: u64) -> Vec<RecordEvent> {
+    let last_seen = || rfc3339(FAKE_EPOCH_SECS + offset_secs + 45);
+    let mut events = vec![RecordEvent {
+        reason: "Created".into(),
+        message: format!("{kind} object created"),
+        count: 1,
+        last_seen: last_seen(),
+    }];
+    if summary.ends_with("ready") || summary == "Running" || summary == "Complete" {
+        events.push(RecordEvent {
+            reason: "Started".into(),
+            message: format!("{kind} reached {summary}"),
+            count: 1,
+            last_seen: last_seen(),
+        });
+    } else if summary.contains("0/") || summary == "Pending" || summary == "Suspended" {
+        events.push(RecordEvent {
+            reason: "Progressing".into(),
+            message: format!("{kind} waiting while {summary}"),
+            count: 2,
+            last_seen: last_seen(),
+        });
+    }
+    events
 }
 
 fn uid(context: &str, kind: &str, namespace: Option<&str>, name: &str) -> String {

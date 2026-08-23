@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 
 use egui::{RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
-use k10s_protocol::{GroupVersionKind, ResourceIdentity, ResourceListRow, ResourceTypeEntry};
+use k10s_protocol::{
+    GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+};
 
 use crate::workspace::{ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
@@ -25,6 +27,9 @@ pub struct ResourceFeed {
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
     /// Types offered by the searchable GVK picker.
     pub types: Vec<ResourceTypeEntry>,
+    /// Backend-resolved detail responses keyed by stable identity. Both the
+    /// integrated pane and dedicated windows look their view up here.
+    pub details: HashMap<ResourceIdentity, ResourceDetailResponse>,
 }
 
 /// Maps a protocol row identity onto the shell's workspace identity type.
@@ -35,11 +40,22 @@ pub trait RowIdentity: Clone + Eq + std::hash::Hash + std::fmt::Debug {
     /// Convert one protocol identity into this workspace's identity type.
     #[must_use]
     fn from_row_identity(identity: &ResourceIdentity) -> Self;
+
+    /// Recover the protocol identity this workspace identity refers to, so
+    /// pinned detail views can look up their backend-resolved response.
+    #[must_use]
+    fn as_row_identity(&self) -> Option<&ResourceIdentity> {
+        None
+    }
 }
 
 impl RowIdentity for ResourceIdentity {
     fn from_row_identity(identity: &ResourceIdentity) -> Self {
         identity.clone()
+    }
+
+    fn as_row_identity(&self) -> Option<&ResourceIdentity> {
+        Some(self)
     }
 }
 
@@ -225,7 +241,15 @@ pub(super) fn show<I>(
     let mut ratio = state.split_ratio;
     let detail_shown = state.detail_visible && detail_row.is_some();
 
-    let (list_actions, clear_requested) = super::split::show_vertical(
+    // The integrated pane renders the pinned detail state; the backend
+    // response is looked up by that identity alone.
+    let detail_view = state
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.identity.as_row_identity())
+        .and_then(|identity| feed.details.get(identity));
+
+    let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
         detail_shown,
@@ -245,7 +269,14 @@ pub(super) fn show<I>(
                 |row| I::from_row_identity(&row.identity),
             )
         },
-        |ui| show_detail(ui, detail_row.as_ref()),
+        |ui| {
+            if let Some(detail) = state.detail.as_ref() {
+                if ui.button("Clear selection").clicked() {
+                    queued.push(WorkspaceCommand::ClearSelection(window_id));
+                }
+                super::detail::show(ui, window_id, detail, detail_view, queued);
+            }
+        },
     );
 
     if let Some(actions) = list_actions {
@@ -259,9 +290,12 @@ pub(super) fn show<I>(
         if let Some(identity) = actions.selected {
             queued.push(WorkspaceCommand::SelectRow(window_id, identity));
         }
-    }
-    if clear_requested == Some(true) {
-        queued.push(WorkspaceCommand::ClearSelection(window_id));
+        // Double-click and the row context menu pop a dedicated window out;
+        // it clones the stable identity at open time and never follows this
+        // window's later selection.
+        if let Some(identity) = actions.popped_out {
+            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        }
     }
 
     if ratio != state.split_ratio {
@@ -331,25 +365,4 @@ fn show_picker<I>(
                 }
             }
         });
-}
-
-/// The integrated detail pane below the list, pinned to the current
-/// selection's snapshot row. Returns whether the clear button was clicked.
-fn show_detail(ui: &mut egui::Ui, row: Option<&ResourceListRow>) -> bool {
-    ui.separator();
-    ui.heading(RichText::new("Details").strong());
-    let Some(row) = row else {
-        return false;
-    };
-    let identity = &row.identity;
-    let scope_line = match identity.namespace.as_deref() {
-        Some(namespace) => format!("Namespace {namespace}"),
-        None => "Scope Cluster-scoped".to_owned(),
-    };
-    ui.label(format!("Kind {}", identity.gvk.kind));
-    ui.label(format!("Name {}", identity.name));
-    ui.label(scope_line);
-    ui.label(format!("Status {}", row.summary));
-    ui.monospace(format!("Created {}", row.created_at));
-    ui.button("Clear selection").clicked()
 }

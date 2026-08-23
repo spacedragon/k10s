@@ -216,6 +216,39 @@ pub struct DetailSection {
     pub rows: Vec<DetailRow>,
 }
 
+/// One deterministic event row of a resource's Events tab.
+///
+/// Events are resolved by the backend from the object's observed state; the
+/// UI never synthesizes them.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRow {
+    /// Short Kubernetes-style event reason, such as `Started`.
+    pub reason: String,
+    /// Human-readable event message.
+    pub message: String,
+    /// How many times this event repeated.
+    pub count: u32,
+    /// Last occurrence formatted as RFC 3339.
+    pub last_seen: String,
+}
+
+/// One backend-resolved group of related resources.
+///
+/// Rows are full normalized list rows so related tabs render through the
+/// same projection as list windows; the traversal itself never crosses the
+/// protocol boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedGroup {
+    /// Group title shown as the section heading, such as `Pods`.
+    pub title: String,
+    /// Type every row in this group shares.
+    pub gvk: GroupVersionKind,
+    /// Sorted normalized rows of the group.
+    pub rows: Vec<ResourceListRow>,
+}
+
 /// Server-asserted capabilities for one resource type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -300,6 +333,10 @@ pub struct ResourceDetailResponse {
     pub owner_references: Vec<OwnerReference>,
     /// Ordered detail sections.
     pub sections: Vec<DetailSection>,
+    /// Deterministic backend-resolved events for this object.
+    pub events: Vec<EventRow>,
+    /// Related rows resolved by backend owner traversal, grouped by type.
+    pub related: Vec<RelatedGroup>,
     /// Capabilities asserted for this kind.
     pub capabilities: ResourceCapabilities,
 }

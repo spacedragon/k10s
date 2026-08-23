@@ -99,9 +99,9 @@ where
     // Workload windows render from a mutable clone of their list state and
     // queue the resulting commands; the workspace stays immutable during
     // rendering.
-    let mut resource_state = match &state.content {
-        WindowContent::Resource(resource) => Some(resource.clone()),
-        WindowContent::Detail(_) => None,
+    let (mut resource_state, detail_state) = match &state.content {
+        WindowContent::Resource(resource) => (Some(resource.clone()), None),
+        WindowContent::Detail(detail) => (None, Some(detail.clone())),
     };
 
     let response = egui::Window::new(state.title.as_str())
@@ -144,7 +144,16 @@ where
                         unreachable!("workload windows render through resource_window")
                     }
                     WindowKind::Detail => {
-                        ui.label("Resource detail");
+                        // Dedicated windows render only their pinned
+                        // identity; they never read the integrated
+                        // selection of any list window.
+                        if let Some(detail) = detail_state.as_ref() {
+                            let view = detail
+                                .identity
+                                .as_row_identity()
+                                .and_then(|identity| feed.details.get(identity));
+                            super::detail::show(ui, state.id, detail, view, queued);
+                        }
                         false
                     }
                 }

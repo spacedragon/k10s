@@ -35,6 +35,9 @@ pub enum Query {
     },
     /// Fetch normalized details for one resource.
     ResourceDetail { reference: ResourceRef },
+    /// Resolve the related objects of one resource by controller-owner
+    /// traversal (for example Deployment → ReplicaSet → Pod).
+    ResourceRelations { reference: ResourceRef },
     /// Fetch the availability-gated metrics sample for one pod.
     ResourceMetrics { reference: ResourceRef },
     /// List the selectable resource types (built-ins and CRDs) of a context.
@@ -137,6 +140,8 @@ pub enum QueryResult {
     ResourceList(ResourceListData),
     /// Normalized details for one resource.
     ResourceDetail(ResourceRecord),
+    /// Backend-resolved related rows for one resource.
+    ResourceRelations(RelatedData),
     /// Availability-gated metrics sample for one pod.
     ResourceMetrics(MetricsSample),
     /// Selectable resource types of one context.
@@ -226,6 +231,8 @@ pub struct ResourceRecord {
     pub created_at: String,
     /// Owner chain references resolved by the adapter.
     pub owner_references: Vec<OwnerRef>,
+    /// Deterministic events observed for this object.
+    pub events: Vec<RecordEvent>,
 }
 
 /// A reference from a child object to its owner.
@@ -239,6 +246,51 @@ pub struct OwnerRef {
     pub uid: String,
     /// Whether this owner is the managing controller.
     pub controller: bool,
+}
+
+/// One deterministic event observed for a resource.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecordEvent {
+    /// Short Kubernetes-style event reason, such as `Started`.
+    pub reason: String,
+    /// Human-readable event message.
+    pub message: String,
+    /// How many times this event repeated.
+    pub count: u32,
+    /// Last occurrence formatted as RFC 3339.
+    pub last_seen: String,
+}
+
+/// One group of related records sharing a type, resolved by traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedRecordGroup {
+    /// Type every record in this group shares.
+    pub gvk: Gvk,
+    /// Records sorted by stable identity.
+    pub records: Vec<ResourceRecord>,
+}
+
+/// Backend-resolved related rows for one resource.
+///
+/// The adapter owns the owner-reference traversal; the kernel maps this
+/// into protocol-facing related groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedData {
+    /// The resource whose relations were resolved.
+    pub reference: ResourceRef,
+    /// Groups in deterministic type order.
+    pub groups: Vec<RelatedRecordGroup>,
+}
+
+impl RelatedData {
+    /// Related data with no groups; used when an adapter cannot traverse.
+    #[must_use]
+    pub fn empty(reference: ResourceRef) -> Self {
+        Self {
+            reference,
+            groups: Vec::new(),
+        }
+    }
 }
 
 /// A normalized list snapshot for one resource type.

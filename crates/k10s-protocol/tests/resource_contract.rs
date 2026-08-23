@@ -353,6 +353,17 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
                 value: "3 desired".into(),
             }],
         }],
+        events: vec![k10s_protocol::EventRow {
+            reason: "Started".into(),
+            message: "replicaset reached 20 desired".into(),
+            count: 1,
+            last_seen: "2026-08-21T00:06:45Z".into(),
+        }],
+        related: vec![k10s_protocol::RelatedGroup {
+            title: "Pods".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            rows: Vec::new(),
+        }],
         capabilities: ResourceCapabilities {
             can_edit_yaml: true,
             can_delete: true,
@@ -367,6 +378,10 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
         encoded["sections"][0]["rows"][0]["label"],
         json!("Replicas")
     );
+    assert_eq!(encoded["events"][0]["reason"], json!("Started"));
+    assert_eq!(encoded["events"][0]["count"], json!(1));
+    assert_eq!(encoded["related"][0]["title"], json!("Pods"));
+    assert_eq!(encoded["related"][0]["gvk"]["kind"], json!("Pod"));
     assert_eq!(encoded["capabilities"]["canScale"], json!(false));
 }
 

@@ -1380,6 +1380,7 @@ mod tests {
             summary: "Running".into(),
             created_at: "2026-08-21T00:00:00Z".into(),
             owner_references: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -1811,6 +1812,7 @@ mod tests {
                 summary: "Running".into(),
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
+                events: Vec::new(),
             }],
         );
         recovery.push(ServerFrame {
