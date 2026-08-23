@@ -107,8 +107,8 @@ pub struct K10sApp {
     resource_types: Vec<ResourceTypeEntry>,
     /// The context whose types are cached or being fetched.
     types_context: Option<String>,
-    /// In-flight resource.types request for that context.
-    types_request: Option<PendingRequest>,
+    /// In-flight `resource.types` request and the context it was issued for.
+    types_request: Option<(String, PendingRequest)>,
     /// In-flight workload mutations awaiting their accepted operation.
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
     /// Backend-resolved details for every identity a window pinned, keyed by
@@ -654,36 +654,51 @@ impl K10sApp {
                 }
             }
         }
-        if self.types_context.as_deref() != Some(context) && self.types_context.is_some() {
-            // Context changed: drop the stale type cache; refetched below.
-            self.resource_types.clear();
-        }
-        if self.types_context.as_deref() != Some(context) && self.types_request.is_none() {
-            let request = self
-                .client
-                .begin(Query::ResourceTypes(ResourceTypesRequest {
-                    context: context.to_owned(),
-                }))?;
-            self.types_request = Some(request);
-            self.flush_outbound()
-                .map_err(|error| ClientError::Protocol(format!("{error:?}")))?;
+        match &self.types_request {
+            Some((requested, _)) if requested == context => {}
+            _ => {
+                // A stale cache or a mismatched in-flight request must never
+                // populate the new context's picker: cancel the old one and
+                // start fresh.
+                if let Some((requested, request)) = self.types_request.take()
+                    && requested != context
+                {
+                    let _ = self.client.cancel(&request);
+                }
+                self.resource_types.clear();
+                self.types_context = Some(context.to_owned());
+                let request = self
+                    .client
+                    .begin(Query::ResourceTypes(ResourceTypesRequest {
+                        context: context.to_owned(),
+                    }))?;
+                self.types_request = Some((context.to_owned(), request));
+                self.flush_outbound()
+                    .map_err(|error| ClientError::Protocol(format!("{error:?}")))?;
+            }
         }
         Ok(())
     }
 
     /// Complete the in-flight `resource.types` request.
     fn finish_type_requests(&mut self) {
-        let Some(request) = &self.types_request else {
+        let Some((_, request)) = &self.types_request else {
             return;
         };
         if self.client.is_pending(request) {
             return;
         }
-        let Some(request) = self.types_request.take() else {
+        let Some((requested, request)) = self.types_request.take() else {
             unreachable!("just checked");
         };
-        if let Some(QueryResult::ResourceTypes(response)) = self.client.take(request) {
+        if let Some(QueryResult::ResourceTypes(response)) = self.client.take(request)
+            && self.types_context.as_deref() == Some(requested.as_str())
+        {
             self.resource_types = response.types;
+        } else {
+            // The answer no longer matches the selection: force a refetch on
+            // the next reconciliation.
+            self.types_context = None;
         }
     }
 

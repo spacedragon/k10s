@@ -652,6 +652,18 @@ async fn mutations_without_idempotency_keys_are_rejected_as_invalid() {
     .await;
     expect_error(&mut ws, "scale-no-key", ErrorCode::InvalidRequest).await;
 
+    // Blank keys are equally invalid for both mutation kinds: the backend
+    // skips retention for empty strings, so replays would execute twice.
+    send_keyed(
+        &mut ws,
+        "scale-blank-key",
+        "workload.scale",
+        scale_payload("web-frontend", 3),
+        "   ",
+    )
+    .await;
+    expect_error(&mut ws, "scale-blank-key", ErrorCode::InvalidRequest).await;
+
     send_request(
         &mut ws,
         "delete-no-key",
@@ -660,6 +672,16 @@ async fn mutations_without_idempotency_keys_are_rejected_as_invalid() {
     )
     .await;
     expect_error(&mut ws, "delete-no-key", ErrorCode::InvalidRequest).await;
+
+    send_keyed(
+        &mut ws,
+        "delete-blank-key",
+        "workload.delete",
+        delete_payload("api-server", DeletePropagation::Background),
+        "",
+    )
+    .await;
+    expect_error(&mut ws, "delete-blank-key", ErrorCode::InvalidRequest).await;
 
     server.shutdown().await.unwrap();
 }

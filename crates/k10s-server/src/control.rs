@@ -923,8 +923,10 @@ fn parse_request(
             // A missing key cannot be synthesized from context/name alone:
             // same-name objects in different namespaces or kinds, and
             // legitimate later mutations, would be misread as replays.
-            let Some(idempotency_key) = idempotency_key else {
-                return Err("workload.scale requires an envelope-level idempotencyKey".to_owned());
+            let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
+                return Err(
+                    "workload.scale requires a non-empty envelope-level idempotencyKey".to_owned(),
+                );
             };
             serde_json::from_value::<ScaleRequest>(payload.clone())
                 .map(|scale| {

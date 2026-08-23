@@ -169,9 +169,12 @@ impl ScaleDialog {
         self.phase
     }
 
-    /// Report an accepted operation for the drained submission.
+    /// Report an accepted operation for the drained submission. Any earlier
+    /// failure is cleared: the dialog is done.
     pub fn operation_accepted(&mut self, operation_id: OperationId) {
         self.submitted_operation = Some(operation_id);
+        self.failure = None;
+        self.phase = DialogPhase::Submitted;
     }
 
     /// Report a failed submission and reopen the dialog for a corrected
@@ -302,9 +305,11 @@ impl DeleteDialog {
         self.connected = true;
     }
 
-    /// Report an accepted operation for the drained submission.
+    /// Report an accepted operation for the drained submission. Any earlier
+    /// failure is cleared: the dialog is done.
     pub fn operation_accepted(&mut self, operation_id: OperationId) {
         self.submitted_operation = Some(operation_id);
+        self.failure = None;
     }
 
     /// Report a failed submission and reopen the dialog for a corrected
