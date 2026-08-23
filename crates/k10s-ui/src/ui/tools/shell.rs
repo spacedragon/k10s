@@ -155,10 +155,29 @@ impl ShellTool {
     }
 
     /// Fail the session with an explicit typed reason (ticket denial,
-    /// RBAC, missing binary); the scrollback survives.
+    /// RBAC, missing binary); the scrollback survives. Recovery goes
+    /// through [`Self::dismiss_failure`].
     pub fn fail(&mut self, reason: &str) {
         if self.phase == ShellPhase::Attached || self.phase == ShellPhase::Connecting {
             self.phase = ShellPhase::Failed(reason.to_owned());
+        }
+    }
+
+    /// Intentional teardown by the application (selection rebind or guard
+    /// resolution): returns to the reconnectable Disconnected state,
+    /// dropping queued input/actions while preserving the scrollback.
+    pub fn disconnect_intentional(&mut self) {
+        if !matches!(self.phase, ShellPhase::Disconnected) {
+            self.phase = ShellPhase::Disconnected;
+        }
+        self.actions.clear();
+    }
+
+    /// Dismiss a failure report and allow a fresh explicit connect.
+    pub fn dismiss_failure(&mut self) {
+        if matches!(self.phase, ShellPhase::Failed(_)) {
+            self.phase = ShellPhase::Disconnected;
+            self.actions.clear();
         }
     }
 }
@@ -310,6 +329,17 @@ pub(crate) fn show(
             }
             ShellPhase::Failed(reason) => {
                 ui.label(RichText::new(format!("Session failed: {reason}")));
+                let dismiss = ui.button("New session");
+                dismiss.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "New session".to_owned(),
+                    )
+                });
+                if dismiss.clicked() {
+                    session.dismiss_failure();
+                }
             }
         }
         ScrollArea::vertical()

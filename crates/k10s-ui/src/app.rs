@@ -675,8 +675,10 @@ impl K10sApp {
                     }
                 }
                 StreamRoute::Exec => {
+                    // Intentional teardown stays reconnectable.
+                    let _ = reason;
                     if let Some(shell) = stores.shells.get_mut(window) {
-                        shell.fail(reason);
+                        shell.disconnect_intentional();
                     }
                 }
             }
@@ -827,8 +829,9 @@ impl K10sApp {
                             }
                             StreamRoute::Exec => {
                                 if !target_current {
+                                    // Intentional teardown: reconnectable.
                                     if let Some(shell) = stores.shells.get_mut(window) {
-                                        shell.fail("the shell target changed");
+                                        shell.disconnect_intentional();
                                     }
                                     stale_handshake = true;
                                     continue;
@@ -1510,7 +1513,7 @@ mod stream_lifecycle_tests {
                 .get_mut(window)
                 .expect("terminal exists")
                 .phase(),
-            ShellPhase::Failed("the shell target changed".to_owned())
+            ShellPhase::Disconnected
         );
         assert!(
             !app.stream_sessions
@@ -1525,6 +1528,34 @@ mod stream_lifecycle_tests {
         assert_eq!(
             app.workspace_stream_target(window).as_ref(),
             Some(&target_for("pod-b"))
+        );
+
+        // Clearing the selection and reselecting the SAME pod A must leave
+        // a reconnectable terminal (not a dead Failed one): connect works
+        // again and a fresh Ready re-engages the guard.
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ClearSelection(window));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_a.clone()));
+        assert_eq!(
+            app.workspace_stream_target(window).as_ref(),
+            Some(&target_for("pod-a"))
+        );
+        let tx2 = attach_session(&mut app, window, &pod_a);
+        ready_signal(&tx2, "app");
+        app.poll_stream_sessions();
+        assert!(
+            app.shell_guard_connected(window),
+            "a fresh session can engage the guard again"
+        );
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
         );
     }
 
@@ -1568,7 +1599,7 @@ mod stream_lifecycle_tests {
                 .get_mut(window)
                 .expect("terminal exists")
                 .phase(),
-            ShellPhase::Failed("the shell target changed".to_owned())
+            ShellPhase::Disconnected
         );
         // The detail tab state stays consistent for the next connect attempt.
         assert_eq!(
