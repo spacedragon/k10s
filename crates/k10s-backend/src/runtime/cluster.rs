@@ -102,6 +102,13 @@ impl ClusterWatches {
         if let Some(handle) = selections.get(&selector) {
             // Warm join: register first so no published snapshot can be
             // missed, then hand this subscriber the complete current state.
+            // The join timestamp resets the linger deadline: even a join so
+            // short the monitor never samples its presence pushes teardown a
+            // full linger window away.
+            *handle
+                .last_join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
             let receiver = handle.sender.subscribe();
             handle.publisher.publish_current();
             return receiver;
@@ -124,6 +131,7 @@ impl ClusterWatches {
                 sender: sender.clone(),
                 phases: phase_rx.clone(),
                 publisher: Arc::clone(&publisher),
+                last_join: StdMutex::new(std::time::Instant::now()),
             },
         );
         drop(selections);
@@ -192,10 +200,12 @@ impl ClusterWatches {
             .map(|handle| handle.publisher.stale())
     }
 
-    /// Exit a selection once every subscriber has been gone for a full linger
-    /// window. Removal happens under the same lock as subscription, so a
-    /// rejoin racing the teardown either lands on the warm entry or starts a
-    /// fresh selection — never on a dying one.
+    /// Exit a selection only after a full linger window has elapsed with no
+    /// subscriber at any point in it. The final check-and-remove runs under
+    /// the same registry lock as [`ClusterWatches::subscribe`] and rechecks
+    /// the live receiver count, so a join racing the teardown either lands
+    /// on the warm entry (monitor keeps waiting) or starts a fresh selection
+    /// — never on a dying one.
     fn spawn_linger_monitor(
         &self,
         selector: WatchSelector,
@@ -206,32 +216,56 @@ impl ClusterWatches {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
             let poll = shared.linger.min(LINGER_POLL).max(Duration::from_millis(5));
+            let mut empty_since: Option<tokio::time::Instant> = None;
             loop {
                 tokio::time::sleep(poll).await;
                 if sender.receiver_count() > 0 {
+                    // Any live subscriber resets the linger deadline.
+                    empty_since = None;
                     continue;
                 }
-                // Linger window: any rejoin raises the receiver count again.
-                tokio::time::sleep(shared.linger).await;
-                if sender.receiver_count() > 0 {
+                let since = match empty_since {
+                    Some(since) => since,
+                    None => *empty_since.insert(tokio::time::Instant::now()),
+                };
+                if since.elapsed() < shared.linger {
                     continue;
                 }
-                break;
-            }
-            let removed = remove_if_current(&shared, &selector, id);
-            if removed {
-                cancel.cancel();
+                if remove_if_current_and_empty(&shared, &selector, id, shared.linger) {
+                    cancel.cancel();
+                    return;
+                }
+                // A concurrent subscribe re-registered or joined: keep watching.
+                empty_since = None;
             }
         });
     }
 }
 
-/// Atomically remove the entry if it is still the registration this monitor
-/// owns; a newer registration keeps running on its own lifecycle.
-fn remove_if_current(shared: &Shared, selector: &WatchSelector, id: u64) -> bool {
+/// Atomically remove the entry if it is still this monitor's registration,
+/// it still has no receivers, and no join has happened within the linger
+/// window. Holding the registry lock for the checks and the removal closes
+/// the join/teardown race: a subscriber creates its receiver under the same
+/// lock, so it is either counted here (entry kept) or joins after the entry
+/// was removed (fresh selection) — never on a dying one.
+fn remove_if_current_and_empty(
+    shared: &Shared,
+    selector: &WatchSelector,
+    id: u64,
+    linger: Duration,
+) -> bool {
     let mut selections = shared.selections.lock().unwrap_or_else(|e| e.into_inner());
     match selections.get(selector) {
-        Some(handle) if handle.id == id => {
+        Some(handle)
+            if handle.id == id
+                && handle.sender.receiver_count() == 0
+                && handle
+                    .last_join
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .elapsed()
+                    >= linger =>
+        {
             selections.remove(selector);
             true
         }

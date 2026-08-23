@@ -617,6 +617,152 @@ fn cache_replacement_is_atomic_never_half_initialized() {
 }
 
 #[tokio::test]
+async fn empty_list_cuts_keep_the_revision_stream_increasing() {
+    let world = ClusterWatches::new(Duration::from_millis(50));
+    let (source, script) = ScriptedSource::new(vec![
+        // Initially empty cut, then a populated relist, then back to empty.
+        listed("11", &[]),
+        listed("22", &[pod_row("web", "Running")]),
+        listed("33", &[]),
+    ]);
+    let source: Arc<dyn WatchSource> = Arc::new(source);
+    let selector = pod_selector(Some("default"));
+
+    let mut events = world.subscribe(selector.clone(), Arc::clone(&source));
+    let BackendEvent::Snapshot(empty) = next_event(&mut events).await else {
+        panic!("snapshot first");
+    };
+    assert!(
+        empty.rows.is_empty(),
+        "an empty cut still publishes a complete snapshot"
+    );
+    assert_eq!(
+        empty.revision,
+        k10s_backend::runtime::INITIAL_WATCH_REVISION,
+        "empty cuts keep their allocated revision instead of regressing to zero"
+    );
+
+    script.end_stream();
+    let BackendEvent::Snapshot(populated) = next_event(&mut events).await else {
+        panic!("restart republishes a snapshot");
+    };
+    assert_eq!(populated.rows.len(), 1);
+    assert!(populated.revision > empty.revision);
+
+    script.end_stream();
+    let BackendEvent::Snapshot(back_to_empty) = next_event(&mut events).await else {
+        panic!("restart republishes a snapshot");
+    };
+    assert!(back_to_empty.rows.is_empty());
+    assert!(
+        back_to_empty.revision > populated.revision,
+        "nonempty-to-empty relists keep revisions strictly increasing"
+    );
+}
+
+#[tokio::test]
+async fn late_joins_never_observe_a_revision_regression() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    let world = ClusterWatches::new(Duration::from_millis(50));
+    let (source, script) = ScriptedSource::new(vec![listed("11", &[pod_row("web", "Running")])]);
+    let source: Arc<dyn WatchSource> = Arc::new(source);
+    let selector = pod_selector(Some("default"));
+
+    let _initial = world.subscribe(selector.clone(), Arc::clone(&source));
+    wait_for_phase(&world, &selector, WatchPhase::InitDone).await;
+
+    // Feed live deltas continuously while late joiners keep arriving: every
+    // receiver's event stream must stay revision-monotonic even though
+    // warm-join snapshots and supervisor deltas publish concurrently.
+    let stop = Arc::new(AtomicBool::new(false));
+    let feeder_stop = Arc::clone(&stop);
+    let feeder_world = ClusterWatches::new(Duration::from_millis(50));
+    drop(feeder_world);
+    let feeder = tokio::spawn(async move {
+        let mut index = 0_u64;
+        while !feeder_stop.load(Ordering::SeqCst) {
+            script.push_update(WatchUpdate::Upsert(pod_row(
+                &format!("pod-{index:03}"),
+                "Running",
+            )));
+            index += 1;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+
+    let regressions = Arc::new(AtomicU64::new(0));
+    for _ in 0..25 {
+        let mut events = world.subscribe(selector.clone(), Arc::clone(&source));
+        let mut last_seen: Option<u64> = None;
+        for _ in 0..6 {
+            let event = next_event(&mut events).await;
+            let revision = match event {
+                BackendEvent::Snapshot(snapshot) => snapshot.revision,
+                BackendEvent::Changed(record) => record.revision,
+                other => panic!("unexpected event {other:?}"),
+            };
+            if let Some(previous) = last_seen.replace(revision)
+                && revision <= previous
+            {
+                regressions.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        drop(events);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stop.store(true, Ordering::SeqCst);
+    feeder.await.expect("feeder exits");
+
+    assert_eq!(
+        regressions.load(Ordering::SeqCst),
+        0,
+        "warm-join snapshots must never reorder behind newer deltas"
+    );
+}
+
+#[tokio::test]
+async fn linger_teardown_requires_a_full_quiet_window_and_stays_rejoin_safe() {
+    let world = ClusterWatches::new(Duration::from_millis(150));
+    let (source, _script) = ScriptedSource::new(vec![listed("11", &[pod_row("web", "Running")])]);
+    let source: Arc<dyn WatchSource> = Arc::new(source);
+    let selector = pod_selector(Some("default"));
+
+    let first = world.subscribe(selector.clone(), Arc::clone(&source));
+    wait_for_phase(&world, &selector, WatchPhase::InitDone).await;
+    drop(first);
+
+    // Repeatedly rejoin and leave again, including past one full linger
+    // window: each join resets the deadline and keeps the selection alive.
+    for round in 0..12 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let mut rejoin = world.subscribe(selector.clone(), Arc::clone(&source));
+        let joined = next_event(&mut rejoin).await;
+        assert!(
+            matches!(joined, BackendEvent::Snapshot(_)),
+            "round {round}: the warm selection is still serving"
+        );
+        assert_eq!(world.live_selections(), 1);
+        drop(rejoin);
+    }
+
+    // After the final drop, teardown needs one full quiet linger window.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        world.live_selections(),
+        1,
+        "the selection survives partial quiet windows"
+    );
+    for _ in 0..600 {
+        if world.live_selections() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(world.live_selections(), 0);
+}
+
+#[tokio::test]
 async fn unknown_context_and_gvk_are_typed_not_founds_on_the_adapter() {
     use k10s_backend::testkit::RecordedApiServer;
 

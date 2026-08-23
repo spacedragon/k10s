@@ -103,12 +103,18 @@ pub trait WatchSource: Send + Sync + std::fmt::Debug {
 
 /// Publisher fusing the summary cache of one selection with its bounded
 /// broadcast channel and the shared monotonic revision counter.
+///
+/// Every broadcast (list cut, live delta, warm-join snapshot) runs inside
+/// one publication lock, so the order events reach the channel matches the
+/// order revisions are allocated: a receiver can never observe a newer
+/// delta followed by an older snapshot.
 #[derive(Debug)]
 pub struct SelectionPublisher {
     selector: WatchSelector,
     cache: SummaryCache,
     sender: broadcast::Sender<BackendEvent>,
     revisions: RevisionCounter,
+    publish_order: std::sync::Mutex<()>,
 }
 
 impl SelectionPublisher {
@@ -126,35 +132,53 @@ impl SelectionPublisher {
             cache,
             sender,
             revisions,
+            publish_order: std::sync::Mutex::new(()),
         }
     }
 
     /// Apply one list cut atomically and broadcast the full snapshot event.
     ///
     /// The snapshot event is published only after the complete cut sits in
-    /// the cache: watchers can never receive half of a list.
+    /// the cache: watchers can never receive half of a list. The snapshot
+    /// carries the revision allocated for this cut — including for empty
+    /// cuts, so the revision stream stays strictly increasing even when a
+    /// selection relists to zero rows.
     pub fn apply_list(&self, listed: &ListedState) {
-        let (_, records) = self.cache.replace(listed.rows.clone(), &self.revisions);
+        let _order = self
+            .publish_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (revision, records) = self.cache.replace(listed.rows.clone(), &self.revisions);
         let _ = self.sender.send(BackendEvent::Snapshot(ResourceListData {
             context: self.selector.context.clone(),
             gvk: self.selector.gvk.clone(),
             namespace: self.selector.namespace.clone(),
             generated_at: now_rfc3339(),
-            revision: records.first().map_or(0, |record| record.revision),
+            revision,
             rows: records,
         }));
     }
 
     /// Apply one live delta and broadcast it.
     pub fn apply_update(&self, update: WatchUpdate) {
+        let _order = self
+            .publish_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = self
             .sender
             .send(self.cache.apply_update(update, &self.revisions));
     }
 
     /// Broadcast the current cache contents as a complete snapshot for late
-    /// joiners of a warm selection.
+    /// joiners of a warm selection. Ordered against list cuts and live
+    /// deltas by the same publication lock, so a joining receiver's event
+    /// stream stays revision-monotonic.
     pub fn publish_current(&self) {
+        let _order = self
+            .publish_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let data = self.cache.publish_current(&self.revisions);
         let _ = self.sender.send(BackendEvent::Snapshot(data));
     }
@@ -185,6 +209,11 @@ pub(crate) struct SelectionHandle {
     pub(crate) sender: broadcast::Sender<BackendEvent>,
     pub(crate) phases: watch::Receiver<WatchPhase>,
     pub(crate) publisher: Arc<SelectionPublisher>,
+    /// Last time any subscriber joined this selection (registration or warm
+    /// join). Teardown may only proceed a full linger after this instant,
+    /// which covers subscribers too short-lived for the monitor's samples to
+    /// ever observe their presence.
+    pub(crate) last_join: std::sync::Mutex<std::time::Instant>,
 }
 
 /// Drive one supervised selection until its shutdown token fires.
