@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use k10s_backend::BackendMode;
+
 /// Validated standalone listener, secret, and exact Trunk distribution source.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StandaloneConfig {
@@ -90,6 +92,22 @@ impl StandaloneConfig {
     #[must_use]
     pub fn dist_dir(&self) -> &Path {
         &self.dist_dir
+    }
+}
+
+/// Resolve the runtime backend mode for a standalone launch from explicit
+/// operator inputs, before any listener is bound.
+///
+/// Normal launches default to the real `Kube` adapter (with an explicit
+/// kubeconfig path when given). `Fake` is never implicit: it requires the
+/// explicit development flag. File validity itself is enforced by the backend
+/// factory at kernel construction, which entry points must run before bind.
+pub fn resolve_backend_mode(fake_requested: bool, kubeconfig_path: Option<&Path>) -> BackendMode {
+    if fake_requested {
+        return BackendMode::Fake;
+    }
+    BackendMode::Kube {
+        kubeconfig: kubeconfig_path.map(Path::to_path_buf),
     }
 }
 

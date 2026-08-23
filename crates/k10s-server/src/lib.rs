@@ -10,7 +10,7 @@ mod probes;
 
 pub use config::{
     AccessTokenSourceError, ServerConfig, StandaloneConfig, StandaloneConfigError,
-    resolve_access_token,
+    resolve_access_token, resolve_backend_mode,
 };
 pub use lifecycle::{
     Admission, ConnectionTasks, DrainSignals, MutationGate, ServerHandle, router, run,

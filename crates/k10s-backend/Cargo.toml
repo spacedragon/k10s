@@ -5,6 +5,11 @@ edition.workspace = true
 
 [dependencies]
 k10s-protocol = { path = "../k10s-protocol" }
+# Feature pin only: kube-rs requires exactly one Kubernetes API version to be
+# enabled somewhere in the dependency graph; this internal workspace crate is
+# where k10s makes that choice.
+k8s-openapi = { version = "0.28", features = ["v1_36"] }
+kube = { version = "4.2", default-features = false, features = ["config"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "time"] }
