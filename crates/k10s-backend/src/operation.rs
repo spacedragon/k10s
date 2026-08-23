@@ -26,6 +26,87 @@ pub struct Ticket {
     pub disruptive: bool,
 }
 
+/// How dependents are handled when an object is deleted. Mirrors the
+/// protocol propagation modes without leaking wire types across the port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Propagation {
+    /// Dependents are garbage-collected after the owner disappears.
+    Background,
+    /// The owner disappears only after every dependent was removed.
+    Foreground,
+    /// Dependents are orphaned and left running.
+    Orphan,
+}
+
+/// Backend-owned lifecycle state of one background operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationState {
+    /// Waiting to run.
+    Pending,
+    /// Currently running.
+    Running,
+    /// Completed successfully.
+    Succeeded,
+    /// Completed with an error.
+    Failed,
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+impl OperationState {
+    /// Whether this state ends an operation's lifecycle.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    /// Map to the protocol-facing status.
+    #[must_use]
+    pub fn wire(self) -> k10s_protocol::OperationStatus {
+        match self {
+            Self::Pending => k10s_protocol::OperationStatus::Pending,
+            Self::Running => k10s_protocol::OperationStatus::Running,
+            Self::Succeeded => k10s_protocol::OperationStatus::Succeeded,
+            Self::Failed => k10s_protocol::OperationStatus::Failed,
+            Self::Cancelled => k10s_protocol::OperationStatus::Cancelled,
+        }
+    }
+}
+
+/// One backend-observed operation state change, delivered to subscribers
+/// and answerable through status queries until eviction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationEvent {
+    /// Operation identifier.
+    pub id: String,
+    /// Current lifecycle state.
+    pub state: OperationState,
+    /// Deterministic progress as `(completed, total)` when running.
+    pub progress: Option<(u32, u32)>,
+    /// Safe human-readable detail, set for terminal failures.
+    pub detail: Option<String>,
+}
+
+/// The retained record of one operation behind status queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationRecord {
+    /// Operation identifier.
+    pub id: String,
+    /// Current lifecycle state.
+    pub state: OperationState,
+    /// Progress as `(completed, total)` when running.
+    pub progress: Option<(u32, u32)>,
+    /// Safe detail, set for terminal failures.
+    pub detail: Option<String>,
+}
+
+/// Answer to a status query: records for every requested ID still known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationStatusData {
+    /// Records for every requested ID the adapter still knows.
+    pub operations: Vec<OperationRecord>,
+}
+
 /// Backend-owned validation outcome before protocol mapping.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +376,47 @@ pub(crate) fn manifest_for(record: &ResourceRecord) -> String {
         manifest.push_str(&format!("  namespace: {namespace}\n"));
     }
     manifest
+}
+
+/// Kernel-mapped operation status result carrying the exact wire payload.
+#[derive(Debug, Clone)]
+pub struct OperationStatusResult {
+    payload: k10s_protocol::OperationStatusResponse,
+}
+
+impl OperationStatusResult {
+    /// Map backend-owned status data into the protocol-facing payload.
+    /// IDs the adapter no longer knows are simply absent so clients derive
+    /// an `Unknown` state for them.
+    #[must_use]
+    pub fn new(data: OperationStatusData) -> Self {
+        let payload = k10s_protocol::OperationStatusResponse {
+            operations: data
+                .operations
+                .into_iter()
+                .map(|record| k10s_protocol::OperationSnapshotEntry {
+                    operation_id: k10s_protocol::OperationId::new(record.id),
+                    status: record.state.wire(),
+                    progress: record.progress.map(|(completed, total)| {
+                        k10s_protocol::OperationProgress { completed, total }
+                    }),
+                })
+                .collect(),
+        };
+        Self { payload }
+    }
+
+    /// Return the exact response payload for a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> k10s_protocol::OperationStatusResponse {
+        self.payload.clone()
+    }
+
+    /// Serialize the wire payload to a JSON string.
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("OperationStatusResponse must serialize")
+    }
 }
 
 #[cfg(test)]

@@ -38,8 +38,11 @@ pub use metrics::{
     MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use operation::{
-    OperationAccepted, REQUEST_YAML_APPLY, REQUEST_YAML_VALIDATE, ValidationTicket,
-    YamlApplyRequest, YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
+    DeletePropagation, DeleteRequest, OperationAccepted, OperationProgress, OperationSnapshotEntry,
+    OperationStatusRequest, OperationStatusResponse, REQUEST_OPERATION_STATUS,
+    REQUEST_WORKLOAD_DELETE, REQUEST_WORKLOAD_SCALE, REQUEST_YAML_APPLY, REQUEST_YAML_VALIDATE,
+    ScaleRequest, ValidationTicket, YamlApplyRequest, YamlDiagnostic, YamlOutcome,
+    YamlValidateRequest, buffer_hash,
 };
 pub use resource::{
     AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,

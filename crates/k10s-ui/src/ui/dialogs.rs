@@ -1,0 +1,546 @@
+//! Operation confirmation dialogs: scale and delete workflows rendered as
+//! small modal windows above the canvas.
+//!
+//! The dialog state is pure and testable; rendering only queues actions.
+//! The application layer drains [`DialogAction`]s, submits them through the
+//! shared client's command path (every action carries an idempotency key),
+//! and reports the accepted operation or failure back to the originating
+//! dialog. Disabled controls always carry a safe human-readable reason.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use egui::RichText;
+use k10s_protocol::{DeletePropagation, OperationId, ResourceIdentity};
+
+use crate::workspace::WindowId;
+
+/// One queued mutation request from a dialog, drained by the application
+/// layer after rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogAction {
+    /// Scale the target to the requested replica count.
+    SubmitScale {
+        /// Exact target identity including its immutable UID.
+        target: ResourceIdentity,
+        /// Desired replica count.
+        replicas: u32,
+        /// Idempotency key for safe retries.
+        idempotency_key: String,
+    },
+    /// Delete the target with the selected propagation mode.
+    SubmitDelete {
+        /// Exact target identity including its immutable UID.
+        target: ResourceIdentity,
+        /// How dependents are handled.
+        propagation: DeletePropagation,
+        /// Idempotency key for safe retries.
+        idempotency_key: String,
+    },
+}
+
+/// Lifecycle phase of one open dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogPhase {
+    /// Waiting for user input or a valid submission.
+    AwaitingInput,
+    /// The submission was drained by the application layer.
+    Submitted,
+}
+
+/// Deterministic idempotency keys for dialog submissions. A process-wide
+/// counter keeps repeated dialogs for the same target distinct.
+fn next_dialog_key(prefix: &str, target: &ResourceIdentity) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{prefix}:{}:{}:{counter}",
+        target.context,
+        target.name,
+        counter = COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The replica-count bounds accepted by the fake-backed prototype.
+const MIN_REPLICAS: i64 = 0;
+const MAX_REPLICAS: i64 = 999;
+
+fn replicas_reason(input: &str) -> Option<&'static str> {
+    match input.trim().parse::<i64>() {
+        Ok(value) if (MIN_REPLICAS..=MAX_REPLICAS).contains(&value) => None,
+        Ok(_) => Some("replicas must be a whole number between 0 and 999"),
+        Err(_) => Some("replicas must be a whole number between 0 and 999"),
+    }
+}
+
+/// Modal confirmation dialog for scaling one exact workload object.
+#[derive(Debug, Clone)]
+pub struct ScaleDialog {
+    target: ResourceIdentity,
+    input: String,
+    idempotency_key: String,
+    phase: DialogPhase,
+    connected: bool,
+    submitted_operation: Option<OperationId>,
+    failure: Option<String>,
+}
+
+impl ScaleDialog {
+    /// Open a scale dialog for `target`, optionally pre-filling the desired
+    /// count from the row summary.
+    #[must_use]
+    pub fn for_target(target: ResourceIdentity, suggested_replicas: Option<u32>) -> Self {
+        Self {
+            input: suggested_replicas
+                .map(|count| count.to_string())
+                .unwrap_or_default(),
+            idempotency_key: next_dialog_key("scale", &target),
+            target,
+            phase: DialogPhase::AwaitingInput,
+            connected: true,
+            submitted_operation: None,
+            failure: None,
+        }
+    }
+
+    /// The exact target this dialog mutates.
+    #[must_use]
+    pub fn target(&self) -> &ResourceIdentity {
+        &self.target
+    }
+
+    /// Mutable input buffer for the replica count field.
+    fn input_buffer(&mut self) -> &mut String {
+        &mut self.input
+    }
+
+    /// Update the desired replica count text.
+    pub fn set_input(&mut self, text: impl Into<String>) {
+        self.input = text.into();
+    }
+
+    /// Why submission is disabled right now, if it is. Disconnection wins
+    /// over validation so users are never told to fix numbers that cannot
+    /// be submitted anyway.
+    #[must_use]
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        if !self.connected {
+            return Some("not connected");
+        }
+        if matches!(self.phase, DialogPhase::Submitted) && self.failure.is_none() {
+            return Some("already submitted");
+        }
+        replicas_reason(&self.input)
+    }
+
+    /// Whether a submission may be drained right now.
+    #[must_use]
+    pub fn can_submit(&self) -> bool {
+        self.disabled_reason().is_none()
+    }
+
+    /// Take the queued submission exactly once. Consuming moves the dialog
+    /// to [`DialogPhase::Submitted`].
+    pub fn take_action(&mut self) -> Option<DialogAction> {
+        if !self.can_submit() {
+            return None;
+        }
+        let replicas = self.input.trim().parse::<u32>().ok()?;
+        self.phase = DialogPhase::Submitted;
+        Some(DialogAction::SubmitScale {
+            target: self.target.clone(),
+            replicas,
+            idempotency_key: self.idempotency_key.clone(),
+        })
+    }
+
+    /// Notify the dialog that the transport was lost.
+    pub fn connection_lost(&mut self) {
+        self.connected = false;
+    }
+
+    /// Current lifecycle phase.
+    #[must_use]
+    pub fn phase(&self) -> DialogPhase {
+        self.phase
+    }
+
+    /// Report an accepted operation for the drained submission.
+    pub fn operation_accepted(&mut self, operation_id: OperationId) {
+        self.submitted_operation = Some(operation_id);
+    }
+
+    /// Report a failed submission and reopen the dialog for a corrected
+    /// retry with the same idempotency key.
+    pub fn operation_failed(&mut self, reason: impl Into<String>) {
+        self.failure = Some(reason.into());
+        self.phase = DialogPhase::AwaitingInput;
+    }
+
+    /// The accepted operation, once known.
+    #[must_use]
+    pub fn submitted_operation(&self) -> Option<OperationId> {
+        self.submitted_operation.clone()
+    }
+
+    /// The safe failure reason, if the last attempt failed.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Whether a failed attempt can be retried through this dialog.
+    #[must_use]
+    pub fn can_resubmit(&self) -> bool {
+        self.failure.is_some()
+    }
+}
+
+/// Modal confirmation dialog for deleting one exact object. Deletion is
+/// gated on typing the resource name and carries an explicit propagation
+/// mode.
+#[derive(Debug, Clone)]
+pub struct DeleteDialog {
+    target: ResourceIdentity,
+    propagation: DeletePropagation,
+    confirmation: String,
+    idempotency_key: String,
+    connected: bool,
+    consumed: bool,
+    submitted_operation: Option<OperationId>,
+}
+
+impl DeleteDialog {
+    /// Open a delete dialog for `target`.
+    #[must_use]
+    pub fn for_target(target: ResourceIdentity) -> Self {
+        Self {
+            idempotency_key: next_dialog_key("delete", &target),
+            propagation: DeletePropagation::Background,
+            confirmation: String::new(),
+            target,
+            connected: true,
+            consumed: false,
+            submitted_operation: None,
+        }
+    }
+
+    /// The exact target this dialog deletes.
+    #[must_use]
+    pub fn target(&self) -> &ResourceIdentity {
+        &self.target
+    }
+
+    /// Mutable input buffer for the typed confirmation field.
+    fn confirmation_buffer(&mut self) -> &mut String {
+        &mut self.confirmation
+    }
+
+    /// Update the typed confirmation text.
+    pub fn set_confirmation(&mut self, text: impl Into<String>) {
+        self.confirmation = text.into();
+    }
+
+    /// Select the propagation mode.
+    pub fn set_propagation(&mut self, propagation: DeletePropagation) {
+        self.propagation = propagation;
+    }
+
+    /// Currently selected propagation mode.
+    #[must_use]
+    pub fn propagation(&self) -> DeletePropagation {
+        self.propagation
+    }
+
+    /// Why submission is disabled right now, if it is.
+    #[must_use]
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        if !self.connected {
+            return Some("not connected");
+        }
+        if self.consumed {
+            return Some("already submitted");
+        }
+        if self.confirmation != self.target.name {
+            return Some("type the resource name to confirm deletion");
+        }
+        None
+    }
+
+    /// Whether a submission may be drained right now.
+    #[must_use]
+    pub fn can_submit(&self) -> bool {
+        self.disabled_reason().is_none()
+    }
+
+    /// Take the queued submission exactly once.
+    pub fn take_action(&mut self) -> Option<DialogAction> {
+        if !self.can_submit() {
+            return None;
+        }
+        self.consumed = true;
+        Some(DialogAction::SubmitDelete {
+            target: self.target.clone(),
+            propagation: self.propagation,
+            idempotency_key: self.idempotency_key.clone(),
+        })
+    }
+
+    /// Notify the dialog that the transport was lost.
+    pub fn connection_lost(&mut self) {
+        self.connected = false;
+    }
+
+    /// Report an accepted operation for the drained submission.
+    pub fn operation_accepted(&mut self, operation_id: OperationId) {
+        self.submitted_operation = Some(operation_id);
+    }
+
+    /// The accepted operation, once known.
+    #[must_use]
+    pub fn submitted_operation(&self) -> Option<OperationId> {
+        self.submitted_operation.clone()
+    }
+}
+
+/// Which dialog is active on a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveDialogKind {
+    /// A scale confirmation is open.
+    Scale,
+    /// A delete confirmation is open.
+    Delete,
+}
+
+/// Mutable access to the dialog active on a window.
+#[derive(Debug)]
+pub enum DialogHandle<'a> {
+    /// A scale confirmation.
+    Scale(&'a mut ScaleDialog),
+    /// A delete confirmation.
+    Delete(&'a mut DeleteDialog),
+}
+
+/// Per-window store of open operation dialogs plus the actions queued by
+/// rendering. Owned by the shell; drained by the application layer.
+#[derive(Debug, Default)]
+pub struct OperationDialogs {
+    windows: HashMap<WindowId, ActiveDialog>,
+    actions: Vec<(WindowId, DialogAction)>,
+}
+
+/// The dialog open on one window.
+#[derive(Debug)]
+enum ActiveDialog {
+    Scale(ScaleDialog),
+    Delete(DeleteDialog),
+}
+
+impl OperationDialogs {
+    /// Open (or replace) the scale dialog on `window`.
+    pub fn open_scale(
+        &mut self,
+        window: WindowId,
+        target: ResourceIdentity,
+        suggested_replicas: Option<u32>,
+    ) {
+        self.windows.insert(
+            window,
+            ActiveDialog::Scale(ScaleDialog::for_target(target, suggested_replicas)),
+        );
+    }
+
+    /// Open (or replace) the delete dialog on `window`.
+    pub fn open_delete(&mut self, window: WindowId, target: ResourceIdentity) {
+        self.windows.insert(
+            window,
+            ActiveDialog::Delete(DeleteDialog::for_target(target)),
+        );
+    }
+
+    /// Which dialog, if any, is open on `window`.
+    #[must_use]
+    pub fn active(&self, window: WindowId) -> Option<ActiveDialogKind> {
+        match self.windows.get(&window) {
+            Some(ActiveDialog::Scale(_)) => Some(ActiveDialogKind::Scale),
+            Some(ActiveDialog::Delete(_)) => Some(ActiveDialogKind::Delete),
+            None => None,
+        }
+    }
+
+    /// Mutable access to the dialog open on `window`.
+    #[must_use]
+    pub fn active_mut(&mut self, window: WindowId) -> Option<DialogHandle<'_>> {
+        match self.windows.get_mut(&window) {
+            Some(ActiveDialog::Scale(dialog)) => Some(DialogHandle::Scale(dialog)),
+            Some(ActiveDialog::Delete(dialog)) => Some(DialogHandle::Delete(dialog)),
+            None => None,
+        }
+    }
+
+    /// Close the dialog on `window`, if any.
+    pub fn close(&mut self, window: WindowId) {
+        self.windows.remove(&window);
+    }
+
+    /// Submit the dialog active on `window`, if it allows a submission
+    /// right now. Queues its action for draining. Rendering and pure-state
+    /// callers share this path.
+    pub fn submit_active(&mut self, window: WindowId) {
+        let action = match self.windows.get_mut(&window) {
+            Some(ActiveDialog::Scale(dialog)) => dialog.take_action(),
+            Some(ActiveDialog::Delete(dialog)) => dialog.take_action(),
+            None => None,
+        };
+        if let Some(action) = action {
+            self.actions.push((window, action));
+        }
+    }
+
+    /// Drop entries for closed windows.
+    pub fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
+        self.windows.retain(|window, _| live(*window));
+    }
+
+    /// Notify every open dialog that the transport was lost.
+    pub fn connection_lost(&mut self) {
+        for dialog in self.windows.values_mut() {
+            match dialog {
+                ActiveDialog::Scale(scale) => scale.connection_lost(),
+                ActiveDialog::Delete(delete) => delete.connection_lost(),
+            }
+        }
+    }
+
+    /// Drain every queued dialog action for submission.
+    pub fn drain_actions(&mut self) -> Vec<(WindowId, DialogAction)> {
+        std::mem::take(&mut self.actions)
+    }
+
+    /// Render every open dialog. Queues actions; never blocks.
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        let windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window in windows {
+            let Some(dialog) = self.windows.get_mut(&window) else {
+                continue;
+            };
+            let mut close_requested = false;
+            let mut submit_requested = false;
+            egui::Window::new(dialog_title(dialog))
+                .id(egui::Id::new(("k10s.operation-dialog", window.0)))
+                .collapsible(false)
+                .resizable(false)
+                .show(ui, |ui| match dialog {
+                    ActiveDialog::Scale(scale) => {
+                        render_scale(ui, scale, &mut submit_requested, &mut close_requested);
+                    }
+                    ActiveDialog::Delete(delete) => {
+                        render_delete(ui, delete, &mut submit_requested, &mut close_requested);
+                    }
+                });
+            if submit_requested {
+                self.submit_active(window);
+                ui.ctx().request_repaint();
+            }
+            if close_requested {
+                self.windows.remove(&window);
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+}
+
+fn dialog_title(dialog: &ActiveDialog) -> &'static str {
+    match dialog {
+        ActiveDialog::Scale(_) => "Scale workload",
+        ActiveDialog::Delete(_) => "Delete resource",
+    }
+}
+
+fn render_scale(ui: &mut egui::Ui, dialog: &mut ScaleDialog, submit: &mut bool, close: &mut bool) {
+    ui.label(format!("Set replicas for {}", dialog.target().name));
+    ui.add_space(4.0);
+    let field = ui.text_edit_singleline(dialog.input_buffer());
+    field.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::TextEdit,
+            true,
+            "Desired replicas".to_owned(),
+        )
+    });
+    if let Some(reason) = dialog.disabled_reason() {
+        ui.label(RichText::new(reason).weak());
+    } else {
+        ui.label("Replicas will be applied through a background operation.");
+    }
+    if let Some(failure) = dialog.failure_message() {
+        ui.label(RichText::new(format!("Failed: {failure}")).color(ui.visuals().error_fg_color));
+    }
+    if let Some(operation_id) = dialog.submitted_operation() {
+        ui.label(format!("Submitted operation {}", operation_id.as_str()));
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Cancel").clicked() {
+            *close = true;
+        }
+        let button = ui.add_enabled(dialog.can_submit(), egui::Button::new("Apply scale"));
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Apply scale".to_owned())
+        });
+        if button.clicked() {
+            *submit = true;
+        }
+    });
+}
+
+fn render_delete(
+    ui: &mut egui::Ui,
+    dialog: &mut DeleteDialog,
+    submit: &mut bool,
+    close: &mut bool,
+) {
+    ui.label(format!(
+        "Permanently delete {}? Type its name to confirm.",
+        dialog.target().name
+    ));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Propagation");
+        for (mode, label) in [
+            (DeletePropagation::Background, "Background"),
+            (DeletePropagation::Foreground, "Foreground"),
+            (DeletePropagation::Orphan, "Orphan"),
+        ] {
+            if ui.radio(dialog.propagation() == mode, label).clicked() {
+                dialog.set_propagation(mode);
+            }
+        }
+    });
+    let field = ui.text_edit_singleline(dialog.confirmation_buffer());
+    field.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::TextEdit,
+            true,
+            "Confirm deletion".to_owned(),
+        )
+    });
+    if let Some(reason) = dialog.disabled_reason() {
+        ui.label(RichText::new(reason).weak());
+    }
+    if let Some(operation_id) = dialog.submitted_operation() {
+        ui.label(format!("Submitted operation {}", operation_id.as_str()));
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Cancel").clicked() {
+            *close = true;
+        }
+        let button = ui.add_enabled(dialog.can_submit(), egui::Button::new("Delete"));
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Confirm delete".to_owned())
+        });
+        if button.clicked() {
+            *submit = true;
+        }
+    });
+}

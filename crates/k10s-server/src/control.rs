@@ -12,12 +12,12 @@ use k10s_backend::{
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest,
-    OperationAccepted, OperationId, RequestId, ResourceIdentity, ResourceListRequest,
-    ResourceRefRequest, ResourceTypesRequest, ResumeStatus, Retryability, ServerFrame, ServerKind,
-    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
-    SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
-    decode_client_frame,
+    ClientKind, ClientPayload, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
+    InfrastructureRequest, OperationAccepted, OperationId, OperationStatusRequest, OperationUpdate,
+    RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest,
+    ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId, ShutdownNotice,
+    SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
+    Welcome, YamlApplyRequest, YamlValidateRequest, decode_client_frame,
 };
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -251,6 +251,10 @@ pub(crate) async fn serve_socket(
     }
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
+    // Accepted operation IDs correlated to their submitting request ID so
+    // every forwarded operation update can be traced with both identifiers.
+    let operation_correlations: Arc<std::sync::Mutex<HashMap<String, String>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut request_tasks = JoinSet::new();
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let subscription_cancel = child.child_token();
@@ -261,6 +265,60 @@ pub(crate) async fn serve_socket(
     let mut next_forwarder_id = 1_u128;
     let mut last_acked_sequence = 0_u64;
     let mut noticed = false;
+
+    // Every authenticated session streams background operation updates:
+    // they arrive through the backend's operations subscription and leave
+    // as sequenced `operationUpdate` frames on the lossless reserve.
+    if let Ok(mut handle) = kernel.subscribe(BackendSubscribe::Operations).await
+        && let Some(mut events) = handle.take_events()
+    {
+        let fwd_outbound = outbound.clone();
+        // Bound to the subscription-generation token so session teardown
+        // can join this forwarder deterministically.
+        let fwd_cancel = subscription_cancel.child_token();
+        let fwd_correlations = operation_correlations.clone();
+        let fwd_counter = Arc::clone(&last_sent_sequence);
+        let ops_span = tracing::info_span!(
+            "control_operations",
+            session_id = %session_id.as_str(),
+            backend_subscription_id = %handle.id,
+        );
+        request_tasks.spawn(
+            async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = fwd_cancel.cancelled() => break,
+                        event = events.recv() => match event {
+                            Ok(BackendEvent::Operation(update)) => {
+                                let correlation = fwd_correlations
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .get(&update.id)
+                                    .cloned();
+                                let outcome = forward_operation_update(
+                                    &fwd_outbound,
+                                    &fwd_counter,
+                                    &update,
+                                    correlation.as_deref(),
+                                );
+                                if outcome.is_err() {
+                                    overload_close(&fwd_outbound);
+                                    break;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                                tracing::warn!(dropped, "operations consumer lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                    }
+                }
+            }
+            .instrument(ops_span),
+        );
+    }
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         let next = tokio::select! {
@@ -369,6 +427,7 @@ pub(crate) async fn serve_socket(
                 let task_kernel = kernel.clone();
                 let task_outbound = outbound.clone();
                 let task_requests = requests.clone();
+                let task_correlations = operation_correlations.clone();
                 let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
                 let task_session_id = session_id.clone();
@@ -382,7 +441,11 @@ pub(crate) async fn serve_socket(
                 );
                 request_tasks.spawn(
                     async move {
-                        let parsed = parse_request(&request.request_kind, request.payload);
+                        let parsed = parse_request(
+                    &request.request_kind,
+                    &request.payload,
+                    request.idempotency_key.clone(),
+                );
                         let result: Result<RequestOutcome, RequestFailure> = match parsed {
                             Ok(Some(ParsedRequest::Query(query))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
@@ -393,29 +456,26 @@ pub(crate) async fn serve_socket(
                                         result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
                                 }
                             }
-                            Ok(Some(ParsedRequest::Apply(apply))) => {
-                                let command = Command::Apply {
-                                    context: apply.context,
-                                    yaml: apply.yaml,
-                                    idempotency_key: request
-                                        .idempotency_key
-                                        .clone()
-                                        .unwrap_or_else(|| apply.ticket_id.clone()),
-                                    ticket_id: apply.ticket_id,
-                                    buffer_hash: apply.buffer_hash,
-                                    target: backend_reference(apply.target),
-                                };
+                            Ok(Some(ParsedRequest::Execute(command))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
                                 tokio::select! {
                                     () = request_cancel.cancelled() =>
                                         Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                    result = task_kernel.execute_with_deadline(command, deadline) =>
+                                    result = task_kernel.execute_with_deadline(command, deadline) => {
                                         result.map(|operation_id| {
+                                            task_correlations
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .insert(
+                                                    operation_id.as_str().to_owned(),
+                                                    request_id.as_str().to_owned(),
+                                                );
                                             RequestOutcome::Applied(OperationAccepted {
                                                 operation_id: OperationId::new(operation_id.as_str()),
                                             })
                                         })
-                                        .map_err(RequestFailure::Backend),
+                                        .map_err(RequestFailure::Backend)
+                                    }
                                 }
                             }
                             Ok(None) => Err(RequestFailure::Backend(BackendError::unsupported(
@@ -471,6 +531,13 @@ pub(crate) async fn serve_socket(
                                     Priority::P1,
                                 )
                             }
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::OperationStatus(
+                                value,
+                            ))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
                             Ok(RequestOutcome::Applied(value)) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value),
@@ -774,8 +841,9 @@ pub(crate) async fn serve_socket(
 enum ParsedRequest {
     /// A behavior-level query.
     Query(Query),
-    /// A guarded YAML apply routed through the command port.
-    Apply(YamlApplyRequest),
+    /// A behavior-level mutation routed through the command port. The
+    /// envelope-level idempotency key travels inside every command.
+    Execute(Command),
 }
 
 /// Outcome of one dispatched control request.
@@ -790,10 +858,16 @@ enum RequestOutcome {
 /// Map a request kind and payload onto a backend behavior.
 ///
 /// `Ok(None)` marks the bootstrap request, which needs no payload parsing.
-fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<ParsedRequest>, String> {
+/// Mutations receive the envelope-level idempotency key; when absent, the
+/// ticket ID (for applies) keeps legacy envelopes safe.
+fn parse_request(
+    kind: &str,
+    payload: &serde_json::Value,
+    idempotency_key: Option<String>,
+) -> Result<Option<ParsedRequest>, String> {
     match kind {
         "bootstrap" => Ok(Some(ParsedRequest::Query(Query::Bootstrap))),
-        "yaml.validate" => serde_json::from_value::<YamlValidateRequest>(payload)
+        "yaml.validate" => serde_json::from_value::<YamlValidateRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ValidateApply {
                     context: parsed.context,
@@ -801,10 +875,92 @@ fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<Parsed
                 }))
             })
             .map_err(|error| format!("invalid yaml.validate payload: {error}")),
-        "yaml.apply" => serde_json::from_value::<YamlApplyRequest>(payload)
-            .map(|request| Some(ParsedRequest::Apply(request)))
-            .map_err(|error| format!("invalid yaml.apply payload: {error}")),
-        "resource.list" => serde_json::from_value::<ResourceListRequest>(payload)
+        k10s_protocol::REQUEST_YAML_APPLY => {
+            serde_json::from_value::<YamlApplyRequest>(payload.clone())
+                .map(|apply| {
+                    Some(ParsedRequest::Execute(Command::Apply {
+                        context: apply.context.clone(),
+                        yaml: apply.yaml,
+                        idempotency_key: idempotency_key.unwrap_or_else(|| apply.ticket_id.clone()),
+                        ticket_id: apply.ticket_id,
+                        buffer_hash: apply.buffer_hash,
+                        target: backend_reference(apply.target),
+                    }))
+                })
+                .map_err(|error| format!("invalid yaml.apply payload: {error}"))
+        }
+        k10s_protocol::REQUEST_WORKLOAD_SCALE => {
+            serde_json::from_value::<ScaleRequest>(payload.clone())
+                .map(|scale| {
+                    let key = idempotency_key
+                        .unwrap_or_else(|| format!("scale:{}/{}", scale.context, scale.name));
+                    Some(ParsedRequest::Execute(Command::Scale {
+                        context: scale.context,
+                        gvk: Gvk {
+                            group: scale.gvk.group,
+                            version: scale.gvk.version,
+                            kind: scale.gvk.kind,
+                        },
+                        namespace: scale.namespace,
+                        name: scale.name,
+                        uid: scale.uid,
+                        replicas: scale.replicas,
+                        idempotency_key: key,
+                    }))
+                })
+                .map_err(|error| {
+                    format!(
+                        "invalid {kind} payload: {error}",
+                        kind = k10s_protocol::REQUEST_WORKLOAD_SCALE
+                    )
+                })
+        }
+        k10s_protocol::REQUEST_WORKLOAD_DELETE => {
+            serde_json::from_value::<DeleteRequest>(payload.clone())
+                .map(|delete| {
+                    let key = idempotency_key.unwrap_or_else(|| {
+                        format!(
+                            "delete:{}/{}",
+                            delete.identity.context, delete.identity.name
+                        )
+                    });
+                    let propagation = match delete.propagation {
+                        DeletePropagation::Background => k10s_backend::Propagation::Background,
+                        DeletePropagation::Foreground => k10s_backend::Propagation::Foreground,
+                        DeletePropagation::Orphan => k10s_backend::Propagation::Orphan,
+                    };
+                    Some(ParsedRequest::Execute(Command::Delete {
+                        target: backend_reference(delete.identity),
+                        propagation,
+                        idempotency_key: key,
+                    }))
+                })
+                .map_err(|error| {
+                    format!(
+                        "invalid {kind} payload: {error}",
+                        kind = k10s_protocol::REQUEST_WORKLOAD_DELETE
+                    )
+                })
+        }
+        k10s_protocol::REQUEST_OPERATION_STATUS => {
+            serde_json::from_value::<OperationStatusRequest>(payload.clone())
+                .map(|status| {
+                    Some(ParsedRequest::Query(Query::OperationStatus {
+                        operation_ids: status
+                            .operation_ids
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                    }))
+                })
+                .map_err(|error| {
+                    format!(
+                        "invalid {kind} payload: {error}",
+                        kind = k10s_protocol::REQUEST_OPERATION_STATUS
+                    )
+                })
+        }
+        "resource.list" => serde_json::from_value::<ResourceListRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ResourceList {
                     context: parsed.context,
@@ -817,28 +973,28 @@ fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<Parsed
                 }))
             })
             .map_err(|error| format!("invalid resource.list payload: {error}")),
-        "resource.detail" => serde_json::from_value::<ResourceRefRequest>(payload)
+        "resource.detail" => serde_json::from_value::<ResourceRefRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ResourceDetail {
                     reference: backend_reference(parsed.identity),
                 }))
             })
             .map_err(|error| format!("invalid resource.detail payload: {error}")),
-        "resource.metrics" => serde_json::from_value::<ResourceRefRequest>(payload)
+        "resource.metrics" => serde_json::from_value::<ResourceRefRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ResourceMetrics {
                     reference: backend_reference(parsed.identity),
                 }))
             })
             .map_err(|error| format!("invalid resource.metrics payload: {error}")),
-        "resource.types" => serde_json::from_value::<ResourceTypesRequest>(payload)
+        "resource.types" => serde_json::from_value::<ResourceTypesRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ResourceTypes {
                     context: parsed.context,
                 }))
             })
             .map_err(|error| format!("invalid resource.types payload: {error}")),
-        "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload)
+        "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::Infrastructure {
                     context: parsed.context,
@@ -846,7 +1002,7 @@ fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<Parsed
             })
             .map_err(|error| format!("invalid infrastructure.get payload: {error}")),
         k10s_protocol::REQUEST_STREAM_TICKET => {
-            serde_json::from_value::<k10s_protocol::StreamTicketRequest>(payload)
+            serde_json::from_value::<k10s_protocol::StreamTicketRequest>(payload.clone())
                 .map(|parsed| {
                     let target = &parsed.target;
                     let stream = match parsed.stream_type {
@@ -1039,6 +1195,9 @@ async fn stream_backend_events(
             Ok(BackendEvent::Stream(_)) => {
                 // Stream chunks never ride the control scheduler; they are
                 // forwarded by the dedicated logs/exec sockets only.
+            }
+            Ok(BackendEvent::Operation(update)) => {
+                let _ = forward_operation_update(outbound, sequence_counter, &update, None);
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                 tracing::warn!(
@@ -1244,6 +1403,47 @@ fn send_sequenced<'a>(
             Ok((sequence, Message::Text(text.into())))
         })
     })
+}
+
+/// Forward one backend operation event as a sequenced `operationUpdate`
+/// frame on the lossless P0 reserve. The frame carries its connection
+/// sequence and is traced with both the operation ID and, when known, the
+/// correlation ID of the request that submitted it.
+fn forward_operation_update(
+    outbound: &Scheduler,
+    sequence_counter: &AtomicU64,
+    update: &k10s_backend::OperationEvent,
+    correlation_id: Option<&str>,
+) -> Result<(), EnqueueError> {
+    let payload = OperationUpdate {
+        operation_id: OperationId::new(update.id.clone()),
+        status: update.state.wire(),
+        progress: update.progress.map(|(completed, total)| {
+            serde_json::to_value(k10s_protocol::OperationProgress { completed, total })
+                .expect("progress serializes")
+        }),
+    };
+    let result = outbound.enqueue_p0_sequenced(|| {
+        let sequence = allocate_sequence(sequence_counter).ok_or(EnqueueError::Overloaded)?;
+        let frame = ServerFrame {
+            kind: ServerKind::OperationUpdate,
+            request_id: None,
+            subscription_id: None,
+            sequence: Some(sequence),
+            payload: serde_json::to_value(&payload).expect("operation update serializes"),
+        };
+        let text = serde_json::to_string(&frame).expect("server frame serializes");
+        Ok((sequence, Message::Text(text.into())))
+    });
+    if result.is_ok() {
+        tracing::info!(
+            operation_id = %update.id,
+            correlation_id = correlation_id.unwrap_or("unknown"),
+            status = ?update.state,
+            "operation update forwarded"
+        );
+    }
+    result
 }
 
 /// FNV-1a 64-bit constants for the deterministic snapshot checksum.

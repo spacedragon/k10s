@@ -116,6 +116,34 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Enqueue a lossless sequenced item at `P0` priority while holding the
+    /// scheduler lock so connection sequences stay contiguous with every
+    /// other sequenced frame. Operation updates ride this path: they must
+    /// reach the client even when coalescible `P2` traffic fills its
+    /// partition, but never create a wire-level sequence hole.
+    pub fn enqueue_p0_sequenced(
+        &self,
+        build: impl FnOnce() -> Result<(u64, Message), EnqueueError>,
+    ) -> Result<(), EnqueueError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || state.queue.len() == self.capacity {
+            return Err(EnqueueError::Overloaded);
+        }
+        let (sequence, message) = build()?;
+        state.queue.push_back(Entry {
+            priority: Priority::P0,
+            message,
+            p2_identity: None,
+            sequence: Some(sequence),
+        });
+        drop(state);
+        self.ready.notify_one();
+        Ok(())
+    }
+
     pub fn enqueue_p2(
         &self,
         resource: impl Into<String>,
@@ -273,12 +301,15 @@ impl Scheduler {
                 let index = state
                     .queue
                     .iter()
-                    .position(|entry| entry.priority == Priority::P0)
+                    .position(|entry| entry.priority == Priority::P0 && entry.sequence.is_none())
                     .or_else(|| {
                         state.queue.iter().position(|entry| {
                             entry.priority == Priority::P1 && entry.sequence.is_none()
                         })
                     })
+                    // Sequenced frames must always drain in sequence order
+                    // regardless of their class, or clients would observe a
+                    // sequence gap.
                     .or_else(|| {
                         state
                             .queue

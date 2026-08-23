@@ -604,6 +604,10 @@ pub enum OperationStatus {
     Failed,
     /// Cancelled by the client.
     Cancelled,
+    /// The backend no longer knows this operation: its ID expired out of
+    /// the bounded store or was never seen by this server instance. Only
+    /// clients derive this state; servers never send it.
+    Unknown,
 }
 
 /// Required full-resync reason.

@@ -99,7 +99,7 @@ impl From<&str> for SubscriptionId {
 }
 
 /// Identifier for a background operation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OperationId(String);
 

@@ -45,6 +45,9 @@ pub enum Query {
     ResourceTypes { context: String },
     /// Fetch the complete Overview, Nodes, and Storage projection.
     Infrastructure { context: String },
+    /// Look up the current state of specific operations by ID. IDs the
+    /// adapter no longer knows are simply absent from the answer.
+    OperationStatus { operation_ids: Vec<String> },
 }
 
 /// One selectable resource type behind [`Query::ResourceTypes`].
@@ -109,8 +112,11 @@ pub enum StreamInput {
 
 /// A behavior-level command (mutation) to the Kubernetes adapter.
 ///
-/// All variants are unsupported in this task; they return typed capability
-/// errors. `execute(Command)` always returns an `OperationId` when supported.
+/// Every variant returns an `OperationId` when supported; the mutation
+/// itself is applied to adapter state immediately while the operation's
+/// lifecycle advances deterministically. All commands carry an
+/// idempotency key: replaying a key returns the original `OperationId`
+/// instead of executing again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Apply a YAML manifest through a previously issued validation ticket.
@@ -128,20 +134,21 @@ pub enum Command {
         buffer_hash: String,
         target: ResourceRef,
     },
-    /// Scale a deployment or replicaset.
+    /// Scale one exact workload object to a replica count. The full
+    /// identity (including UID) is re-checked before the mutation runs.
     Scale {
         context: String,
-        kind: String,
-        namespace: String,
+        gvk: Gvk,
+        namespace: Option<String>,
         name: String,
+        uid: String,
         replicas: u32,
+        idempotency_key: String,
     },
-    /// Delete a resource.
+    /// Delete one exact object with an explicit propagation mode.
     Delete {
-        context: String,
-        kind: String,
-        namespace: String,
-        name: String,
+        target: ResourceRef,
+        propagation: crate::operation::Propagation,
         idempotency_key: String,
     },
 }
@@ -171,6 +178,10 @@ pub enum Subscribe {
         /// Dedicated route the redemption arrives on.
         route: StreamRouteKind,
     },
+    /// Subscribe to background operation lifecycle events. Late
+    /// subscribers immediately receive the current state of every live
+    /// (nonterminal) operation so reconnecting sessions resynchronize.
+    Operations,
 }
 
 /// Result of a query to the Kubernetes adapter.
@@ -194,6 +205,8 @@ pub enum QueryResult {
     YamlValidation(crate::operation::YamlValidationData),
     /// A single-use stream ticket was issued for one target.
     StreamTicket(StreamGrant),
+    /// Current records for the requested operation IDs.
+    OperationStatus(crate::operation::OperationStatusData),
 }
 
 /// An issued single-use stream ticket before protocol mapping.
@@ -397,6 +410,8 @@ pub enum BackendEvent {
     Infrastructure(CatalogSnapshot),
     /// One chunk of a redeemed stream session. `exit_code` terminates it.
     Stream(crate::stream::StreamChunk),
+    /// One background operation changed state.
+    Operation(crate::operation::OperationEvent),
 }
 
 /// Bootstrap information returned by the adapter.

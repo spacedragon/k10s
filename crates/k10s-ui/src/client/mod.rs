@@ -6,8 +6,8 @@ mod transport;
 
 pub use state::{
     ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, LiveSubscription,
-    LocalUiState, PendingRequest, Query, QueryResult, ResourceListQuery, ResourceListState,
-    ResourceSnapshot, RetrySchedule,
+    LocalUiState, OperationView, PendingRequest, Query, QueryResult, ResourceListQuery,
+    ResourceListState, ResourceSnapshot, RetryEligibility, RetrySchedule,
 };
 pub use streams::{
     StreamIo, StreamRoute, StreamSession, StreamSignal, StreamSocket, derive_stream_url,

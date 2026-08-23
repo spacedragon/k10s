@@ -70,6 +70,18 @@ async fn send_request(ws: &mut Ws, request_id: &str, kind: &str, payload: Value)
     .unwrap();
 }
 
+/// Receive the next frame that is not an operation update: accepted
+/// mutations open background operations whose pending updates may interleave
+/// with any response.
+async fn next_non_update(ws: &mut Ws) -> ServerFrame {
+    loop {
+        let frame = receive_frame(ws).await;
+        if frame.kind != ServerKind::OperationUpdate {
+            return frame;
+        }
+    }
+}
+
 async fn receive_frame(ws: &mut Ws) -> ServerFrame {
     let message = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
@@ -80,7 +92,7 @@ async fn receive_frame(ws: &mut Ws) -> ServerFrame {
 }
 
 async fn expect_error(ws: &mut Ws, request_id: &str, code: ErrorCode) -> String {
-    let frame = receive_frame(ws).await;
+    let frame = next_non_update(ws).await;
     assert_eq!(frame.kind, ServerKind::Error, "{frame:?}");
     assert_eq!(frame.request_id.as_ref().unwrap().as_str(), request_id);
     assert_eq!(frame.payload["code"], json!(code));
@@ -103,7 +115,7 @@ async fn validate(ws: &mut Ws, request_id: &str, context: &str, yaml: &str) -> Y
         .unwrap(),
     )
     .await;
-    let frame = receive_frame(ws).await;
+    let frame = next_non_update(ws).await;
     assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
     assert_eq!(frame.request_id.as_ref().unwrap().as_str(), request_id);
     frame.decode_response_payload().unwrap()
@@ -141,7 +153,7 @@ async fn apply_ticket(ws: &mut Ws, request_id: &str, outcome: &YamlOutcome) -> S
         yaml: WEB_FRONTEND_MANIFEST.to_owned(),
     };
     send_apply(ws, request_id, &apply).await;
-    let frame = receive_frame(ws).await;
+    let frame = next_non_update(ws).await;
     assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
     let accepted: k10s_protocol::OperationAccepted = frame.decode_response_payload().unwrap();
     accepted.operation_id.as_str().to_owned()
@@ -373,7 +385,7 @@ async fn applied_changes_reach_watchers_and_subsequent_lists() {
         yaml: created_manifest.to_owned(),
     };
     send_apply(&mut ws, "create-apply", &apply).await;
-    let frame = receive_frame(&mut ws).await;
+    let frame = next_non_update(&mut ws).await;
     assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
     let accepted: k10s_protocol::OperationAccepted = frame.decode_response_payload().unwrap();
     assert!(!accepted.operation_id.as_str().is_empty());
@@ -395,7 +407,7 @@ async fn applied_changes_reach_watchers_and_subsequent_lists() {
         .unwrap(),
     )
     .await;
-    let frame = receive_frame(&mut ws).await;
+    let frame = next_non_update(&mut ws).await;
     let list: ResourceListResponse = frame.decode_response_payload().unwrap();
     assert!(
         list.rows.iter().any(|row| row.identity.name == "brand-new"),
@@ -627,7 +639,7 @@ async fn apply_envelopes_are_rejected_when_the_declared_target_differs_from_the_
         },
     )
     .await;
-    let frame = receive_frame(&mut ws).await;
+    let frame = next_non_update(&mut ws).await;
     assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
 
     server.shutdown().await.unwrap();
@@ -766,7 +778,7 @@ async fn ticket_store_evicts_oldest_unredeemed_tickets_under_capacity_pressure()
         yaml: WEB_FRONTEND_MANIFEST.to_owned(),
     };
     send_apply(&mut ws, "newest", &apply).await;
-    let frame = receive_frame(&mut ws).await;
+    let frame = next_non_update(&mut ws).await;
     assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
 
     server.shutdown().await.unwrap();
