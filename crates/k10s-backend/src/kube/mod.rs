@@ -267,6 +267,19 @@ impl KubeAdapter {
         let Some(descriptor) = catalog.types.iter().find(|entry| entry.gvk == gvk) else {
             return Err(BackendError::NotFound);
         };
+        // Scope and capability checks come before any task is spawned: a
+        // cluster-scoped type cannot honor a namespace restriction, and a
+        // list-only type could never attach a live stream — accepting either
+        // would relist-loop against the API server forever.
+        if namespace.is_some() && !descriptor.namespaced {
+            return Err(BackendError::Conflict(
+                "the requested type is cluster-scoped and cannot be watched within one namespace"
+                    .into(),
+            ));
+        }
+        if !descriptor.supports_watch {
+            return Err(BackendError::unsupported("resource.watch"));
+        }
 
         #[cfg(feature = "testkit")]
         let scripted = self

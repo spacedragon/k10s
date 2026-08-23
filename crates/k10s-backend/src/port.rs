@@ -65,6 +65,9 @@ pub struct ApiResourceDescriptor {
     pub namespaced: bool,
     /// Whether the cluster exposes a scale subresource for this type.
     pub supports_scale: bool,
+    /// Whether the cluster advertises the watch verb for this type; a
+    /// list-only type cannot back a live resource watch.
+    pub supports_watch: bool,
 }
 
 /// Selectable resource types of one context.

@@ -805,6 +805,72 @@ async fn unknown_context_and_gvk_are_typed_not_founds_on_the_adapter() {
 }
 
 #[tokio::test]
+async fn scope_and_capability_violations_are_typed_rejections() {
+    use k10s_backend::testkit::RecordedApiServer;
+
+    // Cluster-scoped type with a namespace restriction: a typed conflict.
+    let server = RecordedApiServer::standard();
+    let client = server.clone().into_client("default");
+    let adapter = k10s_backend::KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "dev".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("dev", client)],
+    )
+    .expect("adapter builds");
+    let scoped = adapter
+        .subscribe(Subscribe::ResourceWatch {
+            context: "dev".into(),
+            gvk: Gvk::core("v1", "Node"),
+            namespace: Some("default".into()),
+        })
+        .await;
+    assert!(
+        matches!(scoped, Err(k10s_backend::BackendError::Conflict(_))),
+        "namespace-qualified cluster-scoped watches are rejected: {scoped:?}"
+    );
+
+    // List-only type (discovery without the watch verb): unsupported rather
+    // than a supervised selection that can never attach and relist-loops.
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1",
+        200,
+        r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"v1","resources":[
+          {"name":"configmaps","singularName":"configmap","namespaced":true,"kind":"ConfigMap","verbs":["get","list"]}
+        ]}"#,
+    );
+    let client = server.clone().into_client("default");
+    let adapter = k10s_backend::KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "dev".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("dev", client)],
+    )
+    .expect("adapter builds");
+    let list_only = adapter
+        .subscribe(Subscribe::ResourceWatch {
+            context: "dev".into(),
+            gvk: Gvk::core("v1", "ConfigMap"),
+            namespace: Some("default".into()),
+        })
+        .await;
+    assert!(
+        matches!(
+            list_only,
+            Err(k10s_backend::BackendError::Unsupported { .. })
+        ),
+        "list-only types are rejected before any task spawns: {list_only:?}"
+    );
+}
+
+#[tokio::test]
 async fn kube_adapter_serves_a_scripted_resource_watch() {
     use k10s_backend::runtime::RuntimeWatchScript;
     use k10s_backend::testkit::RecordedApiServer;

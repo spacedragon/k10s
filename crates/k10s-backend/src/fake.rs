@@ -1206,6 +1206,8 @@ impl KubernetesAccess for FakeKubernetes {
                         types.push(ApiResourceDescriptor {
                             plural: plural_name(&gvk.kind),
                             supports_scale: scale_exposed(&gvk),
+                            // The fake world's watches always attach.
+                            supports_watch: true,
                             gvk,
                             namespaced,
                         });
