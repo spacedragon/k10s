@@ -93,6 +93,7 @@ jobs:
       # the target for stable instead, so the pinned 1.97.1 cross-builds
       # would fail with "target not installed".
       - name: Install pinned Rust toolchain and matrix target
+        shell: bash
         run: |
           CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           rustup toolchain install "${CHANNEL}" --profile minimal --no-self-update
@@ -100,6 +101,7 @@ jobs:
           rustup default "${CHANNEL}"
 
       - name: Verify toolchain and matrix target
+        shell: bash
         run: |
           rustc --version
           rustup target list --installed | grep -Fx "${{ matrix.target }}"
