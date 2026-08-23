@@ -153,6 +153,14 @@ impl ShellTool {
             self.phase = ShellPhase::Failed("terminal disconnected".to_owned());
         }
     }
+
+    /// Fail the session with an explicit typed reason (ticket denial,
+    /// RBAC, missing binary); the scrollback survives.
+    pub fn fail(&mut self, reason: &str) {
+        if self.phase == ShellPhase::Attached || self.phase == ShellPhase::Connecting {
+            self.phase = ShellPhase::Failed(reason.to_owned());
+        }
+    }
 }
 
 use std::collections::HashMap;

@@ -391,7 +391,9 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
         ]
     );
 
-    session.send_stdin("ls");
+    // The newline comes from the tool's queued action; send_stdin sends
+    // exactly what it is given (no double termination).
+    session.send_stdin("ls\n");
     let binary = sent_binary.lock().unwrap();
     assert_eq!(binary.len(), 1);
     let decoded = k10s_protocol::decode_stream_payload(&binary[0]).unwrap();

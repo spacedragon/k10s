@@ -13,7 +13,7 @@ use crate::client::{
     TransportError, WebSocketTransport,
 };
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
-use crate::workspace::{WindowId, WorkspaceState};
+use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -360,7 +360,7 @@ impl K10sApp {
                                             .shells
                                             .get_mut(entry.window)
                                         {
-                                            shell.connection_lost();
+                                            shell.fail(&server_error.safe_message.clone());
                                         }
                                     }
                                 }
@@ -535,6 +535,21 @@ impl K10sApp {
         self.view = AppView::Failed { message };
     }
 
+    /// Release the workspace connected-shell guard once a terminal is no
+    /// longer live (exit, rejection, or transport loss).
+    fn release_shell_guard(&mut self, window: WindowId) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::DisconnectShell(window))
+        {
+            self.handle_workspace_event(event);
+        }
+    }
+
+    /// Apply workspace events produced by command application. Only the
+    /// focus-raising events matter at this layer.
+    fn handle_workspace_event(&mut self, _event: WorkspaceEvent<ResourceIdentity>) {}
+
     /// Close every dedicated stream session and mark its tool disconnected.
     fn teardown_stream_sessions(&mut self) {
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
@@ -659,54 +674,78 @@ impl K10sApp {
             if signals.is_empty() {
                 continue;
             }
+            // Guard transitions are collected while the tool stores are
+            // borrowed and applied afterwards.
+            let mut guard_connected = false;
+            let mut guard_released = false;
+            // Tool projections run inside this block so the store borrow
+            // ends before workspace commands are applied.
             let stores = self.shell.stream_stores_mut();
-            for signal in signals {
-                match signal {
-                    StreamSignal::Ready { .. } => match route {
-                        StreamRoute::Logs => {
-                            if let Some(view) = stores.logs.get_mut(window) {
-                                view.attach();
+            {
+                for signal in signals {
+                    match signal {
+                        StreamSignal::Ready { .. } => match route {
+                            StreamRoute::Logs => {
+                                if let Some(view) = stores.logs.get_mut(window) {
+                                    view.attach();
+                                }
                             }
-                        }
-                        StreamRoute::Exec => {
+                            StreamRoute::Exec => {
+                                if let Some(shell) = stores.shells.get_mut(window) {
+                                    shell.attach();
+                                }
+                                // The live terminal engages the workspace's
+                                // connected-shell navigation guard.
+                                guard_connected = true;
+                            }
+                        },
+                        StreamSignal::Output(text) => match route {
+                            StreamRoute::Logs => {
+                                if let Some(view) = stores.logs.get_mut(window) {
+                                    view.append(&text);
+                                }
+                            }
+                            StreamRoute::Exec => {
+                                if let Some(shell) = stores.shells.get_mut(window) {
+                                    shell.apply_output(&text);
+                                }
+                            }
+                        },
+                        StreamSignal::Status(_message) => {}
+                        StreamSignal::Exited(code) => {
                             if let Some(shell) = stores.shells.get_mut(window) {
-                                shell.attach();
+                                shell.exit(code);
                             }
+                            guard_released = true;
                         }
-                    },
-                    StreamSignal::Output(text) => match route {
-                        StreamRoute::Logs => {
-                            if let Some(view) = stores.logs.get_mut(window) {
-                                view.append(&text);
+                        StreamSignal::Rejected(reason) => match route {
+                            StreamRoute::Logs => {
+                                if let Some(view) = stores.logs.get_mut(window) {
+                                    view.fail(&reason);
+                                }
+                                self.stream_sessions.remove(&key);
                             }
-                        }
-                        StreamRoute::Exec => {
-                            if let Some(shell) = stores.shells.get_mut(window) {
-                                shell.apply_output(&text);
+                            StreamRoute::Exec => {
+                                if let Some(shell) = stores.shells.get_mut(window) {
+                                    shell.fail(&reason);
+                                }
+                                guard_released = true;
+                                self.stream_sessions.remove(&key);
                             }
-                        }
-                    },
-                    StreamSignal::Status(_message) => {}
-                    StreamSignal::Exited(code) => {
-                        if let Some(shell) = stores.shells.get_mut(window) {
-                            shell.exit(code);
-                        }
+                        },
                     }
-                    StreamSignal::Rejected(reason) => match route {
-                        StreamRoute::Logs => {
-                            if let Some(view) = stores.logs.get_mut(window) {
-                                view.fail(&reason);
-                            }
-                            self.stream_sessions.remove(&key);
-                        }
-                        StreamRoute::Exec => {
-                            if let Some(shell) = stores.shells.get_mut(window) {
-                                shell.connection_lost();
-                            }
-                            self.stream_sessions.remove(&key);
-                        }
-                    },
                 }
+            }
+            if guard_connected {
+                for event in self
+                    .shell
+                    .apply_workspace_command(WorkspaceCommand::ConnectShell(window))
+                {
+                    self.handle_workspace_event(event);
+                }
+            }
+            if guard_released {
+                self.release_shell_guard(window);
             }
         }
     }

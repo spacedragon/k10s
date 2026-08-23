@@ -819,13 +819,19 @@ async fn fragmented_messages_are_assembled_and_enforced() {
         let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), path))
             .await
             .unwrap();
+        // Four ~100-byte fragments: each far below the 128-byte frame
+        // limit, assembled above the 256-byte message limit, so only the
+        // assembled-message bound can reject this.
         let padding = "y".repeat(400);
+        let (a, rest) = padding.split_at(100);
+        let (b, c) = rest.split_at(100);
         send_fragmented_text(
             &mut ws,
             &[
                 r#"{"kind":"hello","protocolMajor":1,"accessToken":"secret","streamTicket":""#,
-                &padding[..200],
-                &padding[200..],
+                a,
+                b,
+                c,
                 r#""}"#,
             ],
         )

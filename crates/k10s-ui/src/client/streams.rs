@@ -223,12 +223,13 @@ impl StreamSession {
         self.socket.is_some()
     }
 
-    /// Queue one line of TTY standard input.
+    /// Send TTY standard input exactly as given; the newline belongs to
+    /// the tool layer so a submitted command is never double-terminated.
     pub fn send_stdin(&mut self, line: &str) {
         if let Some(socket) = self.socket.as_mut() {
             socket.send_binary(k10s_protocol::encode_stream_payload(
                 k10s_protocol::payload_kind::STDIN,
-                format!("{line}\n").as_bytes(),
+                line.as_bytes(),
             ));
         }
     }
