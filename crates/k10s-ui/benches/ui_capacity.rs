@@ -341,23 +341,34 @@ fn main() {
     }
 
     // -- Measured phase ----------------------------------------------------
-    // Exercise the live filter path over the whole 18,750-row pod list
-    // periodically: on, then off again.
-    let mut filter_on = false;
+    // Two explicit halves so every mode gates both structures:
+    // an UNFILTERED half that renders the large virtualized window over
+    // all 18,750 rows (this is what catches losing row virtualization),
+    // and a FILTERED half that exercises the model-wide live filter.
     let mut timings = Vec::with_capacity(measured_frames);
     let mut allocs_per_frame: Vec<u64> = Vec::with_capacity(measured_frames);
-    for frame in 0..measured_frames {
-        if frame % 20 == 0 {
-            filter_on = !filter_on;
-            shell.apply_workspace_command(WorkspaceCommand::SetSearch(
-                pods_id,
-                if filter_on {
-                    "scale-pod-00012".to_owned()
-                } else {
-                    String::new()
-                },
-            ));
-        }
+
+    shell.apply_workspace_command(WorkspaceCommand::SetSearch(pods_id, String::new()));
+    let unfiltered = measured_frames / 2 + measured_frames % 2;
+    for _ in 0..unfiltered {
+        let (elapsed, allocated) = render_frame(
+            &ctx,
+            &mut shell,
+            &feed,
+            &contexts,
+            &mut selected_context,
+            &mut accesskit_tree,
+            Vec::new(),
+        );
+        timings.push(elapsed);
+        allocs_per_frame.push(allocated);
+    }
+
+    shell.apply_workspace_command(WorkspaceCommand::SetSearch(
+        pods_id,
+        "scale-pod-00012".to_owned(),
+    ));
+    for _ in 0..(measured_frames - unfiltered) {
         let (elapsed, allocated) = render_frame(
             &ctx,
             &mut shell,
