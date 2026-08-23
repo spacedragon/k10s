@@ -70,6 +70,10 @@ pub trait StreamIo {
     fn send_text(&mut self, text: String);
     /// Send one raw binary message (already framed by the caller).
     fn send_binary(&mut self, bytes: Vec<u8>);
+    /// Whether the bounded inbound queue overflowed and closed transport.
+    fn overflowed(&self) -> bool {
+        false
+    }
 }
 
 impl StreamIo for StreamSocket {
@@ -83,6 +87,10 @@ impl StreamIo for StreamSocket {
 
     fn send_binary(&mut self, bytes: Vec<u8>) {
         self.transport.send_binary(bytes);
+    }
+
+    fn overflowed(&self) -> bool {
+        self.inbox.overflowed()
     }
 }
 
@@ -161,6 +169,7 @@ pub struct StreamSession {
     target: StreamTarget,
     tty: bool,
     socket: Option<Box<dyn StreamIo>>,
+    ended: bool,
 }
 
 impl std::fmt::Debug for StreamSession {
@@ -170,7 +179,7 @@ impl std::fmt::Debug for StreamSession {
             .field("route", &self.route)
             .field("target", &self.target)
             .field("tty", &self.tty)
-            .field("socket_live", &self.socket.is_some())
+            .field("socket_live", &self.is_live())
             .finish()
     }
 }
@@ -184,6 +193,7 @@ impl StreamSession {
             target,
             tty,
             socket: None,
+            ended: false,
         }
     }
 
@@ -220,7 +230,13 @@ impl StreamSession {
     /// Whether stdin/resize can be sent right now.
     #[must_use]
     pub fn is_live(&self) -> bool {
-        self.socket.is_some()
+        self.socket.is_some() && !self.ended
+    }
+
+    /// Mark the session terminally ended; later polls stay silent.
+    fn end(&mut self) {
+        self.ended = true;
+        self.socket = None;
     }
 
     /// Send TTY standard input exactly as given; the newline belongs to
@@ -244,7 +260,10 @@ impl StreamSession {
         }
     }
 
-    /// Drain every available transport event into signals.
+    /// Drain every available transport event into signals. Inbox overflow
+    /// is projected exactly once as a terminal rejection: the bounded
+    /// callback already closed the physical socket, so the session must go
+    /// non-live instead of pretending to stream.
     pub fn poll(&mut self) -> Vec<StreamSignal> {
         let Some(socket) = self.socket.as_mut() else {
             return Vec::new();
@@ -296,15 +315,27 @@ impl StreamSession {
                 _ => {}
             }
         }
-        // Overflow observability stays on the concrete socket; scripted
-        // transports simply never report it.
+        // Bounded-inbox overflow closed the physical socket behind our
+        // back: project it exactly once as a terminal rejection and go
+        // non-live instead of pretending to stream.
+        if socket.overflowed() {
+            signals.retain(|signal| !matches!(signal, StreamSignal::Rejected(_)));
+            signals.push(StreamSignal::Rejected("stream inbox overflow".to_owned()));
+        }
         signals.retain(|signal| !matches!(signal, StreamSignal::Output(chunk) if chunk.is_empty()));
+        if signals
+            .iter()
+            .any(|signal| matches!(signal, StreamSignal::Rejected(_)))
+        {
+            self.end();
+        }
         signals
     }
 
     /// Close the socket; the backend retires the session on next touch.
     pub fn disconnect(&mut self) {
         self.socket = None;
+        self.ended = true;
     }
 
     /// Echoed target of this session.

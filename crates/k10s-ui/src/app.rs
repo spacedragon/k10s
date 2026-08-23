@@ -1389,7 +1389,7 @@ mod stream_lifecycle_tests {
         }
     }
 
-    fn target_for(pod_name: &str) -> StreamTarget {
+    pub(super) fn target_for(pod_name: &str) -> StreamTarget {
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
@@ -1410,7 +1410,10 @@ mod stream_lifecycle_tests {
         .unwrap();
     }
 
-    fn open_pod_detail(app: &mut K10sApp, pod: &ResourceIdentity) -> crate::workspace::WindowId {
+    pub(super) fn open_pod_detail(
+        app: &mut K10sApp,
+        pod: &ResourceIdentity,
+    ) -> crate::workspace::WindowId {
         let events = app
             .shell
             .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
@@ -1607,5 +1610,81 @@ mod stream_lifecycle_tests {
             Some(&target_for("pod-b"))
         );
         let _ = DetailTab::Shell;
+    }
+}
+
+#[cfg(test)]
+mod stream_overflow_tests {
+    use ewebsock::WsEvent;
+
+    use super::stream_lifecycle_tests::target_for;
+    use super::tests::test_app;
+    use crate::client::{StreamIo, StreamRoute, StreamSession, StreamSignal};
+    use crate::workspace::{WorkloadKind, WorkspaceCommand};
+
+    /// A transport whose bounded inbox overflowed: the physical socket is
+    /// already closed and every queued event was discarded.
+    #[derive(Debug)]
+    struct OverflowedSocket;
+
+    impl StreamIo for OverflowedSocket {
+        fn try_recv(&mut self) -> Option<WsEvent> {
+            None
+        }
+        fn send_text(&mut self, _text: String) {}
+        fn send_binary(&mut self, _bytes: Vec<u8>) {}
+        fn overflowed(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn inbox_overflow_projects_one_rejection_and_ends_the_session() {
+        let (mut app, _state) = test_app(Vec::new());
+        let events = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let window = events
+            .iter()
+            .find_map(|event| match event {
+                crate::workspace::WorkspaceEvent::Opened(id) => Some(*id),
+                _ => None,
+            })
+            .expect("workload window opens");
+
+        // A live logs session whose inbox overflowed.
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        session.inject_for_test(OverflowedSocket);
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+
+        app.poll_stream_sessions();
+
+        // The overflow is projected exactly once as terminal rejection: the
+        // session is gone (non-live), so the tool cannot stay Streaming
+        // behind a dead socket.
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(window, StreamRoute::Logs)),
+            "an overflowed stream must be torn down"
+        );
+    }
+
+    #[test]
+    fn overflow_signal_is_emitted_exactly_once_and_session_goes_non_live() {
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        session.inject_for_test(OverflowedSocket);
+        assert!(session.is_live());
+
+        let signals = session.poll();
+        assert_eq!(
+            signals,
+            vec![StreamSignal::Rejected("stream inbox overflow".to_owned())]
+        );
+
+        // Terminal: later polls stay silent and the session is non-live.
+        assert!(!session.is_live());
+        assert!(session.poll().is_empty());
+        assert!(session.poll().is_empty());
     }
 }
