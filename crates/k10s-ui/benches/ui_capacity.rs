@@ -233,7 +233,7 @@ fn main() {
 
         let before_allocs = allocations();
         let start = Instant::now();
-        let _output = ctx.run_ui(input, |ui| {
+        let mut output = ctx.run_ui(input, |ui| {
             shell.show_with_resources(
                 ui,
                 ConnectionState::Connected,
@@ -243,6 +243,9 @@ fn main() {
                 &feed,
             );
         });
+        // This harness never paints, so font/texture deltas are discarded
+        // explicitly instead of being dropped unapplied.
+        output.textures_delta.clear();
         let elapsed = start.elapsed();
         if frame >= WARMUP_FRAMES {
             timings.push(elapsed);
