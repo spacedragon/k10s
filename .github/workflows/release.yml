@@ -1,0 +1,169 @@
+name: Release
+
+# Publish a GitHub Release with prebuilt binaries.
+#
+# Triggers:
+#   - Pushing a tag `v<version>` (e.g. `v0.1.0`) builds all platform
+#     artifacts and creates a GitHub Release. The tag must exactly match
+#     the `version` in the workspace root Cargo.toml, otherwise the run
+#     fails fast (see the `verify-version` job).
+#   - Every pull request runs the build matrix only (no release is
+#     created), so platform builds stay verified before any tag is cut.
+#   - `workflow_dispatch` runs the build matrix only — handy for testing
+#     the pipeline before tagging.
+#
+# To cut a release:
+#   1. Bump `version` in Cargo.toml and commit (CI on main stays green).
+#   2. `git tag v<version> && git push origin v<version>`
+#   3. The workflow uploads k10s-desktop / k10s-server archives for
+#      Linux, Windows, and macOS to the release with checksums.
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Cancel a superseded release run for the same tag (e.g. after a retag).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail fast when the tag does not match the workspace version, so we
+  # never publish a release whose binaries claim a different version.
+  verify-version:
+    name: Verify tag matches workspace version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read workspace version
+        id: version
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce v<version> tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          EXPECTED="v${{ steps.version.outputs.version }}"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "::error::Tag '$TAG' does not match workspace version '$EXPECTED'. Bump Cargo.toml first, or retag."
+            exit 1
+          fi
+          echo "Tag $TAG matches workspace version. Building..."
+
+  # Build release binaries for every supported platform/target pair and
+  # upload the packaged archives. `fail-fast: false` keeps all platforms
+  # building even if one target breaks.
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          # macOS 13 (Intel) runners are deprecated, so both macOS
+          # targets are produced from the arm64 runner by cross-compiling
+          # the x86_64 target with the same Apple SDK.
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      # The repository pins Rust via rust-toolchain.toml. Install the pinned
+      # channel explicitly and add the matrix target to THAT channel —
+      # dtolnay/rust-toolchain has no toolchain-file input and would install
+      # the target for stable instead, so the pinned 1.97.1 cross-builds
+      # would fail with "target not installed".
+      - name: Install pinned Rust toolchain and matrix target
+        shell: bash
+        run: |
+          CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "${CHANNEL}" --profile minimal --no-self-update
+          rustup target add "${{ matrix.target }}" --toolchain "${CHANNEL}"
+          rustup default "${CHANNEL}"
+
+      - name: Verify toolchain and matrix target
+        shell: bash
+        run: |
+          rustc --version
+          rustup target list --installed | grep -Fx "${{ matrix.target }}"
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            release-${{ matrix.target }}-
+
+      - name: Build release binaries
+        run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/${{ matrix.target }}/release/k10s-desktop.exe, target/${{ matrix.target }}/release/k10s-server.exe `
+            -DestinationPath dist/k10s-${{ matrix.target }}.zip
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -czf dist/k10s-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release k10s-desktop k10s-server
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k10s-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Create the GitHub Release from the tag, attach all platform archives
+  # plus a SHA256 checksum file. Tags with a pre-release suffix
+  # (e.g. v0.2.0-rc.1) are marked as prereleases.
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum k10s-* > SHA256SUMS.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

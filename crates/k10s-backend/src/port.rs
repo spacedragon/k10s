@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use serde::Serialize;
@@ -474,6 +475,56 @@ impl std::fmt::Display for BackendError {
 }
 
 impl std::error::Error for BackendError {}
+
+/// Typed errors from constructing backend adapters at startup.
+///
+/// These are normalized away from Kubernetes client types so entry points can
+/// report clear operator-facing failures. Messages deliberately never include
+/// credential material (tokens, certificates, keys).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterError {
+    /// The kubeconfig file does not exist at this location.
+    KubeconfigMissing(PathBuf),
+    /// No kubeconfig was found through standard discovery: `KUBECONFIG` is
+    /// unset (or empty) and no default `~/.kube/config` exists.
+    KubeconfigNotConfigured,
+    /// The kubeconfig exists but cannot be read, parsed, or validated; the
+    /// detail names the problem without exposing file contents.
+    KubeconfigInvalid { source: String, detail: String },
+    /// A context's user relies on an exec-based credential plugin; k10s never
+    /// executes external helpers and refuses to commit such registries.
+    ExecPluginRejected { context: String, user: String },
+    /// Context summaries violated registry invariants (duplicate names or
+    /// multiple current contexts), so nothing was committed.
+    InvalidContextSummaries { detail: String },
+}
+
+impl std::fmt::Display for AdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KubeconfigMissing(path) => {
+                write!(f, "kubeconfig file not found at {}", path.display())
+            }
+            Self::KubeconfigNotConfigured => {
+                f.write_str("no kubeconfig configured: set KUBECONFIG or create ~/.kube/config")
+            }
+            Self::KubeconfigInvalid { source, detail } => {
+                write!(f, "invalid kubeconfig from {source}: {detail}")
+            }
+            Self::ExecPluginRejected { context, user } => {
+                write!(
+                    f,
+                    "context '{context}' uses exec-plugin credentials (user '{user}'), which k10s does not support"
+                )
+            }
+            Self::InvalidContextSummaries { detail } => {
+                write!(f, "invalid context summaries: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdapterError {}
 
 /// An opaque identifier for a background operation.
 #[derive(Debug, Clone, PartialEq, Eq)]

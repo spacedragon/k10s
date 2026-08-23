@@ -28,6 +28,11 @@ jobs:
       - name: Rust version
         run: rustc --version && cargo --version
 
+      - name: Free disk space for builds
+        # The workspace debug build is near hosted runner limits; reclaim the
+        # OS package cache before compiling so artifact growth stays bounded.
+        run: sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
@@ -44,10 +49,43 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (deny warnings)
+        # Check-only pass over the whole workspace: no test-binary linking,
+        # so it stays within hosted disk limits even with heavy backends.
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Unit tests
-        run: cargo test --locked --workspace --all-targets
+      - name: Unit tests (core)
+        # Core protocol/backend/server packages carry the Kubernetes adapter;
+        # their test binaries link against it. UI and app test binaries are
+        # linked in a separate job to keep each hosted runner under budget.
+        run: cargo test --locked -p k10s-protocol -p k10s-backend -p k10s-server --all-targets
+
+  ui-tests:
+    name: UI unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain-file: rust-toolchain.toml
+
+      - name: Free disk space for builds
+        run: sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Unit tests (UI and apps)
+        run: cargo test --locked -p k10s-ui -p k10s-desktop -p k10s-server-app -p k10s-web --all-targets
 
   # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
   wasm:

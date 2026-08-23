@@ -13,7 +13,9 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command:
-      'trunk build --release && cargo run --locked --release -p k10s-server-app',
+      // Browser foundation tests exercise the UI shell only, so they select
+      // fake data explicitly; real-cluster launches default to Kube mode.
+      'trunk build --release && cargo run --locked --release -p k10s-server-app -- --fake',
     url: 'http://127.0.0.1:8080',
     reuseExistingServer: !process.env.CI,
     timeout: 900_000,
