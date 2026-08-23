@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{
-    BackendError, BackendEvent, BackendKernel, Command, Gvk, KernelQueryResult, Query,
+    BackendError, BackendEvent, BackendKernel, Command, Gvk, KernelQueryResult, Query, StreamKind,
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
@@ -19,6 +19,7 @@ use k10s_protocol::{
     SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
     decode_client_frame,
 };
+
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -463,6 +464,13 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::StreamTicket(value))) => {
+                                send_frame(
+                                    &task_outbound,
+                                    ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                    Priority::P1,
+                                )
+                            }
                             Ok(RequestOutcome::Applied(value)) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value),
@@ -837,6 +845,34 @@ fn parse_request(kind: &str, payload: serde_json::Value) -> Result<Option<Parsed
                 }))
             })
             .map_err(|error| format!("invalid infrastructure.get payload: {error}")),
+        k10s_protocol::REQUEST_STREAM_TICKET => {
+            serde_json::from_value::<k10s_protocol::StreamTicketRequest>(payload)
+                .map(|parsed| {
+                    let target = &parsed.target;
+                    let stream = match parsed.stream_type {
+                        k10s_protocol::StreamType::Logs => StreamKind::Logs {
+                            context: target.context.clone(),
+                            namespace: target.namespace.clone(),
+                            pod: target.pod.clone(),
+                            container: target.container.clone(),
+                        },
+                        k10s_protocol::StreamType::Exec => StreamKind::Exec {
+                            context: target.context.clone(),
+                            namespace: target.namespace.clone(),
+                            pod: target.pod.clone(),
+                            container: target.container.clone(),
+                            tty: parsed.tty,
+                        },
+                    };
+                    Some(ParsedRequest::Query(Query::StreamTicket { stream }))
+                })
+                .map_err(|error| {
+                    format!(
+                        "invalid {kind} payload: {error}",
+                        kind = k10s_protocol::REQUEST_STREAM_TICKET
+                    )
+                })
+        }
         _ => Ok(None),
     }
 }
@@ -879,6 +915,10 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
             "context or resource not found".to_owned(),
         ),
         BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::Forbidden => (
+            ErrorCode::Unauthorized,
+            "access denied by policy".to_owned(),
+        ),
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Internal(_) => (ErrorCode::Internal, "internal server error".to_owned()),
@@ -995,6 +1035,10 @@ async fn stream_backend_events(
                         break;
                     }
                 }
+            }
+            Ok(BackendEvent::Stream(_)) => {
+                // Stream chunks never ride the control scheduler; they are
+                // forwarded by the dedicated logs/exec sockets only.
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                 tracing::warn!(
@@ -1353,6 +1397,10 @@ fn send_backend_error(
             "context or resource not found".to_owned(),
         ),
         BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::Forbidden => (
+            ErrorCode::Unauthorized,
+            "access denied by policy".to_owned(),
+        ),
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Unsupported { capability } => (

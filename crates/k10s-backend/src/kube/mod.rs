@@ -13,7 +13,7 @@ use std::pin::Pin;
 
 use crate::port::{
     AdapterError, BackendError, BootstrapInfo, Command, KubernetesAccess, OperationId, Query,
-    QueryResult, Subscribe, SubscriptionHandle,
+    QueryResult, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 
@@ -97,7 +97,16 @@ impl KubernetesAccess for KubeAdapter {
                 Subscribe::Infrastructure { .. } => {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
+                Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
             }
         })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: StreamInput,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }

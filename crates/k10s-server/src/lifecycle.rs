@@ -32,11 +32,12 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-struct AppState {
+pub(crate) struct AppState {
     config: Arc<ServerConfig>,
     kernel: Arc<BackendKernel>,
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
+    streams: Arc<Semaphore>,
     signals: DrainSignals,
     connections: Arc<TaskTracker>,
     tasks: Arc<ConnectionTasks>,
@@ -588,6 +589,7 @@ pub fn router(
     let state = AppState {
         unauthenticated: Arc::new(Semaphore::new(config.max_unauthenticated_connections)),
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
+        streams: Arc::new(Semaphore::new(config.max_stream_connections)),
         config: Arc::new(config),
         kernel: Arc::new(kernel),
         signals,
@@ -601,8 +603,8 @@ pub fn router(
         .route("/healthz", get(health))
         .route("/readyz", get(ready_probe))
         .route(k10s_protocol::CONTROL_PATH, get(control_upgrade))
-        .route(k10s_protocol::LOGS_PATH, get(not_implemented))
-        .route(k10s_protocol::EXEC_PATH, get(not_implemented))
+        .route(k10s_protocol::LOGS_PATH, get(crate::logs::upgrade))
+        .route(k10s_protocol::EXEC_PATH, get(crate::exec::upgrade))
         .with_state(state);
     if let Some(dist_dir) = dist_dir {
         let index = dist_dir.join("index.html");
@@ -616,18 +618,10 @@ async fn ready_probe(State(state): State<AppState>) -> (StatusCode, &'static str
     ready(Arc::clone(&state.readiness)).await
 }
 
-async fn not_implemented() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
-
-async fn control_upgrade(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, StatusCode> {
-    // Same-origin policy for browser upgrades. Native clients send no Origin
-    // header and are unconstrained; spoofed X-Forwarded-* style headers are
-    // deliberately ignored (see README security section).
+/// Shared same-origin policy for browser WebSocket upgrades. Native clients
+/// send no Origin header and are unconstrained; spoofed X-Forwarded-* style
+/// headers are deliberately ignored (see README security section).
+fn verify_origin(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     let origin = headers.get("origin");
     let host = headers
         .get(axum::http::header::HOST)
@@ -640,7 +634,7 @@ async fn control_upgrade(
                 target: "k10s_server::lifecycle",
                 ?text,
                 ?host,
-                "cross-origin control upgrade rejected"
+                "cross-origin upgrade rejected"
             );
             return Err(StatusCode::FORBIDDEN);
         }
@@ -651,10 +645,77 @@ async fn control_upgrade(
         tracing::warn!(
             target: "k10s_server::lifecycle",
             ?host,
-            "control upgrade rejected: undecodable Origin header"
+            "upgrade rejected: undecodable Origin header"
         );
         return Err(StatusCode::FORBIDDEN);
     }
+    Ok(())
+}
+
+/// Shared upgrade guard for the dedicated logs/exec stream sockets: the Plan
+/// 1 admission barrier and unauthenticated-connection semaphore apply, with
+/// the stream-specific frame and message limits.
+pub(crate) async fn stream_upgrade(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+    route: crate::streams::StreamRoute,
+) -> Result<Response, StatusCode> {
+    verify_origin(&headers)?;
+    let Some(upgrade_guard) = state.admission.try_register(&state.readiness) else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    // The dedicated stream cap is enforced independently of the control
+    // pool: a live authenticated stream holds no unauthenticated-control
+    // permit, so streams can never starve new control authentication.
+    let stream_permit = match state.streams.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            drop(upgrade_guard);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let permit = match state.unauthenticated.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            drop(stream_permit);
+            drop(upgrade_guard);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let config = state.config.clone();
+    let kernel = state.kernel.clone();
+    let connections = state.connections.clone();
+    let signals = state.signals.clone();
+    Ok(ws
+        .max_frame_size(config.max_stream_frame_size)
+        .max_message_size(config.max_stream_message_size)
+        .on_upgrade(move |socket| async move {
+            let running_guard = upgrade_guard.confirm_running();
+            connections.spawn(async move {
+                let _running = running_guard;
+                crate::streams::serve_stream(
+                    socket,
+                    config,
+                    kernel,
+                    route,
+                    signals,
+                    permit,
+                    stream_permit,
+                )
+                .await;
+            });
+        }))
+}
+
+async fn control_upgrade(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    // Same-origin policy for browser upgrades (shared with the dedicated
+    // stream routes).
+    verify_origin(&headers)?;
 
     // Registration and the readiness decision share one critical section, so
     // an accepted upgrade is always observable by the drain, and once draining

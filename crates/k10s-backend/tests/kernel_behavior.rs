@@ -16,9 +16,25 @@ use k10s_protocol::{
 };
 
 #[tokio::test]
-async fn unsupported_queries_return_typed_capability_errors() {
+async fn stream_tickets_validate_targets_and_issue_single_use_grants() {
     let kernel = BackendKernel::new(FakeKubernetes::standard());
+
+    // Unknown pods stay typed not-found errors at issuance time.
     let err = kernel
+        .query(Query::StreamTicket {
+            stream: k10s_backend::StreamKind::Logs {
+                context: "dev-local".into(),
+                namespace: "default".into(),
+                pod: "no-such-pod".into(),
+                container: "app".into(),
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err, BackendError::NotFound);
+
+    // A valid pod gets a deterministic grant bound to its target.
+    let result = kernel
         .query(Query::StreamTicket {
             stream: k10s_backend::StreamKind::Logs {
                 context: "dev-local".into(),
@@ -28,14 +44,17 @@ async fn unsupported_queries_return_typed_capability_errors() {
             },
         })
         .await
-        .unwrap_err();
-
+        .unwrap();
+    let k10s_backend::KernelQueryResult::StreamTicket(grant) = result else {
+        panic!("expected a stream ticket grant");
+    };
+    let payload = grant.wire_payload();
     assert_eq!(
-        err,
-        BackendError::Unsupported {
-            capability: "stream.ticket".into()
-        }
+        payload.ticket_id, "stream-ticket-0001",
+        "ticket IDs are deterministic"
     );
+    assert_eq!(payload.target.pod, "web-frontend-7d9f8-00001");
+    assert_eq!(payload.target.container, "app");
 }
 
 #[tokio::test]
@@ -221,6 +240,14 @@ impl KubernetesAccess for SlowAdapter {
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
     }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
+    }
 }
 
 #[tokio::test]
@@ -257,6 +284,14 @@ impl KubernetesAccess for ExecAdapter {
         _req: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }
 

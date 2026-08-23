@@ -3,10 +3,13 @@
 mod auth;
 mod config;
 mod control;
+mod exec;
 mod lifecycle;
+mod logs;
 mod origin;
 mod outbound;
 mod probes;
+mod streams;
 
 pub use config::{
     AccessTokenSourceError, ServerConfig, StandaloneConfig, StandaloneConfigError,

@@ -66,6 +66,10 @@ pub struct ResourceTypesData {
 }
 
 /// Kind of stream to open.
+///
+/// `Exec` carries the explicit mode: `tty: true` is an interactive shell
+/// with merged output; `tty: false` is the retained non-TTY mode whose
+/// stdout and stderr stay separated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamKind {
     /// Tail logs from a container.
@@ -81,7 +85,26 @@ pub enum StreamKind {
         namespace: String,
         pod: String,
         container: String,
+        tty: bool,
     },
+}
+
+/// Which dedicated socket route a stream belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRouteKind {
+    /// The logs route.
+    Logs,
+    /// The exec route.
+    Exec,
+}
+
+/// Inbound data on a live exec session, forwarded by the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamInput {
+    /// One line of TTY standard input.
+    Stdin(String),
+    /// Terminal resize.
+    Resize { cols: u32, rows: u32 },
 }
 
 /// A behavior-level command (mutation) to the Kubernetes adapter.
@@ -139,6 +162,15 @@ pub enum Subscribe {
     },
     /// Watch coalescible infrastructure telemetry for one context.
     Infrastructure { context: String },
+    /// Redeem a single-use stream ticket in the kernel-owned Stream Hub.
+    /// Returns a bounded receiver of stream chunks; the ticket is consumed
+    /// exactly once.
+    StreamRedeem {
+        /// Ticket issued through [`Query::StreamTicket`].
+        ticket_id: String,
+        /// Dedicated route the redemption arrives on.
+        route: StreamRouteKind,
+    },
 }
 
 /// Result of a query to the Kubernetes adapter.
@@ -160,6 +192,17 @@ pub enum QueryResult {
     Infrastructure(CatalogSnapshot),
     /// Guarded YAML validation outcome with an issued ticket when valid.
     YamlValidation(crate::operation::YamlValidationData),
+    /// A single-use stream ticket was issued for one target.
+    StreamTicket(StreamGrant),
+}
+
+/// An issued single-use stream ticket before protocol mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGrant {
+    /// Opaque ticket ID redeemed in the stream socket's first `hello`.
+    pub ticket_id: String,
+    /// Bound stream identity and mode.
+    pub stream: StreamKind,
 }
 
 /// Backend-owned group/version/kind of a resource type.
@@ -352,6 +395,8 @@ pub enum BackendEvent {
     /// A complete infrastructure telemetry projection. The server coalesces
     /// these by context on its bounded P2 scheduler.
     Infrastructure(CatalogSnapshot),
+    /// One chunk of a redeemed stream session. `exit_code` terminates it.
+    Stream(crate::stream::StreamChunk),
 }
 
 /// Bootstrap information returned by the adapter.
@@ -386,6 +431,8 @@ pub enum BackendError {
     /// The target changed since validation, or the ticket is stale,
     /// consumed, or tampered. Safe reason attached.
     Conflict(String),
+    /// The operation was denied by authorization policy (RBAC).
+    Forbidden,
     /// The request timed out.
     Timeout,
     /// The request was cancelled.
@@ -419,6 +466,7 @@ impl std::fmt::Display for BackendError {
             Self::Unsupported { capability } => write!(f, "unsupported capability: {capability}"),
             Self::NotFound => write!(f, "context or resource not found"),
             Self::Conflict(reason) => write!(f, "conflict: {reason}"),
+            Self::Forbidden => write!(f, "access denied"),
             Self::Timeout => write!(f, "request timed out"),
             Self::Cancelled => write!(f, "request was cancelled"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
@@ -518,6 +566,9 @@ pub struct SubscriptionHandle {
     /// Opaque subscription ID.
     pub id: String,
     events: Option<broadcast::Receiver<BackendEvent>>,
+    /// Backend-owned stream binding, set by stream redemptions so the
+    /// server can echo the bound target in its ready frame.
+    stream: Option<StreamKind>,
 }
 
 impl SubscriptionHandle {
@@ -527,6 +578,7 @@ impl SubscriptionHandle {
         Self {
             id: id.into(),
             events: None,
+            stream: None,
         }
     }
 
@@ -536,13 +588,27 @@ impl SubscriptionHandle {
         Self {
             id: id.into(),
             events: Some(events),
+            stream: None,
         }
+    }
+
+    /// Attach the backend-owned stream binding of a redeemed ticket.
+    #[must_use]
+    pub fn with_stream(mut self, stream: StreamKind) -> Self {
+        self.stream = Some(stream);
+        self
     }
 
     /// Take the event stream, if this subscription carries one.
     #[must_use]
     pub fn take_events(&mut self) -> Option<broadcast::Receiver<BackendEvent>> {
         self.events.take()
+    }
+
+    /// Take the bound stream identity of a redeemed ticket.
+    #[must_use]
+    pub fn take_bound_stream(&mut self) -> Option<StreamKind> {
+        self.stream.take()
     }
 }
 
@@ -571,4 +637,14 @@ pub trait KubernetesAccess: Send + Sync + std::fmt::Debug {
         &'a self,
         req: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>>;
+
+    /// Forward inbound user input into a redeemed stream session.
+    ///
+    /// Sessions are keyed by their (consumed) ticket ID; unknown sessions
+    /// are typed conflicts.
+    fn stream_input<'a>(
+        &'a self,
+        ticket_id: &'a str,
+        input: StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
 }

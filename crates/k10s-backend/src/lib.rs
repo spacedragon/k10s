@@ -9,6 +9,7 @@ pub mod fake;
 pub mod kernel;
 pub mod operation;
 pub mod port;
+pub mod stream;
 pub mod watch;
 
 mod kube;
@@ -22,7 +23,8 @@ pub use operation::YamlValidationData;
 pub use port::{
     AdapterError, BackendError, BackendEvent, Command, ContextInfo, Gvk, KubernetesAccess,
     MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData,
-    RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef, StreamKind, Subscribe,
-    SubscriptionHandle,
+    RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef, StreamGrant, StreamInput,
+    StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle,
 };
 pub use runtime::{BackendMode, ContextRegistry, build_kernel};
+pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

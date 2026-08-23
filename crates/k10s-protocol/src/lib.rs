@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod operation;
 pub mod resource;
 pub mod route;
+pub mod stream;
 pub mod subscription;
 
 pub use bootstrap::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
@@ -48,6 +49,12 @@ pub use resource::{
     StorageClassRow, StorageInventory, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
+pub use stream::{
+    DecodedStreamPayload, REQUEST_STREAM_TICKET, STREAM_PAYLOAD_VERSION, StreamClientMessage,
+    StreamPayloadError, StreamServerMessage, StreamTarget, StreamTicketRequest,
+    StreamTicketResponse, StreamType, decode_resize_payload, decode_stream_payload,
+    encode_resize_payload, encode_stream_payload, payload_kind,
+};
 pub use subscription::{
     RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, ResourceChanged, ResourceGone,
     ResourceSnapshotPage, ResourceTypeEntry, ResourceTypesRequest, ResourceTypesResponse,

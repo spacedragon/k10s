@@ -138,6 +138,20 @@ pub struct ServerConfig {
     pub drain_timeout: Duration,
     /// Capabilities implemented by this server.
     pub capabilities: Vec<String>,
+    /// Maximum individual WebSocket frame size on the dedicated logs/exec
+    /// stream sockets. Deliberately separate from (and smaller than) the
+    /// control-socket limit.
+    pub max_stream_frame_size: usize,
+    /// Maximum assembled WebSocket message size across fragmentation on the
+    /// stream sockets, enforced before authentication or payload dispatch.
+    pub max_stream_message_size: usize,
+    /// Maximum time allowed for the mandatory first `hello` frame.
+    pub stream_hello_timeout: Duration,
+    /// Inbound byte budget per stream socket per second; exceeding it closes
+    /// the socket with an explicit overload error.
+    pub stream_rate_budget_bytes_per_sec: usize,
+    /// Maximum concurrent dedicated stream sockets.
+    pub max_stream_connections: usize,
 }
 
 impl Default for ServerConfig {
@@ -155,6 +169,11 @@ impl Default for ServerConfig {
             drain_grace_timeout: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(10),
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],
+            max_stream_frame_size: 64 << 10,
+            max_stream_message_size: 256 << 10,
+            stream_hello_timeout: Duration::from_secs(5),
+            stream_rate_budget_bytes_per_sec: 512 << 10,
+            max_stream_connections: 64,
         }
     }
 }
@@ -182,6 +201,14 @@ impl std::fmt::Debug for ServerConfig {
             .field("drain_grace_timeout", &self.drain_grace_timeout)
             .field("drain_timeout", &self.drain_timeout)
             .field("capabilities", &self.capabilities)
+            .field("max_stream_frame_size", &self.max_stream_frame_size)
+            .field("max_stream_message_size", &self.max_stream_message_size)
+            .field("stream_hello_timeout", &self.stream_hello_timeout)
+            .field(
+                "stream_rate_budget_bytes_per_sec",
+                &self.stream_rate_budget_bytes_per_sec,
+            )
+            .field("max_stream_connections", &self.max_stream_connections)
             .finish()
     }
 }

@@ -55,8 +55,17 @@ impl KubernetesAccess for ClosingWatchKubernetes {
                 Subscribe::Infrastructure { .. } => {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
+                Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
             }
         })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }
 

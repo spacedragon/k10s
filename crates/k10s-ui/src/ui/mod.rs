@@ -12,7 +12,7 @@ pub mod tools;
 mod top_bar;
 mod window;
 
-pub use resource_window::ResourceFeed;
+pub use resource_window::{ResourceFeed, RowIdentity};
 
 use std::fmt::Debug;
 
@@ -44,6 +44,7 @@ pub struct UiShell<I> {
     infrastructure: infrastructure::InfrastructureUiState,
     resources: resource_window::ResourceUiState,
     yaml: tools::YamlEditors,
+    streams: tools::StreamStores,
 }
 
 impl<I> Default for UiShell<I>
@@ -66,6 +67,7 @@ where
             infrastructure: infrastructure::InfrastructureUiState::default(),
             resources: resource_window::ResourceUiState::default(),
             yaml: tools::YamlEditors::default(),
+            streams: tools::StreamStores::default(),
         }
     }
 
@@ -92,6 +94,26 @@ where
     /// application layer can feed backend outcomes into them.
     pub fn yaml_editors_mut(&mut self) -> &mut tools::YamlEditors {
         &mut self.yaml
+    }
+
+    /// Mutable access to the connected stream tool stores.
+    pub fn stream_stores_mut(&mut self) -> &mut tools::StreamStores {
+        &mut self.streams
+    }
+
+    /// Drain every queued log-view protocol action.
+    pub fn drain_log_actions(&mut self) -> Vec<(WindowId, tools::LogsAction)> {
+        self.streams.logs.drain_actions()
+    }
+
+    /// Drain every queued explicit shell-connect request.
+    pub fn drain_shell_connects(&mut self) -> Vec<(WindowId, k10s_protocol::StreamTarget)> {
+        self.streams.shells.drain_connects()
+    }
+
+    /// Drain every queued stdin/resize action of live terminals.
+    pub fn drain_shell_actions(&mut self) -> Vec<(WindowId, tools::ShellAction)> {
+        self.streams.shells.drain_actions()
     }
 
     /// Render one frame. All mutations are queued while immutable workspace
@@ -170,6 +192,7 @@ where
                 &mut self.infrastructure,
                 &mut resources,
                 &mut self.yaml,
+                &mut self.streams,
                 response,
                 feed,
                 connection,
@@ -179,6 +202,8 @@ where
         resources.retain(|id| self.workspace.window(id).is_some());
         self.resources = resources;
         self.yaml.retain(|id| self.workspace.window(id).is_some());
+        self.streams
+            .retain(|id| self.workspace.window(id).is_some());
 
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));
