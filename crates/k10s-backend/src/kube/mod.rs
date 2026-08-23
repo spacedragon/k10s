@@ -8,11 +8,12 @@
 
 mod config;
 mod discovery;
+mod watch;
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
@@ -20,16 +21,40 @@ pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 use crate::port::ContextInfo;
 
 use crate::port::{
-    AdapterError, BackendError, BootstrapInfo, Command, KubernetesAccess, OperationId, Query,
+    AdapterError, BackendError, BootstrapInfo, Command, Gvk, KubernetesAccess, OperationId, Query,
     QueryResult, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
+use crate::runtime::cluster::ClusterWatches;
+use crate::runtime::supervisor::WatchSource;
+use crate::watch::WatchSelector;
+
+/// A test-only override choosing scripted watch sources per selection.
+///
+/// Returning `None` falls back to the real kube-rs source so a script can
+/// cover only the selections it cares about. The public alias lives in
+/// [`crate::runtime`].
+#[cfg(feature = "testkit")]
+type WatchScript = crate::runtime::RuntimeWatchScript;
+
+/// Debug wrapper over the scripted-watch holder (closures are not Debug).
+#[cfg(feature = "testkit")]
+#[derive(Clone)]
+struct ScriptedWatches(Arc<std::sync::Mutex<Option<WatchScript>>>);
+
+#[cfg(feature = "testkit")]
+impl std::fmt::Debug for ScriptedWatches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ScriptedWatches")
+    }
+}
 
 /// Real Kubernetes adapter that loads contexts from a kubeconfig file.
 ///
 /// The committed [`ContextRegistry`] is bootstrap state; per-context cluster
-/// clients and the bounded discovery catalog cache are runtime state. Kube-rs
-/// types never leave this module tree.
+/// clients, the bounded discovery catalog cache, and the supervised demand-
+/// driven watch runtime are runtime state. Kube-rs types never leave this
+/// module tree.
 pub struct KubeAdapter {
     registry: ContextRegistry,
     /// Shared cluster client per context name: pre-injected in tests through
@@ -41,12 +66,21 @@ pub struct KubeAdapter {
     kubeconfig_source: Option<kube::config::Kubeconfig>,
     /// Bounded per-context discovery catalog cache (LRU eviction, TTL refresh).
     catalogs: StdMutex<CatalogCache>,
+    /// Supervised demand-driven watch runtime: one task per selection with
+    /// atomic summary caches and lingered teardown.
+    watches: ClusterWatches,
+    /// Test-only scripted watch sources overriding the real kube-rs path.
+    #[cfg(feature = "testkit")]
+    watch_scripts: ScriptedWatches,
 }
 
 impl std::fmt::Debug for KubeAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Cluster clients own transport state; only the config source is reported.
-        f.debug_struct("KubeAdapter")
+        let mut debug = f.debug_struct("KubeAdapter");
+        #[cfg(feature = "testkit")]
+        let debug = debug.field("scripted_watches", &self.watch_scripts);
+        debug
             .field("registry", &self.registry)
             .field("has_kubeconfig_source", &self.kubeconfig_source.is_some())
             .finish()
@@ -72,6 +106,9 @@ impl KubeAdapter {
             clients: tokio::sync::Mutex::new(HashMap::new()),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
+            watches: ClusterWatches::default(),
+            #[cfg(feature = "testkit")]
+            watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
     }
 
@@ -114,7 +151,24 @@ impl KubeAdapter {
             clients: tokio::sync::Mutex::new(client_map),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
+            watches: ClusterWatches::default(),
+            #[cfg(feature = "testkit")]
+            watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
+    }
+
+    /// Install a test-only scripted watch source factory, overriding the
+    /// real kube-rs list/watch path per selection. Returning `None` from
+    /// the script falls back to the real source for that selection.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn with_scripted_watches(self, script: WatchScript) -> Self {
+        *self
+            .watch_scripts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(script);
+        self
     }
 }
 
@@ -169,7 +223,11 @@ impl KubernetesAccess for KubeAdapter {
             match req {
                 // Same protocol shape as the fake adapter's bootstrap status.
                 Subscribe::BootstrapStatus => Ok(SubscriptionHandle::new("bootstrap-status")),
-                Subscribe::ResourceWatch { .. } => Err(BackendError::unsupported("resource.watch")),
+                Subscribe::ResourceWatch {
+                    context,
+                    gvk,
+                    namespace,
+                } => self.resource_watch(context, gvk, namespace).await,
                 Subscribe::Infrastructure { .. } => {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
@@ -189,12 +247,108 @@ impl KubernetesAccess for KubeAdapter {
 }
 
 impl KubeAdapter {
+    /// Open a supervised demand-driven resource watch for one selection.
+    ///
+    /// The selection must name a known context and a type the discovery
+    /// catalog lists; unknown selections are typed not-founds. The first
+    /// subscriber starts one supervised task that relists, attaches a live
+    /// watch at the list's opaque resourceVersion, and feeds an atomic
+    /// summary cache behind a bounded broadcast channel.
+    async fn resource_watch(
+        &self,
+        context: String,
+        gvk: Gvk,
+        namespace: Option<String>,
+    ) -> Result<SubscriptionHandle, BackendError> {
+        if self.registry.find(&context).is_none() {
+            return Err(BackendError::NotFound);
+        }
+        let catalog = self.catalog_for(&context).await?;
+        let Some(descriptor) = catalog.types.iter().find(|entry| entry.gvk == gvk) else {
+            return Err(BackendError::NotFound);
+        };
+        // Scope and capability checks come before any task is spawned: a
+        // cluster-scoped type cannot honor a namespace restriction, and a
+        // list-only type could never attach a live stream — accepting either
+        // would relist-loop against the API server forever.
+        if namespace.is_some() && !descriptor.namespaced {
+            return Err(BackendError::Conflict(
+                "the requested type is cluster-scoped and cannot be watched within one namespace"
+                    .into(),
+            ));
+        }
+        if !descriptor.supports_watch {
+            return Err(BackendError::unsupported("resource.watch"));
+        }
+
+        #[cfg(feature = "testkit")]
+        let scripted = self
+            .watch_scripts
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|script| script(&gvk, namespace.as_deref()));
+
+        #[cfg(feature = "testkit")]
+        let source: Arc<dyn WatchSource> = if let Some(source) = scripted {
+            source
+        } else {
+            Arc::new(
+                self.real_watch_source(&context, descriptor, namespace.clone())
+                    .await?,
+            )
+        };
+
+        #[cfg(not(feature = "testkit"))]
+        let source: Arc<dyn WatchSource> = Arc::new(
+            self.real_watch_source(&context, descriptor, namespace.clone())
+                .await?,
+        );
+
+        let receiver = self.watches.subscribe(
+            WatchSelector {
+                context,
+                gvk,
+                namespace,
+            },
+            source,
+        );
+        Ok(SubscriptionHandle::with_events(
+            "kube-resource-watch",
+            receiver,
+        ))
+    }
+
+    /// Build the real kube-rs list/watch source for one selection.
+    async fn real_watch_source(
+        &self,
+        context: &str,
+        descriptor: &crate::port::ApiResourceDescriptor,
+        namespace: Option<String>,
+    ) -> Result<watch::KubeWatchSource, BackendError> {
+        let client = self.cluster_client(context).await?;
+        Ok(watch::KubeWatchSource::new(
+            client,
+            context.to_owned(),
+            descriptor.gvk.clone(),
+            descriptor.plural.clone(),
+            descriptor.namespaced,
+            namespace,
+        ))
+    }
+
     /// Serve one context's resource catalog through discovery.
     ///
     /// Unknown contexts are typed not-found; a fresh cached catalog is served
     /// without network traffic, and expired or invalidated catalogs trigger a
     /// re-discovery that replaces them under the same bounds as before.
     async fn resource_types(&self, context: &str) -> Result<QueryResult, BackendError> {
+        Ok(QueryResult::ResourceTypes(self.catalog_for(context).await?))
+    }
+
+    /// Resolve one context's discovery catalog through the bounded cache.
+    async fn catalog_for(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
         if self.registry.find(context).is_none() {
             return Err(BackendError::NotFound);
         }
@@ -208,7 +362,7 @@ impl KubeAdapter {
             catalogs.fresh(context).cloned()
         };
         if let Some(data) = cached {
-            return Ok(QueryResult::ResourceTypes(data));
+            return Ok(data);
         }
 
         // Slow path: discover through kube-rs, then publish under the bounds.
@@ -221,10 +375,10 @@ impl KubeAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A concurrent query may have refreshed the catalog while we discovered.
         if let Some(data) = catalogs.fresh(context).cloned() {
-            return Ok(QueryResult::ResourceTypes(data));
+            return Ok(data);
         }
         catalogs.insert(context.to_owned(), data.clone());
-        Ok(QueryResult::ResourceTypes(data))
+        Ok(data)
     }
 
     /// Invalidate one context's cached discovery catalog so its next query

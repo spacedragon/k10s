@@ -58,6 +58,7 @@ pub(crate) async fn discover_resource_types(
                         .subresources
                         .iter()
                         .any(|(sub, _)| sub.plural == "scale"),
+                    supports_watch: capabilities.supports_operation(verbs::WATCH),
                 });
             }
         }

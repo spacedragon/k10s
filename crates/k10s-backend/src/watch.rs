@@ -16,7 +16,7 @@ use crate::port::{BackendEvent, Gvk, ResourceRef};
 pub const WATCH_CAPACITY: usize = 128;
 
 /// The selector of one registered resource watch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WatchSelector {
     /// Context being watched.
     pub context: String,

@@ -261,3 +261,236 @@ async fn fake_and_kube_adapters_agree_on_resource_types_shape() {
         assert_resource_types_shape(payload, label);
     }
 }
+
+/// Shared resource-watch wire contract: the fake adapter and the real kube
+/// adapter (driven by a fully scripted watch source, no cluster) must
+/// normalize identical backend types, so the kernel maps both onto the same
+/// snapshot-page and delta payloads with no raw Kubernetes vocabulary.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use k10s_backend::runtime::{ListedState, WatchRow, WatchSource, WatchUpdate};
+    use k10s_backend::{BackendEvent, Gvk, ResourceRef, Subscribe};
+
+    fn pods_gvk() -> Gvk {
+        Gvk::core("v1", "Pod")
+    }
+
+    #[derive(Debug)]
+    struct ContractSource {
+        /// Updates flushed into the stream as soon as it attaches.
+        updates: StdMutex<Vec<WatchUpdate>>,
+    }
+
+    impl WatchSource for ContractSource {
+        fn list<'a>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ListedState, String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                Ok(ListedState {
+                    resource_version: "41".into(),
+                    rows: vec![WatchRow {
+                        reference: ResourceRef {
+                            context: "contract-mock".into(),
+                            gvk: pods_gvk(),
+                            namespace: Some("default".into()),
+                            name: "web".into(),
+                            uid: "uid-web".into(),
+                        },
+                        labels: [("app".into(), "web".into())].into_iter().collect(),
+                        summary: String::new(),
+                        created_at: "2026-08-21T00:00:00Z".into(),
+                        owner_references: Vec::new(),
+                    }],
+                })
+            })
+        }
+
+        fn attach_watch<'a>(
+            &'a self,
+            _resource_version: String,
+            out: tokio::sync::mpsc::UnboundedSender<WatchUpdate>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                for update in self
+                    .updates
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .drain(..)
+                {
+                    let _ = out.send(update);
+                }
+                std::future::pending::<()>().await;
+            })
+        }
+    }
+
+    /// Collect one snapshot plus two deltas and map them through the kernel
+    /// into their wire payloads.
+    async fn wire_events<A: k10s_backend::KubernetesAccess + 'static>(
+        adapter: A,
+        context: &str,
+        drive_change: impl FnOnce(),
+    ) -> Vec<Value> {
+        let kernel = BackendKernel::new(adapter);
+        let mut handle = kernel
+            .subscribe(Subscribe::ResourceWatch {
+                context: context.into(),
+                gvk: pods_gvk(),
+                namespace: Some("default".into()),
+            })
+            .await
+            .expect("resource watch subscribes");
+        let mut events = handle.take_events().expect("watches carry events");
+
+        let mut payloads = Vec::new();
+        // Snapshot first.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("snapshot arrives")
+            .expect("channel open")
+        {
+            BackendEvent::Snapshot(data) => {
+                let page = kernel.snapshot_page(data.revision, &data.rows);
+                payloads.push(serde_json::to_value(&page).expect("snapshot page serializes"));
+            }
+            other => panic!("first event must be the snapshot, got {other:?}"),
+        }
+        // Drive one changed and one gone delta.
+        drive_change();
+        for _ in 0..2 {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("delta arrives")
+                .expect("channel open")
+            {
+                BackendEvent::Changed(record) => {
+                    let delta = kernel.changed_delta(&record);
+                    payloads.push(serde_json::to_value(&delta).expect("delta serializes"));
+                }
+                BackendEvent::Gone {
+                    reference,
+                    revision,
+                } => {
+                    let delta = kernel.gone_delta(&reference, revision);
+                    payloads.push(serde_json::to_value(&delta).expect("gone serializes"));
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        payloads
+    }
+
+    // Fake side: standard dataset, then touch and delete through its seams.
+    let fake = FakeKubernetes::standard();
+    let fake_payloads = wire_events(fake.clone(), "dev-local", || {
+        fake.touch_resource(
+            "dev-local",
+            &pods_gvk(),
+            Some("default"),
+            "web-frontend-7d9f8-00001",
+        )
+        .expect("touched pod exists");
+        fake.delete_resource(
+            "dev-local",
+            &pods_gvk(),
+            Some("default"),
+            "api-server-5cc4d-qw8rt",
+        );
+    })
+    .await;
+
+    // Kube side: fully scripted source emitting the same observable shape.
+    let server = RecordedApiServer::standard();
+    let client = server.clone().into_client("default");
+    let source: Arc<dyn WatchSource> = Arc::new(ContractSource {
+        updates: StdMutex::new(vec![
+            WatchUpdate::Upsert(WatchRow {
+                reference: ResourceRef {
+                    context: "contract-mock".into(),
+                    gvk: pods_gvk(),
+                    namespace: Some("default".into()),
+                    name: "web".into(),
+                    uid: "uid-web".into(),
+                },
+                labels: [("app".into(), "web".into())].into_iter().collect(),
+                summary: "CrashLoopBackOff".into(),
+                created_at: "2026-08-21T00:00:00Z".into(),
+                owner_references: Vec::new(),
+            }),
+            WatchUpdate::Delete(ResourceRef {
+                context: "contract-mock".into(),
+                gvk: pods_gvk(),
+                namespace: Some("default".into()),
+                name: "web".into(),
+                uid: "uid-web".into(),
+            }),
+        ]),
+    });
+    let scripted: k10s_backend::runtime::RuntimeWatchScript =
+        Arc::new(move |_gvk, _namespace| Some(Arc::clone(&source)));
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds")
+    .with_scripted_watches(scripted);
+    let kube_payloads = wire_events(kube_adapter, "contract-mock", || {}).await;
+
+    assert_eq!(fake_payloads.len(), 3);
+    assert_eq!(kube_payloads.len(), 3);
+
+    // Identical normalized key shapes on every payload pair.
+    fn keys(value: &Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_object()
+            .unwrap_or_else(|| panic!("payload is an object: {value:?}"))
+            .keys()
+            .cloned()
+            .collect()
+    }
+    for (fake_event, kube_event) in fake_payloads.iter().zip(kube_payloads.iter()) {
+        assert_eq!(
+            keys(fake_event),
+            keys(kube_event),
+            "event payload keys drifted"
+        );
+    }
+    // Row-level shape parity on the snapshot pages (row counts differ by
+    // dataset design; the wire shape must not).
+    let fake_rows = fake_payloads[0]["rows"].as_array().unwrap();
+    let kube_rows = kube_payloads[0]["rows"].as_array().unwrap();
+    assert!(fake_rows.len() > 1 && kube_rows.len() == 1);
+    let row_keys = |row: &Value| {
+        row.as_object()
+            .unwrap_or_else(|| panic!("row is an object: {row:?}"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(row_keys(&fake_rows[0]), row_keys(&kube_rows[0]));
+    let identity_keys = |row: &Value| {
+        row["identity"]
+            .as_object()
+            .unwrap_or_else(|| panic!("identity is an object"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(identity_keys(&fake_rows[0]), identity_keys(&kube_rows[0]));
+
+    // The opaque Kubernetes resourceVersion never reaches either wire.
+    for payload in fake_payloads.iter().chain(kube_payloads.iter()) {
+        let text = payload.to_string();
+        assert!(!text.contains("resourceVersion"));
+        assert!(!text.contains("resource_version"));
+    }
+}
