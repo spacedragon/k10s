@@ -71,6 +71,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     detail: &DetailState<I>,
     view: Option<&ResourceDetailResponse>,
+    gone: bool,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
     dialogs: &mut dialogs::OperationDialogs,
@@ -110,10 +111,18 @@ pub(super) fn show<I>(
     show_header(ui, identity, view);
 
     let Some(view) = view else {
-        ui.horizontal(|ui| {
-            ui.add(Spinner::new());
-            ui.label("Loading details");
-        });
+        if gone {
+            // The authoritative rows dropped this identity: it is gone,
+            // not loading. The pinned header stays for reference.
+            ui.label(
+                RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING),
+            );
+        } else {
+            ui.horizontal(|ui| {
+                ui.add(Spinner::new());
+                ui.label("Loading details");
+            });
+        }
         return;
     };
 

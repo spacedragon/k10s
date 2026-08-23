@@ -362,6 +362,45 @@ impl FakeKubernetes {
         }
     }
 
+    /// Create the deterministic capacity dataset used by the Plan 2 gate:
+    /// exactly `objects` workload objects spread over the built-in kinds in
+    /// `dev-local` plus `nodes` cluster-scoped Nodes. Generation is fully
+    /// deterministic — the same inputs always produce byte-identical
+    /// identities, summaries, labels, and timestamps — so benchmarks and
+    /// capacity tests are reproducible without any random seed.
+    #[must_use]
+    pub fn with_capacity(objects: usize, nodes: usize) -> Self {
+        let adapter = Self::with_contexts(vec![
+            ContextInfo {
+                name: "dev-local".into(),
+                cluster: "dev-cluster".into(),
+                namespace: Some("default".into()),
+                is_current: true,
+            },
+            ContextInfo {
+                name: "prod-readonly".into(),
+                cluster: "prod-cluster".into(),
+                namespace: Some("default".into()),
+                is_current: false,
+            },
+        ]);
+        {
+            let mut state = adapter.lock();
+            state.records = build_capacity_records("dev-local", objects, nodes);
+            state
+                .records
+                .sort_by(|left, right| left.reference.cmp(&right.reference));
+        }
+        adapter
+    }
+
+    /// Total number of retained records; observability for the capacity
+    /// dataset.
+    #[must_use]
+    pub fn total_records(&self) -> usize {
+        self.lock().records.len()
+    }
+
     /// Remove one object behind the adapter and broadcast a resource-gone
     /// delta to matching watchers. Returns whether the object existed.
     pub fn delete_resource(
@@ -1384,6 +1423,58 @@ impl KubernetesAccess for FakeKubernetes {
             }
         })
     }
+}
+
+/// Deterministic capacity dataset: `nodes` cluster-scoped Nodes plus
+/// `objects` namespaced workload objects spread over the built-in kinds.
+/// Pod share is deliberately dominant, mirroring real clusters where pod
+/// lists dominate snapshot traffic. Every field is derived from the object
+/// index; no randomness anywhere.
+fn build_capacity_records(context: &str, objects: usize, nodes: usize) -> Vec<ResourceRecord> {
+    const KIND_CYCLE: [(&str, &str); 8] = [
+        ("apps", "Deployment"),
+        ("", "Pod"),
+        ("", "Pod"),
+        ("", "Pod"),
+        ("apps", "StatefulSet"),
+        ("apps", "DaemonSet"),
+        ("batch", "Job"),
+        ("batch", "CronJob"),
+    ];
+    const SUMMARIES: [&str; 4] = ["Running", "2/2 ready", "0/1 ready", "1/1 up"];
+
+    let mut records = Vec::with_capacity(objects + nodes);
+    for index in 0..nodes {
+        records.push(record(RecordSeed {
+            offset_secs: u64::try_from(index).unwrap_or(u64::MAX) % 86_400,
+            summary: if index % 16 == 7 {
+                "Not Ready"
+            } else {
+                "Ready"
+            },
+            context,
+            gvk: Gvk::core("v1", "Node"),
+            namespace: None,
+            name: &format!("capacity-node-{index:05}"),
+            labels: &[("role", "worker")],
+            owner_references: Vec::new(),
+        }));
+    }
+    for index in 0..objects {
+        let (group, kind) = KIND_CYCLE[index % KIND_CYCLE.len()];
+        let version = "v1";
+        records.push(record(RecordSeed {
+            offset_secs: (u64::try_from(index).unwrap_or(u64::MAX) * 30) % 86_400,
+            summary: SUMMARIES[index % SUMMARIES.len()],
+            context,
+            gvk: Gvk::new(group, version, kind),
+            namespace: Some("default"),
+            name: &format!("scale-{}-{index:06}", kind.to_lowercase()),
+            labels: &[("tier", "capacity")],
+            owner_references: Vec::new(),
+        }));
+    }
+    records
 }
 
 /// Seed describing one deterministic dataset record.

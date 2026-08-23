@@ -1,0 +1,192 @@
+Window
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  Button label="File"
+                  Button label="View"
+                  Button label="Help"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          ComboBox label="Kubernetes context" value="dev-local"
+                        Label value="Kubernetes context"
+                          TextRun value="Kubernetes context"
+                  GenericContainer
+                    Button label="Refresh"
+                  Label value="Connected"
+                    TextRun value="Connected"
+                  Label value="Connection status: Connected"
+                    TextRun value="●"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Button label="Overview"
+            GenericContainer
+              Button label="Nodes"
+            GenericContainer
+              Button label="Storage"
+            GenericContainer
+              Button label="Workloads"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Deployments"
+                      GenericContainer
+                        Button label="Open another Deployments window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Pods"
+                      Label value="1 open Pods window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another Pods window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="StatefulSets"
+                      GenericContainer
+                        Button label="Open another StatefulSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="DaemonSets"
+                      GenericContainer
+                        Button label="Open another DaemonSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Jobs"
+                      GenericContainer
+                        Button label="Open another Jobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="CronJobs"
+                      GenericContainer
+                        Button label="Open another CronJobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Custom Resources…"
+                      GenericContainer
+                        Button label="Open another Custom Resources… window"
+        GenericContainer
+          GenericContainer
+  Window label="Overview"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                ProgressIndicator
+                Label value="Loading cluster overview"
+                  TextRun value="Loading cluster overview"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Pods"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                TextInput label="Search pods" value=""
+                  TextRun value=""
+                TextInput label="Namespace filter" value=""
+                  TextRun value=""
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Namespace"
+                              TextRun value="Namespace"
+                            Button label="Sort pods by namespace"
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Button label="Sort pods by name"
+                          GenericContainer
+                            Label value="Status"
+                              TextRun value="Status"
+                            Button label="Sort pods by status"
+                          GenericContainer
+                            Label value="Created"
+                              TextRun value="Created"
+                            Button label="Sort pods by created"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="db-postgres-0"
+                          Label value="Running"
+                            TextRun value="Running"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+              Unknown
+              GenericContainer
+                Button label="Clear selection"
+                GenericContainer
+                  Label value="Details"
+                    TextRun value="Details"
+                  Button label="Tab Overview"
+                  Button label="Tab Events"
+                  Button label="Tab Logs"
+                  Button label="Tab Shell"
+                Label value="db-postgres-0"
+                  TextRun value="db-postgres-0"
+                Label value="Kind Pod"
+                  TextRun value="Kind Pod"
+                Label value="Namespace default"
+                  TextRun value="Namespace default"
+                Label value="UID uid-dev-local-pod-default-db-postgres-0"
+                  TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
+                Label value="Created 2026-08-21T00:50:10Z"
+                  TextRun value="Created 2026-08-21T00:50:10Z"
+                GenericContainer
+                  Button label="Delete resource"
+                  Button label="View logs"
+                  Button label="Exec shell"
+                  Button label="Edit YAML"
+                GenericContainer
+                  GenericContainer
+                    Label value="Overview"
+                      TextRun value="Overview"
+                    GenericContainer
+                      GenericContainer
+                        Label value="Status Running"
+                          TextRun value="Status Running"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter

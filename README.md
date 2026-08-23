@@ -3,14 +3,16 @@
 A local Kubernetes control-plane client with a Rust workspace foundation: a
 protocol crate shared by native and web frontends, a fake-backed backend
 kernel, and an embeddable Axum control server. The current milestone is the
-**runtime foundation** — connection lifecycle, probes, graceful shutdown, and
-CI. Resource windows and operational workflows come later.
+**connected UI prototype** — resource windows, details, guarded YAML, logs,
+shell tools, operation dialogs, resilient states, accessibility coverage, and
+capacity baselines over the real control protocol.
 
 ## Scope
 
-Everything is **fake-only** today: `BackendKernel` serves deterministic fake
+Everything is **fake-backed** today: `BackendKernel` serves deterministic fake
 Kubernetes data (`FakeKubernetes`) over the loopback control WebSocket. No real
-cluster access, no credentials, and no mutation operations exist yet.
+cluster access, no credentials, and no mutation operations exist yet; all UI
+states are reproducible deterministically without cluster infrastructure.
 
 ## Workspace layout
 
@@ -91,6 +93,50 @@ npx playwright test tests/browser/foundation.spec.ts --project=chromium
 `Trunk.toml` pins `locked = true`; CI pins Trunk 0.21.14. The web entry derives
 only the scheme and authority from `window.location` and replaces the path with
 the root-level control endpoint; it never forces WSS on HTTP development pages.
+
+## Resilient states, accessibility, and capacity
+
+The connected UI prototype closes with a quality gate covering every
+loading/empty/stale/error state of the approved screen set:
+
+- `crates/k10s-ui/tests/ui_resilience.rs` — loading vs empty vs filtered-empty
+  lists, stale-connection banners, textual (never color-only) status and
+  metrics conditions, conflict reasons inside operation dialogs, a gone-resource
+  projection for deleted selections, unavailable GVKs after context switches,
+  disconnected logs that retain history, active-shell navigation guards,
+  keyboard focus order, and minimum-size non-overlap.
+- `crates/k10s-ui/tests/ui_snapshots.rs` + `tests/snapshots/*.txt` — stable
+  accessibility-tree snapshots of the approved screens. These are deterministic
+  text dumps (roles, labels, values in widget order) rather than pixel PNGs:
+  byte-stable across renderers and CI runners, and they double as the AccessKit
+  coverage. Regenerate intentionally with
+  `K10S_UPDATE_SNAPSHOTS=1 cargo test -p k10s-ui --test ui_snapshots`.
+
+### Capacity benchmarks
+
+A deterministic **50,000-object / 1,000-node** fake dataset
+(`FakeKubernetes::with_capacity`) anchors the capacity gate; the same fixed
+distribution is used end to end:
+
+| Command | Proves |
+| --- | --- |
+| `cargo bench -p k10s-backend --bench fake_scale -- --test` | dataset build time, full pod-list query time, subscription snapshot registration, and stable live memory across repeated queries |
+| `cargo test -p k10s-server --test fake_capacity` | the whole dominant-kind snapshot (~18,750 rows) streams through the real control socket as bounded ≤16-row pages and reassembles completely |
+| `cargo bench -p k10s-ui --bench ui_capacity -- --test` | the shell renders/filters/scrolls the 50k-object model at a fixed 1440×900 viewport within recorded frame-time and allocation-per-frame ceilings |
+
+Recorded baselines (developer workstation; CI ceilings carry an order of
+magnitude of headroom while still catching order-of-magnitude regressions):
+
+- backend: dataset build ≈ 0.11 s, full pod-list query ≈ 11 ms, snapshot
+  registration ≈ 10 ms, no live-memory drift across repeated queries
+- server: full socket transfer of ~1,175 bounded frames ≈ 1.4 s (debug build)
+- UI: ≈ 1.3 ms average frame time with virtualized rows (~30k allocations per
+  frame), ceilings 100 ms / 150k — losing row virtualization or doing
+  model-sized work per frame breaches them
+
+Both benches are hand-rolled (`harness = false`) because the ceilings
+themselves are the assertions; they run once under `--test` for CI
+determinism. Plan 5 repeats this gate against real runtime pressure.
 
 ## Health probes
 

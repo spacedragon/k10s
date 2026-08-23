@@ -42,19 +42,20 @@ impl<I> Default for TableActions<I> {
 }
 
 /// Whether a row matches the current search text (name, namespace, or
-/// status summary).
-pub(super) fn matches_search(row: &ResourceListRow, search: &str) -> bool {
-    let needle = search.to_lowercase();
+/// status summary). `needle` must be the already-lowercased search text;
+/// the caller hoists the conversion out of the per-row loop so filtering
+/// large snapshots never allocates per row.
+pub(super) fn matches_search(row: &ResourceListRow, needle: &str) -> bool {
     needle.is_empty()
-        || row.identity.name.to_lowercase().contains(&needle)
+        || row.identity.name.to_lowercase().contains(needle)
         || row
             .identity
             .namespace
             .as_deref()
             .unwrap_or_default()
             .to_lowercase()
-            .contains(&needle)
-        || row.summary.to_lowercase().contains(&needle)
+            .contains(needle)
+        || row.summary.to_lowercase().contains(needle)
 }
 
 /// Sort rows by the spec with a deterministic name tiebreaker.
@@ -115,9 +116,13 @@ where
         return actions;
     }
 
+    // Rows are virtualized: only the visible window of rows is laid out
+    // per frame, so frame cost stays bounded by the viewport rather than
+    // the snapshot size.
+    let row_height = ui.text_style_height(&egui::TextStyle::Body);
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
-        .show(ui, |ui| {
+        .show_rows(ui, row_height, rows.len(), |ui, range| {
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
                 .min_col_width(72.0)
@@ -130,7 +135,7 @@ where
                     }
                     ui.end_row();
 
-                    for row in rows {
+                    for row in &rows[range] {
                         if namespaced {
                             ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                         }

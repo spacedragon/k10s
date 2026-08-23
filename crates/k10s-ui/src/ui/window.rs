@@ -163,7 +163,7 @@ where
                                 .as_row_identity()
                                 .and_then(|identity| feed.details.get(identity));
                             super::detail::show(
-                                ui, state.id, detail, view, yaml, streams, dialogs, queued,
+                                ui, state.id, detail, view, false, yaml, streams, dialogs, queued,
                             );
                         }
                         false
