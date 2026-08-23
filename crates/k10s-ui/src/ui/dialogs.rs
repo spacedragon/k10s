@@ -207,6 +207,7 @@ pub struct DeleteDialog {
     connected: bool,
     consumed: bool,
     submitted_operation: Option<OperationId>,
+    failure: Option<String>,
 }
 
 impl DeleteDialog {
@@ -221,6 +222,7 @@ impl DeleteDialog {
             connected: true,
             consumed: false,
             submitted_operation: None,
+            failure: None,
         }
     }
 
@@ -295,6 +297,19 @@ impl DeleteDialog {
         self.submitted_operation = Some(operation_id);
     }
 
+    /// Report a failed submission and reopen the dialog for a corrected
+    /// retry with the same idempotency key.
+    pub fn operation_failed(&mut self, reason: impl Into<String>) {
+        self.failure = Some(reason.into());
+        self.consumed = false;
+    }
+
+    /// The safe failure reason, if the last attempt failed.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
     /// The accepted operation, once known.
     #[must_use]
     pub fn submitted_operation(&self) -> Option<OperationId> {
@@ -318,6 +333,24 @@ pub enum DialogHandle<'a> {
     Scale(&'a mut ScaleDialog),
     /// A delete confirmation.
     Delete(&'a mut DeleteDialog),
+}
+
+impl DialogHandle<'_> {
+    /// Report an accepted operation to whichever dialog is active.
+    pub fn operation_accepted(&mut self, operation_id: OperationId) {
+        match self {
+            Self::Scale(dialog) => dialog.operation_accepted(operation_id),
+            Self::Delete(dialog) => dialog.operation_accepted(operation_id),
+        }
+    }
+
+    /// Report a failed submission to whichever dialog is active.
+    pub fn operation_failed(&mut self, reason: impl Into<String>) {
+        match self {
+            Self::Scale(dialog) => dialog.operation_failed(reason),
+            Self::Delete(dialog) => dialog.operation_failed(reason),
+        }
+    }
 }
 
 /// Per-window store of open operation dialogs plus the actions queued by
@@ -526,6 +559,9 @@ fn render_delete(
     });
     if let Some(reason) = dialog.disabled_reason() {
         ui.label(RichText::new(reason).weak());
+    }
+    if let Some(failure) = dialog.failure_message() {
+        ui.label(RichText::new(format!("Failed: {failure}")).color(ui.visuals().error_fg_color));
     }
     if let Some(operation_id) = dialog.submitted_operation() {
         ui.label(format!("Submitted operation {}", operation_id.as_str()));

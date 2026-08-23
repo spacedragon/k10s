@@ -88,6 +88,22 @@ async fn send_request(ws: &mut Ws, request_id: &str, kind: &str, payload: Value)
     .unwrap();
 }
 
+/// Send one request carrying an envelope-level idempotency key (mandatory
+/// for mutations).
+async fn send_keyed(ws: &mut Ws, request_id: &str, kind: &str, payload: Value, key: &str) {
+    ws.send(Message::Text(
+        json!({
+            "kind": "request",
+            "requestId": request_id,
+            "payload": {"kind": kind, "idempotencyKey": key, "payload": payload}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+}
+
 async fn receive_frame(ws: &mut Ws) -> ServerFrame {
     let message = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
@@ -337,11 +353,12 @@ async fn deletes_are_typed_with_propagation_modes_and_remove_state() {
     );
 
     // Deleting again is a typed not-found, never a silent success.
-    send_request(
+    send_keyed(
         &mut ws,
         "delete-missing",
         "workload.delete",
         delete_payload("api-server", DeletePropagation::Background),
+        "idem-delete-missing",
     )
     .await;
     expect_error(&mut ws, "delete-missing", ErrorCode::NotFound).await;
@@ -359,11 +376,12 @@ async fn mutations_enforce_exact_scope_identity_including_uid() {
     let mut stale =
         serde_json::from_value::<ScaleRequest>(scale_payload("web-frontend", 3)).unwrap();
     stale.uid = "uid-stale-recreated".into();
-    send_request(
+    send_keyed(
         &mut ws,
         "stale-uid",
         "workload.scale",
         serde_json::to_value(stale).unwrap(),
+        "idem-stale-uid",
     )
     .await;
     let message = expect_error(&mut ws, "stale-uid", ErrorCode::Conflict).await;
@@ -373,17 +391,18 @@ async fn mutations_enforce_exact_scope_identity_including_uid() {
     );
 
     // A completely unknown object stays a typed not-found.
-    send_request(
+    send_keyed(
         &mut ws,
         "unknown-object",
         "workload.scale",
         scale_payload("no-such-deployment", 1),
+        "idem-unknown-object",
     )
     .await;
     expect_error(&mut ws, "unknown-object", ErrorCode::NotFound).await;
 
     // The readonly cluster denies mutations by policy.
-    send_request(
+    send_keyed(
         &mut ws,
         "readonly-scale",
         "workload.scale",
@@ -392,6 +411,7 @@ async fn mutations_enforce_exact_scope_identity_including_uid() {
             ..serde_json::from_value::<ScaleRequest>(scale_payload("edge-gateway", 1)).unwrap()
         })
         .unwrap(),
+        "idem-readonly-scale",
     )
     .await;
     expect_error(&mut ws, "readonly-scale", ErrorCode::Unauthorized).await;
@@ -612,6 +632,34 @@ async fn every_nonterminal_operation_is_queryable_after_a_forced_reconnect() {
         .find(|entry| entry.operation_id.as_str() == finished)
         .expect("the finished operation is still queryable");
     assert_eq!(entry.status, OperationStatus::Succeeded);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mutations_without_idempotency_keys_are_rejected_as_invalid() {
+    let (server, _fake) = spawn_server().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    // A synthesized context/name key would misidentify same-name objects in
+    // other namespaces or kinds as replays, so keys are mandatory.
+    send_request(
+        &mut ws,
+        "scale-no-key",
+        "workload.scale",
+        scale_payload("web-frontend", 3),
+    )
+    .await;
+    expect_error(&mut ws, "scale-no-key", ErrorCode::InvalidRequest).await;
+
+    send_request(
+        &mut ws,
+        "delete-no-key",
+        "workload.delete",
+        delete_payload("api-server", DeletePropagation::Background),
+    )
+    .await;
+    expect_error(&mut ws, "delete-no-key", ErrorCode::InvalidRequest).await;
 
     server.shutdown().await.unwrap();
 }

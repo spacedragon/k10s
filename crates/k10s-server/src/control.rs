@@ -309,7 +309,33 @@ pub(crate) async fn serve_socket(
                             }
                             Ok(_) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                                tracing::warn!(dropped, "operations consumer lagged");
+                                tracing::warn!(
+                                    dropped,
+                                    "operations consumer lagged; demanding resync"
+                                );
+                                // Dropped updates are unrecoverable on this
+                                // stream: the client must refresh every
+                                // nonterminal operation by ID, so demand a
+                                // full resync losslessly.
+                                let reason = "operation updates were dropped".to_owned();
+                                let outcome = fwd_outbound.enqueue_p0_sequenced(|| {
+                                    let sequence = allocate_sequence(&fwd_counter)
+                                        .ok_or(EnqueueError::Overloaded)?;
+                                    let frame = ServerFrame {
+                                        kind: ServerKind::ResyncRequired,
+                                        request_id: None,
+                                        subscription_id: None,
+                                        sequence: Some(sequence),
+                                        payload: serde_json::json!({ "reason": reason }),
+                                    };
+                                    let text =
+                                        serde_json::to_string(&frame).expect("resync frame serializes");
+                                    Ok((sequence, Message::Text(text.into())))
+                                });
+                                if outcome.is_err() {
+                                    overload_close(&fwd_outbound);
+                                }
+                                break;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         },
@@ -890,10 +916,15 @@ fn parse_request(
                 .map_err(|error| format!("invalid yaml.apply payload: {error}"))
         }
         k10s_protocol::REQUEST_WORKLOAD_SCALE => {
+            // A missing key cannot be synthesized from context/name alone:
+            // same-name objects in different namespaces or kinds, and
+            // legitimate later mutations, would be misread as replays.
+            let Some(idempotency_key) = idempotency_key else {
+                return Err("workload.scale requires an envelope-level idempotencyKey".to_owned());
+            };
             serde_json::from_value::<ScaleRequest>(payload.clone())
                 .map(|scale| {
-                    let key = idempotency_key
-                        .unwrap_or_else(|| format!("scale:{}/{}", scale.context, scale.name));
+                    let key = idempotency_key;
                     Some(ParsedRequest::Execute(Command::Scale {
                         context: scale.context,
                         gvk: Gvk {
@@ -916,14 +947,12 @@ fn parse_request(
                 })
         }
         k10s_protocol::REQUEST_WORKLOAD_DELETE => {
+            let Some(idempotency_key) = idempotency_key else {
+                return Err("workload.delete requires an envelope-level idempotencyKey".to_owned());
+            };
             serde_json::from_value::<DeleteRequest>(payload.clone())
                 .map(|delete| {
-                    let key = idempotency_key.unwrap_or_else(|| {
-                        format!(
-                            "delete:{}/{}",
-                            delete.identity.context, delete.identity.name
-                        )
-                    });
+                    let key = idempotency_key;
                     let propagation = match delete.propagation {
                         DeletePropagation::Background => k10s_backend::Propagation::Background,
                         DeletePropagation::Foreground => k10s_backend::Propagation::Foreground,
