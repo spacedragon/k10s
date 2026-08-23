@@ -90,7 +90,7 @@ pub struct K10sApp {
     infrastructure_request: Option<PendingRequest>,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
-    stream_sessions: BTreeMap<WindowId, StreamSession>,
+    stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
     pending_stream_tickets: BTreeMap<k10s_protocol::RequestId, PendingStreamTicket>,
     recovering: bool,
     view: AppView,
@@ -322,11 +322,49 @@ impl K10sApp {
                 let frame: ServerFrame = serde_json::from_str(&text).map_err(|error| {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
+                let stream_request_id = frame.request_id.clone();
                 if let Err(error) = self.client.apply_at(frame, now_ms, entropy) {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
+                        }
+                        // A request-scoped stream-ticket denial is projected
+                        // into the requesting tool; it never kills the
+                        // control connection or any other stream.
+                        ClientError::Server(ref server_error)
+                            if stream_request_id
+                                .as_ref()
+                                .is_some_and(|id| self.pending_stream_tickets.contains_key(id)) =>
+                        {
+                            if let Some(entry) = stream_request_id
+                                .as_ref()
+                                .and_then(|id| self.pending_stream_tickets.remove(id))
+                            {
+                                let reason = server_error.safe_message.clone();
+                                match entry.route {
+                                    StreamRoute::Logs => {
+                                        if let Some(view) = self
+                                            .shell
+                                            .stream_stores_mut()
+                                            .logs
+                                            .get_mut(entry.window)
+                                        {
+                                            view.fail(&reason);
+                                        }
+                                    }
+                                    StreamRoute::Exec => {
+                                        if let Some(shell) = self
+                                            .shell
+                                            .stream_stores_mut()
+                                            .shells
+                                            .get_mut(entry.window)
+                                        {
+                                            shell.connection_lost();
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ if self.client.phase() == ClientPhase::Disconnected => {
                             return Err(AppEventError::Transient);
@@ -525,6 +563,11 @@ impl K10sApp {
                 stream_type: k10s_protocol::StreamType::Logs,
                 tty: false,
             })?;
+            // The tool moves to Connecting immediately; the Ready signal
+            // completes the attach.
+            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
+                view.connect();
+            }
             self.pending_stream_tickets.insert(
                 request.id().clone(),
                 PendingStreamTicket {
@@ -540,6 +583,10 @@ impl K10sApp {
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
             })?;
+            // Same explicit Connecting transition for the terminal.
+            if let Some(shell) = self.shell.stream_stores_mut().shells.get_mut(window) {
+                shell.connect();
+            }
             self.pending_stream_tickets.insert(
                 request.id().clone(),
                 PendingStreamTicket {
@@ -551,7 +598,8 @@ impl K10sApp {
         }
         // Forward terminal stdin/resize into live exec sessions.
         for (window, action) in self.shell.drain_shell_actions() {
-            if let Some(session) = self.stream_sessions.get_mut(&window)
+            let key = (window, StreamRoute::Exec);
+            if let Some(session) = self.stream_sessions.get_mut(&key)
                 && session.is_live()
             {
                 match action {
@@ -601,12 +649,12 @@ impl K10sApp {
     /// Project dedicated-socket events into the connected tools.
     fn poll_stream_sessions(&mut self) {
         self.finish_stream_tickets();
-        let windows: Vec<WindowId> = self.stream_sessions.keys().copied().collect();
-        for window in windows {
-            let Some(session) = self.stream_sessions.get_mut(&window) else {
+        let keys: Vec<(WindowId, StreamRoute)> = self.stream_sessions.keys().copied().collect();
+        for key in keys {
+            let (window, route) = key;
+            let Some(session) = self.stream_sessions.get_mut(&key) else {
                 continue;
             };
-            let route = session.route();
             let signals = session.poll();
             if signals.is_empty() {
                 continue;
@@ -644,18 +692,18 @@ impl K10sApp {
                             shell.exit(code);
                         }
                     }
-                    StreamSignal::Rejected(_reason) => match route {
+                    StreamSignal::Rejected(reason) => match route {
                         StreamRoute::Logs => {
                             if let Some(view) = stores.logs.get_mut(window) {
-                                view.connection_lost();
+                                view.fail(&reason);
                             }
-                            self.stream_sessions.remove(&window);
+                            self.stream_sessions.remove(&key);
                         }
                         StreamRoute::Exec => {
                             if let Some(shell) = stores.shells.get_mut(window) {
                                 shell.connection_lost();
                             }
-                            self.stream_sessions.remove(&window);
+                            self.stream_sessions.remove(&key);
                         }
                     },
                 }
@@ -667,7 +715,7 @@ impl K10sApp {
 /// Open a dedicated socket with a granted ticket and register the session
 /// under its owning window. Failures leave no half-open state behind.
 fn session_open(
-    sessions: &mut BTreeMap<WindowId, StreamSession>,
+    sessions: &mut BTreeMap<(WindowId, StreamRoute), StreamSession>,
     window: WindowId,
     route: StreamRoute,
     granted: k10s_protocol::StreamTicketResponse,
@@ -678,7 +726,7 @@ fn session_open(
     session
         .open_with_ticket(connection_url, access_token, &granted.ticket_id)
         .map_err(|_| ())?;
-    sessions.insert(window, session);
+    sessions.insert((window, route), session);
     Ok(())
 }
 

@@ -17,7 +17,7 @@ use k10s_protocol::{
 use crate::client::transport::{BoundedInbox, TransportError, WebSocketTransport};
 
 /// Which dedicated route a session attaches to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StreamRoute {
     /// `/api/v1/logs`.
     Logs,

@@ -850,10 +850,17 @@ async fn fragmented_messages_are_assembled_and_enforced() {
     server.shutdown().await.unwrap();
 }
 
-/// Fragmented oversized exec input is rejected by the same assembled limit.
+/// Fragmented oversized exec input is rejected by the assembled-message
+/// limit specifically: every fragment stays below the frame limit while the
+/// reassembled message exceeds the message bound. A fragmented resize under
+/// both bounds proves control messages still assemble correctly.
 #[tokio::test]
 async fn fragmented_oversized_exec_input_is_rejected() {
-    let (server, fake) = spawn_server().await;
+    let config = ServerConfig {
+        max_stream_frame_size: 512 << 10,
+        ..ServerConfig::default()
+    };
+    let (server, fake) = spawn_server_with(config).await;
     let mut control = connect_control(&server).await;
     let ticket = issue_ticket(
         &mut control,
@@ -872,15 +879,16 @@ async fn fragmented_oversized_exec_input_is_rejected() {
     let (_, banner) = decode_binary(receive_message(&mut ws).await);
     assert!(banner.contains("attached"));
 
-    // One logical stdin message far above the default assembled-message
-    // bound, split into two fragments each below the frame bound.
-    let chunk = [b'x'; 64 * 1024];
+    // One logical stdin message of ~400 KiB — above the 256 KiB
+    // assembled-message bound but each fragment below the 512 KiB frame
+    // bound, isolating the assembled-limit rejection.
     let header = vec![
         k10s_protocol::STREAM_PAYLOAD_VERSION,
         k10s_protocol::payload_kind::STDIN,
     ];
-    let first = [header.as_slice(), &chunk].concat();
-    let second = chunk.to_vec();
+    let mut first = header;
+    first.extend(std::iter::repeat_n(b'x', 200 * 1024));
+    let second = vec![b'x'; 200 * 1024];
     ws.send(Message::Frame(Frame::message(
         first,
         OpCode::Data(Data::Binary),
@@ -913,6 +921,63 @@ async fn fragmented_oversized_exec_input_is_rejected() {
         0,
         "the disconnected terminal must not survive"
     );
+
+    server.shutdown().await.unwrap();
+}
+
+/// A fragmented resize control message under both bounds assembles and is
+/// acknowledged normally.
+#[tokio::test]
+async fn fragmented_resize_control_messages_are_accepted() {
+    let (server, fake) = spawn_server().await;
+    let mut control = connect_control(&server).await;
+    let ticket = issue_ticket(
+        &mut control,
+        "t",
+        &web_target(WEB_CONTAINER),
+        StreamType::Exec,
+        true,
+    )
+    .await;
+
+    let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), EXEC_PATH))
+        .await
+        .unwrap();
+    send_stream_hello(&mut ws, "secret", &ticket).await;
+    assert_eq!(receive_text(&mut ws).await["kind"], json!("ready"));
+    let (_, _) = decode_binary(receive_message(&mut ws).await);
+
+    // Split the tiny resize frame into three fragments.
+    let full = k10s_protocol::encode_stream_payload(
+        k10s_protocol::payload_kind::RESIZE,
+        &k10s_protocol::encode_resize_payload(80, 24),
+    );
+    let mid = full.len() / 2;
+    ws.send(Message::Frame(Frame::message(
+        full[..1].to_vec(),
+        OpCode::Data(Data::Binary),
+        false,
+    )))
+    .await
+    .unwrap();
+    ws.send(Message::Frame(Frame::message(
+        full[1..mid].to_vec(),
+        OpCode::Data(Data::Continue),
+        false,
+    )))
+    .await
+    .unwrap();
+    ws.send(Message::Frame(Frame::message(
+        full[mid..].to_vec(),
+        OpCode::Data(Data::Continue),
+        true,
+    )))
+    .await
+    .unwrap();
+
+    let status = receive_text(&mut ws).await;
+    assert_eq!(status["kind"], json!("status"), "{status:?}");
+    assert_eq!(fake.last_stream_resize(&ticket), Some((80, 24)));
 
     server.shutdown().await.unwrap();
 }

@@ -43,6 +43,13 @@ pub struct LogsTool {
     find: Option<String>,
     truncated_lines: u64,
     dropped_while_paused: u64,
+    /// Absolute number of chunks ever buffered; drives `since`.
+    total_received: u64,
+    /// When set, only chunks buffered at or after this absolute index are
+    /// shown (a deterministic stand-in for a server-side since cursor).
+    since_received: Option<u64>,
+    /// Last rejection reason surfaced by the application layer.
+    last_error: Option<String>,
 }
 
 impl LogsTool {
@@ -60,6 +67,9 @@ impl LogsTool {
             find: None,
             truncated_lines: 0,
             dropped_while_paused: 0,
+            total_received: 0,
+            since_received: None,
+            last_error: None,
         }
     }
 
@@ -87,9 +97,17 @@ impl LogsTool {
         self.follow
     }
 
-    /// Lines retained after the tail bound and pause drops were applied.
+    /// Lines retained after the tail bound, pause drops, and the `since`
+    /// filter were applied.
     pub fn visible_lines(&self) -> impl Iterator<Item = &String> {
-        self.lines.iter()
+        let first_visible = self.since_received.unwrap_or(0);
+        let first_absolute = self.total_received - self.lines.len() as u64;
+        self.lines
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, line)| {
+                (first_absolute + index as u64 >= first_visible).then_some(line)
+            })
     }
 
     /// Total number of oldest lines dropped by the tail bound.
@@ -104,10 +122,41 @@ impl LogsTool {
         self.dropped_while_paused
     }
 
+    /// Whether a `since` filter is active.
+    #[must_use]
+    pub fn since_active(&self) -> bool {
+        self.since_received.is_some()
+    }
+
+    /// Show only what arrives after now (the deterministic since cursor).
+    pub fn set_since_now(&mut self) {
+        self.since_received = Some(self.total_received);
+    }
+
+    /// Show the whole retained buffer again.
+    pub fn clear_since(&mut self) {
+        self.since_received = None;
+    }
+
+    /// Project a ticket/socket rejection into the view.
+    pub fn fail(&mut self, reason: &str) {
+        if self.phase != LogsPhase::Disconnected {
+            self.phase = LogsPhase::Disconnected;
+        }
+        self.last_error = Some(reason.to_owned());
+    }
+
+    /// The last rejection reason, if any.
+    #[must_use]
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
     /// Begin attaching: the application opens the dedicated socket next.
     pub fn connect(&mut self) {
         if self.phase == LogsPhase::Disconnected {
             self.phase = LogsPhase::Connecting;
+            self.last_error = None;
         }
     }
 
@@ -133,6 +182,7 @@ impl LogsTool {
             line = line.chars().take(MAX_LINE_CHARS).collect::<String>() + TRUNCATION_MARKER;
         }
         self.lines.push_back(line);
+        self.total_received += 1;
         while self.lines.len() > self.tail_capacity {
             self.lines.pop_front();
             self.truncated_lines += 1;
@@ -267,6 +317,11 @@ pub(crate) fn show(
     let mut connect_requested = false;
     {
         let view = views.ensure(window_id, target.clone());
+        if let Some(error) = view.last_error() {
+            ui.label(
+                RichText::new(error.to_owned()).color(egui::Color32::from_rgb(0xc0, 0x39, 0x2b)),
+            );
+        }
         ui.horizontal(|ui| {
             match view.phase() {
                 LogsPhase::Disconnected => {
@@ -300,6 +355,18 @@ pub(crate) fn show(
                     if ui.checkbox(&mut { follow }, "Follow").changed() {
                         view.set_follow(!follow);
                     }
+                    let since_label = if view.since_active() {
+                        "Show all"
+                    } else {
+                        "Since now"
+                    };
+                    if ui.button(since_label).clicked() {
+                        if view.since_active() {
+                            view.clear_since();
+                        } else {
+                            view.set_since_now();
+                        }
+                    }
                 }
             }
             let mut find = view.find().unwrap_or_default().to_owned();
@@ -318,14 +385,27 @@ pub(crate) fn show(
         ScrollArea::vertical()
             .id_salt(("logs.stream", window_id.0))
             .show(ui, |ui| {
-                for line in view.visible_lines() {
-                    ui.label(RichText::new(line.as_str()).monospace());
+                // An active Find filters the retained buffer; otherwise the
+                // since/tail-filtered view is shown.
+                if view.find().is_some() {
+                    for line in view.find_matches() {
+                        ui.label(RichText::new(line.as_str()).monospace());
+                    }
+                } else {
+                    for line in view.visible_lines() {
+                        ui.label(RichText::new(line.as_str()).monospace());
+                    }
                 }
                 if view.truncated_lines() > 0 {
                     ui.label(
                         RichText::new(format!("{} older lines truncated", view.truncated_lines()))
                             .weak(),
                     );
+                }
+                // Follow autoscrolls to the newest line; a disengaged
+                // follow leaves the scroll position to the user.
+                if view.follows() && !view.is_paused() {
+                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                 }
             });
     }

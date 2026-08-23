@@ -398,3 +398,23 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
     assert_eq!(decoded.kind, k10s_protocol::payload_kind::STDIN);
     assert_eq!(decoded.data, b"ls\n");
 }
+
+#[test]
+fn since_filters_older_lines_until_cleared() {
+    let mut tool = logs_tool();
+    tool.connect();
+    tool.attach();
+    tool.append("old-1");
+    tool.append("old-2");
+
+    tool.set_since_now();
+    assert!(tool.since_active());
+    tool.append("new-1");
+    let visible: Vec<_> = tool.visible_lines().map(String::as_str).collect();
+    assert_eq!(visible, ["new-1"], "only post-since lines are visible");
+
+    tool.clear_since();
+    assert!(!tool.since_active());
+    let visible: Vec<_> = tool.visible_lines().map(String::as_str).collect();
+    assert_eq!(visible, ["old-1", "old-2", "new-1"]);
+}
