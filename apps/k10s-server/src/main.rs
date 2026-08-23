@@ -3,8 +3,8 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use k10s_backend::{BackendKernel, FakeKubernetes};
-use k10s_server::{ServerConfig, StandaloneConfig};
+use k10s_backend::build_kernel;
+use k10s_server::{ServerConfig, StandaloneConfig, resolve_backend_mode};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -41,9 +41,33 @@ async fn forward_termination_signals(cancel: CancellationToken) {
     cancel.cancel();
 }
 
+/// Parse development CLI flags. `--fake` is the only way to select fake
+/// mode; normal launches default to the real kube-rs adapter.
+fn parse_backend_flags(args: &[String]) -> Result<(bool, Option<PathBuf>), Box<dyn Error>> {
+    let mut fake_requested = false;
+    let mut kubeconfig_path = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--fake" => fake_requested = true,
+            "--kubeconfig" => {
+                let path = iter
+                    .next()
+                    .map(PathBuf::from)
+                    .ok_or("missing value for --kubeconfig")?;
+                kubeconfig_path = Some(path);
+            }
+            other => return Err(format!("unknown argument: {other}").into()),
+        }
+    }
+    Ok((fake_requested, kubeconfig_path))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
+    let args: Vec<String> = env::args().skip(1).collect();
+    let (fake_requested, kubeconfig_path) = parse_backend_flags(&args)?;
     let bind_addr: SocketAddr = env::var("K10S_BIND_ADDR")
         .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned())
         .parse()?;
@@ -62,6 +86,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Security-sensitive validation and asset checks intentionally precede bind.
     let standalone = StandaloneConfig::new(bind_addr, access_token, dist_dir)?;
+
+    // Backend mode is resolved and validated through the same factory the
+    // desktop app uses; a broken kubeconfig fails startup instead of falling
+    // back to fake data.
+    let backend_mode = resolve_backend_mode(fake_requested, kubeconfig_path.as_deref());
+    let kernel = build_kernel(&backend_mode)?;
+
     if !standalone.dist_dir().join("index.html").is_file() {
         return Err("Trunk distribution is missing index.html".into());
     }
@@ -76,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     k10s_server::run_with_assets(
         listener,
         config,
-        BackendKernel::new(FakeKubernetes::standard()),
+        kernel,
         cancel,
         Some(standalone.dist_dir().to_owned()),
     )

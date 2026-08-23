@@ -5,15 +5,20 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use k10s_desktop::{DesktopApp, launch_embedded_server};
+use k10s_backend::BackendMode;
+use k10s_desktop::{DesktopApp, launch_embedded_server_with_mode};
 use k10s_protocol::CONTROL_PATH;
 use k10s_ui::client::ConnectTarget;
 use k10s_ui::{AppView, K10sApp};
 
 #[test]
 fn launches_on_random_loopback_with_a_fresh_csprng_token() {
-    let mut first = launch_embedded_server().expect("first embedded server must become ready");
-    let mut second = launch_embedded_server().expect("second embedded server must become ready");
+    // Explicit fake mode: normal launches now default to the real Kube
+    // adapter, so lifecycle tests opt into the offline dataset themselves.
+    let mut first = launch_embedded_server_with_mode(&BackendMode::Fake)
+        .expect("first embedded server must become ready");
+    let mut second = launch_embedded_server_with_mode(&BackendMode::Fake)
+        .expect("second embedded server must become ready");
 
     assert_eq!(first.local_addr().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert_eq!(second.local_addr().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -46,7 +51,8 @@ fn launches_on_random_loopback_with_a_fresh_csprng_token() {
 
 #[test]
 fn app_bootstraps_over_the_exact_control_websocket() {
-    let mut server = launch_embedded_server().expect("embedded server must become ready");
+    let mut server = launch_embedded_server_with_mode(&BackendMode::Fake)
+        .expect("embedded server must become ready");
     let target = ConnectTarget::new(server.control_url(), server.access_token());
     let mut app = K10sApp::connect(target).expect("shared websocket transport must start");
 
@@ -83,7 +89,8 @@ fn app_bootstraps_over_the_exact_control_websocket() {
 
 #[test]
 fn shutdown_joins_the_runtime_thread_and_closes_the_listener() {
-    let mut server = launch_embedded_server().expect("embedded server must become ready");
+    let mut server = launch_embedded_server_with_mode(&BackendMode::Fake)
+        .expect("embedded server must become ready");
     let addr = server.local_addr();
     assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok());
 
@@ -106,7 +113,8 @@ fn shutdown_joins_the_runtime_thread_and_closes_the_listener() {
 
 #[test]
 fn shutdown_is_bounded_with_an_authenticated_connection() {
-    let mut server = launch_embedded_server().expect("embedded server must become ready");
+    let mut server = launch_embedded_server_with_mode(&BackendMode::Fake)
+        .expect("embedded server must become ready");
     let target = ConnectTarget::new(server.control_url(), server.access_token());
     let mut app = K10sApp::connect(target).expect("shared websocket transport must start");
     let bootstrap_deadline = Instant::now() + Duration::from_secs(3);
@@ -127,7 +135,10 @@ fn shutdown_is_bounded_with_an_authenticated_connection() {
 fn many_consecutive_launches_have_unique_ports_and_tokens() {
     let mut servers = Vec::new();
     for _ in 0..8 {
-        servers.push(launch_embedded_server().expect("embedded server must become ready"));
+        servers.push(
+            launch_embedded_server_with_mode(&BackendMode::Fake)
+                .expect("embedded server must become ready"),
+        );
     }
 
     let ports: HashSet<_> = servers
@@ -145,7 +156,10 @@ fn many_consecutive_launches_have_unique_ports_and_tokens() {
 
 #[test]
 fn desktop_window_owner_shuts_down_server_on_exit() {
-    let desktop = DesktopApp::launch().expect("desktop owner must launch after server readiness");
+    // Explicit fake mode: this test verifies drop-driven shutdown, not
+    // kubeconfig discovery.
+    let desktop = DesktopApp::launch_with_mode(&BackendMode::Fake)
+        .expect("desktop owner must launch after server readiness");
     let addr = desktop.local_addr();
     assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok());
 

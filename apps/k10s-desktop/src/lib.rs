@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use k10s_backend::{BackendKernel, FakeKubernetes};
+use k10s_backend::{AdapterError, BackendMode, build_kernel};
 use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
@@ -32,6 +32,9 @@ pub enum EmbeddedServerError {
     ThreadPanicked,
     /// Shutdown was already completed.
     AlreadyShutdown,
+    /// The backend factory rejected the selected adapter mode at startup;
+    /// no implicit fake fallback may replace it.
+    Backend(AdapterError),
 }
 
 impl std::fmt::Display for EmbeddedServerError {
@@ -45,6 +48,7 @@ impl std::fmt::Display for EmbeddedServerError {
             }
             Self::ThreadPanicked => formatter.write_str("embedded server thread panicked"),
             Self::AlreadyShutdown => formatter.write_str("embedded server is already shut down"),
+            Self::Backend(error) => write!(formatter, "backend selection failed: {error}"),
         }
     }
 }
@@ -54,6 +58,7 @@ impl std::error::Error for EmbeddedServerError {
         match self {
             Self::Io(error) => Some(error),
             Self::Randomness(error) => Some(error),
+            Self::Backend(error) => Some(error),
             _ => None,
         }
     }
@@ -144,9 +149,16 @@ impl std::fmt::Debug for DesktopApp {
 }
 
 impl DesktopApp {
-    /// Launch the server to readiness before constructing the protocol UI.
+    /// Normal desktop launch: real `Kube` adapter through standard kubeconfig
+    /// discovery. Fake mode is never implicit on this production path.
     pub fn launch() -> Result<Self, DesktopLaunchError> {
-        let server = launch_embedded_server()?;
+        Self::launch_with_mode(&BackendMode::Kube { kubeconfig: None })
+    }
+
+    /// Launch with an explicitly selected backend mode through the shared
+    /// runtime factory (tests and explicit development opt-in).
+    pub fn launch_with_mode(mode: &BackendMode) -> Result<Self, DesktopLaunchError> {
+        let server = launch_embedded_server_with_mode(mode)?;
         let target = ConnectTarget::new(server.control_url(), server.access_token());
         let app = K10sApp::connect(target)?;
         Ok(Self {
@@ -230,13 +242,25 @@ impl From<TransportError> for DesktopLaunchError {
     }
 }
 
-/// Start the fake-backed server on a dedicated OS thread and wait for readiness.
+/// Start the normal-launch server on a dedicated OS thread and wait for
+/// readiness. Normal launches use the real `Kube` adapter with standard
+/// kubeconfig discovery; they fail cleanly when none is configured.
 pub fn launch_embedded_server() -> Result<EmbeddedServerHandle, EmbeddedServerError> {
-    launch_embedded_server_on(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    launch_embedded_server_with_mode(&BackendMode::Kube { kubeconfig: None })
+}
+
+/// Start the embedded server with an explicitly selected backend mode through
+/// the shared runtime factory and wait for readiness. Fake mode is only ever
+/// reached this way (tests and explicit development opt-in), never implicitly.
+pub fn launch_embedded_server_with_mode(
+    mode: &BackendMode,
+) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
+    launch_embedded_server_on(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), mode)
 }
 
 fn launch_embedded_server_on(
     bind_addr: SocketAddr,
+    mode: &BackendMode,
 ) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
     let mut token_bytes = [0_u8; 32];
     getrandom::fill(&mut token_bytes).map_err(EmbeddedServerError::Randomness)?;
@@ -244,11 +268,23 @@ fn launch_embedded_server_on(
     let cancel = CancellationToken::new();
     let thread_cancel = cancel.clone();
     let thread_token = access_token.clone();
-    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let (ready_sender, ready_receiver) =
+        mpsc::sync_channel::<Result<SocketAddr, EmbeddedServerError>>(1);
+    let mode = mode.clone();
 
     let thread = thread::Builder::new()
         .name("k10s-embedded-server".to_owned())
         .spawn(move || {
+            // Build the kernel through the shared factory before readiness is
+            // reported: a broken kubeconfig must fail the launch, never fall
+            // back to fake data.
+            let kernel = match build_kernel(&mode) {
+                Ok(kernel) => kernel,
+                Err(error) => {
+                    let _ = ready_sender.send(Err(EmbeddedServerError::Backend(error)));
+                    return Ok(());
+                }
+            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -256,7 +292,7 @@ fn launch_embedded_server_on(
                 Ok(runtime) => runtime,
                 Err(error) => {
                     let startup_error = io::Error::new(error.kind(), error.to_string());
-                    let _ = ready_sender.send(Err(startup_error));
+                    let _ = ready_sender.send(Err(EmbeddedServerError::Io(startup_error)));
                     return Err(error);
                 }
             };
@@ -265,7 +301,7 @@ fn launch_embedded_server_on(
                     Ok(listener) => listener,
                     Err(error) => {
                         let startup_error = io::Error::new(error.kind(), error.to_string());
-                        let _ = ready_sender.send(Err(startup_error));
+                        let _ = ready_sender.send(Err(EmbeddedServerError::Io(startup_error)));
                         return Err(error);
                     }
                 };
@@ -277,21 +313,17 @@ fn launch_embedded_server_on(
                     access_token: thread_token,
                     ..ServerConfig::default()
                 };
-                k10s_server::run(
-                    listener,
-                    config,
-                    BackendKernel::new(FakeKubernetes::standard()),
-                    thread_cancel,
-                )
-                .await
+                k10s_server::run(listener, config, kernel, thread_cancel).await
             })
         })?;
 
     let addr = match ready_receiver.recv_timeout(STARTUP_TIMEOUT) {
         Ok(Ok(addr)) => addr,
         Ok(Err(error)) => {
+            // Typed startup failures (I/O or backend selection) flow through
+            // as-is; there is no implicit fake fallback.
             let _ = thread.join();
-            return Err(EmbeddedServerError::Io(error));
+            return Err(error);
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             cancel.cancel();
@@ -317,14 +349,17 @@ fn launch_embedded_server_on(
 mod tests {
     use std::net::{Ipv4Addr, TcpListener};
 
+    use k10s_backend::BackendMode;
+
     use super::{EmbeddedServerError, launch_embedded_server_on};
 
     #[test]
     fn listener_startup_error_is_delivered_to_the_launcher() {
         let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = occupied.local_addr().unwrap();
-
-        let error = launch_embedded_server_on(addr).unwrap_err();
+        // Explicit fake mode keeps this transport-focused test independent of
+        // any kubeconfig present on the host.
+        let error = launch_embedded_server_on(addr, &BackendMode::Fake).unwrap_err();
 
         assert!(matches!(error, EmbeddedServerError::Io(_)));
     }
