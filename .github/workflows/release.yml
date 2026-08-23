@@ -84,10 +84,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain-file: rust-toolchain.toml
-          targets: ${{ matrix.target }}
+      # The repository pins Rust via rust-toolchain.toml. Install the pinned
+      # channel explicitly and add the matrix target to THAT channel —
+      # dtolnay/rust-toolchain has no toolchain-file input and would install
+      # the target for stable instead, so the pinned 1.97.1 cross-builds
+      # would fail with "target not installed".
+      - name: Install pinned Rust toolchain and matrix target
+        run: |
+          CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "${CHANNEL}" --profile minimal --no-self-update
+          rustup target add "${{ matrix.target }}" --toolchain "${CHANNEL}"
+          rustup default "${CHANNEL}"
+
+      - name: Verify toolchain and matrix target
+        run: |
+          rustc --version
+          rustup target list --installed | grep -Fx "${{ matrix.target }}"
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
