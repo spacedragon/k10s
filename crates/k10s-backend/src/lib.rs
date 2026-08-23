@@ -15,6 +15,6 @@ pub use fake::{FakeKubernetes, FakeMetricsScenario};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
 pub use port::{
     BackendError, BackendEvent, Command, Gvk, KubernetesAccess, MetricsSample, OperationId,
-    OwnerRef, Query, QueryResult, ResourceListData, ResourceRecord, ResourceRef, StreamKind,
-    Subscribe, SubscriptionHandle,
+    OwnerRef, Query, QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,
+    ResourceRecord, ResourceRef, StreamKind, Subscribe, SubscriptionHandle,
 };

@@ -36,11 +36,11 @@ pub use metrics::{
     MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use resource::{
-    AttentionRow, BackendRevision, DetailRow, DetailSection, GroupVersionKind, HealthLevel,
-    NodeRow, OwnerReference, PersistentVolumeClaimRow, PersistentVolumeRow, ResourceCapabilities,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResourceRefRequest, ResourceScope, StorageClassRow, StorageInventory,
-    WorkloadHealth, WorkloadKind,
+    AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,
+    HealthLevel, NodeRow, OwnerReference, PersistentVolumeClaimRow, PersistentVolumeRow,
+    RelatedGroup, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
+    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceRefRequest, ResourceScope,
+    StorageClassRow, StorageInventory, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use subscription::{

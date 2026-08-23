@@ -21,6 +21,9 @@ const COLUMNS: [(&str, &str); 4] = [
 pub(super) struct TableActions<I> {
     /// A row was clicked; carries the mapped window identity.
     pub selected: Option<I>,
+    /// A row was double-clicked or popped out via its context menu; the
+    /// identity is cloned for a dedicated pinned detail window.
+    pub popped_out: Option<I>,
     /// A sort header was clicked; carries the next sort spec.
     pub sort: Option<SortSpec>,
     /// The clear-filters button was clicked.
@@ -31,6 +34,7 @@ impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
             selected: None,
+            popped_out: None,
             sort: None,
             cleared: false,
         }
@@ -142,6 +146,15 @@ where
                         if name_button.clicked() {
                             actions.selected = Some(identity_of(row));
                         }
+                        if name_button.double_clicked() {
+                            actions.popped_out = Some(identity_of(row));
+                        }
+                        name_button.context_menu(|ui| {
+                            if ui.button("Open dedicated window").clicked() {
+                                actions.popped_out = Some(identity_of(row));
+                                ui.close();
+                            }
+                        });
                         ui.label(row.summary.clone());
                         ui.monospace(row.created_at.clone());
                         ui.end_row();

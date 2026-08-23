@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, Query, QueryResult, ResourceRecord, ResourceRef, Subscribe, SubscriptionHandle,
+    OperationId, Query, QueryResult, RelatedData, ResourceRecord, ResourceRef, Subscribe,
+    SubscriptionHandle,
 };
 
 /// The backend kernel.
@@ -78,6 +79,10 @@ impl BackendKernel {
             Query::ResourceMetrics { reference } => Some(reference.clone()),
             _ => None,
         };
+        let detail_reference = match &req {
+            Query::ResourceDetail { reference } => Some(reference.clone()),
+            _ => None,
+        };
         let fut = self.adapter.query(req);
         let result = match deadline {
             Some(d) => tokio::time::timeout(d, fut)
@@ -94,7 +99,15 @@ impl BackendKernel {
                 KernelQueryResult::ResourceList(ResourceListResult::new(data))
             }
             QueryResult::ResourceDetail(record) => {
-                KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record))
+                // Owner traversal belongs to the kernel: detail responses
+                // always carry the backend-resolved related rows, so no
+                // caller can forget them. Adapters without traversal keep a
+                // detail-only response.
+                let related = match detail_reference {
+                    Some(reference) => self.adapter_relations(reference).await,
+                    None => RelatedData::empty(record.reference.clone()),
+                };
+                KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record, related))
             }
             QueryResult::ResourceMetrics(sample) => {
                 KernelQueryResult::ResourceMetrics(ResourceMetricsResult::new(
@@ -110,7 +123,31 @@ impl BackendKernel {
             QueryResult::Infrastructure(snapshot) => {
                 KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
             }
+            QueryResult::ResourceRelations(_) => {
+                // Relations are an internal composition of resource.detail
+                // and are never exposed as a standalone kernel result.
+                return Err(BackendError::unsupported("resource.relations"));
+            }
         })
+    }
+
+    /// Resolve the related rows of one resource through the adapter.
+    ///
+    /// Adapters that do not implement traversal yield empty related data
+    /// instead of failing the detail query.
+    async fn adapter_relations(&self, reference: ResourceRef) -> RelatedData {
+        match self
+            .adapter
+            .query(Query::ResourceRelations {
+                reference: reference.clone(),
+            })
+            .await
+        {
+            Ok(QueryResult::ResourceRelations(data)) => data,
+            // Unsupported adapters and vanished objects keep the detail
+            // response usable; only the related tabs stay empty.
+            Ok(_) | Err(_) => RelatedData::empty(reference),
+        }
     }
 
     /// Execute a behavior-level command (mutation).
@@ -350,10 +387,10 @@ pub struct ResourceDetailResult {
 }
 
 impl ResourceDetailResult {
-    /// Map a backend record into detail sections, owner references, and
-    /// capabilities.
+    /// Map a backend record into detail sections, owner references, resolved
+    /// related rows, deterministic events, and capabilities.
     #[must_use]
-    pub fn new(record: ResourceRecord) -> Self {
+    pub fn new(record: ResourceRecord, related: RelatedData) -> Self {
         let identity = map_identity(&record.reference);
         let mut sections = vec![DetailSection {
             title: "Overview".into(),
@@ -437,6 +474,25 @@ impl ResourceDetailResult {
                     })
                     .collect(),
                 sections,
+                events: record
+                    .events
+                    .iter()
+                    .map(|event| k10s_protocol::EventRow {
+                        reason: event.reason.clone(),
+                        message: event.message.clone(),
+                        count: event.count,
+                        last_seen: event.last_seen.clone(),
+                    })
+                    .collect(),
+                related: related
+                    .groups
+                    .iter()
+                    .map(|group| k10s_protocol::RelatedGroup {
+                        title: related_group_title(&group.gvk),
+                        gvk: map_gvk(&group.gvk),
+                        rows: group.records.iter().map(map_row).collect(),
+                    })
+                    .collect(),
                 capabilities,
                 identity,
             },
@@ -572,6 +628,12 @@ pub fn map_gvk(gvk: &Gvk) -> GroupVersionKind {
         version: gvk.version.clone(),
         kind: gvk.kind.clone(),
     }
+}
+
+/// Human title of one related group, pluralizing the kind deterministically.
+#[must_use]
+fn related_group_title(gvk: &Gvk) -> String {
+    format!("{}s", gvk.kind)
 }
 
 /// Map a backend resource reference into a protocol identity.

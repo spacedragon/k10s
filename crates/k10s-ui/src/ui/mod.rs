@@ -1,5 +1,6 @@
 //! The fixed application shell rendered around the command-driven workspace.
 
+mod detail;
 mod infrastructure;
 mod launcher;
 mod overview;

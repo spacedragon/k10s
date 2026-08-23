@@ -499,9 +499,11 @@ fn detail_pane_selection_hide_restore_respects_split_minima() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("Details");
-    window.get_by_label("Name db-postgres-0");
     window.get_by_label("Kind Pod");
-    window.get_by_label("Status Running");
+    window.get_by_label("Namespace default");
+    // Without a resolved backend response the pane keeps its pinned
+    // identity header and shows a loading state.
+    window.get_by_label("Loading details");
 
     // Extreme split ratios clamp to the pane minima instead of collapsing.
     harness
@@ -536,7 +538,7 @@ fn detail_pane_selection_hide_restore_respects_split_minima() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("Details");
-    window.get_by_label("Name db-postgres-0");
+    window.get_by_label("Kind Pod");
 
     window
         .get_by_role_and_label(Role::Button, "Clear selection")
@@ -570,7 +572,7 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         .type_text("web");
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("web-frontend");
+    window.get_by_role_and_label(Role::Button, "web-frontend");
     assert!(window.query_by_label("api-server").is_none());
 
     // A fresh snapshot replaces every row; the local filter and selection
@@ -610,13 +612,13 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("web-frontend");
+    window.get_by_role_and_label(Role::Button, "web-frontend");
     assert!(
         window.query_by_label("api-server").is_none(),
         "the resynced snapshot must honor the surviving filter"
     );
     assert!(window.query_by_label("checkout").is_none());
-    window.get_by_label("Status 18/18 ready");
+    window.get_by_label("18/18 ready");
 
     // Clearing the filter reveals the rest of the resynced snapshot.
     window
