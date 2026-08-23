@@ -20,6 +20,7 @@ pub(super) fn show_canvas<I>(
     resources: &mut resource_window::ResourceUiState,
     yaml: &mut super::tools::YamlEditors,
     streams: &mut super::tools::StreamStores,
+    dialogs: &mut super::dialogs::OperationDialogs,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     feed: &resource_window::ResourceFeed,
     connection: ConnectionState,
@@ -50,6 +51,7 @@ where
             resources,
             yaml,
             streams,
+            dialogs,
             feed,
             response,
             connection,
@@ -83,6 +85,7 @@ fn show_window<I>(
     resources: &mut resource_window::ResourceUiState,
     yaml: &mut super::tools::YamlEditors,
     streams: &mut super::tools::StreamStores,
+    dialogs: &mut super::dialogs::OperationDialogs,
     feed: &resource_window::ResourceFeed,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     connection: ConnectionState,
@@ -127,8 +130,8 @@ where
                 (resource_state.as_mut(), state.kind)
             {
                 super::resource_window::show(
-                    ui, resources, state.id, kind, resource, yaml, streams, feed, connection,
-                    queued,
+                    ui, resources, state.id, kind, resource, yaml, streams, dialogs, feed,
+                    connection, queued,
                 );
                 false
             } else {
@@ -159,7 +162,9 @@ where
                                 .identity
                                 .as_row_identity()
                                 .and_then(|identity| feed.details.get(identity));
-                            super::detail::show(ui, state.id, detail, view, yaml, streams, queued);
+                            super::detail::show(
+                                ui, state.id, detail, view, yaml, streams, dialogs, queued,
+                            );
                         }
                         false
                     }

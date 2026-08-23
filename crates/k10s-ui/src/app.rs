@@ -6,18 +6,21 @@ use std::collections::BTreeMap;
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
-    ClientFrame, InfrastructureRequest, ResourceIdentity, ServerFrame, StreamTarget,
+    ClientFrame, InfrastructureRequest, RequestId, ResourceDetailResponse, ResourceIdentity,
+    ResourceTypeEntry, ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
-    BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget,
+    BoundedInbox, ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget,
     LiveSubscription, PendingRequest, Query, QueryResult, StreamRoute, StreamSession, StreamSignal,
     TransportError, WebSocketTransport,
 };
+use crate::ui::ResourceFeed;
 use crate::ui::RowIdentity;
+use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
-use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
+use crate::workspace::{WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -95,7 +98,24 @@ pub struct K10sApp {
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
-    pending_stream_tickets: BTreeMap<k10s_protocol::RequestId, PendingStreamTicket>,
+    pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
+    /// Live per-kind resource watch subscriptions and the context they
+    /// were created against; rebuilt automatically on reconnect by the
+    /// shared client's desired-subscription recovery.
+    resource_subscriptions: BTreeMap<WorkloadKind, (String, LiveSubscription)>,
+    /// Selectable resource types of the subscribed context (GVK picker).
+    resource_types: Vec<ResourceTypeEntry>,
+    /// The context whose types are cached or being fetched.
+    types_context: Option<String>,
+    /// In-flight `resource.types` request and the context it was issued for.
+    types_request: Option<(String, PendingRequest)>,
+    /// In-flight workload mutations awaiting their accepted operation.
+    pending_mutations: BTreeMap<RequestId, PendingMutation>,
+    /// Backend-resolved details for every identity a window pinned, keyed by
+    /// stable identity; rebuilt from `operation.status`-style queries.
+    details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
+    /// In-flight detail requests per identity.
+    detail_requests: BTreeMap<ResourceIdentity, PendingRequest>,
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
@@ -108,6 +128,13 @@ pub struct K10sApp {
 struct PendingStreamTicket {
     request: PendingRequest,
     route: StreamRoute,
+    window: WindowId,
+}
+
+/// A window's in-flight workload mutation (scale or delete).
+#[derive(Debug)]
+struct PendingMutation {
+    request: PendingRequest,
     window: WindowId,
 }
 
@@ -167,6 +194,13 @@ impl K10sApp {
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
+            resource_subscriptions: BTreeMap::new(),
+            resource_types: Vec::new(),
+            types_context: None,
+            types_request: None,
+            pending_mutations: BTreeMap::new(),
+            details: BTreeMap::new(),
+            detail_requests: BTreeMap::new(),
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
@@ -215,6 +249,7 @@ impl K10sApp {
         }
         self.reconnect_if_due(now_ms, entropy);
         self.poll_stream_sessions();
+        self.finish_mutations();
     }
 
     /// Current user-visible state.
@@ -243,12 +278,14 @@ impl K10sApp {
             .as_deref()
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
-        let refresh = self.shell.show_with_infrastructure(
+        let feed = self.build_resource_feed();
+        let refresh = self.shell.show_with_resources(
             ui,
             connection,
             contexts,
             &mut self.client.local_ui_mut().selected_context,
             response.as_ref(),
+            &feed,
         );
         let selected_after = self.client.local_ui().selected_context.clone();
         let retry_requested = refresh && connection != ShellConnectionState::Connected;
@@ -260,6 +297,7 @@ impl K10sApp {
             self.retry_now(now_ms, entropy)
         } else if selected_after != selected_before {
             selected_after.as_deref().map_or(Ok(()), |context| {
+                self.ensure_resource_streams(context)?;
                 self.select_infrastructure_context(context)
             })
         } else if refresh {
@@ -279,6 +317,10 @@ impl K10sApp {
         };
         let request_result = request_result.and_then(|()| {
             self.process_stream_requests()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+        });
+        let request_result = request_result.and_then(|()| {
+            self.process_dialog_actions()
                 .map_err(|error| ClientError::Protocol(format!("{error:?}")))
         });
         if let Err(error) = request_result {
@@ -332,6 +374,43 @@ impl K10sApp {
                         ClientError::SequenceGap { .. } => {
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
+                        }
+                        // A request-scoped mutation denial is projected into
+                        // the originating dialog for a corrected retry; it
+                        // never kills the control connection.
+                        ClientError::Server(ref server_error)
+                            if stream_request_id
+                                .as_ref()
+                                .is_some_and(|id| self.pending_mutations.contains_key(id)) =>
+                        {
+                            if let Some(entry) = stream_request_id
+                                .as_ref()
+                                .and_then(|id| self.pending_mutations.remove(id))
+                                && let Some(mut dialog) =
+                                    self.shell.dialogs_mut().active_mut(entry.window)
+                            {
+                                dialog.operation_failed(server_error.safe_message.clone());
+                            }
+                        }
+                        // A vanished object's detail query is dropped
+                        // quietly: the pinned window keeps rendering its
+                        // loading state until a newer selection arrives.
+                        ClientError::Server(_)
+                            if stream_request_id.as_ref().is_some_and(|id| {
+                                self.detail_requests
+                                    .values()
+                                    .any(|request| request.id() == id)
+                            }) =>
+                        {
+                            if let Some(id) = stream_request_id.as_ref()
+                                && let Some(identity) = self
+                                    .detail_requests
+                                    .iter()
+                                    .find(|(_, request)| request.id() == id)
+                                    .map(|(identity, _)| identity.clone())
+                            {
+                                self.detail_requests.remove(&identity);
+                            }
                         }
                         // A request-scoped stream-ticket denial is projected
                         // into the requesting tool; it never kills the
@@ -420,6 +499,11 @@ impl K10sApp {
                     };
                     self.recovering = false;
                     if let Some(context) = selected {
+                        // The bootstrap answer already wrote the selection,
+                        // so the render-time context-change path would skip
+                        // it: reconcile the resource streams here.
+                        self.ensure_resource_streams(&context)
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.select_infrastructure_context(&context)
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                     }
@@ -513,8 +597,224 @@ impl K10sApp {
         self.bootstrap = None;
         self.infrastructure_request = None;
         self.teardown_stream_sessions();
+        // Server-issued details are stale after recovery and every in-flight
+        // mutation lost its response channel: dialogs reopen for a safe
+        // retry (the backend deduplicates by idempotency key).
+        self.details.clear();
+        self.detail_requests.clear();
+        let mut failed_windows: Vec<WindowId> = Vec::new();
+        for (_, entry) in std::mem::take(&mut self.pending_mutations) {
+            failed_windows.push(entry.window);
+        }
+        for window in failed_windows {
+            if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
+                dialog.operation_failed("connection lost; submit again");
+            }
+        }
         self.recovering = true;
         self.view = AppView::Connecting;
+    }
+
+    /// Assemble the connected resource projection for one rendered frame:
+    /// applied per-kind list views, selectable types, and resolved details.
+    fn build_resource_feed(&self) -> ResourceFeed {
+        let mut lists = std::collections::HashMap::new();
+        for (kind, (_, subscription)) in &self.resource_subscriptions {
+            if let Some(state) = self.client.resource_list(subscription.id()) {
+                lists.insert(*kind, state.rows().cloned().collect());
+            }
+        }
+        ResourceFeed {
+            lists,
+            types: self.resource_types.clone(),
+            details: self.details.clone().into_iter().collect(),
+        }
+    }
+
+    /// Keep one live resource watch per built-in workload kind on the
+    /// selected context, plus a cached `resource.types` answer for the GVK
+    /// picker. The shared client resubscribes the desired set after every
+    /// reconnect, so this only reconciles context switches.
+    fn ensure_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
+        let same_context = self
+            .resource_subscriptions
+            .values()
+            .all(|(subscribed, _)| subscribed == context)
+            && !self.resource_subscriptions.is_empty();
+        if !same_context {
+            let old: Vec<(WorkloadKind, (String, LiveSubscription))> =
+                std::mem::take(&mut self.resource_subscriptions)
+                    .into_iter()
+                    .collect();
+            for (_, (_, subscription)) in old {
+                self.client.unsubscribe(&subscription)?;
+            }
+            for kind in WorkloadKind::ALL {
+                if let Some((group, version, k)) = builtin_kind_gvk(kind) {
+                    let subscription = self
+                        .client
+                        .subscribe_resource(context, group, version, k, None)?;
+                    self.resource_subscriptions
+                        .insert(kind, (context.to_owned(), subscription));
+                }
+            }
+        }
+        match &self.types_request {
+            Some((requested, _)) if requested == context => {}
+            _ => {
+                // A stale cache or a mismatched in-flight request must never
+                // populate the new context's picker: cancel the old one and
+                // start fresh.
+                if let Some((requested, request)) = self.types_request.take()
+                    && requested != context
+                {
+                    let _ = self.client.cancel(&request);
+                }
+                self.resource_types.clear();
+                self.types_context = Some(context.to_owned());
+                let request = self
+                    .client
+                    .begin(Query::ResourceTypes(ResourceTypesRequest {
+                        context: context.to_owned(),
+                    }))?;
+                self.types_request = Some((context.to_owned(), request));
+                self.flush_outbound()
+                    .map_err(|error| ClientError::Protocol(format!("{error:?}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Complete the in-flight `resource.types` request.
+    fn finish_type_requests(&mut self) {
+        let Some((_, request)) = &self.types_request else {
+            return;
+        };
+        if self.client.is_pending(request) {
+            return;
+        }
+        let Some((requested, request)) = self.types_request.take() else {
+            unreachable!("just checked");
+        };
+        if let Some(QueryResult::ResourceTypes(response)) = self.client.take(request)
+            && self.types_context.as_deref() == Some(requested.as_str())
+        {
+            self.resource_types = response.types;
+        } else {
+            // The answer no longer matches the selection: force a refetch on
+            // the next reconciliation.
+            self.types_context = None;
+        }
+    }
+
+    /// Drain rendering-time dialog actions into workload mutation commands.
+    fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
+        for (window, action) in self.shell.drain_dialog_actions() {
+            let command = match action {
+                DialogAction::SubmitScale {
+                    target,
+                    replicas,
+                    idempotency_key,
+                } => Command::Scale {
+                    target,
+                    replicas,
+                    idempotency_key,
+                },
+                DialogAction::SubmitDelete {
+                    target,
+                    propagation,
+                    idempotency_key,
+                } => Command::Delete {
+                    target,
+                    propagation,
+                    idempotency_key,
+                },
+            };
+            let request = self.client.begin_command(command)?;
+            self.pending_mutations
+                .insert(request.id().clone(), PendingMutation { request, window });
+        }
+        self.flush_outbound()
+            .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+    }
+
+    /// Complete in-flight mutations by reporting the accepted operation (or
+    /// a lost-response failure) back to the originating dialog.
+    fn finish_mutations(&mut self) {
+        while let Some(id) = self
+            .pending_mutations
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let Some(entry) = self.pending_mutations.remove(&id) else {
+                unreachable!("key came from this map");
+            };
+            let outcome = match self.client.take(entry.request) {
+                Some(QueryResult::Applied(accepted)) => Ok(accepted.operation_id),
+                _ => Err("submission lost; submit again"),
+            };
+            if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(entry.window) {
+                match outcome {
+                    Ok(operation_id) => dialog.operation_accepted(operation_id),
+                    Err(reason) => dialog.operation_failed(reason),
+                }
+            }
+        }
+        self.finish_type_requests();
+        self.refresh_details();
+    }
+
+    /// Issue detail queries for every identity a window pinned so the
+    /// rendered feed carries backend-resolved views. Identities already
+    /// resolved keep their cached response until transport loss.
+    fn refresh_details(&mut self) {
+        let mut desired: Vec<ResourceIdentity> = Vec::new();
+        for window in self.shell.workspace().windows() {
+            let identity = match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.identity.as_row_identity()),
+            };
+            if let Some(identity) = identity
+                && !self.details.contains_key(identity)
+                && !desired.iter().any(|known| known == identity)
+            {
+                desired.push(identity.clone());
+            }
+        }
+        for identity in desired {
+            if self.detail_requests.contains_key(&identity) {
+                continue;
+            }
+            match self.client.begin(Query::ResourceDetail(identity.clone())) {
+                Ok(request) => {
+                    self.detail_requests.insert(identity, request);
+                }
+                Err(_) => return,
+            }
+        }
+        // Collect completed detail responses.
+        let completed: Vec<ResourceIdentity> = self
+            .detail_requests
+            .iter()
+            .filter(|(_, request)| !self.client.is_pending(request))
+            .map(|(identity, _)| identity.clone())
+            .collect();
+        for identity in completed {
+            if let Some(request) = self.detail_requests.remove(&identity)
+                && let Some(QueryResult::ResourceDetail(response)) = self.client.take(request)
+            {
+                self.details.insert(identity, *response);
+            }
+        }
+        self.flush_outbound()
+            .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+            .ok();
     }
 
     fn reconnect_if_due(&mut self, now_ms: u64, entropy: u64) {
@@ -899,6 +1199,20 @@ impl K10sApp {
     }
 }
 
+/// The wire identity of each built-in workload kind. Custom resources are
+/// picker-driven and have no single GVK.
+fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        WorkloadKind::Deployments => Some(("apps", "v1", "Deployment")),
+        WorkloadKind::StatefulSets => Some(("apps", "v1", "StatefulSet")),
+        WorkloadKind::DaemonSets => Some(("apps", "v1", "DaemonSet")),
+        WorkloadKind::Jobs => Some(("batch", "v1", "Job")),
+        WorkloadKind::CronJobs => Some(("batch", "v1", "CronJob")),
+        WorkloadKind::Pods => Some(("", "v1", "Pod")),
+        WorkloadKind::CustomResources => None,
+    }
+}
+
 /// Recover the protocol identity behind a workspace row identity.
 fn k10s_ui_row_identity(identity: &ResourceIdentity) -> Option<&ResourceIdentity> {
     RowIdentity::as_row_identity(identity)
@@ -1182,8 +1496,8 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get"],
-            "recovery loads bootstrap then exactly one infrastructure snapshot"
+            ["bootstrap", "resource.types", "infrastructure.get"],
+            "recovery loads bootstrap, per-kind streams/types, and one infrastructure snapshot"
         );
         assert_eq!(app.client.outbound_len(), 0);
     }
@@ -1220,7 +1534,7 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get"],
+            ["bootstrap", "resource.types", "infrastructure.get"],
             "subscription acknowledgement must not re-bootstrap or restart the snapshot"
         );
     }
@@ -1261,7 +1575,12 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "infrastructure.get", "bootstrap"],
+            [
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get",
+                "bootstrap"
+            ],
             "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
         );
         assert_eq!(app.client.outbound_len(), 0);

@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use k10s_protocol::{
-    Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind, ErrorCode,
-    ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
-    InfrastructureResponse, InfrastructureWatchSpec, OperationAccepted, PROTOCOL_MAJOR,
-    PROTOCOL_MINOR, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
+    Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind,
+    DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, Hello,
+    INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest, InfrastructureResponse,
+    InfrastructureWatchSpec, OperationAccepted, OperationId, OperationProgress, OperationStatus,
+    OperationStatusRequest, OperationStatusResponse, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
+    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
+    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
+    ScaleRequest, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
     StreamTicketRequest, StreamTicketResponse, StreamType, Subscribe, SubscriptionId,
     SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
@@ -206,9 +208,19 @@ pub enum Query {
         /// Exec mode: interactive TTY shell vs separated stdout/stderr.
         tty: bool,
     },
+    /// Look up the current state of specific operations by ID. Used after
+    /// reconnects to refresh every nonterminal operation before allowing
+    /// any retry; IDs absent from the answer become [`OperationStatus::
+    /// Unknown`].
+    OperationStatus(Vec<OperationId>),
 }
 
 /// Command behaviors: mutations that return an `OperationId`.
+///
+/// Every command carries an idempotency key. Replaying a key whose
+/// operation was already accepted returns the original [`OperationId`]
+/// instead of executing again, so a retry after a lost response can never
+/// duplicate a mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Apply a previously validated YAML buffer through its ticket.
@@ -218,7 +230,78 @@ pub enum Command {
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
+    /// Scale one exact workload object.
+    Scale {
+        /// Exact target identity including its immutable UID.
+        target: ResourceIdentity,
+        /// Desired replica count.
+        replicas: u32,
+        /// Idempotency key for safe retries.
+        idempotency_key: String,
+    },
+    /// Delete one exact object with an explicit propagation mode.
+    Delete {
+        /// Exact target identity including its immutable UID.
+        target: ResourceIdentity,
+        /// How dependents are handled.
+        propagation: DeletePropagation,
+        /// Idempotency key for safe retries.
+        idempotency_key: String,
+    },
 }
+
+/// Whether an idempotency key may be reused for a new submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryEligibility {
+    /// No accepted operation carries this key yet.
+    Eligible,
+    /// The key's operation has not reached a terminal state (or been
+    /// refreshed to unknown) since the last submission.
+    Blocked,
+    /// A resync refresh of the key's operation state is in flight; the
+    /// retry decision waits for its answer.
+    RefreshPending,
+}
+
+/// The client-retained view of one background operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationView {
+    status: OperationStatus,
+    progress: Option<OperationProgress>,
+}
+
+impl OperationView {
+    /// Current backend-observed status; [`OperationStatus::Unknown`] when a
+    /// refresh proved the backend no longer knows the ID.
+    #[must_use]
+    pub fn status(&self) -> OperationStatus {
+        self.status
+    }
+
+    /// Latest deterministic progress, when still meaningful.
+    #[must_use]
+    pub fn progress(&self) -> Option<OperationProgress> {
+        self.progress
+    }
+
+    /// Whether this operation reached a terminal or unknown state.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            OperationStatus::Succeeded
+                | OperationStatus::Failed
+                | OperationStatus::Cancelled
+                | OperationStatus::Unknown
+        )
+    }
+}
+
+/// Retained operations never grow past this bound; the oldest terminal
+/// entries are evicted first.
+const OPERATION_RETENTION: usize = 128;
+/// Retained idempotency records never grow past this bound.
+const KEY_RETENTION: usize = 64;
 
 /// Selector for a normalized resource list query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,8 +336,12 @@ pub enum QueryResult {
     YamlValidate(Box<YamlOutcome>),
     /// A granted single-use stream ticket for a dedicated logs/exec socket.
     StreamTicket(Box<StreamTicketResponse>),
-    /// An accepted apply command with its background operation ID.
+    /// An accepted mutation command with its background operation ID.
     Applied(OperationAccepted),
+    /// Answer to an operation status query. The answer was already merged
+    /// into the retained operation registry before this result is handed
+    /// out.
+    OperationStatus(Box<OperationStatusResponse>),
 }
 
 /// The retained, applied list view of one resource watch subscription.
@@ -383,7 +470,10 @@ impl PendingAction {
             Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
             Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
             Self::Query(Query::StreamTicket { .. }) => k10s_protocol::REQUEST_STREAM_TICKET,
+            Self::Query(Query::OperationStatus(_)) => "operation.status",
             Self::Command(Command::YamlApply { .. }) => "yaml.apply",
+            Self::Command(Command::Scale { .. }) => "workload.scale",
+            Self::Command(Command::Delete { .. }) => "workload.delete",
         }
     }
 
@@ -422,13 +512,40 @@ impl PendingAction {
                 stream_type: *stream_type,
                 tty: *tty,
             }),
+            Self::Query(Query::OperationStatus(ids)) => encode(OperationStatusRequest {
+                operation_ids: ids.clone(),
+            }),
             Self::Command(Command::YamlApply { request, .. }) => encode(request),
+            Self::Command(Command::Scale {
+                target, replicas, ..
+            }) => encode(ScaleRequest {
+                context: target.context.clone(),
+                gvk: target.gvk.clone(),
+                namespace: target.namespace.clone(),
+                name: target.name.clone(),
+                uid: target.uid.clone(),
+                replicas: *replicas,
+            }),
+            Self::Command(Command::Delete {
+                target,
+                propagation,
+                ..
+            }) => encode(DeleteRequest {
+                identity: target.clone(),
+                propagation: *propagation,
+            }),
         }
     }
 
     fn idempotency_key(&self) -> Option<String> {
         match self {
             Self::Command(Command::YamlApply {
+                idempotency_key, ..
+            })
+            | Self::Command(Command::Scale {
+                idempotency_key, ..
+            })
+            | Self::Command(Command::Delete {
                 idempotency_key, ..
             }) => Some(idempotency_key.clone()),
             _ => None,
@@ -475,6 +592,18 @@ pub struct ClientState {
     completed_snapshots: HashMap<SubscriptionId, ResourceSnapshot>,
     /// Retained applied list views, one per live resource watch.
     resource_lists: HashMap<SubscriptionId, ResourceListState>,
+    /// Retained background operations by ID. Survives transport loss so a
+    /// reconnect can re-query every nonterminal operation.
+    operations: BTreeMap<OperationId, OperationView>,
+    /// Creation order of retained operations for deterministic eviction.
+    operation_order: VecDeque<OperationId>,
+    /// Accepted idempotency records: key → accepted operation ID.
+    submitted_keys: HashMap<String, OperationId>,
+    /// Insertion order of retained idempotency records.
+    key_order: VecDeque<String>,
+    /// The in-flight resync refresh of nonterminal operations, if any.
+    /// Retries stay blocked until its answer arrives.
+    operation_refresh: Option<RequestId>,
     infrastructure: HashMap<String, InfrastructureResponse>,
     server_bootstrap: Option<BootstrapResponse>,
     server_state_invalid: bool,
@@ -503,6 +632,9 @@ impl std::fmt::Debug for ClientState {
             .field("snapshot_assemblies_len", &self.snapshot_assemblies.len())
             .field("completed_snapshots_len", &self.completed_snapshots.len())
             .field("resource_lists_len", &self.resource_lists.len())
+            .field("operations_len", &self.operations.len())
+            .field("submitted_keys_len", &self.submitted_keys.len())
+            .field("operation_refresh", &self.operation_refresh)
             .field("infrastructure_len", &self.infrastructure.len())
             .field("server_state_invalid", &self.server_state_invalid)
             .field("local_ui", &self.local_ui)
@@ -537,6 +669,11 @@ impl ClientState {
             completed_snapshots: HashMap::new(),
             resource_specs: HashMap::new(),
             resource_lists: HashMap::new(),
+            operations: BTreeMap::new(),
+            operation_order: VecDeque::new(),
+            submitted_keys: HashMap::new(),
+            key_order: VecDeque::new(),
+            operation_refresh: None,
             infrastructure: HashMap::new(),
             server_bootstrap: None,
             server_state_invalid: true,
@@ -751,6 +888,62 @@ impl ClientState {
         self.resource_lists.get(id)
     }
 
+    /// The retained view of one background operation, if tracked. Views
+    /// survive transport loss so dialogs and status surfaces stay truthful
+    /// across reconnects.
+    #[must_use]
+    pub fn operation(&self, id: &OperationId) -> Option<&OperationView> {
+        self.operations.get(id)
+    }
+
+    /// Every retained operation view with its ID.
+    pub fn tracked_operations(&self) -> impl Iterator<Item = (&OperationId, &OperationView)> {
+        self.operations.iter()
+    }
+
+    /// IDs of every retained operation that has not reached a terminal or
+    /// unknown state.
+    #[must_use]
+    pub fn nonterminal_operation_ids(&self) -> Vec<OperationId> {
+        self.operation_order
+            .iter()
+            .filter(|id| {
+                self.operations
+                    .get(*id)
+                    .is_some_and(|view| !view.is_terminal())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The accepted operation behind an idempotency key, if any.
+    #[must_use]
+    pub fn submitted_operation(&self, key: &str) -> Option<&OperationId> {
+        self.submitted_keys.get(key)
+    }
+
+    /// Whether `key` may be reused for a new submission. A key whose
+    /// operation is still nonterminal stays blocked; while a resync refresh
+    /// of that operation's state is in flight the decision waits for its
+    /// answer (refresh-before-retry); terminal or unknown states unlock a
+    /// guarded retry because the backend deduplicates by key anyway.
+    #[must_use]
+    pub fn retry_eligibility(&self, key: &str) -> RetryEligibility {
+        let Some(operation_id) = self.submitted_keys.get(key) else {
+            return RetryEligibility::Eligible;
+        };
+        let Some(view) = self.operations.get(operation_id) else {
+            return RetryEligibility::Eligible;
+        };
+        if view.is_terminal() {
+            return RetryEligibility::Eligible;
+        }
+        if self.operation_refresh.is_some() {
+            return RetryEligibility::RefreshPending;
+        }
+        RetryEligibility::Blocked
+    }
+
     fn queue_subscribe(
         &mut self,
         id: SubscriptionId,
@@ -899,6 +1092,13 @@ impl ClientState {
         self.completed.clear();
         self.outbound.clear();
         self.target = None;
+        // An explicit close ends this client generation entirely: retained
+        // operations and idempotency records are dropped with it.
+        self.operations.clear();
+        self.operation_order.clear();
+        self.submitted_keys.clear();
+        self.key_order.clear();
+        self.operation_refresh = None;
     }
 
     /// Begin a query without a client-side deadline.
@@ -1120,13 +1320,64 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     QueryResult::StreamTicket(Box::new(granted))
                 }
-                PendingAction::Command(Command::YamlApply { .. }) => {
+                PendingAction::Command(_) => {
                     let accepted: OperationAccepted = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
+                    // Remember the idempotency record so a retry of the same
+                    // key can be gated on this operation's terminal state.
+                    let key = match &action {
+                        PendingAction::Command(Command::YamlApply {
+                            idempotency_key, ..
+                        })
+                        | PendingAction::Command(Command::Scale {
+                            idempotency_key, ..
+                        })
+                        | PendingAction::Command(Command::Delete {
+                            idempotency_key, ..
+                        }) => Some(idempotency_key.clone()),
+                        _ => None,
+                    };
+                    if let Some(key) = key {
+                        if !self.submitted_keys.contains_key(&key) {
+                            self.submitted_keys
+                                .insert(key.clone(), accepted.operation_id.clone());
+                            self.key_order.push_back(key);
+                            while self.submitted_keys.len() > KEY_RETENTION {
+                                if let Some(oldest) = self.key_order.pop_front() {
+                                    self.submitted_keys.remove(&oldest);
+                                }
+                            }
+                        }
+                        // Record through the shared path so creation-order
+                        // retention stays consistent; an earlier refresh had
+                        // marked this operation unknown, and the accepted
+                        // answer re-grounds it.
+                        if self
+                            .operations
+                            .get(&accepted.operation_id)
+                            .is_none_or(|view| view.status == OperationStatus::Unknown)
+                        {
+                            self.record_view(
+                                accepted.operation_id.clone(),
+                                OperationStatus::Pending,
+                                None,
+                            );
+                        }
+                    }
                     QueryResult::Applied(accepted)
                 }
+                PendingAction::Query(Query::OperationStatus(_)) => {
+                    let response: OperationStatusResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    self.merge_operation_status(&response);
+                    QueryResult::OperationStatus(Box::new(response))
+                }
             };
+            if self.operation_refresh.as_ref() == Some(&id) {
+                self.operation_refresh = None;
+            }
             let _pending = self.pending.remove(&id);
             self.completed.insert(id, result);
             return Ok(());
@@ -1360,6 +1611,10 @@ impl ClientState {
                     Err(ClientError::Server(error))
                 }
             }
+            ServerPayload::OperationUpdate(update) => {
+                self.record_operation_update(&update);
+                Ok(())
+            }
             _ => Err(ClientError::Protocol("unexpected server frame".to_owned())),
         };
         result?;
@@ -1454,7 +1709,87 @@ impl ClientState {
             }
             self.queue_subscribe(id, selector)?;
         }
+        // Refresh every nonterminal operation by ID before any retry of its
+        // idempotency key may be allowed.
+        let nonterminal = self.nonterminal_operation_ids();
+        if !nonterminal.is_empty() {
+            let refresh = self.begin(Query::OperationStatus(nonterminal))?;
+            self.operation_refresh = Some(refresh.id().clone());
+        }
         Ok(())
+    }
+
+    /// Merge a status answer into the retained registry. Requested IDs that
+    /// the backend no longer knows become [`OperationStatus::Unknown`].
+    fn merge_operation_status(&mut self, response: &OperationStatusResponse) {
+        for entry in &response.operations {
+            self.record_view(entry.operation_id.clone(), entry.status, entry.progress);
+        }
+        let answered: std::collections::HashSet<&OperationId> = response
+            .operations
+            .iter()
+            .map(|entry| &entry.operation_id)
+            .collect();
+        let unknown: Vec<OperationId> = self
+            .operation_order
+            .iter()
+            .filter(|id| {
+                !answered.contains(id)
+                    && self.operations.get(*id).is_some_and(|view| {
+                        matches!(
+                            view.status,
+                            OperationStatus::Pending | OperationStatus::Running
+                        )
+                    })
+            })
+            .cloned()
+            .collect();
+        for id in unknown {
+            self.record_view(id, OperationStatus::Unknown, None);
+        }
+    }
+
+    /// Insert or update one retained operation view with bounded eviction:
+    /// the oldest terminal entries go first.
+    fn record_view(
+        &mut self,
+        id: OperationId,
+        status: OperationStatus,
+        progress: Option<OperationProgress>,
+    ) {
+        if !self.operations.contains_key(&id) {
+            self.operation_order.push_back(id.clone());
+        }
+        self.operations
+            .insert(id.clone(), OperationView { status, progress });
+        while self.operations.len() > OPERATION_RETENTION {
+            let evict = self
+                .operation_order
+                .iter()
+                .find(|candidate| {
+                    self.operations
+                        .get(*candidate)
+                        .is_some_and(OperationView::is_terminal)
+                })
+                .or_else(|| self.operation_order.front())
+                .cloned();
+            match evict {
+                Some(oldest) => {
+                    self.operations.remove(&oldest);
+                    self.operation_order.retain(|id| *id != oldest);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Apply one server-pushed operation update to the retained registry.
+    fn record_operation_update(&mut self, update: &k10s_protocol::OperationUpdate) {
+        let progress = update
+            .progress
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<OperationProgress>(value.clone()).ok());
+        self.record_view(update.operation_id.clone(), update.status, progress);
     }
 
     fn refresh_server_validity(&mut self) {

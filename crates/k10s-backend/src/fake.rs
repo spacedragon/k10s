@@ -28,12 +28,26 @@ use crate::watch::{WatchHub, WatchSelector};
 
 /// Unix seconds for the fixed fake epoch `2026-08-21T00:00:00Z`.
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
+/// The context whose policy denies every mutation (RBAC fixture).
+const READONLY_CONTEXT: &str = "prod-readonly";
 /// Revision assigned to every object in the pristine dataset.
 const INITIAL_REVISION: u64 = 1_000;
 /// Hard bound on unredeemed validation tickets kept per process.
 const TICKET_CAPACITY: usize = 32;
 /// A ticket older than this many backend revisions has expired.
 const TICKET_MAX_AGE_REVISIONS: u64 = 128;
+/// Hard bound on retained operation records.
+const OPERATION_CAPACITY: usize = 64;
+/// Hard bound on retained idempotency records.
+const IDEMPOTENCY_CAPACITY: usize = 32;
+/// Total deterministic progress steps of one operation lifecycle.
+const OPERATION_TOTAL_STEPS: u32 = 3;
+
+/// A registered background-operation watcher.
+#[derive(Debug)]
+struct OperationWatcher {
+    sender: broadcast::Sender<crate::port::BackendEvent>,
+}
 
 /// A registered infrastructure telemetry watcher.
 #[derive(Debug)]
@@ -84,6 +98,19 @@ struct FakeState {
     ticket_order: std::collections::VecDeque<String>,
     next_ticket: u64,
     next_operation: u64,
+    /// Retained operation records by ID, bounded by [`OPERATION_CAPACITY`].
+    /// `operation_order` mirrors the live keys in creation order so
+    /// eviction removes the oldest deterministically.
+    operations: HashMap<String, crate::operation::OperationRecord>,
+    operation_order: std::collections::VecDeque<String>,
+    /// Operation IDs armed to fail at their terminal transition.
+    armed_failures: HashMap<String, String>,
+    /// Live background-operation watchers.
+    operation_watchers: Vec<OperationWatcher>,
+    /// Bounded idempotency records: key → accepted operation ID. Replays
+    /// of a key return the original operation instead of executing again.
+    idempotency: HashMap<String, String>,
+    idempotency_order: std::collections::VecDeque<String>,
     /// Kernel-owned stream hub: single-use stream tickets and fake sessions.
     streams: StreamHub,
 }
@@ -292,6 +319,12 @@ impl FakeKubernetes {
                 ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
+                operations: HashMap::new(),
+                operation_order: std::collections::VecDeque::new(),
+                armed_failures: HashMap::new(),
+                operation_watchers: Vec::new(),
+                idempotency: HashMap::new(),
+                idempotency_order: std::collections::VecDeque::new(),
                 streams: StreamHub::new(),
             })),
             #[cfg(test)]
@@ -316,6 +349,12 @@ impl FakeKubernetes {
                 ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
+                operations: HashMap::new(),
+                operation_order: std::collections::VecDeque::new(),
+                armed_failures: HashMap::new(),
+                operation_watchers: Vec::new(),
+                idempotency: HashMap::new(),
+                idempotency_order: std::collections::VecDeque::new(),
                 streams: StreamHub::new(),
             })),
             #[cfg(test)]
@@ -394,17 +433,209 @@ impl FakeKubernetes {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Broadcast one operation event to every live watcher.
+    fn emit_operation(state: &mut FakeState, event: crate::operation::OperationEvent) {
+        state.operation_watchers.retain(|watcher| {
+            if watcher.sender.receiver_count() == 0 {
+                return false;
+            }
+            let _ = watcher
+                .sender
+                .send(crate::port::BackendEvent::Operation(event.clone()));
+            true
+        });
+    }
+
+    /// Record a freshly accepted mutation as an operation: allocates its
+    /// deterministic ID, stores the bounded record in `Pending`, remembers
+    /// the idempotency key, and notifies watchers. Returns the ID.
+    fn begin_operation(state: &mut FakeState, idempotency_key: &str) -> OperationId {
+        let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
+        state.next_operation += 1;
+        let record = crate::operation::OperationRecord {
+            id: operation_id.as_str().to_owned(),
+            state: crate::operation::OperationState::Pending,
+            progress: None,
+            detail: None,
+        };
+        state.operations.insert(record.id.clone(), record.clone());
+        state.operation_order.push_back(record.id.clone());
+        while state.operations.len() > OPERATION_CAPACITY {
+            if let Some(oldest) = state.operation_order.pop_front() {
+                state.operations.remove(&oldest);
+            }
+        }
+        if !idempotency_key.is_empty() && !state.idempotency.contains_key(idempotency_key) {
+            state
+                .idempotency
+                .insert(idempotency_key.to_owned(), operation_id.as_str().to_owned());
+            state
+                .idempotency_order
+                .push_back(idempotency_key.to_owned());
+            while state.idempotency.len() > IDEMPOTENCY_CAPACITY {
+                if let Some(oldest) = state.idempotency_order.pop_front() {
+                    state.idempotency.remove(&oldest);
+                }
+            }
+        }
+        Self::emit_operation(
+            state,
+            crate::operation::OperationEvent {
+                id: record.id,
+                state: record.state,
+                progress: None,
+                detail: None,
+            },
+        );
+        operation_id
+    }
+
+    /// Advance every nonterminal operation exactly one deterministic step:
+    /// `Pending → Running(1/3) → Running(2/3) → terminal`. Operations never
+    /// advance on their own; tests command each tick explicitly. Terminal
+    /// failures only occur when armed through [`Self::fail_next_operation`].
+    pub fn tick_operations(&self) {
+        let mut state = self.lock();
+        let ids: Vec<String> = state
+            .operation_order
+            .iter()
+            .filter(|id| {
+                state
+                    .operations
+                    .get(*id)
+                    .is_some_and(|record| !record.state.is_terminal())
+            })
+            .cloned()
+            .collect();
+        for id in ids {
+            // Whether this tick drives the operation to its terminal step;
+            // decided up front so the armed-failure slot can be consumed
+            // without overlapping borrows.
+            let terminal_step =
+                state
+                    .operations
+                    .get(&id)
+                    .is_some_and(|record| match record.state {
+                        crate::operation::OperationState::Pending => false,
+                        crate::operation::OperationState::Running => record
+                            .progress
+                            .is_none_or(|(done, _)| done + 1 >= OPERATION_TOTAL_STEPS),
+                        crate::operation::OperationState::Succeeded
+                        | crate::operation::OperationState::Failed
+                        | crate::operation::OperationState::Cancelled => false,
+                    });
+            let armed_failure = if terminal_step {
+                state.armed_failures.remove(&id)
+            } else {
+                None
+            };
+            // Advance one deterministic step, then notify watchers.
+            let event = {
+                let record = state
+                    .operations
+                    .get_mut(&id)
+                    .expect("live operations stay recorded");
+                match record.state {
+                    crate::operation::OperationState::Pending => {
+                        record.state = crate::operation::OperationState::Running;
+                        record.progress = Some((1, OPERATION_TOTAL_STEPS));
+                        Some(crate::operation::OperationEvent {
+                            id: record.id.clone(),
+                            state: record.state,
+                            progress: record.progress,
+                            detail: None,
+                        })
+                    }
+                    crate::operation::OperationState::Running => {
+                        let completed = record.progress.map_or(1, |(done, _)| done) + 1;
+                        if completed < OPERATION_TOTAL_STEPS {
+                            record.progress = Some((completed, OPERATION_TOTAL_STEPS));
+                            Some(crate::operation::OperationEvent {
+                                id: record.id.clone(),
+                                state: record.state,
+                                progress: record.progress,
+                                detail: None,
+                            })
+                        } else if let Some(reason) = armed_failure {
+                            record.state = crate::operation::OperationState::Failed;
+                            record.progress = None;
+                            record.detail = Some(reason);
+                            Some(crate::operation::OperationEvent {
+                                id: record.id.clone(),
+                                state: record.state,
+                                progress: None,
+                                detail: record.detail.clone(),
+                            })
+                        } else {
+                            record.state = crate::operation::OperationState::Succeeded;
+                            record.progress = None;
+                            Some(crate::operation::OperationEvent {
+                                id: record.id.clone(),
+                                state: record.state,
+                                progress: None,
+                                detail: None,
+                            })
+                        }
+                    }
+                    crate::operation::OperationState::Succeeded
+                    | crate::operation::OperationState::Failed
+                    | crate::operation::OperationState::Cancelled => None,
+                }
+            };
+            // A failed operation releases its idempotency record so the key
+            // can be retried; successful ones keep it for deduplication.
+            if event
+                .as_ref()
+                .is_some_and(|event| event.state == crate::operation::OperationState::Failed)
+            {
+                let released: Vec<String> = state
+                    .idempotency
+                    .iter()
+                    .filter(|(_, operation_id)| **operation_id == id)
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                for key in released {
+                    state.idempotency.remove(&key);
+                    state
+                        .idempotency_order
+                        .retain(|candidate| candidate != &key);
+                }
+            }
+            if let Some(event) = event {
+                Self::emit_operation(&mut state, event);
+            }
+        }
+    }
+
+    /// Arm the NEXT accepted mutation to fail at its final step with the
+    /// given safe reason. Deterministic test control over failure paths.
+    pub fn fail_next_operation(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        let mut state = self.lock();
+        let pending_id = format!("op-{:06}", state.next_operation);
+        state.armed_failures.insert(pending_id, reason);
+    }
+
+    /// Number of retained operation records; observability for bounds.
+    #[must_use]
+    pub fn retained_operations(&self) -> usize {
+        self.lock().operations.len()
+    }
+
     /// Apply a validated YAML buffer through its single-use ticket.
     ///
     /// Every binding is re-checked before anything mutates: the ticket must
     /// exist unconsumed, the buffer hash must match, the target identity
     /// must still resolve, and the backend revision must equal the revision
     /// the validation was issued against. On success the ticket is consumed,
-    /// the fake state advances, and watchers receive the changed row.
+    /// an operation is opened, and the fake state advances so watchers
+    /// receive the changed row. Replaying a live idempotency key returns
+    /// the original operation without executing again.
     async fn apply_yaml(
         &self,
         context: String,
         yaml: String,
+        idempotency_key: String,
         ticket_id: String,
         buffer_hash: String,
         declared_target: ResourceRef,
@@ -418,6 +649,10 @@ impl FakeKubernetes {
             return Err(BackendError::Conflict(
                 "the edited buffer no longer matches the validated ticket".into(),
             ));
+        }
+        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
+        if let Some(existing) = replay {
+            return Ok(OperationId::new(existing));
         }
         let (ticket, operation_id) = {
             let mut state = self.lock();
@@ -449,10 +684,11 @@ impl FakeKubernetes {
                     "the validation ticket has expired".into(),
                 ));
             }
-            let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
-            state.next_operation += 1;
             state.tickets.remove(&ticket_id);
             state.ticket_order.retain(|id| *id != ticket_id);
+
+            // Open the operation record before the mutation lands.
+            let operation_id = Self::begin_operation(&mut state, &idempotency_key);
             (ticket, operation_id)
         };
 
@@ -520,6 +756,118 @@ impl FakeKubernetes {
                 state.notify_matching(&reference, crate::port::BackendEvent::Changed(changed));
             }
         }
+        Ok(operation_id)
+    }
+
+    /// Scale one exact workload object. The full identity including UID is
+    /// re-checked before anything mutates; a stale identity is a typed
+    /// conflict and an unknown object a typed not-found. The mutation is
+    /// applied to fake state immediately (watchers see the changed row) and
+    /// its lifecycle advances only through [`Self::tick_operations`].
+    #[allow(clippy::too_many_arguments)]
+    async fn scale(
+        &self,
+        context: String,
+        gvk: Gvk,
+        namespace: Option<String>,
+        name: String,
+        uid: String,
+        replicas: u32,
+        idempotency_key: String,
+    ) -> Result<OperationId, BackendError> {
+        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
+        if let Some(existing) = replay {
+            return Ok(OperationId::new(existing));
+        }
+        let mut state = self.lock();
+        if !state.contexts.iter().any(|c| c.name == context) {
+            return Err(BackendError::NotFound);
+        }
+        if context == READONLY_CONTEXT {
+            return Err(BackendError::Forbidden);
+        }
+        let Some(record) = state.find_by_name(&context, &gvk, namespace.as_deref(), &name) else {
+            return Err(BackendError::NotFound);
+        };
+        if record.reference.uid != uid {
+            return Err(BackendError::Conflict(
+                "the target does not match the current object at this name; it was recreated"
+                    .into(),
+            ));
+        }
+        let index = state
+            .find_index(&context, &gvk, namespace.as_deref(), &name)
+            .expect("the record was just resolved");
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key);
+        let revision = state.advance_revision();
+        state.records[index].revision = revision;
+        // The desired count becomes observable backend state wherever the
+        // summary carries one (e.g. `20/20 ready` → `3/20 ready`).
+        if let Some(next) = scaled_summary(&state.records[index].summary, replicas) {
+            state.records[index].summary = next;
+        }
+        let changed = state.records[index].clone();
+        let reference = changed.reference.clone();
+        state.notify_matching(&reference, crate::port::BackendEvent::Changed(changed));
+        drop(state);
+        Ok(operation_id)
+    }
+
+    /// Delete one exact object with an explicit propagation mode. Same
+    /// identity re-checks as scaling; watchers receive the gone delta.
+    async fn delete(
+        &self,
+        target: ResourceRef,
+        propagation: crate::operation::Propagation,
+        idempotency_key: String,
+    ) -> Result<OperationId, BackendError> {
+        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
+        if let Some(existing) = replay {
+            return Ok(OperationId::new(existing));
+        }
+        let mut state = self.lock();
+        if !state
+            .contexts
+            .iter()
+            .any(|c| c.name == target.context.as_str())
+        {
+            return Err(BackendError::NotFound);
+        }
+        if target.context == READONLY_CONTEXT {
+            return Err(BackendError::Forbidden);
+        }
+        let Some(record) = state.find_by_name(
+            &target.context,
+            &target.gvk,
+            target.namespace.as_deref(),
+            &target.name,
+        ) else {
+            return Err(BackendError::NotFound);
+        };
+        if record.reference.uid != target.uid {
+            return Err(BackendError::Conflict(
+                "the target does not match the current object at this name; it was recreated"
+                    .into(),
+            ));
+        }
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key);
+        let _ = propagation;
+        let index = state
+            .find_index(
+                &target.context,
+                &target.gvk,
+                target.namespace.as_deref(),
+                &target.name,
+            )
+            .expect("the record was just resolved");
+        let removed = state.records.remove(index);
+        let revision = state.advance_revision();
+        let gone = crate::port::BackendEvent::Gone {
+            reference: removed.reference.clone(),
+            revision,
+        };
+        state.notify_matching(&removed.reference, gone);
+        drop(state);
         Ok(operation_id)
     }
 
@@ -839,6 +1187,16 @@ impl KubernetesAccess for FakeKubernetes {
                         state.metrics_scenario.into(),
                     )))
                 }
+                Query::OperationStatus { operation_ids } => {
+                    let state = self.lock();
+                    let operations = operation_ids
+                        .iter()
+                        .filter_map(|id| state.operations.get(id).cloned())
+                        .collect();
+                    Ok(QueryResult::OperationStatus(
+                        crate::operation::OperationStatusData { operations },
+                    ))
+                }
             }
         })
     }
@@ -853,17 +1211,46 @@ impl KubernetesAccess for FakeKubernetes {
                 Command::Apply {
                     context,
                     yaml,
-                    idempotency_key: _,
+                    idempotency_key,
                     ticket_id,
                     buffer_hash,
                     target,
                 } => {
-                    self.apply_yaml(context, yaml, ticket_id, buffer_hash, target)
-                        .await
+                    self.apply_yaml(
+                        context,
+                        yaml,
+                        idempotency_key,
+                        ticket_id,
+                        buffer_hash,
+                        target,
+                    )
+                    .await
                 }
-                Command::Scale { .. } | Command::Delete { .. } => {
-                    Err(BackendError::unsupported("execute"))
+                Command::Scale {
+                    context,
+                    gvk,
+                    namespace,
+                    name,
+                    uid,
+                    replicas,
+                    idempotency_key,
+                } => {
+                    self.scale(
+                        context,
+                        gvk,
+                        namespace,
+                        name,
+                        uid,
+                        replicas,
+                        idempotency_key,
+                    )
+                    .await
                 }
+                Command::Delete {
+                    target,
+                    propagation,
+                    idempotency_key,
+                } => self.delete(target, propagation, idempotency_key).await,
             }
         })
     }
@@ -965,6 +1352,29 @@ impl KubernetesAccess for FakeKubernetes {
                     let (receiver, bound) = state.streams.redeem(&ticket_id, route, revision)?;
                     Ok(SubscriptionHandle::with_events("stream-session", receiver)
                         .with_stream(bound))
+                }
+                Subscribe::Operations => {
+                    let mut state = self.lock();
+                    // Late subscribers immediately learn the current state of
+                    // every retained operation so reconnecting sessions can
+                    // resynchronize without polling.
+                    let snapshot: Vec<crate::operation::OperationEvent> = state
+                        .operation_order
+                        .iter()
+                        .filter_map(|id| state.operations.get(id))
+                        .map(|record| crate::operation::OperationEvent {
+                            id: record.id.clone(),
+                            state: record.state,
+                            progress: record.progress,
+                            detail: record.detail.clone(),
+                        })
+                        .collect();
+                    let (sender, receiver) = broadcast::channel(crate::watch::WATCH_CAPACITY);
+                    for event in snapshot {
+                        let _ = sender.send(crate::port::BackendEvent::Operation(event));
+                    }
+                    state.operation_watchers.push(OperationWatcher { sender });
+                    Ok(SubscriptionHandle::with_events("operations", receiver))
                 }
             }
         })
@@ -1258,6 +1668,13 @@ fn build_prod_records() -> Vec<ResourceRecord> {
         labels: &[("app", "edge")],
         owner_references: Vec::new(),
     })]
+}
+
+/// Replace the desired count of a `N/M ...` style status summary.
+fn scaled_summary(summary: &str, replicas: u32) -> Option<String> {
+    let (desired, rest) = summary.split_once('/')?;
+    desired.parse::<u32>().ok()?;
+    Some(format!("{replicas}/{rest}"))
 }
 
 /// Format unix seconds as an RFC 3339 UTC timestamp without external crates.

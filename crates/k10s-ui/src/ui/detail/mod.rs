@@ -14,6 +14,7 @@ mod related;
 use egui::{RichText, Spinner};
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
 
+use crate::ui::dialogs;
 use crate::ui::tools;
 use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
@@ -72,6 +73,7 @@ pub(super) fn show<I>(
     view: Option<&ResourceDetailResponse>,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
+    dialogs: &mut dialogs::OperationDialogs,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -117,8 +119,40 @@ pub(super) fn show<I>(
 
     ui.horizontal(|ui| {
         let capabilities = view.capabilities;
+        let identity = detail.identity.as_row_identity();
         if capabilities.can_scale {
-            action_button(ui, "Scale", "Scale workload");
+            let scale = ui.button("Scale");
+            scale.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Scale workload".to_owned(),
+                )
+            });
+            if scale.clicked()
+                && let Some(identity) = identity
+            {
+                dialogs.open_scale(
+                    window_id,
+                    identity.clone(),
+                    status_summary(view).and_then(summary_replicas),
+                );
+            }
+        }
+        if capabilities.can_delete && identity.is_some() {
+            let delete = ui.button("Delete");
+            delete.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    "Delete resource".to_owned(),
+                )
+            });
+            if delete.clicked()
+                && let Some(identity) = identity
+            {
+                dialogs.open_delete(window_id, identity.clone());
+            }
         }
         if capabilities.can_view_logs {
             action_button(ui, "View logs", "View logs");
@@ -161,6 +195,27 @@ pub(super) fn show<I>(
 
 /// The default pod container streamed by the connected tools.
 const DEFAULT_CONTAINER: &str = "app";
+
+/// Best-effort current desired replica count from a status summary such as
+/// `20/20 ready`, used as the pre-filled value of the scale dialog.
+fn summary_replicas(summary: &str) -> Option<u32> {
+    let (desired, _) = summary.split_once('/')?;
+    desired.trim().parse::<u32>().ok()
+}
+
+/// The backend-asserted status summary of a detail response, if present.
+fn status_summary(view: &ResourceDetailResponse) -> Option<&str> {
+    view.sections
+        .iter()
+        .find(|section| section.title == "Overview")
+        .and_then(|section| {
+            section
+                .rows
+                .iter()
+                .find(|row| row.label == "Status")
+                .map(|row| row.value.as_str())
+        })
+}
 
 /// Resolve a pod/container stream target from the pinned identity. Only pod
 /// identities can stream; anything else yields no target.

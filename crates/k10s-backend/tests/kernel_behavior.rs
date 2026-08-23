@@ -59,14 +59,16 @@ async fn stream_tickets_validate_targets_and_issue_single_use_grants() {
 
 #[tokio::test]
 async fn unsupported_commands_return_typed_capability_errors() {
-    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let kernel = BackendKernel::new(SlowAdapter);
     let err = kernel
         .execute(Command::Scale {
             context: "dev-local".into(),
-            kind: "Deployment".into(),
-            namespace: "default".into(),
-            name: "api".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+            name: "api-server".into(),
+            uid: "uid-api-server".into(),
             replicas: 3,
+            idempotency_key: "idem-unsupported".into(),
         })
         .await
         .unwrap_err();
@@ -77,6 +79,74 @@ async fn unsupported_commands_return_typed_capability_errors() {
             capability: "execute".into()
         }
     );
+}
+
+#[tokio::test]
+async fn fake_scale_and_delete_execute_through_the_kernel() {
+    let kernel = BackendKernel::new(FakeKubernetes::standard());
+
+    let operation_id = kernel
+        .execute(Command::Scale {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+            name: "api-server".into(),
+            uid: "uid-dev-local-deployment-default-api-server".into(),
+            replicas: 5,
+            idempotency_key: "idem-kernel-scale".into(),
+        })
+        .await
+        .expect("supported commands return an operation ID");
+    assert!(!operation_id.as_str().is_empty());
+
+    // Replaying the same idempotency key returns the original operation.
+    let replay = kernel
+        .execute(Command::Scale {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+            name: "api-server".into(),
+            uid: "uid-dev-local-deployment-default-api-server".into(),
+            replicas: 9,
+            idempotency_key: "idem-kernel-scale".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay, operation_id);
+
+    // A stale UID is a typed conflict even when the name still resolves.
+    let err = kernel
+        .execute(Command::Delete {
+            target: k10s_backend::ResourceRef {
+                context: "dev-local".into(),
+                gvk: Gvk::new("apps", "v1", "Deployment"),
+                namespace: Some("default".into()),
+                name: "web-frontend".into(),
+                uid: "uid-stale".into(),
+            },
+            propagation: k10s_backend::Propagation::Background,
+            idempotency_key: "idem-stale-delete".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Conflict(_)));
+
+    // The readonly context denies mutations by policy.
+    let err = kernel
+        .execute(Command::Delete {
+            target: k10s_backend::ResourceRef {
+                context: "prod-readonly".into(),
+                gvk: Gvk::new("apps", "v1", "Deployment"),
+                namespace: Some("default".into()),
+                name: "edge-gateway".into(),
+                uid: "uid-prod-readonly-deployment-default-edge-gateway".into(),
+            },
+            propagation: k10s_backend::Propagation::Foreground,
+            idempotency_key: "idem-readonly-delete".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err, BackendError::Forbidden);
 }
 
 #[tokio::test]
@@ -300,10 +370,14 @@ async fn execute_returns_operation_id_through_kernel() {
     let kernel = BackendKernel::new(ExecAdapter);
     let id = kernel
         .execute(Command::Delete {
-            context: "dev-local".into(),
-            kind: "Pod".into(),
-            namespace: "default".into(),
-            name: "api".into(),
+            target: k10s_backend::ResourceRef {
+                context: "dev-local".into(),
+                gvk: Gvk::core("v1", "Pod"),
+                namespace: Some("default".into()),
+                name: "api".into(),
+                uid: "uid-api".into(),
+            },
+            propagation: k10s_backend::Propagation::Background,
             idempotency_key: "idem-1".into(),
         })
         .await

@@ -1,6 +1,7 @@
 //! The fixed application shell rendered around the command-driven workspace.
 
 mod detail;
+pub mod dialogs;
 mod infrastructure;
 mod launcher;
 mod overview;
@@ -45,6 +46,7 @@ pub struct UiShell<I> {
     resources: resource_window::ResourceUiState,
     yaml: tools::YamlEditors,
     streams: tools::StreamStores,
+    dialogs: dialogs::OperationDialogs,
 }
 
 impl<I> Default for UiShell<I>
@@ -68,6 +70,7 @@ where
             resources: resource_window::ResourceUiState::default(),
             yaml: tools::YamlEditors::default(),
             streams: tools::StreamStores::default(),
+            dialogs: dialogs::OperationDialogs::default(),
         }
     }
 
@@ -99,6 +102,16 @@ where
     /// Mutable access to the connected stream tool stores.
     pub fn stream_stores_mut(&mut self) -> &mut tools::StreamStores {
         &mut self.streams
+    }
+
+    /// Mutable access to the open operation dialogs.
+    pub fn dialogs_mut(&mut self) -> &mut dialogs::OperationDialogs {
+        &mut self.dialogs
+    }
+
+    /// Drain every queued operation dialog action.
+    pub fn drain_dialog_actions(&mut self) -> Vec<(WindowId, dialogs::DialogAction)> {
+        self.dialogs.drain_actions()
     }
 
     /// Drain every queued log-view protocol action.
@@ -193,6 +206,7 @@ where
                 &mut resources,
                 &mut self.yaml,
                 &mut self.streams,
+                &mut self.dialogs,
                 response,
                 feed,
                 connection,
@@ -204,6 +218,10 @@ where
         self.yaml.retain(|id| self.workspace.window(id).is_some());
         self.streams
             .retain(|id| self.workspace.window(id).is_some());
+        let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
+        self.dialogs.retain(|id| live_windows.contains(&id));
+        self.dialogs
+            .show(ui, connection == ConnectionState::Connected);
 
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));

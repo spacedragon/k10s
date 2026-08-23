@@ -129,6 +129,9 @@ impl BackendKernel {
             QueryResult::StreamTicket(grant) => {
                 KernelQueryResult::StreamTicket(crate::stream::StreamTicketResult::new(grant))
             }
+            QueryResult::OperationStatus(data) => KernelQueryResult::OperationStatus(
+                crate::operation::OperationStatusResult::new(data),
+            ),
             QueryResult::ResourceRelations(_) => {
                 // Relations are an internal composition of resource.detail
                 // and are never exposed as a standalone kernel result.
@@ -261,6 +264,8 @@ pub enum KernelQueryResult {
     YamlValidate(crate::operation::YamlValidateResult),
     /// A granted single-use stream ticket.
     StreamTicket(crate::stream::StreamTicketResult),
+    /// Current state of the requested background operations.
+    OperationStatus(crate::operation::OperationStatusResult),
 }
 
 impl KernelQueryResult {
@@ -288,6 +293,7 @@ impl KernelQueryResult {
             Self::Infrastructure(r) => r.serialized(),
             Self::YamlValidate(r) => r.serialized(),
             Self::StreamTicket(r) => r.serialized(),
+            Self::OperationStatus(r) => r.serialized(),
         }
     }
 

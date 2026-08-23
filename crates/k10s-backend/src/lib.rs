@@ -19,7 +19,9 @@ pub use catalog::CatalogSnapshot;
 pub use fake::{FakeKubernetes, FakeMetricsScenario};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
 pub use kube::KubeAdapter;
-pub use operation::YamlValidationData;
+pub use operation::{
+    OperationEvent, OperationState, OperationStatusData, Propagation, YamlValidationData,
+};
 pub use port::{
     AdapterError, BackendError, BackendEvent, Command, ContextInfo, Gvk, KubernetesAccess,
     MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent, RelatedData,

@@ -68,6 +68,7 @@ impl KubernetesAccess for KubeAdapter {
                 }
                 Query::ResourceTypes { .. } => Err(BackendError::unsupported("resource.types")),
                 Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
+                Query::OperationStatus { .. } => Err(BackendError::unsupported("operation.status")),
             }
         })
     }
@@ -98,6 +99,7 @@ impl KubernetesAccess for KubeAdapter {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
                 Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
+                Subscribe::Operations => Err(BackendError::unsupported("operations")),
             }
         })
     }
