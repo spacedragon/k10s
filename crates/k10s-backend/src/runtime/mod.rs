@@ -19,6 +19,7 @@ use crate::kube::KubeAdapter;
 use crate::port::AdapterError;
 
 pub use self::cache::{INITIAL_WATCH_REVISION, RevisionCounter, SummaryCache};
+pub(crate) use self::cache::{now_rfc3339, record_from_row};
 pub use self::cluster::{ClusterWatches, WATCH_LINGER};
 pub use self::context::ContextRegistry;
 pub use self::supervisor::{

@@ -127,6 +127,8 @@ impl RecordedApiServer {
               {"name":"services","singularName":"service","namespaced":true,"kind":"Service","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["svc"]},
               {"name":"configmaps","singularName":"configmap","namespaced":true,"kind":"ConfigMap","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["cm"]},
               {"name":"namespaces","singularName":"namespace","namespaced":false,"kind":"Namespace","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["ns"]},
+              {"name":"persistentvolumeclaims","singularName":"persistentvolumeclaim","namespaced":true,"kind":"PersistentVolumeClaim","verbs":["get","list","watch","create","update","patch","delete"]},
+              {"name":"persistentvolumes","singularName":"persistentvolume","namespaced":false,"kind":"PersistentVolume","verbs":["get","list","watch","create","update","patch","delete"]},
               {"name":"tokenreviews","singularName":"tokenreview","namespaced":false,"kind":"TokenReview","verbs":["create"]}
             ]}"#,
         );
@@ -159,6 +161,13 @@ impl RecordedApiServer {
             ]}"#,
         );
         server.set_response(
+            "/apis/storage.k8s.io/v1",
+            200,
+            r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"storage.k8s.io/v1","resources":[
+              {"name":"storageclasses","singularName":"storageclass","namespaced":false,"kind":"StorageClass","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["sc"]}
+            ]}"#,
+        );
+        server.set_response(
             "/apis/k10s.example.com/v1alpha1",
             200,
             r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"k10s.example.com/v1alpha1","resources":[
@@ -182,6 +191,7 @@ const APIS_GROUP_LIST: &str = r#"{"kind":"APIGroupList","apiVersion":"v1","group
   {"name":"apps","versions":[{"groupVersion":"apps/v1","version":"v1"}],"preferredVersion":{"groupVersion":"apps/v1","version":"v1"}},
   {"name":"batch","versions":[{"groupVersion":"batch/v1","version":"v1"}],"preferredVersion":{"groupVersion":"batch/v1","version":"v1"}},
   {"name":"apiextensions.k8s.io","versions":[{"groupVersion":"apiextensions.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"apiextensions.k8s.io/v1","version":"v1"}},
+  {"name":"storage.k8s.io","versions":[{"groupVersion":"storage.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"storage.k8s.io/v1","version":"v1"}},
   {"name":"k10s.example.com","versions":[{"groupVersion":"k10s.example.com/v1alpha1","version":"v1alpha1"}]}
 ]}"#;
 

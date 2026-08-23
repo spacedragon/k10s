@@ -8,6 +8,8 @@
 
 mod config;
 mod discovery;
+mod normalize;
+mod read;
 mod watch;
 
 use std::collections::HashMap;
@@ -22,7 +24,7 @@ use crate::port::ContextInfo;
 
 use crate::port::{
     AdapterError, BackendError, BootstrapInfo, Command, Gvk, KubernetesAccess, OperationId, Query,
-    QueryResult, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::ClusterWatches;
@@ -190,7 +192,11 @@ impl KubernetesAccess for KubeAdapter {
                 // until then they are typed, not guessed.
                 Query::ValidateApply { .. } => Err(BackendError::unsupported("validate.apply")),
                 Query::StreamTicket { .. } => Err(BackendError::unsupported("stream.ticket")),
-                Query::ResourceList { .. } => Err(BackendError::unsupported("resource.list")),
+                Query::ResourceList {
+                    context,
+                    gvk,
+                    namespace,
+                } => self.resource_list(context, gvk, namespace).await,
                 Query::ResourceDetail { .. } => Err(BackendError::unsupported("resource.detail")),
                 Query::ResourceMetrics { .. } => Err(BackendError::unsupported("resource.metrics")),
                 Query::ResourceRelations { .. } => {
@@ -336,6 +342,61 @@ impl KubeAdapter {
             descriptor.namespaced,
             namespace,
         ))
+    }
+
+    /// Serve one on-demand list snapshot for one selection.
+    ///
+    /// Unknown contexts or types are typed not-founds; a namespace on a
+    /// cluster-scoped type is a typed conflict. Rows are read fresh from the
+    /// cluster, normalized into view models, sorted by stable identity, and
+    /// stamped with one revision from the same monotonic counter the watch
+    /// runtime publishes with.
+    async fn resource_list(
+        &self,
+        context: String,
+        gvk: Gvk,
+        namespace: Option<String>,
+    ) -> Result<QueryResult, BackendError> {
+        if self.registry.find(&context).is_none() {
+            return Err(BackendError::NotFound);
+        }
+        let catalog = self.catalog_for(&context).await?;
+        let Some(descriptor) = catalog.types.iter().find(|entry| entry.gvk == gvk) else {
+            return Err(BackendError::NotFound);
+        };
+        if namespace.is_some() && !descriptor.namespaced {
+            return Err(BackendError::Conflict(
+                "the requested type is cluster-scoped and cannot be listed within one namespace"
+                    .into(),
+            ));
+        }
+
+        let client = self.cluster_client(&context).await?;
+        let read = read::list_resource(
+            &client,
+            &context,
+            &gvk,
+            &descriptor.plural,
+            descriptor.namespaced,
+            namespace.as_deref(),
+        )
+        .await?;
+
+        let revision = self.watches.next_revision();
+        let mut records: Vec<_> = read
+            .rows
+            .iter()
+            .map(|row| crate::runtime::record_from_row(row, revision))
+            .collect();
+        records.sort_by(|left, right| left.reference.cmp(&right.reference));
+        Ok(QueryResult::ResourceList(ResourceListData {
+            context,
+            gvk,
+            namespace,
+            revision,
+            rows: records,
+            generated_at: crate::runtime::now_rfc3339(),
+        }))
     }
 
     /// Serve one context's resource catalog through discovery.

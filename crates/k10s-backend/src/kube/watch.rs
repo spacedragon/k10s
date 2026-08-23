@@ -6,18 +6,18 @@
 //! [`WatchRow`]s, [`WatchUpdate`]s, and sanitized error strings ever reach
 //! the runtime, so no credential or raw API shape can leak downstream.
 //!
-//! Rows carry standard metadata only (identity, labels, owner references,
-//! creation timestamp); per-kind status summaries arrive with the Plan 3
-//! normalization task and stay empty here rather than being guessed.
+//! Rows are normalized through the shared [`super::normalize`] normalizers,
+//! so live deltas carry the same per-kind summaries as list reads.
 
 use futures_util::StreamExt;
-use kube::ResourceExt;
 use kube::api::{Api, ListParams, WatchParams};
 use kube::core::{DynamicObject, WatchEvent};
 use kube::discovery::ApiResource;
 
-use crate::port::{Gvk, OwnerRef, ResourceRef};
+use crate::port::Gvk;
 use crate::runtime::supervisor::{ListedState, WatchRow, WatchSource, WatchUpdate};
+
+use super::normalize::normalize_row;
 
 /// A list/watch source bound to one selection on one cluster client.
 #[derive(Clone)]
@@ -69,68 +69,54 @@ impl KubeWatchSource {
     }
 
     fn api(&self) -> Api<DynamicObject> {
-        let api_version = if self.gvk.group.is_empty() {
-            self.gvk.version.clone()
-        } else {
-            format!("{}/{}", self.gvk.group, self.gvk.version)
-        };
-        let api_resource = ApiResource {
-            group: self.gvk.group.clone(),
-            version: self.gvk.version.clone(),
-            kind: self.gvk.kind.clone(),
-            plural: self.plural.clone(),
-            api_version,
-        };
-        match (self.namespaced, self.namespace.as_deref()) {
-            (true, Some(namespace)) => {
-                Api::namespaced_with(self.client.clone(), namespace, &api_resource)
-            }
-            _ => Api::all_with(self.client.clone(), &api_resource),
-        }
+        dynamic_api(
+            self.client.clone(),
+            self.gvk.clone(),
+            self.plural.clone(),
+            self.namespaced,
+            self.namespace.clone(),
+        )
     }
 
     /// Normalize one dynamic object into a runtime row.
     fn normalize(&self, object: &DynamicObject) -> WatchRow {
-        let name = object.name_any();
-        let uid = object.uid().unwrap_or_else(|| {
-            // Server-assigned UIDs are always present on real clusters; the
-            // deterministic fallback only covers degenerate recorded data.
-            format!("uid-{}-{}", self.gvk.kind.to_lowercase(), name)
-        });
-        let namespace = object
-            .namespace()
-            .or_else(|| self.namespaced.then(|| self.namespace.clone()).flatten());
-        let owner_references: Vec<OwnerRef> = object
-            .owner_references()
-            .iter()
-            .map(|owner| {
-                let (group, version) = split_api_version(&owner.api_version);
-                OwnerRef {
-                    gvk: Gvk::new(group, version, owner.kind.clone()),
-                    name: owner.name.clone(),
-                    uid: owner.uid.clone(),
-                    controller: owner.controller.unwrap_or(false),
-                }
-            })
-            .collect();
-        WatchRow {
-            reference: ResourceRef {
-                context: self.context.clone(),
-                gvk: self.gvk.clone(),
-                namespace,
-                name,
-                uid,
-            },
-            labels: object.labels().clone(),
-            // Per-kind summaries are the normalization task's job; empty is
-            // honest where guessing would fabricate status.
-            summary: String::new(),
-            created_at: object
-                .creation_timestamp()
-                .map(|time| time.0.to_string())
-                .unwrap_or_default(),
-            owner_references,
-        }
+        normalize_row(
+            &self.context,
+            &self.gvk,
+            self.namespaced,
+            self.namespace.as_deref(),
+            object,
+        )
+    }
+}
+
+/// Bind one selection onto a kube-rs dynamic API handle, shared by the live
+/// watch source and the on-demand read path. A namespace on a cluster-scoped
+/// type is canonicalized away so the request can never disagree with its own
+/// scope.
+pub(crate) fn dynamic_api(
+    client: kube::Client,
+    gvk: Gvk,
+    plural: String,
+    namespaced: bool,
+    namespace: Option<String>,
+) -> Api<DynamicObject> {
+    let api_version = if gvk.group.is_empty() {
+        gvk.version.clone()
+    } else {
+        format!("{}/{}", gvk.group, gvk.version)
+    };
+    let api_resource = ApiResource {
+        group: gvk.group.clone(),
+        version: gvk.version.clone(),
+        kind: gvk.kind.clone(),
+        plural,
+        api_version,
+    };
+    let namespace = if namespaced { namespace } else { None };
+    match (namespaced, namespace.as_deref()) {
+        (true, Some(namespace)) => Api::namespaced_with(client, namespace, &api_resource),
+        _ => Api::all_with(client, &api_resource),
     }
 }
 
@@ -189,15 +175,8 @@ impl WatchSource for KubeWatchSource {
     }
 }
 
-fn split_api_version(api_version: &str) -> (String, String) {
-    match api_version.split_once('/') {
-        Some((group, version)) => (group.to_owned(), version.to_owned()),
-        None => (String::new(), api_version.to_owned()),
-    }
-}
-
 /// Sanitized relist failure detail; raw Kubernetes Status text never crosses.
-fn sanitize_list_error(error: kube::Error) -> String {
+pub(crate) fn sanitize_list_error(error: kube::Error) -> String {
     match error {
         kube::Error::Api(status) => format!(
             "resource list rejected by the api server with HTTP {}",
