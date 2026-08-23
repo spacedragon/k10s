@@ -76,8 +76,11 @@ struct FakeState {
     metrics_scenario: FakeMetricsScenario,
     revision: u64,
     /// Live validation tickets by ID, consumed single-use by apply.
-    /// Ordered so capacity eviction removes the oldest deterministically.
-    tickets: std::collections::BTreeMap<String, crate::operation::Ticket>,
+    /// `ticket_order` mirrors the live keys in issuance order so capacity
+    /// eviction removes the oldest deterministically regardless of ID
+    /// formatting.
+    tickets: HashMap<String, crate::operation::Ticket>,
+    ticket_order: std::collections::VecDeque<String>,
     next_ticket: u64,
     next_operation: u64,
 }
@@ -282,7 +285,8 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario,
                 revision: INITIAL_REVISION,
-                tickets: std::collections::BTreeMap::new(),
+                tickets: HashMap::new(),
+                ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
             })),
@@ -304,7 +308,8 @@ impl FakeKubernetes {
                 infrastructure_watchers: Vec::new(),
                 metrics_scenario: FakeMetricsScenario::Full,
                 revision: INITIAL_REVISION,
-                tickets: std::collections::BTreeMap::new(),
+                tickets: HashMap::new(),
+                ticket_order: std::collections::VecDeque::new(),
                 next_ticket: 1,
                 next_operation: 1,
             })),
@@ -442,6 +447,7 @@ impl FakeKubernetes {
             let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
             state.next_operation += 1;
             state.tickets.remove(&ticket_id);
+            state.ticket_order.retain(|id| *id != ticket_id);
             (ticket, operation_id)
         };
 
@@ -611,18 +617,6 @@ impl KubernetesAccess for FakeKubernetes {
                     };
                     let ticket_id = format!("ticket-{:04}", state.next_ticket);
                     state.next_ticket += 1;
-                    // Bounded retention: evict the oldest unredeemed
-                    // tickets first so repeated validation without apply
-                    // cannot grow the store without limit.
-                    while state.tickets.len() >= TICKET_CAPACITY {
-                        let oldest = state
-                            .tickets
-                            .keys()
-                            .min()
-                            .expect("capacity is positive")
-                            .clone();
-                        state.tickets.remove(&oldest);
-                    }
                     let ticket = crate::operation::Ticket {
                         id: ticket_id.clone(),
                         buffer_hash: k10s_protocol::buffer_hash(&yaml),
@@ -631,7 +625,17 @@ impl KubernetesAccess for FakeKubernetes {
                         issued_revision: state.current_revision(),
                         target: reference,
                     };
+                    // Bounded retention: evict the oldest unredeemed
+                    // tickets (by issuance order) first so repeated
+                    // validation without apply cannot grow the store
+                    // without limit.
                     state.tickets.insert(ticket.id.clone(), ticket.clone());
+                    state.ticket_order.push_back(ticket.id.clone());
+                    while state.tickets.len() > TICKET_CAPACITY {
+                        if let Some(oldest) = state.ticket_order.pop_front() {
+                            state.tickets.remove(&oldest);
+                        }
+                    }
                     Ok(QueryResult::YamlValidation(
                         crate::operation::YamlValidationData {
                             context,
@@ -1179,6 +1183,86 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::port::BackendEvent;
+
+    /// Regression: capacity eviction must follow issuance order even across
+    /// the `ticket-{:04}` digit-width transition (ids 9999 → 10000), where
+    /// lexicographic ID ordering no longer matches age.
+    #[tokio::test]
+    async fn ticket_eviction_stays_fifo_across_the_digit_width_transition() {
+        use crate::port::Command;
+
+        let fake = FakeKubernetes::with_contexts(vec![ContextInfo {
+            name: "dev-local".into(),
+            cluster: "dev-cluster".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }]);
+        {
+            let mut state = fake.lock();
+            state.next_ticket = 9_998;
+        }
+        const MANIFEST: &str =
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: brand-new\n";
+        let validate_once = || async {
+            fake.query(Query::ValidateApply {
+                context: "dev-local".into(),
+                yaml: MANIFEST.to_owned(),
+            })
+            .await
+        };
+        // Issue past the width boundary and well past capacity.
+        let mut first_ticket = None;
+        let mut last_ticket = None;
+        for _ in 0..40 {
+            let ticket = match validate_once().await.unwrap() {
+                QueryResult::YamlValidation(data) => match data.outcome {
+                    crate::operation::OutcomeData::Valid { ticket } => ticket,
+                    other => panic!("expected a valid outcome, got {other:?}"),
+                },
+                other => panic!("expected validation, got {other:?}"),
+            };
+            if first_ticket.is_none() {
+                first_ticket = Some(ticket.clone());
+            }
+            last_ticket = Some(ticket);
+        }
+        let first = first_ticket.expect("at least one ticket");
+        let last = last_ticket.expect("at least one ticket");
+        assert_eq!(first.id, "ticket-9998");
+        assert_eq!(last.id, "ticket-10037");
+
+        // The oldest ticket was evicted even though its ID sorts last.
+        let rejected = fake
+            .execute(Command::Apply {
+                context: first.target.context.clone(),
+                yaml: MANIFEST.to_owned(),
+                idempotency_key: "idem-evicted".into(),
+                ticket_id: first.id.clone(),
+                buffer_hash: first.buffer_hash.clone(),
+                target: first.target.clone(),
+            })
+            .await;
+        assert!(
+            matches!(rejected, Err(BackendError::Conflict(_))),
+            "the pre-transition ticket must be evicted, got {rejected:?}"
+        );
+
+        // The newest ticket remains redeemable.
+        let accepted = fake
+            .execute(Command::Apply {
+                context: last.target.context.clone(),
+                yaml: MANIFEST.to_owned(),
+                idempotency_key: "idem-newest".into(),
+                ticket_id: last.id.clone(),
+                buffer_hash: last.buffer_hash.clone(),
+                target: last.target.clone(),
+            })
+            .await;
+        assert!(
+            accepted.is_ok(),
+            "the newest ticket still applies: {accepted:?}"
+        );
+    }
 
     #[test]
     fn rfc3339_formats_the_fixed_fake_epoch() {
