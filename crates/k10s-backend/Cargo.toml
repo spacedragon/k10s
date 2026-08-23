@@ -31,5 +31,9 @@ k10s-backend = { path = ".", features = ["testkit"] }
 # Discovery refresh tests drive tokio's mock clock (pause/advance).
 tokio = { version = "1.49.0", features = ["test-util"] }
 
+[[bench]]
+name = "fake_scale"
+harness = false
+
 [lints]
 workspace = true

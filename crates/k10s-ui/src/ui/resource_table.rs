@@ -42,19 +42,20 @@ impl<I> Default for TableActions<I> {
 }
 
 /// Whether a row matches the current search text (name, namespace, or
-/// status summary).
-pub(super) fn matches_search(row: &ResourceListRow, search: &str) -> bool {
-    let needle = search.to_lowercase();
+/// status summary). `needle` must be the already-lowercased search text;
+/// the caller hoists the conversion out of the per-row loop so filtering
+/// large snapshots never allocates per row.
+pub(super) fn matches_search(row: &ResourceListRow, needle: &str) -> bool {
     needle.is_empty()
-        || row.identity.name.to_lowercase().contains(&needle)
+        || row.identity.name.to_lowercase().contains(needle)
         || row
             .identity
             .namespace
             .as_deref()
             .unwrap_or_default()
             .to_lowercase()
-            .contains(&needle)
-        || row.summary.to_lowercase().contains(&needle)
+            .contains(needle)
+        || row.summary.to_lowercase().contains(needle)
 }
 
 /// Sort rows by the spec with a deterministic name tiebreaker.
@@ -115,22 +116,37 @@ where
         return actions;
     }
 
+    // Rows are virtualized: only the visible window of rows is laid out
+    // per frame, so frame cost stays bounded by the viewport rather than
+    // the snapshot size. Virtual row 0 is the sticky header; data rows
+    // follow at offset 1. Row height matches what a Grid row actually
+    // measures: rows contain buttons, so they are at least one interact
+    // size tall, not one text line.
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    let header_rows = 1_usize;
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
-        .show(ui, |ui| {
+        .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
                 .min_col_width(72.0)
                 .show(ui, |ui| {
-                    for (visible, key) in COLUMNS {
-                        if visible == "Namespace" && !namespaced {
-                            continue;
+                    if range.start < header_rows {
+                        for (visible, key) in COLUMNS {
+                            if visible == "Namespace" && !namespaced {
+                                continue;
+                            }
+                            sort_header(ui, title, visible, key, sort, &mut actions);
                         }
-                        sort_header(ui, title, visible, key, sort, &mut actions);
+                        ui.end_row();
                     }
-                    ui.end_row();
 
-                    for row in rows {
+                    for index in range.start.max(header_rows)..range.end {
+                        let row = &rows[index - header_rows];
                         if namespaced {
                             ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                         }

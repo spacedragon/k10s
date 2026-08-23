@@ -220,6 +220,7 @@ pub(super) fn show<I>(
 
     // The namespace restriction filters authoritative rows locally; the
     // search text filter lives in the table module.
+    let needle = state.search.to_lowercase();
     let filtered: Vec<&ResourceListRow> = rows
         .iter()
         .filter(|row| {
@@ -227,7 +228,7 @@ pub(super) fn show<I>(
                 .namespace
                 .as_deref()
                 .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref())
-                && super::resource_table::matches_search(row, &state.search)
+                && super::resource_table::matches_search(row, &needle)
         })
         .collect();
     let mut sorted = filtered;
@@ -242,7 +243,11 @@ pub(super) fn show<I>(
             .cloned()
     });
     let mut ratio = state.split_ratio;
-    let detail_shown = state.detail_visible && detail_row.is_some();
+    // A pinned identity that no longer exists among the authoritative rows
+    // was deleted (or is gone behind the watch); it must never be shown as
+    // merely "loading".
+    let gone = state.detail.is_some() && detail_row.is_none();
+    let detail_shown = state.detail_visible && state.detail.is_some();
 
     // The integrated pane renders the pinned detail state; the backend
     // response is looked up by that identity alone.
@@ -282,6 +287,7 @@ pub(super) fn show<I>(
                     window_id,
                     detail,
                     detail_view,
+                    gone,
                     yaml,
                     streams,
                     dialogs,

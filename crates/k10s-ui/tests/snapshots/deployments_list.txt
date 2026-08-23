@@ -1,0 +1,166 @@
+Window
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  Button label="File"
+                  Button label="View"
+                  Button label="Help"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          ComboBox label="Kubernetes context" value="dev-local"
+                        Label value="Kubernetes context"
+                          TextRun value="Kubernetes context"
+                  GenericContainer
+                    Button label="Refresh"
+                  Label value="Connected"
+                    TextRun value="Connected"
+                  Label value="Connection status: Connected"
+                    TextRun value="●"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Button label="Overview"
+            GenericContainer
+              Button label="Nodes"
+            GenericContainer
+              Button label="Storage"
+            GenericContainer
+              Button label="Workloads"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Deployments"
+                      Label value="1 open Deployments window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another Deployments window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Pods"
+                      GenericContainer
+                        Button label="Open another Pods window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="StatefulSets"
+                      GenericContainer
+                        Button label="Open another StatefulSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="DaemonSets"
+                      GenericContainer
+                        Button label="Open another DaemonSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Jobs"
+                      GenericContainer
+                        Button label="Open another Jobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="CronJobs"
+                      GenericContainer
+                        Button label="Open another CronJobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Custom Resources…"
+                      GenericContainer
+                        Button label="Open another Custom Resources… window"
+        GenericContainer
+          GenericContainer
+  Window label="Overview"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                ProgressIndicator
+                Label value="Loading cluster overview"
+                  TextRun value="Loading cluster overview"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Deployments"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                TextInput label="Search deployments" value=""
+                  TextRun value=""
+                TextInput label="Namespace filter" value=""
+                  TextRun value=""
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Namespace"
+                              TextRun value="Namespace"
+                            Button label="Sort deployments by namespace"
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Button label="Sort deployments by name"
+                          GenericContainer
+                            Label value="Status"
+                              TextRun value="Status"
+                            Button label="Sort deployments by status"
+                          GenericContainer
+                            Label value="Created"
+                              TextRun value="Created"
+                            Button label="Sort deployments by created"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="api-server"
+                          Label value="2/2 ready"
+                            TextRun value="2/2 ready"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="web-frontend"
+                          Label value="20/20 ready"
+                            TextRun value="20/20 ready"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
