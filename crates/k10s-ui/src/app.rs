@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
     ClientFrame, InfrastructureRequest, RequestId, ResourceDetailResponse, ResourceIdentity,
-    ServerFrame, StreamTarget,
+    ResourceTypeEntry, ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
@@ -20,7 +20,7 @@ use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
-use crate::workspace::{WindowId, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
+use crate::workspace::{WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -99,6 +99,16 @@ pub struct K10sApp {
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
+    /// Live per-kind resource watch subscriptions and the context they
+    /// were created against; rebuilt automatically on reconnect by the
+    /// shared client's desired-subscription recovery.
+    resource_subscriptions: BTreeMap<WorkloadKind, (String, LiveSubscription)>,
+    /// Selectable resource types of the subscribed context (GVK picker).
+    resource_types: Vec<ResourceTypeEntry>,
+    /// The context whose types are cached or being fetched.
+    types_context: Option<String>,
+    /// In-flight resource.types request for that context.
+    types_request: Option<PendingRequest>,
     /// In-flight workload mutations awaiting their accepted operation.
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
     /// Backend-resolved details for every identity a window pinned, keyed by
@@ -184,6 +194,10 @@ impl K10sApp {
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
+            resource_subscriptions: BTreeMap::new(),
+            resource_types: Vec::new(),
+            types_context: None,
+            types_request: None,
             pending_mutations: BTreeMap::new(),
             details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
@@ -264,10 +278,7 @@ impl K10sApp {
             .as_deref()
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
-        let feed = ResourceFeed {
-            details: self.details.clone().into_iter().collect(),
-            ..ResourceFeed::default()
-        };
+        let feed = self.build_resource_feed();
         let refresh = self.shell.show_with_resources(
             ui,
             connection,
@@ -286,6 +297,7 @@ impl K10sApp {
             self.retry_now(now_ms, entropy)
         } else if selected_after != selected_before {
             selected_after.as_deref().map_or(Ok(()), |context| {
+                self.ensure_resource_streams(context)?;
                 self.select_infrastructure_context(context)
             })
         } else if refresh {
@@ -598,6 +610,83 @@ impl K10sApp {
         self.view = AppView::Connecting;
     }
 
+    /// Assemble the connected resource projection for one rendered frame:
+    /// applied per-kind list views, selectable types, and resolved details.
+    fn build_resource_feed(&self) -> ResourceFeed {
+        let mut lists = std::collections::HashMap::new();
+        for (kind, (_, subscription)) in &self.resource_subscriptions {
+            if let Some(state) = self.client.resource_list(subscription.id()) {
+                lists.insert(*kind, state.rows().cloned().collect());
+            }
+        }
+        ResourceFeed {
+            lists,
+            types: self.resource_types.clone(),
+            details: self.details.clone().into_iter().collect(),
+        }
+    }
+
+    /// Keep one live resource watch per built-in workload kind on the
+    /// selected context, plus a cached `resource.types` answer for the GVK
+    /// picker. The shared client resubscribes the desired set after every
+    /// reconnect, so this only reconciles context switches.
+    fn ensure_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
+        let same_context = self
+            .resource_subscriptions
+            .values()
+            .all(|(subscribed, _)| subscribed == context)
+            && !self.resource_subscriptions.is_empty();
+        if !same_context {
+            let old: Vec<(WorkloadKind, (String, LiveSubscription))> =
+                std::mem::take(&mut self.resource_subscriptions)
+                    .into_iter()
+                    .collect();
+            for (_, (_, subscription)) in old {
+                self.client.unsubscribe(&subscription)?;
+            }
+            for kind in WorkloadKind::ALL {
+                if let Some((group, version, k)) = builtin_kind_gvk(kind) {
+                    let subscription = self
+                        .client
+                        .subscribe_resource(context, group, version, k, None)?;
+                    self.resource_subscriptions
+                        .insert(kind, (context.to_owned(), subscription));
+                }
+            }
+        }
+        if self.types_context.as_deref() != Some(context) && self.types_context.is_some() {
+            // Context changed: drop the stale type cache; refetched below.
+            self.resource_types.clear();
+        }
+        if self.types_context.as_deref() != Some(context) && self.types_request.is_none() {
+            let request = self
+                .client
+                .begin(Query::ResourceTypes(ResourceTypesRequest {
+                    context: context.to_owned(),
+                }))?;
+            self.types_request = Some(request);
+            self.flush_outbound()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))?;
+        }
+        Ok(())
+    }
+
+    /// Complete the in-flight `resource.types` request.
+    fn finish_type_requests(&mut self) {
+        let Some(request) = &self.types_request else {
+            return;
+        };
+        if self.client.is_pending(request) {
+            return;
+        }
+        let Some(request) = self.types_request.take() else {
+            unreachable!("just checked");
+        };
+        if let Some(QueryResult::ResourceTypes(response)) = self.client.take(request) {
+            self.resource_types = response.types;
+        }
+    }
+
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
@@ -652,6 +741,7 @@ impl K10sApp {
                 }
             }
         }
+        self.finish_type_requests();
         self.refresh_details();
     }
 
@@ -1086,6 +1176,20 @@ impl K10sApp {
                 self.stream_sessions.remove(&key);
             }
         }
+    }
+}
+
+/// The wire identity of each built-in workload kind. Custom resources are
+/// picker-driven and have no single GVK.
+fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        WorkloadKind::Deployments => Some(("apps", "v1", "Deployment")),
+        WorkloadKind::StatefulSets => Some(("apps", "v1", "StatefulSet")),
+        WorkloadKind::DaemonSets => Some(("apps", "v1", "DaemonSet")),
+        WorkloadKind::Jobs => Some(("batch", "v1", "Job")),
+        WorkloadKind::CronJobs => Some(("batch", "v1", "CronJob")),
+        WorkloadKind::Pods => Some(("", "v1", "Pod")),
+        WorkloadKind::CustomResources => None,
     }
 }
 

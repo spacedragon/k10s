@@ -158,6 +158,11 @@ impl ScaleDialog {
         self.connected = false;
     }
 
+    /// Notify the dialog that the transport is available again.
+    pub fn reconnected(&mut self) {
+        self.connected = true;
+    }
+
     /// Current lifecycle phase.
     #[must_use]
     pub fn phase(&self) -> DialogPhase {
@@ -290,6 +295,11 @@ impl DeleteDialog {
     /// Notify the dialog that the transport was lost.
     pub fn connection_lost(&mut self) {
         self.connected = false;
+    }
+
+    /// Notify the dialog that the transport is available again.
+    pub fn reconnected(&mut self) {
+        self.connected = true;
     }
 
     /// Report an accepted operation for the drained submission.
@@ -436,10 +446,29 @@ impl OperationDialogs {
 
     /// Notify every open dialog that the transport was lost.
     pub fn connection_lost(&mut self) {
+        self.set_connected(false);
+    }
+
+    /// Drive every dialog's connectivity flag from the shell each frame, so
+    /// a dialog opened before or across a reconnect always reflects the
+    /// current transport state.
+    pub fn set_connected(&mut self, connected: bool) {
         for dialog in self.windows.values_mut() {
             match dialog {
-                ActiveDialog::Scale(scale) => scale.connection_lost(),
-                ActiveDialog::Delete(delete) => delete.connection_lost(),
+                ActiveDialog::Scale(scale) => {
+                    if connected {
+                        scale.reconnected();
+                    } else {
+                        scale.connection_lost();
+                    }
+                }
+                ActiveDialog::Delete(delete) => {
+                    if connected {
+                        delete.reconnected();
+                    } else {
+                        delete.connection_lost();
+                    }
+                }
             }
         }
     }
@@ -450,7 +479,8 @@ impl OperationDialogs {
     }
 
     /// Render every open dialog. Queues actions; never blocks.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    pub fn show(&mut self, ui: &mut egui::Ui, connected: bool) {
+        self.set_connected(connected);
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
         for window in windows {
             let Some(dialog) = self.windows.get_mut(&window) else {

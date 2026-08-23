@@ -10,7 +10,7 @@ use super::resource::ResourceWindowState;
 pub struct WindowId(pub u64);
 
 /// Workload list kinds shown under the launcher's collapsible group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkloadKind {
     Deployments,
     Pods,

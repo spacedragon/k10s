@@ -334,8 +334,12 @@ pub(crate) async fn serve_socket(
                                 });
                                 if outcome.is_err() {
                                     overload_close(&fwd_outbound);
+                                    break;
                                 }
-                                break;
+                                // Keep forwarding: later updates still reach
+                                // the client, and the resync answer repairs
+                                // everything dropped before it.
+                                continue;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         },
@@ -947,8 +951,10 @@ fn parse_request(
                 })
         }
         k10s_protocol::REQUEST_WORKLOAD_DELETE => {
-            let Some(idempotency_key) = idempotency_key else {
-                return Err("workload.delete requires an envelope-level idempotencyKey".to_owned());
+            let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
+                return Err(
+                    "workload.delete requires a non-empty envelope-level idempotencyKey".to_owned(),
+                );
             };
             serde_json::from_value::<DeleteRequest>(payload.clone())
                 .map(|delete| {
