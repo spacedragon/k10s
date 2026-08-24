@@ -10,6 +10,7 @@ pub mod kernel;
 pub mod operation;
 pub mod port;
 pub mod stream;
+mod validation;
 pub mod watch;
 
 mod kube;

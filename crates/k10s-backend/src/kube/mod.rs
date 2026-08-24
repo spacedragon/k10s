@@ -14,6 +14,7 @@ mod normalize;
 mod owners;
 mod permissions;
 mod read;
+mod validation;
 mod watch;
 
 use std::collections::HashMap;
@@ -87,6 +88,9 @@ pub struct KubeAdapter {
     /// validation, commit, and retirement run under one guard so overlapping
     /// switches cannot interleave their phases or retire the wrong runtime.
     switch_lock: tokio::sync::Mutex<()>,
+    /// Process-local validation authority. Restarting the adapter drops every
+    /// issued ticket, and the store itself enforces TTL and capacity bounds.
+    validation_tickets: StdMutex<crate::validation::ticket::TicketStore>,
     /// Test-only scripted watch sources overriding the real kube-rs path.
     #[cfg(feature = "testkit")]
     watch_scripts: ScriptedWatches,
@@ -127,6 +131,7 @@ impl KubeAdapter {
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -174,6 +179,7 @@ impl KubeAdapter {
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -260,7 +266,7 @@ impl KubernetesAccess for KubeAdapter {
                 } => self.context_permissions(&context, checks).await,
                 // Cluster-facing capabilities arrive with later Plan 3 tasks;
                 // until then they are typed, not guessed.
-                Query::ValidateApply { .. } => Err(BackendError::unsupported("validate.apply")),
+                Query::ValidateApply { context, yaml } => self.validate_apply(context, yaml).await,
                 Query::StreamTicket { .. } => Err(BackendError::unsupported("stream.ticket")),
                 Query::ResourceList {
                     context,

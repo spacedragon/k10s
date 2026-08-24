@@ -1039,6 +1039,7 @@ impl KubernetesAccess for FakeKubernetes {
                         buffer_hash: k10s_protocol::buffer_hash(&yaml),
                         disruptive: exists && crate::operation::is_disruptive_kind(&gvk),
                         resource_revision,
+                        opaque_resource_version: None,
                         issued_revision: state.current_revision(),
                         target: reference,
                     };
