@@ -262,6 +262,10 @@ fn client_state_encodes_stream_ticket_queries_safely() {
         "web-frontend-7d9f8-00001"
     );
     assert_eq!(raw["payload"]["payload"]["tty"], true);
+    assert_eq!(
+        raw["payload"]["payload"]["command"],
+        serde_json::json!(["/bin/sh"])
+    );
 
     let response = ServerFrame {
         kind: ServerKind::Response,

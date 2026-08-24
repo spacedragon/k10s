@@ -1263,6 +1263,11 @@ fn parse_request(
                             pod: target.pod.clone(),
                             uid: target.uid.clone(),
                             container: target.container.clone(),
+                            command: if parsed.command.is_empty() {
+                                vec!["/bin/sh".to_owned()]
+                            } else {
+                                parsed.command.clone()
+                            },
                             tty: parsed.tty,
                         },
                     };

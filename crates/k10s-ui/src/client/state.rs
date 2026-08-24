@@ -548,6 +548,11 @@ impl PendingAction {
                 target: target.clone(),
                 stream_type: *stream_type,
                 tty: *tty,
+                command: if *stream_type == k10s_protocol::StreamType::Exec {
+                    vec!["/bin/sh".to_owned()]
+                } else {
+                    Vec::new()
+                },
                 tail_lines: (*stream_type == k10s_protocol::StreamType::Logs).then_some(200),
                 since_seconds: None,
                 timestamps: *stream_type == k10s_protocol::StreamType::Logs,
