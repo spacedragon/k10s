@@ -247,7 +247,7 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $ErrorActionPreference = 'Stop'
-          $match = Select-String rust-toolchain.toml '^channel = "([^"]+)"$'
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$'
           if (-not $match) { throw 'Unable to read rust-toolchain.toml' }
           $channel = $match.Matches[0].Groups[1].Value
           rustup toolchain install $channel --profile minimal --no-self-update
