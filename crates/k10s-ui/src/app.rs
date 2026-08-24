@@ -394,8 +394,11 @@ impl K10sApp {
                 let frame: ServerFrame = serde_json::from_str(&text).map_err(|error| {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
+                let resource_delta = resource_delta_projection(&frame);
                 let stream_request_id = frame.request_id.clone();
-                if let Err(error) = self.client.apply_at(frame, now_ms, entropy) {
+                let apply_result = self.client.apply_at(frame, now_ms, entropy);
+                let applied = apply_result.is_ok();
+                if let Err(error) = apply_result {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
@@ -496,6 +499,18 @@ impl K10sApp {
                         }
                         _ => return Err(AppEventError::Terminal(error.to_string())),
                     }
+                }
+                if applied
+                    && let Some((subscription, identity, revision)) = resource_delta
+                    && self
+                        .client
+                        .resource_list(&subscription)
+                        .and_then(|state| state.revision())
+                        == Some(revision)
+                {
+                    self.shell
+                        .yaml_editors_mut()
+                        .target_changed(&identity, revision);
                 }
                 self.finish_infrastructure_request();
                 self.finish_context_switch()?;
@@ -1407,6 +1422,35 @@ impl K10sApp {
     }
 }
 
+/// Extract the immutable identity/revision carried by a resource delta. The
+/// caller projects it only after ClientState proves that exact revision was
+/// accepted for the owning subscription, so stale/out-of-order deltas cannot
+/// invalidate a still-current validation ticket.
+fn resource_delta_projection(
+    frame: &ServerFrame,
+) -> Option<(
+    k10s_protocol::SubscriptionId,
+    ResourceIdentity,
+    k10s_protocol::BackendRevision,
+)> {
+    let subscription = frame.subscription_id.clone()?;
+    let k10s_protocol::ServerPayload::Event(event) = frame.decode_payload().ok()? else {
+        return None;
+    };
+    match event.event_kind.as_str() {
+        k10s_protocol::RESOURCE_EVENT_CHANGED => {
+            let delta: k10s_protocol::ResourceChanged =
+                serde_json::from_value(event.payload).ok()?;
+            Some((subscription, delta.identity, delta.row.revision))
+        }
+        k10s_protocol::RESOURCE_EVENT_GONE => {
+            let delta: k10s_protocol::ResourceGone = serde_json::from_value(event.payload).ok()?;
+            Some((subscription, delta.identity, delta.revision))
+        }
+        _ => None,
+    }
+}
+
 /// The wire identity of each built-in workload kind. Custom resources are
 /// picker-driven and have no single GVK.
 fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
@@ -1468,9 +1512,12 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable as _};
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode, ErrorFrame, ErrorScope,
-        GroupVersionKind, ProtocolVersion, RequestId, ResourceIdentity, ResumeStatus, Retryability,
-        ServerFrame, ServerKind, SessionId, Subscribed, SubscriptionId, Welcome,
+        BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
+        ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
+        ResourceChanged, ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus,
+        Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk,
+        SnapshotEnd, Subscribed, SubscriptionId, ValidationTicket, Welcome, YamlOutcome,
+        buffer_hash,
     };
 
     use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
@@ -1572,6 +1619,148 @@ mod tests {
             app.workspace().windows()[0].kind,
             crate::workspace::WindowKind::Overview
         );
+    }
+
+    #[test]
+    fn accepted_watch_revision_invalidates_yaml_authority_but_stale_delta_does_not() {
+        let (mut app, _) = test_app(Vec::new());
+        app.client.apply(welcome()).unwrap();
+        let subscription = app
+            .client
+            .subscribe_resource("dev", "apps", "v1", "Deployment", None)
+            .unwrap();
+        let subscription_id = subscription.id().clone();
+        let identity = ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        };
+        let row = |revision| ResourceListRow {
+            identity: identity.clone(),
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        };
+        let window = crate::workspace::WindowId(99);
+        let manifest = "apiVersion: apps/v1\nkind: Deployment\n";
+        let editor = app
+            .shell
+            .yaml_editors_mut()
+            .open(window, identity.clone(), manifest);
+        editor.begin_edit();
+        editor.set_buffer(format!("{manifest}# local edit\n"));
+        editor.review();
+        editor.apply_outcome(&YamlOutcome::Valid {
+            ticket: ValidationTicket {
+                id: "validation-1".into(),
+                target: identity.clone(),
+                resource_revision: BackendRevision::new(10),
+                buffer_hash: buffer_hash(editor.buffer()),
+                disruptive: false,
+            },
+        });
+        assert!(editor.can_apply());
+
+        let frame = |kind, sequence, payload| ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::Subscribed,
+                1,
+                serde_json::to_value(Subscribed).unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotBegin,
+                2,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotChunk,
+                3,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(10),
+                        rows: vec![row(10)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotEnd,
+                4,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "test".into(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+
+        for (sequence, revision) in [(5, 9), (6, 11)] {
+            app.handle_event(
+                server_message(&frame(
+                    ServerKind::Event,
+                    sequence,
+                    serde_json::to_value(Event {
+                        event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                        revision: Some(revision.to_string()),
+                        payload: serde_json::to_value(ResourceChanged {
+                            identity: identity.clone(),
+                            row: row(revision),
+                        })
+                        .unwrap(),
+                    })
+                    .unwrap(),
+                )),
+                0,
+                0,
+            )
+            .unwrap();
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            if revision == 9 {
+                assert!(editor.can_apply(), "stale watch deltas are ignored");
+            } else {
+                assert!(
+                    !editor.can_apply(),
+                    "accepted target drift revokes authority"
+                );
+                assert!(
+                    editor.is_dirty(),
+                    "local edits survive authority invalidation"
+                );
+            }
+        }
     }
 
     fn welcome() -> ServerFrame {

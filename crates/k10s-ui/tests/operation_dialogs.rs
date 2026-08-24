@@ -584,17 +584,6 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
     // Recovery must query EVERY nonterminal operation by ID before anything
     // may retry. Bootstrap is rebuilt first; keep reading until the
     // operation refresh request is queued behind it.
-    eprintln!(
-        "DEBUG nonterminal after resync: {:?}",
-        client.nonterminal_operation_ids()
-    );
-    eprintln!(
-        "DEBUG ops tracked: {:?}",
-        client
-            .tracked_operations()
-            .map(|(id, v)| (id.as_str(), v.status()))
-            .collect::<Vec<_>>()
-    );
     let (refresh_id, _kind, payload, _) = loop {
         let next = encoded_request(&mut client);
         if next.1 == "operation.status" {
