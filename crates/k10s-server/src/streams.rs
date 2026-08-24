@@ -335,21 +335,19 @@ pub(crate) async fn serve_stream(
                                 let _ = sink.send(Message::Close(None)).await;
                                 return;
                             };
-                            for line in text.lines().filter(|line| !line.is_empty()) {
-                                if kernel
-                                    .stream_input(&stream_ticket, StreamInput::Stdin(line.to_owned()))
-                                    .await
-                                    .is_err()
-                                {
-                                    let _ = sink
-                                        .send(error_message(
-                                            ErrorCode::Conflict,
-                                            "the stream session is not active",
-                                        ))
-                                        .await;
-                                    let _ = sink.send(Message::Close(None)).await;
-                                    return;
-                                }
+                            if kernel
+                                .stream_input(&stream_ticket, StreamInput::Stdin(text.to_owned()))
+                                .await
+                                .is_err()
+                            {
+                                let _ = sink
+                                    .send(error_message(
+                                        ErrorCode::Conflict,
+                                        "the stream session is not active",
+                                    ))
+                                    .await;
+                                let _ = sink.send(Message::Close(None)).await;
+                                return;
                             }
                         }
                         payload_kind::RESIZE => {

@@ -38,9 +38,9 @@ struct Inner {
 }
 
 #[derive(Debug)]
-pub(super) struct LogTickets(Mutex<Inner>);
+pub(super) struct StreamTickets(Mutex<Inner>);
 
-impl LogTickets {
+impl StreamTickets {
     pub(super) fn new() -> Self {
         Self(Mutex::new(Inner {
             tickets: HashMap::new(),
@@ -49,7 +49,7 @@ impl LogTickets {
         }))
     }
 
-    fn issue(&self, stream: StreamKind) -> String {
+    pub(super) fn issue(&self, stream: StreamKind) -> String {
         let mut inner = self
             .0
             .lock()
@@ -71,22 +71,38 @@ impl LogTickets {
         id
     }
 
-    fn redeem(&self, id: &str) -> Result<StreamKind, BackendError> {
+    pub(super) fn redeem_for(
+        &self,
+        id: &str,
+        route: StreamRouteKind,
+    ) -> Result<StreamKind, BackendError> {
         let mut inner = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(ticket) = inner.tickets.remove(id) else {
+        let Some(ticket) = inner.tickets.get(id) else {
             return Err(BackendError::Conflict(
                 "the stream ticket is unknown or already used".into(),
             ));
         };
-        inner.order.retain(|candidate| candidate != id);
         if ticket.issued.elapsed() > TTL {
+            inner.tickets.remove(id);
+            inner.order.retain(|candidate| candidate != id);
             return Err(BackendError::Conflict(
                 "the stream ticket has expired".into(),
             ));
         }
+        let expected = match &ticket.stream {
+            StreamKind::Logs { .. } => StreamRouteKind::Logs,
+            StreamKind::Exec { .. } => StreamRouteKind::Exec,
+        };
+        if route != expected {
+            return Err(BackendError::Conflict(
+                "the stream ticket was issued for a different route".into(),
+            ));
+        }
+        let ticket = inner.tickets.remove(id).expect("checked above");
+        inner.order.retain(|candidate| candidate != id);
         Ok(ticket.stream)
     }
 }
@@ -96,6 +112,9 @@ impl KubeAdapter {
         &self,
         stream: StreamKind,
     ) -> Result<QueryResult, BackendError> {
+        if matches!(stream, StreamKind::Exec { .. }) {
+            return self.issue_exec_ticket(stream).await;
+        }
         let StreamKind::Logs {
             context,
             namespace,
@@ -108,7 +127,7 @@ impl KubeAdapter {
             follow,
         } = stream
         else {
-            return Err(BackendError::unsupported("exec.stream"));
+            unreachable!()
         };
         if tail_lines.is_some_and(|value| !(0..=MAX_TAIL_LINES).contains(&value))
             || since_seconds.is_some_and(|value| !(0..=MAX_SINCE_SECONDS).contains(&value))
@@ -150,7 +169,7 @@ impl KubeAdapter {
             timestamps,
             follow,
         };
-        let id = self.log_tickets.issue(bound.clone());
+        let id = self.stream_tickets.issue(bound.clone());
         Ok(QueryResult::StreamTicket(StreamGrant {
             ticket_id: id,
             stream: bound,
@@ -162,12 +181,10 @@ impl KubeAdapter {
         ticket_id: String,
         route: StreamRouteKind,
     ) -> Result<SubscriptionHandle, BackendError> {
-        if route != StreamRouteKind::Logs {
-            return Err(BackendError::Conflict(
-                "the stream ticket was issued for a different route".into(),
-            ));
+        if route == StreamRouteKind::Exec {
+            return self.redeem_exec_ticket(ticket_id).await;
         }
-        let bound = self.log_tickets.redeem(&ticket_id)?;
+        let bound = self.stream_tickets.redeem_for(&ticket_id, route)?;
         let StreamKind::Logs {
             context,
             namespace,
@@ -229,7 +246,7 @@ async fn pump<R: futures_util::AsyncBufRead + Unpin>(
     }
 }
 
-fn has_container(pod: &Pod, name: &str) -> bool {
+pub(super) fn has_container(pod: &Pod, name: &str) -> bool {
     pod.spec.as_ref().is_some_and(|spec| {
         spec.containers
             .iter()
@@ -278,7 +295,7 @@ mod tests {
 
     #[test]
     fn ticket_store_is_opaque_single_use_and_evicts_the_oldest_entry() {
-        let tickets = LogTickets::new();
+        let tickets = StreamTickets::new();
         let oldest = tickets.issue(log_stream("sensitive-pod-name"));
         assert!(!oldest.contains("sensitive-pod-name"));
 
@@ -288,15 +305,15 @@ mod tests {
         }
 
         assert!(matches!(
-            tickets.redeem(&oldest),
+            tickets.redeem_for(&oldest, StreamRouteKind::Logs),
             Err(BackendError::Conflict(_))
         ));
         assert!(matches!(
-            tickets.redeem(&newest),
+            tickets.redeem_for(&newest, StreamRouteKind::Logs),
             Ok(StreamKind::Logs { .. })
         ));
         assert!(matches!(
-            tickets.redeem(&newest),
+            tickets.redeem_for(&newest, StreamRouteKind::Logs),
             Err(BackendError::Conflict(_))
         ));
     }

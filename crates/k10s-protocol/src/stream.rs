@@ -77,6 +77,11 @@ pub struct StreamTicketRequest {
     /// merged output), `false` the retained non-TTY mode with separated
     /// stdout/stderr. Ignored for logs.
     pub tty: bool,
+    /// Exact remote command and arguments for exec. Older clients omitted
+    /// this field, so an empty value is normalized to `/bin/sh` by the
+    /// server. Ignored for logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
     /// Maximum historical lines requested for a logs stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_lines: Option<i64>,
@@ -306,6 +311,7 @@ mod tests {
             },
             stream_type: StreamType::Logs,
             tty: false,
+            command: Vec::new(),
             tail_lines: Some(200),
             since_seconds: Some(60),
             timestamps: true,
@@ -319,6 +325,21 @@ mod tests {
             serde_json::from_value::<StreamTicketRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn exec_ticket_requests_preserve_the_exact_remote_command() {
+        let value = serde_json::json!({
+            "target": {
+                "context": "dev", "namespace": "default", "pod": "web",
+                "uid": "uid-web", "container": "app"
+            },
+            "streamType": "exec",
+            "tty": false,
+            "command": ["/bin/sh", "-c", "printf exact"]
+        });
+        let request: StreamTicketRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.command, ["/bin/sh", "-c", "printf exact"]);
     }
 
     #[test]

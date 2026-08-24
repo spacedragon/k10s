@@ -233,6 +233,8 @@ pub enum StreamKind {
         pod: String,
         uid: String,
         container: String,
+        /// Exact remote command and arguments; never interpreted locally.
+        command: Vec<String>,
         tty: bool,
     },
 }
