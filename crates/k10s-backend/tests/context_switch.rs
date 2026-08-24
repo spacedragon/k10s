@@ -834,15 +834,7 @@ async fn later_reads_still_reach_the_api_server_and_respect_authorization() {
         })
         .await
         .expect_err("authorization still applies after the switch");
-    match revoked {
-        BackendError::Internal(detail) => {
-            assert!(
-                detail.contains("403"),
-                "sanitized detail keeps the code: {detail}"
-            )
-        }
-        other => panic!("expected a sanitized api-server rejection, got {other:?}"),
-    }
+    assert_eq!(revoked, BackendError::Forbidden);
 }
 
 // ---------------------------------------------------------------------------

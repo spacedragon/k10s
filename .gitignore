@@ -6,4 +6,4 @@ node_modules/
 apps/k10s-web/dist/
 test-results/
 playwright-report/
-
+tests/kind/.kubeconfig
