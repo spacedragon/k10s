@@ -53,6 +53,10 @@ pub struct StreamTarget {
     pub namespace: String,
     /// Pod name.
     pub pod: String,
+    /// Immutable UID of the selected Pod. Older clients may omit it, in
+    /// which case the adapter binds the UID it observes at issuance.
+    #[serde(default)]
+    pub uid: String,
     /// Container within the pod.
     pub container: String,
 }
@@ -73,6 +77,18 @@ pub struct StreamTicketRequest {
     /// merged output), `false` the retained non-TTY mode with separated
     /// stdout/stderr. Ignored for logs.
     pub tty: bool,
+    /// Maximum historical lines requested for a logs stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_lines: Option<i64>,
+    /// Relative history window for logs, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_seconds: Option<i64>,
+    /// Ask Kubernetes to prefix log lines with source timestamps.
+    #[serde(default)]
+    pub timestamps: bool,
+    /// Continue following new log output after the historical tail.
+    #[serde(default)]
+    pub follow: bool,
 }
 
 /// Response payload granting a single-use stream ticket.
@@ -275,6 +291,33 @@ mod tests {
                 access_token: "secret".into(),
                 stream_ticket: "t".into(),
             }
+        );
+    }
+
+    #[test]
+    fn log_ticket_requests_preserve_exact_uid_and_history_options() {
+        let request = StreamTicketRequest {
+            target: StreamTarget {
+                context: "dev".into(),
+                namespace: "default".into(),
+                pod: "web".into(),
+                uid: "uid-web".into(),
+                container: "app".into(),
+            },
+            stream_type: StreamType::Logs,
+            tty: false,
+            tail_lines: Some(200),
+            since_seconds: Some(60),
+            timestamps: true,
+            follow: true,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["target"]["uid"], "uid-web");
+        assert_eq!(value["tailLines"], 200);
+        assert_eq!(value["sinceSeconds"], 60);
+        assert_eq!(
+            serde_json::from_value::<StreamTicketRequest>(value).unwrap(),
+            request
         );
     }
 

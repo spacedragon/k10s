@@ -31,6 +31,7 @@ fn web_target(container: &str) -> StreamTarget {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: WEB_POD.into(),
+        uid: String::new(),
         container: container.into(),
     }
 }
@@ -106,6 +107,10 @@ async fn issue_ticket(
             target: target.clone(),
             stream_type,
             tty,
+            tail_lines: None,
+            since_seconds: None,
+            timestamps: false,
+            follow: false,
         })
         .unwrap(),
     )
@@ -478,10 +483,15 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
                 context: "prod-readonly".into(),
                 namespace: "default".into(),
                 pod: "edge-gateway-x".into(),
+                uid: String::new(),
                 container: "app".into(),
             },
             stream_type: StreamType::Logs,
             tty: false,
+            tail_lines: None,
+            since_seconds: None,
+            timestamps: false,
+            follow: false,
         })
         .unwrap(),
     )
@@ -502,6 +512,10 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             target: missing_pod,
             stream_type: StreamType::Exec,
             tty: true,
+            tail_lines: None,
+            since_seconds: None,
+            timestamps: false,
+            follow: false,
         })
         .unwrap(),
     )
@@ -516,6 +530,10 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             target: web_target("sidecar"),
             stream_type: StreamType::Exec,
             tty: true,
+            tail_lines: None,
+            since_seconds: None,
+            timestamps: false,
+            follow: false,
         })
         .unwrap(),
     )
@@ -532,6 +550,10 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             target: web_target("distroless"),
             stream_type: StreamType::Exec,
             tty: true,
+            tail_lines: None,
+            since_seconds: None,
+            timestamps: false,
+            follow: false,
         })
         .unwrap(),
     )
@@ -656,6 +678,34 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
     );
     let _ = banner;
 
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn outbound_log_rate_budget_closes_before_forwarding_an_oversize_chunk() {
+    let config = ServerConfig {
+        stream_rate_budget_bytes_per_sec: 8,
+        ..ServerConfig::default()
+    };
+    let (server, _fake) = spawn_server_with(config).await;
+    let mut control = connect_control(&server).await;
+    let ticket = issue_ticket(
+        &mut control,
+        "outbound-rate",
+        &web_target(WEB_CONTAINER),
+        StreamType::Logs,
+        false,
+    )
+    .await;
+    let (mut ws, _) = connect_async(format!("ws://{}{}", server.addr(), LOGS_PATH))
+        .await
+        .unwrap();
+    send_stream_hello(&mut ws, "secret", &ticket).await;
+    assert_eq!(receive_text(&mut ws).await["kind"], json!("ready"));
+    let error = receive_text(&mut ws).await;
+    assert_eq!(error["kind"], json!("error"), "{error:?}");
+    assert!(error["message"].as_str().unwrap().contains("budget"));
+    receive_close(&mut ws).await;
     server.shutdown().await.unwrap();
 }
 

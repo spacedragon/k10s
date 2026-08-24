@@ -221,6 +221,8 @@ pub(crate) async fn serve_stream(
     // Inbound rate budget: a fixed one-second byte window.
     let mut window_start = Instant::now();
     let mut window_bytes = 0_usize;
+    let mut outbound_window_start = Instant::now();
+    let mut outbound_window_bytes = 0_usize;
 
     loop {
         tokio::select! {
@@ -240,6 +242,22 @@ pub(crate) async fn serve_stream(
                             .send(text_message(&StreamServerMessage::Exit { exit_code }))
                             .await;
                         let _ = sink.send(Message::Close(None)).await;
+                        return;
+                    }
+                    if !admit_rate(
+                        &mut outbound_window_start,
+                        &mut outbound_window_bytes,
+                        chunk.text.len(),
+                        config.stream_rate_budget_bytes_per_sec,
+                    ) {
+                        tracing::warn!("stream outbound rate budget exceeded; closing");
+                        let _ = sink
+                            .send(error_message(ErrorCode::Internal, "stream rate budget exceeded"))
+                            .await;
+                        let _ = sink.send(Message::Close(Some(CloseFrame {
+                            code: 1013,
+                            reason: "rate budget exceeded".into(),
+                        }))).await;
                         return;
                     }
                     let frame =
@@ -268,7 +286,7 @@ pub(crate) async fn serve_stream(
             },
             frame = inbound.next() => match frame {
                 Some(Ok(Message::Binary(raw))) => {
-                    if !admit_inbound(&mut window_start, &mut window_bytes, raw.len(), config.stream_rate_budget_bytes_per_sec) {
+                    if !admit_rate(&mut window_start, &mut window_bytes, raw.len(), config.stream_rate_budget_bytes_per_sec) {
                         let _ = sink
                             .send(error_message(
                                 ErrorCode::Internal,
@@ -398,7 +416,7 @@ pub(crate) async fn serve_stream(
 }
 
 /// Fixed-window inbound byte budget admission.
-fn admit_inbound(
+fn admit_rate(
     window_start: &mut Instant,
     window_bytes: &mut usize,
     incoming: usize,

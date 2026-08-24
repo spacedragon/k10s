@@ -14,6 +14,7 @@ fn logs_tool() -> LogsTool {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: "web-frontend-7d9f8-00001".into(),
+            uid: "uid-web".into(),
             container: "app".into(),
         },
         3,
@@ -111,6 +112,7 @@ fn shell_requires_an_explicit_connect_before_attach() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
         container: "app".into(),
     });
     assert_eq!(*shell.phase(), ShellPhase::Disconnected);
@@ -132,6 +134,7 @@ fn tty_output_merges_into_one_terminal_buffer() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
         container: "app".into(),
     });
     shell.connect();
@@ -155,6 +158,7 @@ fn stdin_and_resize_are_queued_as_drainable_actions() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
         container: "app".into(),
     });
     shell.connect();
@@ -185,6 +189,7 @@ fn exit_and_disconnect_are_distinct_terminal_states() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
         container: "app".into(),
     });
     shell.connect();
@@ -205,6 +210,7 @@ fn exit_and_disconnect_are_distinct_terminal_states() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
         container: "app".into(),
     });
     exited.connect();
@@ -227,6 +233,7 @@ fn client_state_encodes_stream_ticket_queries_safely() {
         context: "dev-local".into(),
         namespace: "default".into(),
         pod: "web-frontend-7d9f8-00001".into(),
+        uid: "uid-web".into(),
         container: "app".into(),
     };
     let mut client = k10s_ui::client::ClientState::new(k10s_ui::client::ClientConfig::default());
@@ -349,6 +356,7 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: "db-postgres-0".into(),
+            uid: "uid-db".into(),
             container: "app".into(),
         },
         true,

@@ -147,8 +147,8 @@ pub struct ServerConfig {
     pub max_stream_message_size: usize,
     /// Maximum time allowed for the mandatory first `hello` frame.
     pub stream_hello_timeout: Duration,
-    /// Inbound byte budget per stream socket per second; exceeding it closes
-    /// the socket with an explicit overload error.
+    /// Byte budget in each direction per stream socket per second; exceeding
+    /// it closes the socket with an explicit overload error.
     pub stream_rate_budget_bytes_per_sec: usize,
     /// Maximum concurrent dedicated stream sockets.
     pub max_stream_connections: usize,
