@@ -22,11 +22,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// The server's hard bound on rows per snapshot page. The constant is
-/// private to the server, so the test re-derives it from the observed
-/// maximum page size instead of trusting any local copy: if the bound ever
-/// grows, this assertion documents it explicitly.
-const MAX_PAGE_ROWS_OBSERVED_LIMIT: usize = 16;
+/// Deliberately non-default page bound proving the runtime configuration is
+/// used by the real socket chunker rather than a hidden constant.
+const CONFIGURED_PAGE_ROWS: usize = 7;
 
 /// Generous end-to-end ceiling for streaming ~1,200 pages (~19k rows) over
 /// the loopback socket, including client-side reassembly.
@@ -78,6 +76,7 @@ async fn fifty_thousand_object_dataset_streams_in_bounded_pages() {
         ServerConfig {
             access_token: "secret".into(),
             outbound_queue_capacity: CAPACITY_QUEUE_FRAMES,
+            snapshot_rows_per_chunk: CONFIGURED_PAGE_ROWS,
             ..ServerConfig::default()
         },
         kernel,
@@ -124,7 +123,7 @@ async fn fifty_thousand_object_dataset_streams_in_bounded_pages() {
     client.apply(begin).unwrap();
     assert_eq!(
         usize::try_from(total_chunks).unwrap(),
-        expected_rows.div_ceil(MAX_PAGE_ROWS_OBSERVED_LIMIT),
+        expected_rows.div_ceil(CONFIGURED_PAGE_ROWS),
         "one bounded page per slice of the snapshot"
     );
 
@@ -141,7 +140,7 @@ async fn fifty_thousand_object_dataset_streams_in_bounded_pages() {
         last_chunk_index = i64::from(chunk.chunk_index);
         let page = serde_json::from_value::<ResourceSnapshotPage>(chunk.data).unwrap();
         assert!(
-            page.rows.len() <= MAX_PAGE_ROWS_OBSERVED_LIMIT,
+            page.rows.len() <= CONFIGURED_PAGE_ROWS,
             "a snapshot page carried {} rows, breaching the bounded chunk size",
             page.rows.len()
         );

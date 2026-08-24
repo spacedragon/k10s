@@ -132,6 +132,8 @@ pub struct ServerConfig {
     pub outbound_queue_capacity: usize,
     /// Maximum live resource-watch subscriptions per authenticated socket.
     pub max_resource_subscriptions_per_session: usize,
+    /// Maximum normalized resource rows carried by one snapshot chunk.
+    pub snapshot_rows_per_chunk: usize,
     /// Per-socket window after the shutdown notice during which status reads stay served.
     pub drain_grace_timeout: Duration,
     /// Hard deadline for draining tracked connection tasks.
@@ -172,6 +174,7 @@ impl Default for ServerConfig {
             max_authenticated_connections: 128,
             outbound_queue_capacity: 64,
             max_resource_subscriptions_per_session: 64,
+            snapshot_rows_per_chunk: 16,
             drain_grace_timeout: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(10),
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],
@@ -207,6 +210,7 @@ impl std::fmt::Debug for ServerConfig {
                 &self.max_authenticated_connections,
             )
             .field("outbound_queue_capacity", &self.outbound_queue_capacity)
+            .field("snapshot_rows_per_chunk", &self.snapshot_rows_per_chunk)
             .field("drain_grace_timeout", &self.drain_grace_timeout)
             .field("drain_timeout", &self.drain_timeout)
             .field("capabilities", &self.capabilities)
@@ -225,6 +229,82 @@ impl std::fmt::Debug for ServerConfig {
             .field("resume_max_sessions", &self.resume_max_sessions)
             .field("resume_entry_max_age", &self.resume_entry_max_age)
             .finish()
+    }
+}
+
+/// One invalid runtime resource budget rejected before a listener is bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetConfigError {
+    field: &'static str,
+    reason: &'static str,
+}
+
+impl BudgetConfigError {
+    /// Name of the rejected configuration field.
+    #[must_use]
+    pub fn field(&self) -> &'static str {
+        self.field
+    }
+}
+
+impl std::fmt::Display for BudgetConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid {}: {}", self.field, self.reason)
+    }
+}
+
+impl std::error::Error for BudgetConfigError {}
+
+impl ServerConfig {
+    /// Validate every independently configurable hard bound.
+    ///
+    /// Startup rejects invalid values instead of silently widening zero or
+    /// internally contradictory budgets with `.max(1)` fallbacks.
+    pub fn validate(&self) -> Result<(), BudgetConfigError> {
+        macro_rules! nonzero {
+            ($($field:ident),+ $(,)?) => {$({
+                if self.$field == 0 {
+                    return Err(BudgetConfigError { field: stringify!($field), reason: "must be greater than zero" });
+                }
+            })+};
+        }
+        nonzero!(
+            max_frame_size,
+            max_message_size,
+            max_unauthenticated_connections,
+            max_authenticated_connections,
+            outbound_queue_capacity,
+            max_resource_subscriptions_per_session,
+            snapshot_rows_per_chunk,
+            max_stream_frame_size,
+            max_stream_message_size,
+            stream_rate_budget_bytes_per_sec,
+            max_stream_connections,
+            resume_max_journal_entries,
+            resume_max_sessions,
+        );
+        for (field, value) in [
+            ("hello_timeout", self.hello_timeout),
+            ("graceful_flush_timeout", self.graceful_flush_timeout),
+            ("drain_grace_timeout", self.drain_grace_timeout),
+            ("drain_timeout", self.drain_timeout),
+            ("stream_hello_timeout", self.stream_hello_timeout),
+            ("resume_entry_max_age", self.resume_entry_max_age),
+        ] {
+            if value.is_zero() {
+                return Err(BudgetConfigError {
+                    field,
+                    reason: "must be greater than zero",
+                });
+            }
+        }
+        if self.graceful_flush_timeout > self.drain_timeout {
+            return Err(BudgetConfigError {
+                field: "graceful_flush_timeout",
+                reason: "must not exceed drain_timeout",
+            });
+        }
+        Ok(())
     }
 }
 

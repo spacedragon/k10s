@@ -33,9 +33,6 @@ use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
 use crate::resume::ResumeStore;
 
-/// Rows carried by one bounded snapshot chunk frame.
-const RESOURCE_ROWS_PER_CHUNK: usize = 16;
-
 /// A request failure that is not attributable to the backend adapter.
 enum RequestFailure {
     Backend(BackendError),
@@ -873,6 +870,7 @@ pub(crate) async fn serve_socket(
                             let task_kernel = Arc::clone(&kernel);
                             let task_cancel = task_cancel.expect("resource watch has cancellation");
                             let task_counter = Arc::clone(&last_sent_sequence);
+                            let task_snapshot_rows = config.snapshot_rows_per_chunk;
                             let task_generation =
                                 task_generation.expect("resource watch has a generation");
                             let task_id = task_id.expect("resource watch has a task ID");
@@ -892,6 +890,7 @@ pub(crate) async fn serve_socket(
                                         &subscription_id,
                                         handle.take_events(),
                                         &task_counter,
+                                        task_snapshot_rows,
                                         &task_cancel,
                                         task_generation,
                                     )
@@ -1337,12 +1336,14 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
 /// Snapshots stream as lossless bounded `snapshot*` frames; deltas ride the
 /// bounded P2 scheduler coalesced by resource identity. A lagging backend
 /// consumer demands a resync rather than silently dropping deltas.
+#[allow(clippy::too_many_arguments)]
 async fn stream_backend_events(
     outbound: &Scheduler,
     kernel: &BackendKernel,
     subscription_id: &SubscriptionId,
     events: Option<tokio::sync::broadcast::Receiver<BackendEvent>>,
     sequence_counter: &AtomicU64,
+    snapshot_rows_per_chunk: usize,
     cancel: &CancellationToken,
     generation: WatchGeneration,
 ) {
@@ -1359,9 +1360,16 @@ async fn stream_backend_events(
         };
         match event {
             Ok(BackendEvent::Snapshot(data)) => {
-                if stream_snapshot(outbound, kernel, subscription_id, data, sequence_counter)
-                    .await
-                    .is_err()
+                if stream_snapshot(
+                    outbound,
+                    kernel,
+                    subscription_id,
+                    data,
+                    sequence_counter,
+                    snapshot_rows_per_chunk,
+                )
+                .await
+                .is_err()
                 {
                     overload_close(outbound);
                     break;
@@ -1473,8 +1481,10 @@ async fn stream_snapshot(
     subscription_id: &SubscriptionId,
     data: k10s_backend::ResourceListData,
     sequence_counter: &AtomicU64,
+    rows_per_chunk: usize,
 ) -> Result<(), EnqueueError> {
-    let total_chunks = data.rows.len().div_ceil(RESOURCE_ROWS_PER_CHUNK).max(1);
+    debug_assert!(rows_per_chunk > 0, "ServerConfig validation rejects zero");
+    let total_chunks = data.rows.len().div_ceil(rows_per_chunk).max(1);
     let begin_payload = SnapshotBegin {
         total_chunks: total_chunks as u32,
     };
@@ -1492,7 +1502,7 @@ async fn stream_snapshot(
     let pages: Vec<&[k10s_backend::ResourceRecord]> = if data.rows.is_empty() {
         vec![&data.rows[..]]
     } else {
-        data.rows.chunks(RESOURCE_ROWS_PER_CHUNK).collect()
+        data.rows.chunks(rows_per_chunk).collect()
     };
     let mut checksum: u64 = FNV_OFFSET_BASIS;
     for (index, chunk) in pages.into_iter().enumerate() {
@@ -2035,6 +2045,7 @@ mod tests {
             &subscription_id,
             Some(receiver),
             &counter,
+            16,
             &cancel,
             generation,
         )
@@ -2096,6 +2107,7 @@ mod tests {
             &SubscriptionId::new("resource-1"),
             Some(receiver),
             &counter,
+            16,
             &cancel,
             generation,
         )
@@ -2302,6 +2314,7 @@ mod tests {
             &subscription_id,
             Some(receiver),
             &counter,
+            16,
             &cancel,
             generation,
         )
