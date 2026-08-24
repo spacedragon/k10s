@@ -93,6 +93,11 @@ pub struct K10sApp {
     client: ClientState,
     factory: Box<dyn ConnectionFactory>,
     connection: Option<Box<dyn AppConnection>>,
+    /// Whether the current transport completed its WebSocket handshake.
+    /// Sending on a still-connecting browser socket throws and ewebsock
+    /// swallows the failure, silently dropping the frame; outbound frames
+    /// therefore stay queued until [`WsEvent::Opened`] is observed.
+    transport_open: bool,
     bootstrap: Option<PendingRequest>,
     infrastructure_request: Option<PendingRequest>,
     infrastructure_subscription: Option<LiveSubscription>,
@@ -161,6 +166,7 @@ impl std::fmt::Debug for K10sApp {
             .field("access_token", &"[REDACTED]")
             .field("client", &self.client)
             .field("connection_active", &self.connection.is_some())
+            .field("transport_open", &self.transport_open)
             .field("bootstrap", &self.bootstrap)
             .field("infrastructure_request", &self.infrastructure_request)
             .field(
@@ -202,6 +208,7 @@ impl K10sApp {
             client,
             factory,
             connection: Some(connection),
+            transport_open: false,
             bootstrap: None,
             infrastructure_request: None,
             infrastructure_subscription: None,
@@ -379,7 +386,10 @@ impl K10sApp {
         entropy: u64,
     ) -> Result<(), AppEventError> {
         match event {
-            WsEvent::Opened => self.flush_outbound(),
+            WsEvent::Opened => {
+                self.transport_open = true;
+                self.flush_outbound()
+            }
             WsEvent::Message(WsMessage::Text(text)) => {
                 let frame: ServerFrame = serde_json::from_str(&text).map_err(|error| {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
@@ -620,7 +630,16 @@ impl K10sApp {
         }
     }
 
+    /// Send queued frames only through an opened transport.
+    ///
+    /// Before the handshake completes every browser-side send fails with
+    /// `InvalidStateError`, which the transport adapter reports as success;
+    /// draining now would silently drop frames like the protocol `Hello`.
+    /// Queued frames survive until [`WsEvent::Opened`] triggers the flush.
     fn flush_outbound(&mut self) -> Result<(), AppEventError> {
+        if !self.transport_open {
+            return Ok(());
+        }
         while let Some(frame) = self.client.take_outbound() {
             self.connection
                 .as_mut()
@@ -682,7 +701,10 @@ impl K10sApp {
             return Ok(());
         }
         match self.factory.connect(&self.connection_url) {
-            Ok(connection) => self.connection = Some(connection),
+            Ok(connection) => {
+                self.transport_open = false;
+                self.connection = Some(connection);
+            }
             Err(_) => self.transient_loss(now_ms, entropy),
         }
         self.view = AppView::Connecting;
@@ -696,6 +718,7 @@ impl K10sApp {
         if let Some(mut connection) = self.connection.take() {
             connection.close();
         }
+        self.transport_open = false;
         if self.client.phase() != ClientPhase::Disconnected {
             self.client.transport_lost(now_ms, entropy);
         }
@@ -932,7 +955,10 @@ impl K10sApp {
         }
         match self.client.retry_if_due(now_ms) {
             Ok(true) => match self.factory.connect(&self.connection_url) {
-                Ok(connection) => self.connection = Some(connection),
+                Ok(connection) => {
+                    self.transport_open = false;
+                    self.connection = Some(connection);
+                }
                 Err(_) => self.transient_loss(now_ms, entropy),
             },
             Ok(false) => {}
@@ -944,6 +970,7 @@ impl K10sApp {
         if let Some(mut connection) = self.connection.take() {
             connection.close();
         }
+        self.transport_open = false;
         self.teardown_stream_sessions();
         self.view = AppView::Failed { message };
     }
@@ -1526,6 +1553,76 @@ mod tests {
             Some("dev-local")
         );
         assert_eq!(state.borrow().sent.len(), 1, "fresh transport sends Hello");
+    }
+
+    #[test]
+    fn polls_before_the_handshake_completes_keep_the_queued_hello_alive() {
+        // Regression for the browser foundation smoke: a poll tick between
+        // connect() and the socket's Opened used to drain the queued Hello
+        // through a blind flush; the browser-side send failed silently on a
+        // connecting WebSocket and the frame was lost forever.
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::new(),
+            overflowed: false,
+        }]);
+
+        app.poll_at(22, 1);
+        app.poll_at(52, 2);
+        assert!(
+            state.borrow().sent.is_empty(),
+            "no frame may be sent through a still-connecting transport"
+        );
+        assert_eq!(app.client.outbound_len(), 1, "Hello stays queued");
+    }
+
+    #[test]
+    fn retried_transports_send_their_hello_only_after_they_open() {
+        // Same class of bug on the retry path: reconnect_if_due queues a
+        // fresh Hello and creates a new CONNECTING socket inside one poll;
+        // the same tick's trailing flush must not eat it again.
+        let (mut app, state) = test_app(vec![
+            ConnectionScript {
+                events: VecDeque::from([WsEvent::Closed]),
+                overflowed: false,
+            },
+            ConnectionScript {
+                events: VecDeque::from([WsEvent::Closed]),
+                overflowed: false,
+            },
+            ConnectionScript {
+                events: VecDeque::from([WsEvent::Opened]),
+                overflowed: false,
+            },
+        ]);
+        app.client.local_ui_mut().selected_context = Some("dev-local".to_owned());
+
+        app.poll_at(100, 10);
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+
+        // First retry fired: the new transport exists but has not opened,
+        // so the freshly queued Hello must survive this tick's flushes.
+        app.poll_at(10_000, 0);
+        assert_eq!(state.borrow().connect_count, 2);
+        assert_eq!(app.client.phase(), ClientPhase::Authenticating);
+        assert!(
+            state.borrow().sent.is_empty(),
+            "Hello waits for the transport to open"
+        );
+        assert_eq!(app.client.outbound_len(), 1);
+
+        // The deadline close repeats; every generation behaves the same and
+        // the replacement Hello again survives its creation tick.
+        app.poll_at(20_000, 0);
+        assert_eq!(state.borrow().connect_count, 3);
+        assert!(state.borrow().sent.is_empty());
+        assert_eq!(app.client.outbound_len(), 1);
+
+        // Once a transport finally reports Opened the Hello goes out once.
+        app.poll_at(30_000, 0);
+        let sent = state.borrow().sent.clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ClientKind::Hello);
+        assert_eq!(app.view(), &AppView::Connecting);
     }
 
     #[test]
