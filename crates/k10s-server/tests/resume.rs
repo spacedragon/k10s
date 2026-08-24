@@ -337,6 +337,29 @@ async fn age_budget_expires_replayable_entries() {
 }
 
 #[tokio::test]
+async fn aged_live_session_cannot_resume_with_an_empty_incomplete_tail() {
+    let config = ServerConfig {
+        access_token: "secret".into(),
+        resume_entry_max_age: Duration::from_millis(80),
+        ..ServerConfig::default()
+    };
+    let (server, _fake) = server_with(config).await;
+    let mut first = connect(&server).await;
+    let welcome = handshake(&mut first, json!({})).await;
+    let session_id = welcome.session_id.as_str().to_owned();
+    subscribe_pods(&mut first).await;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let mut takeover = connect(&server).await;
+    let welcome = handshake(&mut takeover, resume_fields(&session_id, INSTANCE, 0)).await;
+    assert_eq!(welcome.resume_status, ResumeStatus::Fresh);
+    assert_ne!(welcome.session_id.as_str(), session_id);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn expired_cursor_falls_back_to_full_resync() {
     let (server, fake) = default_server().await;
     let pods = pod_names(&fake).await;

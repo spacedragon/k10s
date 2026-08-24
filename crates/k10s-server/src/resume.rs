@@ -83,10 +83,15 @@ impl SessionJournal {
             }
             replayed.push(entry.clone());
         }
-        // The first required frame must sit exactly at `cursor + 1`.
-        if let Some(first) = replayed.first().map(|entry| entry.sequence)
-            && first != cursor + 1
-        {
+        // The replay must cover every sequence through the issued watermark.
+        let mut expected = cursor.saturating_add(1);
+        for entry in &replayed {
+            if entry.sequence != expected {
+                return None;
+            }
+            expected = expected.saturating_add(1);
+        }
+        if expected != self.last_sequence.saturating_add(1) {
             return None;
         }
         Some(replayed)
