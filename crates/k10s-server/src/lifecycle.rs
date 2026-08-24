@@ -590,6 +590,7 @@ pub fn router(
 ) -> Router {
     let resume = Arc::new(Mutex::new(ResumeState::new(
         config.resume_max_journal_entries,
+        config.resume_max_sessions,
         config.resume_entry_max_age,
     )));
     let state = AppState {

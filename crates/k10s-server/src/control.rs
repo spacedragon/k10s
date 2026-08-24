@@ -129,7 +129,7 @@ pub(crate) async fn serve_socket(
     let writer_outbound = outbound.clone();
     let child = CancellationToken::new();
     let writer_cancel = child.clone();
-    let writer_resume: Arc<Mutex<Option<(ResumeStore, String)>>> = Arc::new(Mutex::new(None));
+    let writer_resume: Arc<Mutex<Option<(ResumeStore, String, u64)>>> = Arc::new(Mutex::new(None));
     let writer_resume_task = Arc::clone(&writer_resume);
     let writer = tokio::spawn(async move {
         loop {
@@ -144,6 +144,18 @@ pub(crate) async fn serve_socket(
                                 .map(|sequence| (sequence, text.to_string())),
                             _ => None,
                         };
+                        if journal_entry.is_some()
+                            && let Some((store, session_id, generation)) = writer_resume_task
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone()
+                            && !store
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .is_current_lease(&session_id, generation)
+                        {
+                            continue;
+                        }
                         let send = sink.send(item.message);
                         let failed = tokio::select! {
                             () = writer_cancel.cancelled() => true,
@@ -153,7 +165,7 @@ pub(crate) async fn serve_socket(
                             break;
                         }
                         if let Some((sequence, text)) = journal_entry
-                            && let Some((store, session_id)) = writer_resume_task
+                            && let Some((store, session_id, generation)) = writer_resume_task
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .clone()
@@ -161,7 +173,7 @@ pub(crate) async fn serve_socket(
                             store
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .record_frame(&session_id, sequence, &text);
+                                .record_frame(&session_id, generation, sequence, &text);
                         }
                     },
                     None => break,
@@ -240,32 +252,55 @@ pub(crate) async fn serve_socket(
         }
     };
     drop(unauthenticated);
-    let resume_attempt = resume
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .attempt_resume(
+    let (takeover_tx, mut takeover_rx) = tokio::sync::oneshot::channel();
+    let claim_result = {
+        let mut state = resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.claim(
             hello.server_instance_id.as_deref(),
             kernel.server_instance_id(),
             hello.session_id.as_ref().map(SessionId::as_str),
             hello.last_acked_sequence,
-        );
-    let (session_id, resume_status, replay) = match resume_attempt {
-        Ok((session_id, replay)) => (SessionId::new(session_id), ResumeStatus::Resumed, replay),
-        Err(()) => (
-            SessionId::new(uuid::Uuid::new_v4().to_string()),
-            ResumeStatus::Fresh,
-            Vec::new(),
-        ),
+            uuid::Uuid::new_v4().to_string(),
+            takeover_tx,
+            config.outbound_queue_capacity.saturating_sub(1),
+        )
     };
-    let (takeover_tx, mut takeover_rx) = tokio::sync::oneshot::channel();
-    let (previous_transport, lease_generation, journal_last_sequence) = resume
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .acquire_lease(session_id.as_str(), takeover_tx);
+    let claim = match claim_result {
+        Ok(claim) => claim,
+        Err(()) => {
+            return close_and_join(
+                outbound,
+                child,
+                writer,
+                "resume session limit",
+                config.graceful_flush_timeout,
+            )
+            .await;
+        }
+    };
+    let crate::resume::SessionClaim {
+        session_id,
+        resumed,
+        replay,
+        previous_transport,
+        lease_generation,
+        last_sequence: journal_last_sequence,
+    } = claim;
+    let session_id = SessionId::new(session_id);
+    let resume_status = if resumed {
+        ResumeStatus::Resumed
+    } else {
+        ResumeStatus::Fresh
+    };
     *writer_resume
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((Arc::clone(&resume), session_id.as_str().to_owned()));
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+        Arc::clone(&resume),
+        session_id.as_str().to_owned(),
+        lease_generation,
+    ));
     if let Some(previous_transport) = previous_transport {
         let _ = previous_transport.send(());
     }

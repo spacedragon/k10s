@@ -273,6 +273,38 @@ async fn count_budget_bounds_the_replayable_window() {
 }
 
 #[tokio::test]
+async fn replay_larger_than_outbound_queue_falls_back_before_welcome() {
+    let config = ServerConfig {
+        access_token: "secret".into(),
+        resume_max_journal_entries: 128,
+        outbound_queue_capacity: 64,
+        ..ServerConfig::default()
+    };
+    let (server, fake) = server_with(config).await;
+    let pods = pod_names(&fake).await;
+    let mut first = connect(&server).await;
+    let welcome = handshake(&mut first, json!({})).await;
+    let session_id = welcome.session_id.as_str().to_owned();
+    let snapshot_end = subscribe_pods(&mut first).await;
+
+    for index in 0..70 {
+        touch_and_read_event(&mut first, &fake, &pods[index % pods.len()]).await;
+    }
+    drop(first);
+
+    let mut resumed = connect(&server).await;
+    let welcome = handshake(
+        &mut resumed,
+        resume_fields(&session_id, INSTANCE, snapshot_end),
+    )
+    .await;
+    assert_eq!(welcome.resume_status, ResumeStatus::Fresh);
+    assert_ne!(welcome.session_id.as_str(), session_id);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn age_budget_expires_replayable_entries() {
     let config = ServerConfig {
         access_token: "secret".into(),

@@ -48,6 +48,10 @@ impl SessionJournal {
             message: message.to_owned(),
         });
         self.last_sequence = sequence;
+        self.prune(max_entries, max_age);
+    }
+
+    fn prune(&mut self, max_entries: usize, max_age: Duration) {
         while let Some(front) = self.entries.front() {
             if self.entries.len() > max_entries || front.sent_at.elapsed() >= max_age {
                 self.entries.pop_front();
@@ -90,13 +94,25 @@ impl SessionJournal {
 }
 
 /// Per-session runtime: journal plus the current transport lease.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionState {
     pub(crate) journal: SessionJournal,
     /// Bumped on every (re-)lease; stale transports must not clobber successors.
     pub(crate) lease_generation: u64,
     /// Wake channel for the transport currently holding this session.
     pub(crate) takeover_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    last_activity: Instant,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            journal: SessionJournal::default(),
+            lease_generation: 0,
+            takeover_tx: None,
+            last_activity: Instant::now(),
+        }
+    }
 }
 
 /// Server-wide registry of resumable sessions and their live leases.
@@ -104,7 +120,18 @@ pub struct SessionState {
 pub struct ResumeState {
     pub(crate) sessions: BTreeMap<String, SessionState>,
     pub(crate) max_entries: usize,
+    pub(crate) max_sessions: usize,
     pub(crate) max_age: Duration,
+}
+
+/// Atomic result of selecting a replay and transferring its transport lease.
+pub struct SessionClaim {
+    pub session_id: String,
+    pub resumed: bool,
+    pub replay: Vec<JournalEntry>,
+    pub previous_transport: Option<tokio::sync::oneshot::Sender<()>>,
+    pub lease_generation: u64,
+    pub last_sequence: u64,
 }
 
 /// Shared handle to the resume state (one per control server).
@@ -113,70 +140,124 @@ pub type ResumeStore = std::sync::Arc<std::sync::Mutex<ResumeState>>;
 impl ResumeState {
     /// Create a store with the configured replay budgets.
     #[must_use]
-    pub fn new(max_entries: usize, max_age: Duration) -> Self {
+    pub fn new(max_entries: usize, max_sessions: usize, max_age: Duration) -> Self {
         Self {
             sessions: BTreeMap::new(),
             max_entries,
+            max_sessions: max_sessions.max(1),
             max_age,
         }
     }
 
-    /// Attempt a resume claim from an authenticated `Hello`.
-    ///
-    /// Returns the claimed session ID and its contiguous replay run when every
-    /// field is present, the server instance matches, the session is known,
-    /// and the cursor can be filled within budget. Otherwise `Err(())`: the
-    /// caller must start a fresh session instead.
-    pub fn attempt_resume(
+    /// Atomically select a complete replay (when possible), capture its
+    /// watermark, and transfer the transport lease. If resume is not safe, a
+    /// bounded fresh session is created instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim(
         &mut self,
         hello_server_instance: Option<&str>,
         server_instance_id: &str,
         claimed_session: Option<&str>,
         last_acked_sequence: Option<u64>,
-    ) -> Result<(String, Vec<JournalEntry>), ()> {
-        let (Some(instance), Some(session_id), Some(cursor)) =
+        fresh_session_id: String,
+        takeover_tx: tokio::sync::oneshot::Sender<()>,
+        replay_capacity: usize,
+    ) -> Result<SessionClaim, ()> {
+        self.prune();
+        if let (Some(instance), Some(session_id), Some(cursor)) =
             (hello_server_instance, claimed_session, last_acked_sequence)
-        else {
-            return Err(());
-        };
-        if instance != server_instance_id {
-            return Err(());
-        }
-        match self
-            .sessions
-            .get_mut(session_id)
-            .and_then(|session| session.journal.replay_from(cursor, self.max_age))
+            && instance == server_instance_id
+            && let Some(replay) = self
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.journal.replay_from(cursor, self.max_age))
+            && replay.len() <= replay_capacity
         {
-            Some(run) => Ok((session_id.to_owned(), run)),
-            None => Err(()),
+            let state = self
+                .sessions
+                .get_mut(session_id)
+                .expect("session still exists");
+            state.lease_generation = state.lease_generation.wrapping_add(1);
+            state.last_activity = Instant::now();
+            let previous_transport = state.takeover_tx.replace(takeover_tx);
+            return Ok(SessionClaim {
+                session_id: session_id.to_owned(),
+                resumed: true,
+                replay,
+                previous_transport,
+                lease_generation: state.lease_generation,
+                last_sequence: state.journal.last_sequence(),
+            });
         }
+
+        self.make_room()?;
+        let state = SessionState {
+            lease_generation: 1,
+            takeover_tx: Some(takeover_tx),
+            ..SessionState::default()
+        };
+        self.sessions.insert(fresh_session_id.clone(), state);
+        Ok(SessionClaim {
+            session_id: fresh_session_id,
+            resumed: false,
+            replay: Vec::new(),
+            previous_transport: None,
+            lease_generation: 1,
+            last_sequence: 0,
+        })
     }
 
-    /// Atomically ensure `session_id` exists and hand its lease to this
-    /// transport. Returns `(previous_transport_wake_channel, our_generation,
-    /// current_last_sequence)`.
-    pub fn acquire_lease(
-        &mut self,
-        session_id: &str,
-        takeover_tx: tokio::sync::oneshot::Sender<()>,
-    ) -> (Option<tokio::sync::oneshot::Sender<()>>, u64, u64) {
-        let state = self.sessions.entry(session_id.to_owned()).or_default();
-        state.lease_generation += 1;
-        let previous = state.takeover_tx.replace(takeover_tx);
-        (
-            previous,
-            state.lease_generation,
-            state.journal.last_sequence(),
-        )
+    fn prune(&mut self) {
+        for state in self.sessions.values_mut() {
+            state.journal.prune(self.max_entries, self.max_age);
+        }
+        self.sessions.retain(|_, state| {
+            state.takeover_tx.is_some() || state.last_activity.elapsed() < self.max_age
+        });
+    }
+
+    fn make_room(&mut self) -> Result<(), ()> {
+        while self.sessions.len() >= self.max_sessions {
+            let Some(oldest) = self
+                .sessions
+                .iter()
+                .filter(|(_, state)| state.takeover_tx.is_none())
+                .min_by_key(|(_, state)| state.last_activity)
+                .map(|(id, _)| id.clone())
+            else {
+                return Err(());
+            };
+            self.sessions.remove(&oldest);
+        }
+        Ok(())
     }
 
     /// Record a wire frame for the session as it leaves the writer.
-    pub fn record_frame(&mut self, session_id: &str, sequence: u64, message: &str) {
+    pub fn record_frame(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        sequence: u64,
+        message: &str,
+    ) {
+        if generation == 0 {
+            self.sessions.entry(session_id.to_owned()).or_default();
+        }
+        if let Some(state) = self.sessions.get_mut(session_id)
+            && state.lease_generation == generation
+        {
+            state.last_activity = Instant::now();
+            state
+                .journal
+                .record(sequence, message, self.max_entries, self.max_age);
+        }
+    }
+
+    /// Whether a writer still owns the live lease for this session.
+    pub fn is_current_lease(&self, session_id: &str, generation: u64) -> bool {
         self.sessions
-            .entry(session_id.to_owned())
-            .or_default()
-            .journal
-            .record(sequence, message, self.max_entries, self.max_age);
+            .get(session_id)
+            .is_some_and(|state| state.lease_generation == generation)
     }
 
     /// Release a transport lease without clearing a newer takeover owner.
@@ -185,6 +266,7 @@ impl ResumeState {
             && state.lease_generation == generation
         {
             state.takeover_tx = None;
+            state.last_activity = Instant::now();
         }
     }
 }
@@ -194,14 +276,14 @@ mod tests {
     use super::*;
 
     fn store(max_entries: usize, max_age: Duration) -> ResumeState {
-        ResumeState::new(max_entries, max_age)
+        ResumeState::new(max_entries, 64, max_age)
     }
 
     #[test]
     fn replay_requires_exact_cursor_plus_one_contiguity() {
         let mut state = store(16, Duration::from_secs(30));
         for sequence in 1..=5 {
-            state.record_frame("s", sequence, &format!("frame-{sequence}"));
+            state.record_frame("s", 0, sequence, &format!("frame-{sequence}"));
         }
 
         // Cursor at the edge: nothing to replay.
@@ -235,7 +317,7 @@ mod tests {
     fn evicted_head_breaks_contiguity() {
         let mut state = store(2, Duration::from_secs(30));
         for sequence in 1..=6 {
-            state.record_frame("s", sequence, &format!("frame-{sequence}"));
+            state.record_frame("s", 0, sequence, &format!("frame-{sequence}"));
         }
         // Only sequences 5 and 6 remain; cursor 0 cannot be filled.
         assert!(
@@ -258,7 +340,7 @@ mod tests {
     #[test]
     fn aged_entries_block_replay() {
         let mut state = store(16, Duration::from_millis(20));
-        state.record_frame("s", 1, "frame-1");
+        state.record_frame("s", 0, 1, "frame-1");
         std::thread::sleep(Duration::from_millis(40));
         assert!(
             state.sessions["s"]
@@ -269,59 +351,93 @@ mod tests {
     }
 
     #[test]
-    fn attempt_resume_validates_instance_session_and_cursor() {
+    fn claim_validates_instance_session_cursor_and_capacity() {
         let mut state = store(16, Duration::from_secs(30));
         for sequence in 1..=4 {
-            state.record_frame("s", sequence, &format!("frame-{sequence}"));
+            state.record_frame("s", 0, sequence, &format!("frame-{sequence}"));
         }
 
-        // Missing fields: fresh.
-        assert!(state.attempt_resume(None, "i", Some("s"), None).is_err());
-        // Wrong instance: fresh even with a fillable cursor.
-        assert!(
-            state
-                .attempt_resume(Some("other"), "i", Some("s"), Some(0))
-                .is_err()
-        );
-        // Unknown session: fresh.
-        assert!(
-            state
-                .attempt_resume(Some("i"), "i", Some("ghost"), Some(0))
-                .is_err()
-        );
-        // Fillable claim succeeds with the replay run.
-        let (session, run) = state
-            .attempt_resume(Some("i"), "i", Some("s"), Some(2))
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let resumed = state
+            .claim(Some("i"), "i", Some("s"), Some(2), "fresh".into(), tx, 16)
             .unwrap();
-        assert_eq!(session, "s");
-        assert_eq!(run.len(), 2);
+        assert!(resumed.resumed);
+        assert_eq!(resumed.session_id, "s");
+        assert_eq!(resumed.replay.len(), 2);
 
-        let mut wrong_instance = ResumeState::new(16, Duration::from_secs(30));
-        for sequence in 1..=4 {
-            wrong_instance.record_frame("s", sequence, &format!("frame-{sequence}"));
-        }
-        // Cursor beyond what was sent: fresh.
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let fallback = state
+            .claim(Some("i"), "i", Some("s"), Some(0), "fresh".into(), tx, 2)
+            .unwrap();
         assert!(
-            wrong_instance
-                .attempt_resume(Some("i"), "i", Some("s"), Some(99))
-                .is_err()
+            !fallback.resumed,
+            "an oversized replay must fall back before welcome"
         );
+        assert_eq!(fallback.session_id, "fresh");
     }
 
     #[test]
     fn lease_takeover_returns_the_previous_wake_channel() {
         let mut state = store(16, Duration::from_secs(30));
         let (tx_a, _rx_a) = tokio::sync::oneshot::channel::<()>();
-        let (prev, gen_a, last) = state.acquire_lease("s", tx_a);
-        assert!(prev.is_none());
-        assert_eq!(last, 0);
+        let first = state
+            .claim(None, "i", None, None, "s".into(), tx_a, 16)
+            .unwrap();
+        assert!(first.previous_transport.is_none());
+        assert_eq!(first.last_sequence, 0);
 
         let (tx_b, _rx_b) = tokio::sync::oneshot::channel::<()>();
-        let (prev, gen_b, _) = state.acquire_lease("s", tx_b);
-        assert_eq!(gen_b, gen_a + 1);
+        let second = state
+            .claim(Some("i"), "i", Some("s"), Some(0), "fresh".into(), tx_b, 16)
+            .unwrap();
+        assert_eq!(second.lease_generation, first.lease_generation + 1);
         // The previous holder's wake channel is still live and addressable.
-        prev.expect("previous lease is returned")
+        second
+            .previous_transport
+            .expect("previous lease is returned")
             .send(())
             .expect("old transport still holds its end");
+    }
+
+    #[test]
+    fn stale_writer_cannot_advance_successor_journal() {
+        let mut state = store(16, Duration::from_secs(30));
+        let (tx_a, _rx_a) = tokio::sync::oneshot::channel();
+        let first = state
+            .claim(None, "i", None, None, "s".into(), tx_a, 16)
+            .unwrap();
+        state.record_frame("s", first.lease_generation, 1, "frame-1");
+
+        let (tx_b, _rx_b) = tokio::sync::oneshot::channel();
+        let second = state
+            .claim(Some("i"), "i", Some("s"), Some(0), "fresh".into(), tx_b, 16)
+            .unwrap();
+        state.record_frame("s", first.lease_generation, 2, "stale-frame-2");
+
+        assert_eq!(second.last_sequence, 1);
+        assert_eq!(state.sessions["s"].journal.last_sequence(), 1);
+    }
+
+    #[test]
+    fn session_cap_evicts_only_inactive_leases() {
+        let mut state = ResumeState::new(4, 2, Duration::from_secs(30));
+        let (tx_a, _rx_a) = tokio::sync::oneshot::channel();
+        let a = state
+            .claim(None, "i", None, None, "a".into(), tx_a, 4)
+            .unwrap();
+        state.release_lease("a", a.lease_generation);
+
+        let (tx_b, _rx_b) = tokio::sync::oneshot::channel();
+        state
+            .claim(None, "i", None, None, "b".into(), tx_b, 4)
+            .unwrap();
+        let (tx_c, _rx_c) = tokio::sync::oneshot::channel();
+        state
+            .claim(None, "i", None, None, "c".into(), tx_c, 4)
+            .unwrap();
+
+        assert!(!state.sessions.contains_key("a"));
+        assert!(state.sessions.contains_key("b"));
+        assert!(state.sessions.contains_key("c"));
     }
 }
