@@ -23,7 +23,8 @@ pub use fake::{FakeKubernetes, FakeMetricsScenario};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
 pub use kube::{DISCOVERY_TTL, KubeAdapter, MAX_CACHED_CONTEXTS};
 pub use operation::{
-    OperationEvent, OperationState, OperationStatusData, Propagation, YamlValidationData,
+    AcceptOutcome, OperationEngine, OperationEvent, OperationState, OperationStatusData,
+    Propagation, YamlValidationData,
 };
 pub use port::{
     AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextInfo,

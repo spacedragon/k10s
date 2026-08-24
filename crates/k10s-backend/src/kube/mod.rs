@@ -88,6 +88,8 @@ pub struct KubeAdapter {
     /// validation, commit, and retirement run under one guard so overlapping
     /// switches cannot interleave their phases or retire the wrong runtime.
     switch_lock: tokio::sync::Mutex<()>,
+    /// Shared lifecycle/idempotency authority for every real mutation.
+    operations: crate::operation::OperationEngine,
     /// Process-local validation authority. Restarting the adapter drops every
     /// issued ticket, and the store itself enforces TTL and capacity bounds.
     validation_tickets: StdMutex<crate::validation::ticket::TicketStore>,
@@ -131,6 +133,7 @@ impl KubeAdapter {
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
@@ -179,6 +182,7 @@ impl KubeAdapter {
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
@@ -236,6 +240,14 @@ impl KubeAdapter {
     pub fn watches_registry(&self) -> ClusterWatches {
         self.watches.clone()
     }
+
+    /// Shared operation engine used by recorded-service tests to model real
+    /// submission lifecycles through the adapter's query/subscription seam.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn operation_engine(&self) -> crate::operation::OperationEngine {
+        self.operations.clone()
+    }
 }
 
 impl KubernetesAccess for KubeAdapter {
@@ -277,7 +289,9 @@ impl KubernetesAccess for KubeAdapter {
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
                 Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
-                Query::OperationStatus { .. } => Err(BackendError::unsupported("operation.status")),
+                Query::OperationStatus { operation_ids } => Ok(QueryResult::OperationStatus(
+                    self.operations.status(&operation_ids),
+                )),
             }
         })
     }
@@ -312,7 +326,10 @@ impl KubernetesAccess for KubeAdapter {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
                 Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
-                Subscribe::Operations => Err(BackendError::unsupported("operations")),
+                Subscribe::Operations => Ok(SubscriptionHandle::with_events(
+                    "operations",
+                    self.operations.subscribe(),
+                )),
             }
         })
     }

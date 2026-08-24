@@ -604,6 +604,9 @@ pub enum OperationStatus {
     Failed,
     /// Cancelled by the client.
     Cancelled,
+    /// The mutation may have reached Kubernetes, but no authoritative
+    /// response was observed. Callers must refresh before deciding to retry.
+    OutcomeUnknown,
     /// The backend no longer knows this operation: its ID expired out of
     /// the bounded store or was never seen by this server instance. Only
     /// clients derive this state; servers never send it.
