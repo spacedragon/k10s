@@ -90,7 +90,16 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $now = [DateTime]::UtcNow
-          $generation = "{0:D4}-W{1:D2}" -f [System.Globalization.ISOWeek]::GetYear($now), [System.Globalization.ISOWeek]::GetWeekOfYear($now)
+          $calendar = [System.Globalization.CultureInfo]::InvariantCulture.Calendar
+          $week = $calendar.GetWeekOfYear(
+            $now,
+            [System.Globalization.CalendarWeekRule]::FirstFourDayWeek,
+            [DayOfWeek]::Monday
+          )
+          $weekYear = $now.Year
+          if ($now.Month -eq 1 -and $week -ge 52) { $weekYear-- }
+          if ($now.Month -eq 12 -and $week -eq 1) { $weekYear++ }
+          $generation = "{0:D4}-W{1:D2}" -f $weekYear, $week
           $cacheRoot = Join-Path "${{ runner.tool_cache }}" "k10s\cargo-target-weekly"
           $targetDir = Join-Path $cacheRoot $generation
           New-Item -ItemType Directory -Force $targetDir | Out-Null
