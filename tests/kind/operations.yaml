@@ -24,11 +24,16 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    # kube-rs negotiates WebSocket exec with GET; retain create for clients
+    # that use the legacy SPDY POST transport.
+    verbs: ["get", "create"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "patch", "delete"]
@@ -62,7 +67,6 @@ metadata:
   name: operations-web
   namespace: k10s-operations
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: operations-web
