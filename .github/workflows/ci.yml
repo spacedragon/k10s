@@ -109,9 +109,11 @@ jobs:
 
       - name: Install container and kind prerequisites
         run: |
-          if ! command -v docker >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+          if ! command -v docker >/dev/null 2>&1 ||
+             ! command -v setfacl >/dev/null 2>&1 ||
+             ! command -v skopeo >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y acl docker.io
+            sudo apt-get install -y acl docker.io skopeo
           fi
           sudo systemctl start docker
           sudo setfacl -m "u:$(id -u):rw" /var/run/docker.sock
@@ -135,6 +137,17 @@ jobs:
               "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl.sha256"
             echo "$(cat /tmp/kubectl.sha256)  $tool_bin/kubectl" | sha256sum -c -
             chmod +x "$tool_bin/kubectl"
+          fi
+
+          node_image=kindest/node:v1.36.1
+          node_digest=sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+          node_archive="${RUNNER_TOOL_CACHE}/k10s/kindest-node-v1.36.1.tar"
+          if ! docker image inspect "$node_image" >/dev/null 2>&1; then
+            if [ ! -f "$node_archive" ]; then
+              skopeo copy "docker://docker.io/kindest/node@${node_digest}" \
+                "docker-archive:${node_archive}:${node_image}"
+            fi
+            docker load -i "$node_archive"
           fi
           echo "$tool_bin" >> "$GITHUB_PATH"
 
