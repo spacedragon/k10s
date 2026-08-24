@@ -450,6 +450,43 @@ fn operation_updates_track_progress_and_terminal_states() {
     assert!(view.is_terminal());
 }
 
+#[test]
+fn outcome_unknown_stays_nonterminal_and_blocks_blind_retry() {
+    let mut client = ready_client();
+    client
+        .begin_command(Command::Scale {
+            target: deployment("web-frontend"),
+            replicas: 3,
+            idempotency_key: "idem-unknown".into(),
+        })
+        .unwrap();
+    let (request_id, _, _, _) = encoded_request(&mut client);
+    client
+        .apply(ServerFrame::response(
+            request_id,
+            k10s_protocol::OperationAccepted {
+                operation_id: OperationId::new("op-unknown"),
+            },
+        ))
+        .unwrap();
+    client
+        .apply(operation_update(
+            "op-unknown",
+            OperationStatus::OutcomeUnknown,
+            None,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        client.nonterminal_operation_ids(),
+        vec![OperationId::new("op-unknown")]
+    );
+    assert!(matches!(
+        client.retry_eligibility("idem-unknown"),
+        k10s_ui::client::RetryEligibility::Blocked
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Client state: forced reconnect, resync queries, retry eligibility
 // ---------------------------------------------------------------------------

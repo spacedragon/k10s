@@ -561,7 +561,8 @@ impl FakeKubernetes {
                             .is_none_or(|(done, _)| done + 1 >= OPERATION_TOTAL_STEPS),
                         crate::operation::OperationState::Succeeded
                         | crate::operation::OperationState::Failed
-                        | crate::operation::OperationState::Cancelled => false,
+                        | crate::operation::OperationState::Cancelled
+                        | crate::operation::OperationState::OutcomeUnknown => false,
                     });
             let armed_failure = if terminal_step {
                 state.armed_failures.remove(&id)
@@ -618,7 +619,8 @@ impl FakeKubernetes {
                     }
                     crate::operation::OperationState::Succeeded
                     | crate::operation::OperationState::Failed
-                    | crate::operation::OperationState::Cancelled => None,
+                    | crate::operation::OperationState::Cancelled
+                    | crate::operation::OperationState::OutcomeUnknown => None,
                 }
             };
             // A failed operation releases its idempotency record so the key

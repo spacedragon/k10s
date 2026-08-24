@@ -1774,7 +1774,9 @@ impl ClientState {
                     && self.operations.get(*id).is_some_and(|view| {
                         matches!(
                             view.status,
-                            OperationStatus::Pending | OperationStatus::Running
+                            OperationStatus::Pending
+                                | OperationStatus::Running
+                                | OperationStatus::OutcomeUnknown
                         )
                     })
             })

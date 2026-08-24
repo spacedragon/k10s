@@ -9,6 +9,11 @@ use k10s_protocol::{BackendRevision, ResourceIdentity, YamlDiagnostic, YamlOutco
 
 use crate::port::{Gvk, ResourceRecord};
 
+pub mod idempotency;
+pub mod state;
+
+pub use state::{AcceptOutcome, OperationEngine};
+
 /// Backend-owned validation ticket before protocol mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ticket {
@@ -54,6 +59,9 @@ pub enum OperationState {
     Failed,
     /// Cancelled before completion.
     Cancelled,
+    /// The request reached Kubernetes but the transport ended before an
+    /// authoritative result was observed. This is never treated as success.
+    OutcomeUnknown,
 }
 
 impl OperationState {
@@ -72,6 +80,7 @@ impl OperationState {
             Self::Succeeded => k10s_protocol::OperationStatus::Succeeded,
             Self::Failed => k10s_protocol::OperationStatus::Failed,
             Self::Cancelled => k10s_protocol::OperationStatus::Cancelled,
+            Self::OutcomeUnknown => k10s_protocol::OperationStatus::OutcomeUnknown,
         }
     }
 }
