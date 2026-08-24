@@ -9,7 +9,8 @@ use k10s_protocol::{
     BootstrapResponse, ContextPermissionsRequest, ContextPermissionsResponse, GroupVersionKind,
     MetricsAvailability, PermissionOutcome, PermissionProbe, ResourceDetailResponse,
     ResourceListRequest, ResourceListResponse, ResourceMetricsResponse, ResourceRefRequest,
-    ResourceTypesRequest, ResourceTypesResponse, ServerFrame, ServerKind,
+    ResourceSnapshotPage, ResourceTypesRequest, ResourceTypesResponse, ServerFrame, ServerKind,
+    ServerPayload, SnapshotBegin, SnapshotChunk,
 };
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -79,12 +80,72 @@ fn kubeconfig() -> PathBuf {
 }
 
 async fn receive_frame(ws: &mut Ws) -> ServerFrame {
-    let message = tokio::time::timeout(Duration::from_secs(30), ws.next())
+    let message = tokio::time::timeout(Duration::from_secs(90), ws.next())
         .await
         .expect("server frame within timeout")
         .expect("socket remains open")
         .expect("socket remains healthy");
     serde_json::from_str(&message.into_text().unwrap()).unwrap()
+}
+
+fn admin_context() -> String {
+    let cluster =
+        std::env::var("K10S_KIND_CLUSTER").unwrap_or_else(|_| "k10s-read-path".to_owned());
+    format!("kind-{cluster}")
+}
+
+fn kubectl_status(args: &[&str]) -> bool {
+    Command::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(kubeconfig())
+        .arg("--context")
+        .arg(admin_context())
+        .args(args)
+        .status()
+        .unwrap()
+        .success()
+}
+
+fn kubectl(args: &[&str]) {
+    assert!(kubectl_status(args), "kubectl failed: {args:?}");
+}
+
+async fn consume_snapshot(ws: &mut Ws) -> Vec<k10s_protocol::ResourceIdentity> {
+    let begin = receive_frame(ws).await;
+    assert_eq!(begin.kind, ServerKind::SnapshotBegin, "{begin:?}");
+    consume_snapshot_from_begin(ws, begin).await
+}
+
+async fn consume_snapshot_from_begin(
+    ws: &mut Ws,
+    begin: ServerFrame,
+) -> Vec<k10s_protocol::ResourceIdentity> {
+    let begin: SnapshotBegin = serde_json::from_value(begin.payload).unwrap();
+    let mut identities = Vec::new();
+    for _ in 0..begin.total_chunks {
+        let chunk = receive_frame(ws).await;
+        assert_eq!(chunk.kind, ServerKind::SnapshotChunk, "{chunk:?}");
+        let chunk: SnapshotChunk = serde_json::from_value(chunk.payload).unwrap();
+        let page: ResourceSnapshotPage = serde_json::from_value(chunk.data).unwrap();
+        identities.extend(page.rows.into_iter().map(|row| row.identity));
+    }
+    assert_eq!(receive_frame(ws).await.kind, ServerKind::SnapshotEnd);
+    identities
+}
+
+async fn receive_resource_event(ws: &mut Ws, expected: &str) -> Value {
+    loop {
+        let frame = receive_frame(ws).await;
+        if frame.kind != ServerKind::Event {
+            continue;
+        }
+        let ServerPayload::Event(event) = frame.decode_payload().unwrap() else {
+            continue;
+        };
+        if event.event_kind == expected {
+            return event.payload;
+        }
+    }
 }
 
 async fn send_request(ws: &mut Ws, request_id: &str, kind: &str, payload: Value) -> ServerFrame {
@@ -293,4 +354,77 @@ async fn standalone_control_socket_serves_live_kind_data_not_fake_fixtures() {
     .await
     .unwrap();
     assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Error);
+
+    ws.send(Message::Text(
+        json!({
+            "kind": "subscribe",
+            "subscriptionId": "live-pods",
+            "payload": {
+                "kind": "resource",
+                "context": "k10s-limited",
+                "gvk": {"group": "", "version": "v1", "kind": "Pod"},
+                "namespace": "k10s-read"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+    let snapshot = consume_snapshot(&mut ws).await;
+    assert_eq!(snapshot.len(), 2);
+    let old_pod = snapshot[0].name.clone();
+
+    kubectl(&[
+        "-n",
+        "k10s-read",
+        "scale",
+        "deployment/read-path-web",
+        "--replicas=3",
+    ]);
+    let changed = receive_resource_event(&mut ws, "resource.changed").await;
+    assert_eq!(changed["identity"]["context"], "k10s-limited");
+
+    kubectl(&["-n", "k10s-read", "delete", "pod", &old_pod, "--wait=false"]);
+    let gone = receive_resource_event(&mut ws, "resource.gone").await;
+    assert_eq!(gone["identity"]["name"], old_pod);
+
+    let cluster =
+        std::env::var("K10S_KIND_CLUSTER").unwrap_or_else(|_| "k10s-read-path".to_owned());
+    assert!(
+        Command::new("docker")
+            .args(["restart", &format!("{cluster}-control-plane")])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if kubectl_status(&["get", "--raw=/readyz"]) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .expect("the kind control plane recovers");
+    let recovery = loop {
+        let frame = receive_frame(&mut ws).await;
+        if frame.kind == ServerKind::SnapshotBegin {
+            break consume_snapshot_from_begin(&mut ws, frame).await;
+        }
+    };
+    assert!(
+        recovery.len() >= 2,
+        "the same WebSocket subscription receives a recovery snapshot"
+    );
+
+    kubectl(&[
+        "-n",
+        "k10s-read",
+        "scale",
+        "deployment/read-path-web",
+        "--replicas=2",
+    ]);
 }
