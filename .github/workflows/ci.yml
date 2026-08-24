@@ -26,7 +26,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Rust version
         run: rustc --version && cargo --version
