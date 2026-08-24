@@ -186,12 +186,16 @@ jobs:
           cargo test --locked -p k10s-server-app --test packaging_server
           if (-not (Get-ChildItem target/release/packages/*.msi)) { throw 'missing MSI' }
           if (-not (Get-ChildItem target/release/packages/*.exe)) { throw 'missing NSIS installer' }
-          $msiRoot = Join-Path $env:RUNNER_TEMP 'k10s-msi-smoke'
-          New-Item -ItemType Directory -Force $msiRoot | Out-Null
           $msi = (Get-ChildItem target/release/packages/*.msi | Select-Object -First 1).FullName
-          $process = Start-Process msiexec.exe -ArgumentList @('/a', $msi, '/qn', "TARGETDIR=$msiRoot") -Wait -PassThru
-          if ($process.ExitCode -ne 0 -or -not (Get-ChildItem $msiRoot -Recurse -Filter k10s-desktop.exe)) { throw 'MSI lacks k10s-desktop.exe' }
+          $wixRoot = Join-Path $env:LOCALAPPDATA '.cargo-packager\WixTools'
+          $darkRoot = Join-Path $env:RUNNER_TEMP 'k10s-msi-smoke'
+          $darkWxs = Join-Path $darkRoot 'package.wxs'
+          Remove-Item -Recurse -Force $darkRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $darkRoot | Out-Null
+          & (Join-Path $wixRoot 'dark.exe') '-x' (Join-Path $darkRoot 'files') '-o' $darkWxs $msi
+          if ($LASTEXITCODE -ne 0 -or -not (Select-String -Quiet -SimpleMatch 'k10s-desktop.exe' $darkWxs)) { throw 'MSI lacks k10s-desktop.exe' }
           $nsisRoot = Join-Path $env:RUNNER_TEMP 'k10s-nsis-smoke'
+          Remove-Item -Recurse -Force $nsisRoot -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $nsisRoot | Out-Null
           $nsis = (Get-ChildItem target/release/packages/*.exe | Select-Object -First 1).FullName
           $process = Start-Process $nsis -ArgumentList @('/S', "/D=$nsisRoot") -Wait -PassThru
