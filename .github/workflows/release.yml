@@ -142,9 +142,17 @@ jobs:
           # Build each Windows installer independently: cargo-packager stops at
           # the first format failure, so `all` can otherwise hide a missing
           # NSIS output behind a WiX failure.
-          cargo packager --release --formats nsis
+          foreach ($attempt in 1..3) {
+            cargo packager --release --formats nsis
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
           if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed: $LASTEXITCODE" }
-          cargo packager --release --formats wix
+          foreach ($attempt in 1..3) {
+            cargo packager --release --formats wix
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
           if ($LASTEXITCODE -ne 0) {
             # WiX 3 ICE validation cannot run as the runner's NetworkService
             # account on some self-hosted Windows machines. Relink the exact
