@@ -88,7 +88,22 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: git config --global http.version HTTP/1.1
 
-      - uses: actions/checkout@v4
+      - name: Checkout source (hosted runners)
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+
+      # This runner's route to github.com occasionally resets connections.
+      # Each checkout action already retries three times; allow two complete
+      # attempts before failing the release job.
+      - name: Checkout source (Windows, first attempt)
+        id: windows_checkout_1
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout source (Windows, retry)
+        if: runner.os == 'Windows' && steps.windows_checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Configure persistent Cargo build cache
         if: matrix.self_hosted == true
