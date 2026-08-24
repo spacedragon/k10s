@@ -26,7 +26,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt,clippy
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -61,7 +62,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt,clippy
 
       - name: Unit tests (UI and apps)
         run: cargo test --locked -p k10s-ui -p k10s-desktop -p k10s-server-app -p k10s-web --all-targets
@@ -83,7 +85,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -106,7 +109,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
 
       - name: Install container and kind prerequisites
         run: |
@@ -185,7 +188,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -239,10 +243,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain-file: rust-toolchain.toml
-          targets: wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $match = Select-String rust-toolchain.toml '^channel = "([^"]+)"$'
+          if (-not $match) { throw 'Unable to read rust-toolchain.toml' }
+          $channel = $match.Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed: $LASTEXITCODE" }
+          rustup target add wasm32-unknown-unknown --toolchain $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
+          rustup default $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed: $LASTEXITCODE" }
 
       - name: Configure persistent Cargo build directory
         shell: powershell
@@ -293,7 +306,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
           targets: wasm32-unknown-unknown
       - name: Build and launch smoke
         run: |
