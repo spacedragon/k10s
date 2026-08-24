@@ -180,6 +180,35 @@ jobs:
             throw "Required target ${{ matrix.target }} is not installed"
           }
 
+      - name: Initialize MSVC build environment
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw 'Visual Studio Build Tools are required, but vswhere.exe was not found'
+          }
+          $installationPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $installationPath) {
+            throw 'Install Visual Studio Build Tools with the MSVC x64/x86 C++ component'
+          }
+          $devCmd = Join-Path $installationPath "Common7\Tools\VsDevCmd.bat"
+          $configured = cmd.exe /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          if ($LASTEXITCODE -ne 0) { throw "VsDevCmd failed with exit code $LASTEXITCODE" }
+
+          $names = @(
+            'INCLUDE', 'LIB', 'LIBPATH', 'PATH', 'UniversalCRTSdkDir',
+            'UCRTVersion', 'VCINSTALLDIR', 'VCToolsInstallDir',
+            'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion'
+          )
+          foreach ($name in $names) {
+            $line = $configured | Where-Object { $_ -like "$name=*" } | Select-Object -Last 1
+            if ($line) { $line >> $env:GITHUB_ENV }
+          }
+
       - name: Cache cargo registry and target
         if: matrix.self_hosted != true
         uses: actions/cache@v4
