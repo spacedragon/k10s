@@ -193,7 +193,13 @@ jobs:
           restore-keys: |
             release-${{ matrix.target }}-
 
-      - name: Build release binaries
+      - name: Build release binaries (Unix)
+        if: runner.os != 'Windows'
+        run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+
+      - name: Build release binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
 
       - name: Package (zip)
