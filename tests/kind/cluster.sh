@@ -18,7 +18,8 @@ up() {
   require kind
   require kubectl
   mkdir -p "$(dirname "$KUBECONFIG_PATH")"
-  kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  kind delete cluster --name "$CLUSTER_NAME" \
+    --kubeconfig "$KUBECONFIG_PATH" >/dev/null 2>&1 || true
   kind create cluster \
     --name "$CLUSTER_NAME" \
     --image "$KIND_IMAGE" \
@@ -53,8 +54,11 @@ up() {
 
 down() {
   require kind
-  kind delete cluster --name "$CLUSTER_NAME"
+  local status=0
+  kind delete cluster --name "$CLUSTER_NAME" \
+    --kubeconfig "$KUBECONFIG_PATH" || status=$?
   rm -f "$KUBECONFIG_PATH"
+  return "$status"
 }
 
 case "${1:-up}" in

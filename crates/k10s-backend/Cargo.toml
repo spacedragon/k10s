@@ -35,7 +35,9 @@ http = { version = "1.5.0", optional = true }
 # Integration tests enable the crate's own testkit surface.
 k10s-backend = { path = ".", features = ["testkit"] }
 # Discovery refresh tests drive tokio's mock clock (pause/advance).
-tokio = { version = "1.49.0", features = ["test-util"] }
+tokio = { version = "1.49.0", features = ["io-util", "net", "rt-multi-thread", "test-util"] }
+rustls-pemfile = "2.2.0"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 
 [[bench]]
 name = "fake_scale"

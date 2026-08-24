@@ -1,22 +1,74 @@
 //! Ignored real-control-socket smoke over the ephemeral kind cluster.
 
 use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use k10s_backend::{BackendKernel, KubeAdapter};
 use k10s_protocol::{
     BootstrapResponse, ContextPermissionsRequest, ContextPermissionsResponse, GroupVersionKind,
     MetricsAvailability, PermissionOutcome, PermissionProbe, ResourceDetailResponse,
     ResourceListRequest, ResourceListResponse, ResourceMetricsResponse, ResourceRefRequest,
     ResourceTypesRequest, ResourceTypesResponse, ServerFrame, ServerKind,
 };
-use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct ServerProcess {
+    child: Child,
+    dist_dir: PathBuf,
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dist_dir);
+    }
+}
+
+fn server_binary() -> PathBuf {
+    std::env::var_os("K10S_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(format!("k10s-server{}", std::env::consts::EXE_SUFFIX))
+        })
+}
+
+fn spawn_server_app() -> (ServerProcess, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let dist_dir = std::env::temp_dir().join(format!("k10s-server-kind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dist_dir);
+    std::fs::create_dir_all(&dist_dir).unwrap();
+    std::fs::write(
+        dist_dir.join("index.html"),
+        "<!doctype html><title>k10s</title>",
+    )
+    .unwrap();
+    let child = Command::new(server_binary())
+        .args(["--kubeconfig"])
+        .arg(kubeconfig())
+        .env("K10S_BIND_ADDR", address.to_string())
+        .env("K10S_ACCESS_TOKEN", "kind-secret")
+        .env("K10S_DIST_DIR", &dist_dir)
+        .spawn()
+        .expect("build k10s-server-app before running this E2E");
+    (
+        ServerProcess { child, dist_dir },
+        format!("ws://{address}{}", k10s_protocol::CONTROL_PATH),
+    )
+}
 
 fn kubeconfig() -> PathBuf {
     std::env::var_os("K10S_KIND_KUBECONFIG")
@@ -56,24 +108,17 @@ async fn send_request(ws: &mut Ws, request_id: &str, kind: &str, payload: Value)
 #[tokio::test]
 #[ignore = "requires tests/kind/cluster.sh up"]
 async fn standalone_control_socket_serves_live_kind_data_not_fake_fixtures() {
-    let adapter = KubeAdapter::from_kubeconfig(Some(&kubeconfig())).unwrap();
-    let server = spawn_loopback(
-        ServerConfig {
-            access_token: "kind-secret".into(),
-            ..ServerConfig::default()
-        },
-        BackendKernel::new_with_instance_id(adapter, "kind-server"),
-    )
+    let (_server, url) = spawn_server_app();
+    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match connect_async(&url).await {
+                Ok(socket) => break socket,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
     .await
-    .unwrap();
-
-    let (mut ws, _) = connect_async(format!(
-        "ws://{}{}",
-        server.addr(),
-        k10s_protocol::CONTROL_PATH
-    ))
-    .await
-    .unwrap();
+    .expect("the standalone server binds its configured socket");
     ws.send(Message::Text(
         json!({
             "kind":"hello",
@@ -248,6 +293,4 @@ async fn standalone_control_socket_serves_live_kind_data_not_fake_fixtures() {
     .await
     .unwrap();
     assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Error);
-
-    server.shutdown().await.unwrap();
 }
