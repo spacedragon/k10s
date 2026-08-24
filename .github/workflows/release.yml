@@ -141,11 +141,24 @@ jobs:
           if (-not $match) { throw 'Unable to read channel from rust-toolchain.toml' }
           $channel = $match.Matches[0].Groups[1].Value
 
-          rustup toolchain install $channel --profile minimal --no-self-update
+          $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+          $rustup = Join-Path $cargoBin "rustup.exe"
+          if (-not (Test-Path $rustup)) {
+            $installer = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe" `
+              -OutFile $installer
+            & $installer -y --profile minimal --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed with exit code $LASTEXITCODE" }
+          }
+          $env:PATH = "$cargoBin;$env:PATH"
+          $cargoBin >> $env:GITHUB_PATH
+
+          & $rustup toolchain install $channel --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
-          rustup target add "${{ matrix.target }}" --toolchain $channel
+          & $rustup target add "${{ matrix.target }}" --toolchain $channel
           if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE" }
-          rustup default $channel
+          & $rustup default $channel
           if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
 
       - name: Verify toolchain and matrix target (Unix)
