@@ -131,4 +131,8 @@ jobs:
         run: npm ci && npx playwright install chromium --with-deps
 
       - name: Browser foundation smoke
-        run: npx playwright test tests/browser/foundation.spec.ts --project=chromium
+        run: |
+          # A self-hosted runner can retain a server from an interrupted job.
+          # Give every workflow run its own port instead of colliding on 8080.
+          export K10S_E2E_PORT="$((20000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT) % 20000))"
+          npx playwright test tests/browser/foundation.spec.ts --project=chromium
