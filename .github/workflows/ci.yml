@@ -143,11 +143,18 @@ jobs:
           node_digest=sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
           node_archive="${RUNNER_TOOL_CACHE}/k10s/kindest-node-v1.36.1.tar"
           if ! docker image inspect "$node_image" >/dev/null 2>&1; then
-            if [ ! -f "$node_archive" ]; then
-              skopeo copy "docker://docker.io/kindest/node@${node_digest}" \
-                "docker-archive:${node_archive}:${node_image}"
+            if [ -f "$node_archive" ] && ! docker load -i "$node_archive"; then
+              rm -f "$node_archive"
             fi
-            docker load -i "$node_archive"
+            if ! docker image inspect "$node_image" >/dev/null 2>&1; then
+              node_archive_tmp="${node_archive}.tmp.$$"
+              trap 'rm -f "$node_archive_tmp"' EXIT
+              rm -f "$node_archive_tmp"
+              skopeo copy "docker://docker.io/kindest/node@${node_digest}" \
+                "docker-archive:${node_archive_tmp}:${node_image}"
+              mv "$node_archive_tmp" "$node_archive"
+              docker load -i "$node_archive"
+            fi
           fi
           echo "$tool_bin" >> "$GITHUB_PATH"
 
