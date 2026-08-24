@@ -249,6 +249,11 @@ pub enum Command {
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
+    /// Roll out a restart of one exact workload.
+    Restart {
+        target: ResourceIdentity,
+        idempotency_key: String,
+    },
     /// Delete one exact object with an explicit propagation mode.
     Delete {
         /// Exact target identity including its immutable UID.
@@ -489,6 +494,7 @@ impl PendingAction {
             Self::Query(Query::ContextPermissions(_)) => k10s_protocol::REQUEST_CONTEXT_PERMISSIONS,
             Self::Command(Command::YamlApply { .. }) => "yaml.apply",
             Self::Command(Command::Scale { .. }) => "workload.scale",
+            Self::Command(Command::Restart { .. }) => "workload.restart",
             Self::Command(Command::Delete { .. }) => "workload.delete",
         }
     }
@@ -546,6 +552,11 @@ impl PendingAction {
                 uid: target.uid.clone(),
                 replicas: *replicas,
             }),
+            Self::Command(Command::Restart { target, .. }) => {
+                encode(k10s_protocol::RestartRequest {
+                    identity: target.clone(),
+                })
+            }
             Self::Command(Command::Delete {
                 target,
                 propagation,
@@ -563,6 +574,9 @@ impl PendingAction {
                 idempotency_key, ..
             })
             | Self::Command(Command::Scale {
+                idempotency_key, ..
+            })
+            | Self::Command(Command::Restart {
                 idempotency_key, ..
             })
             | Self::Command(Command::Delete {
@@ -1351,6 +1365,9 @@ impl ClientState {
                             idempotency_key, ..
                         })
                         | PendingAction::Command(Command::Scale {
+                            idempotency_key, ..
+                        })
+                        | PendingAction::Command(Command::Restart {
                             idempotency_key, ..
                         })
                         | PendingAction::Command(Command::Delete {

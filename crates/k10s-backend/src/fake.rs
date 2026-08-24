@@ -914,6 +914,38 @@ impl FakeKubernetes {
         Ok(operation_id)
     }
 
+    /// Accept a deterministic fake rollout restart after exact identity and
+    /// authorization checks. The fake has no pod-template generation model;
+    /// lifecycle events remain observable through the shared operation seam.
+    async fn restart(
+        &self,
+        target: ResourceRef,
+        idempotency_key: String,
+    ) -> Result<OperationId, BackendError> {
+        if let Some(existing) = self.lock().idempotency.get(&idempotency_key).cloned() {
+            return Ok(OperationId::new(existing));
+        }
+        let mut state = self.lock();
+        if target.context == READONLY_CONTEXT {
+            return Err(BackendError::Forbidden);
+        }
+        let Some(record) = state.find_by_name(
+            &target.context,
+            &target.gvk,
+            target.namespace.as_deref(),
+            &target.name,
+        ) else {
+            return Err(BackendError::NotFound);
+        };
+        if record.reference.uid != target.uid {
+            return Err(BackendError::Conflict(
+                "the target does not match the current object at this name; it was recreated"
+                    .into(),
+            ));
+        }
+        Ok(Self::begin_operation(&mut state, &idempotency_key))
+    }
+
     /// Number of registered watchers; test-only observability for pruning.
     #[cfg(test)]
     fn watcher_count(&self) -> usize {
@@ -1213,6 +1245,8 @@ impl KubernetesAccess for FakeKubernetes {
                             supports_scale: scale_exposed(&gvk),
                             // The fake world's watches always attach.
                             supports_watch: true,
+                            supports_patch: true,
+                            supports_delete: true,
                             gvk,
                             namespaced,
                         });
@@ -1347,6 +1381,10 @@ impl KubernetesAccess for FakeKubernetes {
                     propagation,
                     idempotency_key,
                 } => self.delete(target, propagation, idempotency_key).await,
+                Command::Restart {
+                    target,
+                    idempotency_key,
+                } => self.restart(target, idempotency_key).await,
             }
         })
     }

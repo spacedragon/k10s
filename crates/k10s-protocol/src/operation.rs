@@ -17,6 +17,8 @@ pub const REQUEST_YAML_VALIDATE: &str = "yaml.validate";
 pub const REQUEST_YAML_APPLY: &str = "yaml.apply";
 /// Request kind carrying a [`ScaleRequest`] payload.
 pub const REQUEST_WORKLOAD_SCALE: &str = "workload.scale";
+/// Request kind carrying a [`RestartRequest`] payload.
+pub const REQUEST_WORKLOAD_RESTART: &str = "workload.restart";
 /// Request kind carrying a [`DeleteRequest`] payload.
 pub const REQUEST_WORKLOAD_DELETE: &str = "workload.delete";
 /// Request kind carrying an [`OperationStatusRequest`] payload.
@@ -161,6 +163,14 @@ pub struct ScaleRequest {
     pub uid: String,
     /// Desired replica count.
     pub replicas: u32,
+}
+
+/// Command payload requesting a rollout restart of one exact workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartRequest {
+    /// Exact identity of the workload, including immutable UID.
+    pub identity: ResourceIdentity,
 }
 
 /// How dependents are handled when an object is deleted.

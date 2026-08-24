@@ -10,6 +10,7 @@ mod config;
 mod discovery;
 mod events;
 mod metrics;
+mod mutate;
 mod normalize;
 mod owners;
 mod permissions;
@@ -301,10 +302,7 @@ impl KubernetesAccess for KubeAdapter {
         cmd: Command,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<OperationId, BackendError>> + Send + 'a>>
     {
-        Box::pin(async move {
-            let _ = cmd;
-            Err(BackendError::unsupported("execute"))
-        })
+        Box::pin(async move { self.execute_mutation(cmd).await })
     }
 
     fn subscribe<'a>(
@@ -523,6 +521,7 @@ impl KubeAdapter {
         let mut record = crate::runtime::record_from_row(&read.row, revision);
         record.events = events::events_for(&client, &reference, descriptor.namespaced).await?;
         record.manifest = read.manifest;
+        self.operations.refresh_scope(&reference.coalescing_key());
         Ok(QueryResult::ResourceDetail(record))
     }
 

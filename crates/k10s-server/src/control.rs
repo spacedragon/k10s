@@ -16,8 +16,8 @@ use k10s_protocol::{
     DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, OperationAccepted,
     OperationId, OperationStatusRequest, OperationUpdate, REQUEST_CONTEXT_PERMISSIONS,
     REQUEST_CONTEXT_SWITCH, RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest,
-    ResourceTypesRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind,
-    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+    ResourceTypesRequest, RestartRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame,
+    ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
     SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
     decode_client_frame,
 };
@@ -1114,6 +1114,22 @@ fn parse_request(
                         kind = k10s_protocol::REQUEST_WORKLOAD_DELETE
                     )
                 })
+        }
+        k10s_protocol::REQUEST_WORKLOAD_RESTART => {
+            let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
+                return Err(
+                    "workload.restart requires a non-empty envelope-level idempotencyKey"
+                        .to_owned(),
+                );
+            };
+            serde_json::from_value::<RestartRequest>(payload.clone())
+                .map(|restart| {
+                    Some(ParsedRequest::Execute(Command::Restart {
+                        target: backend_reference(restart.identity),
+                        idempotency_key,
+                    }))
+                })
+                .map_err(|error| format!("invalid workload.restart payload: {error}"))
         }
         k10s_protocol::REQUEST_OPERATION_STATUS => {
             serde_json::from_value::<OperationStatusRequest>(payload.clone())

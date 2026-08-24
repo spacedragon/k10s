@@ -78,6 +78,10 @@ pub struct ApiResourceDescriptor {
     /// Whether the cluster advertises the watch verb for this type; a
     /// list-only type cannot back a live resource watch.
     pub supports_watch: bool,
+    /// Whether discovery advertises patch on the main resource.
+    pub supports_patch: bool,
+    /// Whether discovery advertises delete on the main resource.
+    pub supports_delete: bool,
 }
 
 /// Selectable resource types of one context.
@@ -276,6 +280,11 @@ pub enum Command {
         name: String,
         uid: String,
         replicas: u32,
+        idempotency_key: String,
+    },
+    /// Request a rollout restart of one exact workload object.
+    Restart {
+        target: ResourceRef,
         idempotency_key: String,
     },
     /// Delete one exact object with an explicit propagation mode.

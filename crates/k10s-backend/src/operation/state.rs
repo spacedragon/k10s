@@ -38,7 +38,7 @@ pub struct OperationEngine {
 #[derive(Debug)]
 struct Retained {
     record: OperationRecord,
-    fingerprint: String,
+    scope: String,
     updated_at: Instant,
 }
 
@@ -97,6 +97,18 @@ impl OperationEngine {
         idempotency_key: &str,
         fingerprint: &str,
     ) -> Result<AcceptOutcome, BackendError> {
+        self.accept_scoped(idempotency_key, fingerprint, fingerprint)
+    }
+
+    /// Accept with an explicit target scope. A nonterminal operation owns
+    /// that scope until reconciliation, so changing the payload cannot bypass
+    /// an outcome-unknown refresh gate for the same Kubernetes object.
+    pub fn accept_scoped(
+        &self,
+        idempotency_key: &str,
+        fingerprint: &str,
+        scope: &str,
+    ) -> Result<AcceptOutcome, BackendError> {
         if idempotency_key.is_empty() {
             return Err(BackendError::Conflict(
                 "an idempotency key is required".into(),
@@ -119,10 +131,10 @@ impl OperationEngine {
         if inner
             .operations
             .values()
-            .any(|entry| !entry.record.state.is_terminal() && entry.fingerprint == fingerprint)
+            .any(|entry| !entry.record.state.is_terminal() && entry.scope == scope)
         {
             return Err(BackendError::Conflict(
-                "an equivalent operation is already in flight".into(),
+                "an operation for this target is already in flight; refresh before retrying".into(),
             ));
         }
         inner.make_room()?;
@@ -143,7 +155,7 @@ impl OperationEngine {
             id.clone(),
             Retained {
                 record: record.clone(),
-                fingerprint: fingerprint.into(),
+                scope: scope.into(),
                 updated_at: now,
             },
         );
@@ -155,6 +167,43 @@ impl OperationEngine {
         inner.emit(event_from(&record, None));
         tracing::info!(operation_id = %id, state = ?OperationState::Pending, "operation accepted");
         Ok(AcceptOutcome::Accepted(OperationId::new(id)))
+    }
+
+    /// Release target admission after a successful authoritative refresh.
+    ///
+    /// The original operation deliberately remains `OutcomeUnknown`: a read
+    /// proves that the caller reconciled the target, not whether the timed-out
+    /// write succeeded. It only permits a new idempotency key for that target.
+    pub fn refresh_scope(&self, scope: &str) {
+        let mut inner = self.lock();
+        for entry in inner.operations.values_mut() {
+            if entry.scope == scope && entry.record.state == OperationState::OutcomeUnknown {
+                entry.scope.clear();
+            }
+        }
+    }
+
+    /// Return an exact retained idempotency replay without creating a new
+    /// operation. Admission paths with single-use authority (YAML tickets)
+    /// use this before inspecting/consuming that authority.
+    pub fn replay(
+        &self,
+        idempotency_key: &str,
+        fingerprint: &str,
+    ) -> Result<Option<OperationId>, BackendError> {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner.expire(now);
+        let live = inner.live_operation_ids();
+        let Some(entry) = inner.idempotency.get(idempotency_key, now, &live) else {
+            return Ok(None);
+        };
+        if entry.fingerprint != fingerprint {
+            return Err(BackendError::Conflict(
+                "the idempotency key was already used for a different submission".into(),
+            ));
+        }
+        Ok(Some(OperationId::new(entry.operation_id)))
     }
 
     pub fn running(&self, id: &str, progress: Option<(u32, u32)>) -> Result<(), BackendError> {
