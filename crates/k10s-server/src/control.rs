@@ -29,6 +29,7 @@ use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
 use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
+use crate::resume::ResumeStore;
 
 /// Rows carried by one bounded snapshot chunk frame.
 const RESOURCE_ROWS_PER_CHUNK: usize = 16;
@@ -117,6 +118,7 @@ pub(crate) async fn serve_socket(
     gate: Arc<MutationGate>,
     signals: crate::lifecycle::DrainSignals,
     tasks: Arc<crate::lifecycle::ConnectionTasks>,
+    resume: ResumeStore,
 ) {
     let DrainSignals { drain, force } = signals;
     let (mut sink, mut stream) = socket.split();
@@ -127,14 +129,40 @@ pub(crate) async fn serve_socket(
     let writer_outbound = outbound.clone();
     let child = CancellationToken::new();
     let writer_cancel = child.clone();
+    let writer_resume: Arc<Mutex<Option<(ResumeStore, String)>>> = Arc::new(Mutex::new(None));
+    let writer_resume_task = Arc::clone(&writer_resume);
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = writer_cancel.cancelled() => break,
                 item = writer_outbound.recv() => match item {
                     Some(item) => {
+                        let journal_entry = match &item.message {
+                            Message::Text(text) => serde_json::from_str::<ServerFrame>(text)
+                                .ok()
+                                .and_then(|frame| frame.sequence)
+                                .map(|sequence| (sequence, text.to_string())),
+                            _ => None,
+                        };
                         let send = sink.send(item.message);
-                        if tokio::select! { () = writer_cancel.cancelled() => true, result = send => result.is_err() } { break; }
+                        let failed = tokio::select! {
+                            () = writer_cancel.cancelled() => true,
+                            result = send => result.is_err(),
+                        };
+                        if failed {
+                            break;
+                        }
+                        if let Some((sequence, text)) = journal_entry
+                            && let Some((store, session_id)) = writer_resume_task
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone()
+                        {
+                            store
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .record_frame(&session_id, sequence, &text);
+                        }
                     },
                     None => break,
                 }
@@ -212,7 +240,35 @@ pub(crate) async fn serve_socket(
         }
     };
     drop(unauthenticated);
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string());
+    let resume_attempt = resume
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .attempt_resume(
+            hello.server_instance_id.as_deref(),
+            kernel.server_instance_id(),
+            hello.session_id.as_ref().map(SessionId::as_str),
+            hello.last_acked_sequence,
+        );
+    let (session_id, resume_status, replay) = match resume_attempt {
+        Ok((session_id, replay)) => (SessionId::new(session_id), ResumeStatus::Resumed, replay),
+        Err(()) => (
+            SessionId::new(uuid::Uuid::new_v4().to_string()),
+            ResumeStatus::Fresh,
+            Vec::new(),
+        ),
+    };
+    let (takeover_tx, mut takeover_rx) = tokio::sync::oneshot::channel();
+    let (previous_transport, lease_generation, journal_last_sequence) = resume
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .acquire_lease(session_id.as_str(), takeover_tx);
+    *writer_resume
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((Arc::clone(&resume), session_id.as_str().to_owned()));
+    if let Some(previous_transport) = previous_transport {
+        let _ = previous_transport.send(());
+    }
     tracing::info!(
         session_id = %session_id.as_str(),
         queue_pressure = outbound.len(),
@@ -225,7 +281,7 @@ pub(crate) async fn serve_socket(
         capabilities: negotiated_capabilities.clone(),
         session_id: session_id.clone(),
         server_instance_id: kernel.server_instance_id().to_owned(),
-        resume_status: ResumeStatus::Fresh,
+        resume_status,
     };
     if send_frame(
         &outbound,
@@ -249,6 +305,21 @@ pub(crate) async fn serve_socket(
         )
         .await;
     }
+    for entry in replay {
+        if outbound
+            .enqueue(Priority::P1, Message::Text(entry.message.into()))
+            .is_err()
+        {
+            return close_and_join(
+                outbound,
+                child,
+                writer,
+                "outbound overload",
+                config.graceful_flush_timeout,
+            )
+            .await;
+        }
+    }
     let requests: Arc<std::sync::Mutex<HashMap<RequestId, CancellationToken>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     // Accepted operation IDs correlated to their submitting request ID so
@@ -256,7 +327,7 @@ pub(crate) async fn serve_socket(
     let operation_correlations: Arc<std::sync::Mutex<HashMap<String, String>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut request_tasks = JoinSet::new();
-    let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(journal_last_sequence));
     let subscription_cancel = child.child_token();
     let watch_recovery = WatchRecovery::new();
     let mut watch_subscriptions: HashMap<SubscriptionId, ActiveWatchSubscription> = HashMap::new();
@@ -353,6 +424,16 @@ pub(crate) async fn serve_socket(
     loop {
         let next = tokio::select! {
             biased;
+            _ = &mut takeover_rx => {
+                let _ = outbound.enqueue(
+                    Priority::P0,
+                    Message::Close(Some(CloseFrame {
+                        code: 1008,
+                        reason: "session resumed by another transport".into(),
+                    })),
+                );
+                break;
+            },
             () = force.cancelled() => break,
             () = drain.cancelled(), if !noticed => {
                 noticed = true;
@@ -864,6 +945,10 @@ pub(crate) async fn serve_socket(
     subscription_cancel.cancel();
     while request_tasks.join_next().await.is_some() {}
     drop(authenticated);
+    resume
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .release_lease(session_id.as_str(), lease_generation);
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
 }
 
