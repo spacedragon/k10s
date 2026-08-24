@@ -101,13 +101,13 @@ async fn terminal(adapter: &KubeAdapter, id: &str) -> (OperationState, Option<St
     panic!("operation {id} did not settle")
 }
 
-async fn run(adapter: &KubeAdapter, command: Command) {
+async fn run(adapter: &KubeAdapter, label: &str, command: Command) {
     let id = adapter.execute(command).await.unwrap();
     let (state, detail) = terminal(adapter, id.as_str()).await;
     assert_eq!(
         state,
         OperationState::Succeeded,
-        "operation failed: {detail:?}"
+        "{label} operation failed: {detail:?}"
     );
 }
 
@@ -405,6 +405,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     let hash = k10s_protocol::buffer_hash(&yaml);
     run(
         &adapter,
+        "apply",
         Command::Apply {
             context: CONTEXT.into(),
             yaml,
@@ -441,6 +442,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
 
     run(
         &adapter,
+        "scale",
         Command::Scale {
             context: CONTEXT.into(),
             gvk: deployment.gvk.clone(),
@@ -452,8 +454,17 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         },
     )
     .await;
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "rollout",
+        "status",
+        "deployment/operations-web",
+        "--timeout=60s",
+    ]);
     run(
         &adapter,
+        "restart",
         Command::Restart {
             target: deployment,
             idempotency_key: "kind-restart".into(),
@@ -486,6 +497,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     let target = reference(&adapter, Gvk::core("v1", "ConfigMap"), "delete-me").await;
     run(
         &adapter,
+        "delete",
         Command::Delete {
             target,
             propagation: Propagation::Foreground,
@@ -579,6 +591,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "cronjob suspend",
         Command::SetCronJobSuspended {
             target: cronjob.clone(),
             suspended: true,
@@ -588,6 +601,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "cronjob resume",
         Command::SetCronJobSuspended {
             target: cronjob.clone(),
             suspended: false,
@@ -597,6 +611,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "job creation",
         Command::CreateJob {
             source: cronjob,
             idempotency_key: "kind-create-job".into(),
