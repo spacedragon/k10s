@@ -17,7 +17,7 @@ jobs:
   # Unit test gate: required status check that blocks PR merge until green.
   ci:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +67,7 @@ jobs:
 
   ui-tests:
     name: UI unit tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +101,7 @@ jobs:
   # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
   wasm:
     name: WASM check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -130,7 +130,7 @@ jobs:
   # Web foundation gate: pinned Trunk build plus the Chromium browser smoke.
   web:
     name: Web foundation
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 

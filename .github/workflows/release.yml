@@ -7,8 +7,6 @@ name: Release
 #     artifacts and creates a GitHub Release. The tag must exactly match
 #     the `version` in the workspace root Cargo.toml, otherwise the run
 #     fails fast (see the `verify-version` job).
-#   - Every pull request runs the build matrix only (no release is
-#     created), so platform builds stay verified before any tag is cut.
 #   - `workflow_dispatch` runs the build matrix only — handy for testing
 #     the pipeline before tagging.
 #
@@ -22,7 +20,6 @@ on:
   push:
     tags:
       - "v*"
-  pull_request:
   workflow_dispatch:
 
 permissions:
