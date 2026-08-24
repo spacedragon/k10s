@@ -241,7 +241,14 @@ jobs:
     name: Windows build and loopback launch
     runs-on: [self-hosted, Windows, X64]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source (first attempt)
+        id: windows_checkout_1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout source (retry)
+        if: steps.windows_checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Install pinned Rust toolchain
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
