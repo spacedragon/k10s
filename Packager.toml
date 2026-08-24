@@ -1,0 +1,22 @@
+name = "k10s-desktop"
+product-name = "k10s"
+version = "0.1.0"
+identifier = "dev.k10s.desktop"
+description = "A fast Kubernetes desktop and browser client"
+authors = ["k10s contributors"]
+category = "DeveloperTool"
+homepage = "https://github.com/spacedragon/k10s"
+formats = ["all"]
+out-dir = "target/release/packages"
+binaries-dir = "target/release"
+binaries = [{ path = "k10s-desktop", main = true }]
+icons = ["packaging/icons/32x32.png", "packaging/icons/128x128.png", "packaging/icons/256x256.png"]
+
+[deb]
+depends = ["libwayland-client0", "libx11-6", "libgl1"]
+
+[windows]
+digest-algorithm = "sha256"
+
+[macos]
+minimum-system-version = "12.0"

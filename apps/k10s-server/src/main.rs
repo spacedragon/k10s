@@ -2,6 +2,7 @@ use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use k10s_backend::build_kernel;
 use k10s_server::{ServerConfig, StandaloneConfig, resolve_backend_mode};
@@ -9,7 +10,44 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
-const DEFAULT_DIST_DIR: &str = "dist";
+
+include!(concat!(env!("OUT_DIR"), "/embedded_web.rs"));
+
+struct MaterializedAssets(PathBuf);
+
+impl MaterializedAssets {
+    fn create() -> Result<Self, Box<dyn Error>> {
+        if !EMBEDDED_WEB_COMPLETE {
+            return Err("embedded Trunk distribution is missing; run `trunk build --release` before building k10s-server".into());
+        }
+        let root = env::temp_dir().join(format!(
+            "k10s-web-{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        for (relative, contents) in EMBEDDED_WEB_ASSETS {
+            let destination = root.join(relative);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(destination, contents)?;
+        }
+        Ok(Self(root))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for MaterializedAssets {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 fn init_tracing() {
     tracing_subscriber::fmt()
@@ -49,6 +87,7 @@ struct CliOptions {
     kubeconfig_path: Option<PathBuf>,
     token_file_path: Option<PathBuf>,
     listen: Option<SocketAddr>,
+    shutdown_file_path: Option<PathBuf>,
 }
 
 fn parse_backend_flags(args: &[String]) -> Result<CliOptions, Box<dyn Error>> {
@@ -74,6 +113,13 @@ fn parse_backend_flags(args: &[String]) -> Result<CliOptions, Box<dyn Error>> {
             "--listen" => {
                 let value = iter.next().ok_or("missing value for --listen")?;
                 options.listen = Some(value.parse()?);
+            }
+            "--shutdown-file" => {
+                options.shutdown_file_path = Some(
+                    iter.next()
+                        .map(PathBuf::from)
+                        .ok_or("missing value for --shutdown-file")?,
+                );
             }
             other => return Err(format!("unknown argument: {other}").into()),
         }
@@ -103,8 +149,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .or_else(|| (!token_file_raw.trim().is_empty()).then(|| PathBuf::from(token_file_raw)));
     let access_token =
         k10s_server::resolve_access_token(access_token_env.as_deref(), token_file_path.as_deref())?;
-    let dist_dir =
-        PathBuf::from(env::var("K10S_DIST_DIR").unwrap_or_else(|_| DEFAULT_DIST_DIR.to_owned()));
+    let embedded_assets;
+    let dist_dir = if let Some(path) = env::var_os("K10S_DIST_DIR") {
+        PathBuf::from(path)
+    } else {
+        embedded_assets = MaterializedAssets::create()?;
+        embedded_assets.path().to_owned()
+    };
 
     // Security-sensitive validation and asset checks intentionally precede bind.
     let standalone = StandaloneConfig::new(bind_addr, access_token, dist_dir)?;
@@ -122,10 +173,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(standalone.bind_addr()).await?;
     let config = ServerConfig {
         access_token: standalone.access_token().to_owned(),
+        startup_readiness_delay: Duration::from_secs(1),
+        probe_drain_grace: Duration::from_millis(250),
         ..ServerConfig::default()
     };
     let cancel = CancellationToken::new();
     tokio::spawn(forward_termination_signals(cancel.clone()));
+    if let Some(shutdown_file) = cli.shutdown_file_path {
+        let file_cancel = cancel.clone();
+        tokio::spawn(async move {
+            while !shutdown_file.is_file() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            file_cancel.cancel();
+        });
+    }
     k10s_server::run_with_assets(
         listener,
         config,
@@ -153,6 +215,8 @@ mod tests {
             "tests/browser/token.txt",
             "--listen",
             "127.0.0.1:18080",
+            "--shutdown-file",
+            "tests/browser/shutdown",
         ]))
         .unwrap();
         assert!(parsed.fake_requested);
@@ -161,6 +225,10 @@ mod tests {
             Some(PathBuf::from("tests/browser/token.txt"))
         );
         assert_eq!(parsed.listen, Some("127.0.0.1:18080".parse().unwrap()));
+        assert_eq!(
+            parsed.shutdown_file_path,
+            Some(PathBuf::from("tests/browser/shutdown"))
+        );
     }
 
     #[test]
@@ -169,6 +237,7 @@ mod tests {
             args(&["--token-file"]),
             args(&["--listen"]),
             args(&["--listen", "not-an-address"]),
+            args(&["--shutdown-file"]),
             args(&["--unknown"]),
         ] {
             assert!(
