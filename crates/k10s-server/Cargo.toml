@@ -26,3 +26,7 @@ k10s-ui = { version = "0.1.0", path = "../k10s-ui" }
 tokio-tungstenite = "0.29.0"
 tracing-subscriber = "0.3.22"
 tower = { version = "0.5.3", features = ["util"] }
+
+[[bench]]
+name = "protocol_load"
+harness = false

@@ -47,5 +47,9 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring
 name = "fake_scale"
 harness = false
 
+[[bench]]
+name = "cache_load"
+harness = false
+
 [lints]
 workspace = true

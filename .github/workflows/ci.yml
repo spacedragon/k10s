@@ -45,9 +45,10 @@ jobs:
         # linked in a separate job to keep the CI gates independently visible.
         run: cargo test --locked -p k10s-protocol -p k10s-backend -p k10s-server --all-targets
 
-      - name: Fake capacity benchmark gate
-        # Ceiling-only mode (--test) of the Plan 2 capacity baseline.
-        run: cargo bench --locked -p k10s-backend --bench fake_scale -- --test
+      - name: Two-pass medium-large capacity gate
+        run: |
+          rustc tests/load/run.rs -o /tmp/k10s-load
+          /tmp/k10s-load --test
 
   ui-tests:
     name: UI unit tests
