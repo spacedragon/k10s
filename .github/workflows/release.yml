@@ -160,7 +160,9 @@ jobs:
             # administrative extraction and verifies the installed binary.
             $packageRoot = Resolve-Path 'target/release/packages'
             $packageVersion = (Select-String -Path 'Packager.toml' -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
-            $wixRoot = Join-Path $packageRoot '.cargo-packager\WixTools'
+            # cargo-packager keeps downloaded tools in the OS cache, while only
+            # WiX intermediates live under the package output directory.
+            $wixRoot = Join-Path $env:LOCALAPPDATA '.cargo-packager\WixTools'
             $intermediate = Join-Path $packageRoot '.cargo-packager\wix\x64'
             $light = Join-Path $wixRoot 'light.exe'
             Push-Location $intermediate
