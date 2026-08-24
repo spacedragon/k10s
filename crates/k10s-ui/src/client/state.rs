@@ -213,6 +213,16 @@ pub enum Query {
     /// any retry; IDs absent from the answer become [`OperationStatus::
     /// Unknown`].
     OperationStatus(Vec<OperationId>),
+    /// Switch the backend's current Kubernetes context. The switch is
+    /// prepare-then-commit: a success only ever reports a destination whose
+    /// read path validated.
+    ContextSwitch {
+        /// Destination context name.
+        to: String,
+    },
+    /// Project advisory RBAC capabilities of one context. Outcomes are
+    /// metadata hints, never client-side enforcement.
+    ContextPermissions(k10s_protocol::ContextPermissionsRequest),
 }
 
 /// Command behaviors: mutations that return an `OperationId`.
@@ -342,6 +352,10 @@ pub enum QueryResult {
     /// into the retained operation registry before this result is handed
     /// out.
     OperationStatus(Box<OperationStatusResponse>),
+    /// A committed context switch.
+    ContextSwitch(Box<k10s_protocol::ContextSwitchResponse>),
+    /// An advisory RBAC capability projection.
+    ContextPermissions(Box<k10s_protocol::ContextPermissionsResponse>),
 }
 
 /// The retained, applied list view of one resource watch subscription.
@@ -471,6 +485,8 @@ impl PendingAction {
             Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
             Self::Query(Query::StreamTicket { .. }) => k10s_protocol::REQUEST_STREAM_TICKET,
             Self::Query(Query::OperationStatus(_)) => "operation.status",
+            Self::Query(Query::ContextSwitch { .. }) => k10s_protocol::REQUEST_CONTEXT_SWITCH,
+            Self::Query(Query::ContextPermissions(_)) => k10s_protocol::REQUEST_CONTEXT_PERMISSIONS,
             Self::Command(Command::YamlApply { .. }) => "yaml.apply",
             Self::Command(Command::Scale { .. }) => "workload.scale",
             Self::Command(Command::Delete { .. }) => "workload.delete",
@@ -515,6 +531,10 @@ impl PendingAction {
             Self::Query(Query::OperationStatus(ids)) => encode(OperationStatusRequest {
                 operation_ids: ids.clone(),
             }),
+            Self::Query(Query::ContextSwitch { to }) => {
+                encode(k10s_protocol::ContextSwitchRequest { to: to.clone() })
+            }
+            Self::Query(Query::ContextPermissions(request)) => encode(request.clone()),
             Self::Command(Command::YamlApply { request, .. }) => encode(request),
             Self::Command(Command::Scale {
                 target, replicas, ..
@@ -1373,6 +1393,22 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     self.merge_operation_status(&response);
                     QueryResult::OperationStatus(Box::new(response))
+                }
+                PendingAction::Query(Query::ContextSwitch { .. }) => {
+                    let response: k10s_protocol::ContextSwitchResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    // Retained per-watch state of the previous context dies
+                    // with its subscriptions: callers reconcile a committed
+                    // switch by unsubscribing and resubscribing on the new
+                    // context, which clears those views.
+                    QueryResult::ContextSwitch(Box::new(response))
+                }
+                PendingAction::Query(Query::ContextPermissions(_)) => {
+                    let response: k10s_protocol::ContextPermissionsResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    QueryResult::ContextPermissions(Box::new(response))
                 }
             };
             if self.operation_refresh.as_ref() == Some(&id) {

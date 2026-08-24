@@ -209,6 +209,7 @@ pub(crate) struct SelectionHandle {
     pub(crate) sender: broadcast::Sender<BackendEvent>,
     pub(crate) phases: watch::Receiver<WatchPhase>,
     pub(crate) publisher: Arc<SelectionPublisher>,
+    pub(crate) cancel: CancellationToken,
     /// Last time any subscriber joined this selection (registration or warm
     /// join). Teardown may only proceed a full linger after this instant,
     /// which covers subscribers too short-lived for the monitor's samples to

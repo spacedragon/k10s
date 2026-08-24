@@ -1245,6 +1245,51 @@ impl KubernetesAccess for FakeKubernetes {
                         crate::operation::OperationStatusData { operations },
                     ))
                 }
+                Query::ContextSwitch { to } => {
+                    let mut state = self.lock();
+                    if !state.contexts.iter().any(|c| c.name == to) {
+                        return Err(BackendError::NotFound);
+                    }
+                    let previous = state
+                        .contexts
+                        .iter()
+                        .find(|c| c.is_current)
+                        .map(|c| c.name.clone());
+                    for context in &mut state.contexts {
+                        context.is_current = context.name == to;
+                    }
+                    Ok(QueryResult::ContextSwitch(crate::port::ContextSwitchData {
+                        current: to,
+                        previous,
+                    }))
+                }
+                Query::ContextPermissions { context, probes } => {
+                    let state = self.lock();
+                    if !state.contexts.iter().any(|c| c.name == context) {
+                        return Err(BackendError::NotFound);
+                    }
+                    // The same cross-adapter contract as the kube adapter:
+                    // probes are bounded, and duplicates collapse onto their
+                    // first occurrence. The fake world serves no authorization
+                    // truth: every surviving probe stays explicitly Unknown
+                    // instead of a fabricated allow/deny verdict.
+                    crate::port::validate_probe_count(&probes)?;
+                    Ok(QueryResult::ContextPermissions(
+                        crate::port::ContextPermissionsData {
+                            checks: crate::port::distinct_probes(probes)
+                                .into_iter()
+                                .map(|probe| crate::port::PermissionCheck {
+                                    verb: probe.verb,
+                                    resource: probe.resource,
+                                    group: probe.group,
+                                    namespace: probe.namespace,
+                                    outcome: crate::port::PermissionOutcome::Unknown,
+                                })
+                                .collect(),
+                            context,
+                        },
+                    ))
+                }
             }
         })
     }

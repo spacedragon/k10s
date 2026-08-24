@@ -630,9 +630,24 @@ fn context_switch_commits_after_all_blockers_resolve() {
         &mut state,
         WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window: dirty }),
     );
-    // The dedicated window closes and selections are cleared.
-    assert!(state.window(dedicated).is_none());
+    // The guard cleared and the request surfaced for backend validation.
+    assert!(
+        out.iter()
+            .any(|event| matches!(event, WorkspaceEvent::ContextSwitchRequested { .. }))
+    );
     assert_eq!(state.pending(), None);
+    assert_eq!(
+        state.context(),
+        "",
+        "nothing commits before the backend confirms"
+    );
+
+    // The confirmed commit closes dedicated windows and clears selections.
+    let out = events(
+        &mut state,
+        WorkspaceCommand::CommitContextSwitch { to: "prod".into() },
+    );
+    assert!(state.window(dedicated).is_none());
     assert_eq!(state.context(), "prod");
     assert!(
         out.iter()
@@ -674,6 +689,15 @@ fn context_switch_without_blockers_proceeds_directly() {
         !out.iter()
             .any(|event| matches!(event, WorkspaceEvent::Blocked(_)))
     );
+    // The request alone moves nothing: the backend validates first.
+    assert!(out.contains(&WorkspaceEvent::ContextSwitchRequested { to: "prod".into() }));
+    assert_eq!(state.context(), "");
+
+    // Only the backend-confirmed commit clears selections and pins.
+    events(
+        &mut state,
+        WorkspaceCommand::CommitContextSwitch { to: "prod".into() },
+    );
     assert!(state.window(dedicated).is_none());
     let resource = match &state.window(list).unwrap().content {
         WindowContent::Resource(resource) => resource,
@@ -691,6 +715,16 @@ fn context_switch_applies_and_reports_the_target_context() {
         &mut state,
         WorkspaceCommand::ContextSwitch { to: "prod".into() },
     );
+    assert_eq!(
+        out,
+        vec![WorkspaceEvent::ContextSwitchRequested { to: "prod".into() }]
+    );
+    assert_eq!(state.context(), "", "a request never commits locally");
+
+    let out = events(
+        &mut state,
+        WorkspaceCommand::CommitContextSwitch { to: "prod".into() },
+    );
     assert_eq!(state.context(), "prod");
     assert!(out.contains(&WorkspaceEvent::ContextSwitched { to: "prod".into() }));
 }
@@ -700,7 +734,7 @@ fn resolved_pending_context_switch_applies_the_target_context() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     events(
         &mut state,
-        WorkspaceCommand::ContextSwitch { to: "dev".into() },
+        WorkspaceCommand::CommitContextSwitch { to: "dev".into() },
     );
 
     let window = open_pods(&mut state);
@@ -719,8 +753,14 @@ fn resolved_pending_context_switch_applies_the_target_context() {
         &mut state,
         WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window }),
     );
+    // The guard cleared and the request surfaced; the commit is separate.
+    assert!(out.contains(&WorkspaceEvent::ContextSwitchRequested { to: "prod".into() }));
+    assert_eq!(state.context(), "dev");
+    events(
+        &mut state,
+        WorkspaceCommand::CommitContextSwitch { to: "prod".into() },
+    );
     assert_eq!(state.context(), "prod");
-    assert!(out.contains(&WorkspaceEvent::ContextSwitched { to: "prod".into() }));
 }
 
 #[test]
@@ -728,7 +768,7 @@ fn canceled_context_switch_preserves_the_previous_context() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     events(
         &mut state,
-        WorkspaceCommand::ContextSwitch { to: "dev".into() },
+        WorkspaceCommand::CommitContextSwitch { to: "dev".into() },
     );
 
     let window = open_pods(&mut state);

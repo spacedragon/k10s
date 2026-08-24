@@ -12,6 +12,7 @@
 //! reported as [`ErrorCode::UnsupportedMessage`] errors rather than panics.
 
 pub mod bootstrap;
+pub mod context;
 pub mod envelope;
 pub mod error;
 pub mod ids;
@@ -23,6 +24,11 @@ pub mod stream;
 pub mod subscription;
 
 pub use bootstrap::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
+pub use context::{
+    ContextPermissionsRequest, ContextPermissionsResponse, ContextSwitchRequest,
+    ContextSwitchResponse, PermissionCheck, PermissionOutcome, PermissionProbe,
+    REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH,
+};
 pub use envelope::{
     Ack, CancelRequest, ClientFrame, ClientKind, ClientPayload, Complete, Event, Hello,
     OperationStatus, OperationUpdate, Ping, Pong, ProtocolError, Request, Response, ResumeStatus,

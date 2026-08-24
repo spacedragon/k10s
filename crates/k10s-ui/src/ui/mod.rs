@@ -37,6 +37,26 @@ impl ConnectionState {
     }
 }
 
+/// Where a staged context-switch request came from. The distinction lets
+/// the application layer retry a recently failed destination on a fresh
+/// user action while passive reconciliation stays suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextRequestOrigin {
+    /// A fresh user action: a top-bar pick or a guard-resolved switch the
+    /// user originally asked for.
+    Explicit,
+    /// Passive reconciliation of a selection/workspace mismatch.
+    Reconcile,
+}
+
+impl ContextRequestOrigin {
+    /// Whether this request came from a fresh user action.
+    #[must_use]
+    pub fn is_explicit(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+}
+
 /// Persistent UI shell state. The existing [`WorkspaceState`] remains the
 /// only source of truth for window instances, geometry, focus, and content.
 #[derive(Debug)]
@@ -47,6 +67,11 @@ pub struct UiShell<I> {
     yaml: tools::YamlEditors,
     streams: tools::StreamStores,
     dialogs: dialogs::OperationDialogs,
+    /// A requested context switch awaiting backend validation; drained by
+    /// the application layer, which sends the request and commits locally
+    /// only after the response succeeds. The origin distinguishes a fresh
+    /// user action from passive mismatch reconciliation.
+    requested_context: Option<(String, ContextRequestOrigin)>,
 }
 
 impl<I> Default for UiShell<I>
@@ -71,6 +96,7 @@ where
             yaml: tools::YamlEditors::default(),
             streams: tools::StreamStores::default(),
             dialogs: dialogs::OperationDialogs::default(),
+            requested_context: None,
         }
     }
 
@@ -86,6 +112,14 @@ where
         command: WorkspaceCommand<I>,
     ) -> Vec<WorkspaceEvent<I>> {
         self.workspace.apply(command)
+    }
+
+    /// Drain the context a switch was requested toward, if any, together
+    /// with the request's origin. The caller validates it against the
+    /// backend and applies [`WorkspaceCommand::CommitContextSwitch`] only
+    /// after success.
+    pub fn take_requested_context(&mut self) -> Option<(String, ContextRequestOrigin)> {
+        self.requested_context.take()
     }
 
     /// Drain the protocol actions queued by YAML editors during rendering.
@@ -224,9 +258,17 @@ where
             .show(ui, connection == ConnectionState::Connected);
 
         let context_change = context_change
-            .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));
-        if let Some(context) = context_change {
-            queued.push(WorkspaceCommand::ContextSwitch { to: context });
+            .map(|context| (context, ContextRequestOrigin::Explicit))
+            .or_else(|| {
+                selected
+                    .filter(|context| self.workspace.context() != context.as_str())
+                    .map(|context| (context, ContextRequestOrigin::Reconcile))
+            });
+        if let Some((context, origin)) = context_change {
+            // The request only stages: the application layer validates it
+            // against the backend and commits the workspace transition after
+            // the response succeeds.
+            self.requested_context = Some((context, origin));
         }
 
         if !queued.is_empty() {
@@ -238,6 +280,14 @@ where
                         }
                         WorkspaceEvent::ContextSwitched { to } => {
                             *selected_context = Some(to);
+                        }
+                        // A guard-resolved switch request surfaces here when
+                        // a queued command finally executes; route it through
+                        // the same staged path as direct requests. Resolving
+                        // a guard is a fresh user decision, so the origin is
+                        // explicit.
+                        WorkspaceEvent::ContextSwitchRequested { to } => {
+                            self.requested_context = Some((to, ContextRequestOrigin::Explicit));
                         }
                         WorkspaceEvent::Closed(_)
                         | WorkspaceEvent::Blocked(_)

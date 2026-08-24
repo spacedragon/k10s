@@ -629,8 +629,22 @@ fn a_custom_kind_missing_after_a_context_switch_falls_back_to_the_picker() {
             })
     {
         assert!(
+            matches!(event, WorkspaceEvent::ContextSwitchRequested { .. }),
+            "an unguarded switch only requests; it never commits locally"
+        );
+    }
+    // The backend confirmed the destination: commit the local transition.
+    for event in
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CommitContextSwitch {
+                to: OTHER_CONTEXT.to_owned(),
+            })
+    {
+        assert!(
             matches!(event, WorkspaceEvent::ContextSwitched { .. }),
-            "an unguarded switch commits immediately"
+            "the committed switch reports its new context"
         );
     }
     harness.state_mut().selected_context = OTHER_CONTEXT.to_owned();

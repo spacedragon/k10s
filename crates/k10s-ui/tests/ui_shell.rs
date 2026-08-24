@@ -7,6 +7,7 @@ use k10s_ui::{
     ui::{ConnectionState, UiShell},
     workspace::{
         BlockResolution, LauncherItem, WindowId, WindowKind, WorkloadKind, WorkspaceCommand,
+        WorkspaceEvent,
     },
 };
 
@@ -38,6 +39,33 @@ fn render_shell(ui: &mut egui::Ui, fixture: &mut ShellFixture) {
         &fixture.contexts,
         &mut fixture.selected_context,
     );
+    // Simulate the application layer's side of the contract: a staged
+    // switch is validated against the backend and committed locally only
+    // after success. These shell-level fixtures treat every guard-clear
+    // destination as confirmed, and route guarded ones through the normal
+    // blocking path.
+    if let Some((to, _origin)) = fixture.shell.take_requested_context() {
+        if fixture
+            .shell
+            .workspace()
+            .context_switch_blockers()
+            .is_empty()
+        {
+            for event in fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to })
+            {
+                // The application layer records the committed selection.
+                if let WorkspaceEvent::ContextSwitched { to } = event {
+                    fixture.selected_context = Some(to);
+                }
+            }
+        } else {
+            fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::ContextSwitch { to });
+        }
+    }
 }
 
 fn shell_harness() -> Harness<'static, ShellFixture> {

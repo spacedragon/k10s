@@ -12,12 +12,14 @@ use k10s_backend::{
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
-    InfrastructureRequest, OperationAccepted, OperationId, OperationStatusRequest, OperationUpdate,
-    RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest,
-    ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId, ShutdownNotice,
-    SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
-    Welcome, YamlApplyRequest, YamlValidateRequest, decode_client_frame,
+    ClientKind, ClientPayload, ContextPermissionsRequest, ContextSwitchRequest, DeletePropagation,
+    DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, OperationAccepted,
+    OperationId, OperationStatusRequest, OperationUpdate, REQUEST_CONTEXT_PERMISSIONS,
+    REQUEST_CONTEXT_SWITCH, RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest,
+    ResourceTypesRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind,
+    SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+    SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
+    decode_client_frame,
 };
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -544,6 +546,20 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ContextSwitch(
+                                value,
+                            ))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ContextPermissions(
+                                value,
+                            ))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
                             Ok(RequestOutcome::Kernel(KernelQueryResult::Infrastructure(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
@@ -1031,6 +1047,28 @@ fn parse_request(
                 }))
             })
             .map_err(|error| format!("invalid resource.types payload: {error}")),
+        REQUEST_CONTEXT_SWITCH => serde_json::from_value::<ContextSwitchRequest>(payload.clone())
+            .map(|parsed| Some(ParsedRequest::Query(Query::ContextSwitch { to: parsed.to })))
+            .map_err(|error| format!("invalid {REQUEST_CONTEXT_SWITCH} payload: {error}")),
+        REQUEST_CONTEXT_PERMISSIONS => {
+            serde_json::from_value::<ContextPermissionsRequest>(payload.clone())
+                .map(|parsed| {
+                    Some(ParsedRequest::Query(Query::ContextPermissions {
+                        context: parsed.context,
+                        probes: parsed
+                            .probes
+                            .into_iter()
+                            .map(|probe| k10s_backend::PermissionProbe {
+                                verb: probe.verb,
+                                resource: probe.resource,
+                                group: probe.group,
+                                namespace: probe.namespace,
+                            })
+                            .collect(),
+                    }))
+                })
+                .map_err(|error| format!("invalid {REQUEST_CONTEXT_PERMISSIONS} payload: {error}"))
+        }
         "infrastructure.get" => serde_json::from_value::<InfrastructureRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::Infrastructure {

@@ -68,7 +68,16 @@ pub enum WorkspaceCommand<I> {
     DisconnectShell(WindowId),
     /// Global context switch. Preserves window kinds, geometry, filters,
     /// and splits; clears selections and closes pinned detail windows.
+    ///
+    /// Requesting a switch only validates local navigation guards; the
+    /// workspace state moves solely through [`WorkspaceCommand::
+    /// CommitContextSwitch`] once the backend confirmed the destination.
     ContextSwitch {
+        to: String,
+    },
+    /// Commit a backend-validated context switch locally. Never send this
+    /// before the switch request succeeded.
+    CommitContextSwitch {
         to: String,
     },
     ResolveBlock(BlockResolution),
@@ -87,9 +96,16 @@ pub enum WorkspaceEvent<I> {
     YamlOwnerInUse {
         owner: WindowId,
     },
+    /// The switch request cleared every local navigation guard and now waits
+    /// for the backend to validate the destination. The workspace state is
+    /// untouched until the application layer commits.
+    ContextSwitchRequested {
+        to: String,
+    },
     /// A context switch committed: the workspace now serves `to`. Emitted
-    /// for direct switches and for pending switches after every blocker
-    /// resolved; `Cancel` never emits it.
+    /// by [`WorkspaceCommand::CommitContextSwitch`]; a blocked and later
+    /// resolved switch emits it once its commit runs. `Cancel` never
+    /// emits it.
     ContextSwitched {
         to: String,
     },
@@ -282,6 +298,7 @@ where
                 Vec::new()
             }
             WorkspaceCommand::ContextSwitch { to } => self.context_switch(to),
+            WorkspaceCommand::CommitContextSwitch { to } => self.commit_context_switch(to),
             WorkspaceCommand::ResolveBlock(_) => Vec::new(), // handled in `apply`
         }
     }
@@ -535,9 +552,10 @@ where
 
     // -- context switch -------------------------------------------------------
 
-    fn context_switch(&mut self, to: String) -> Vec<WorkspaceEvent<I>> {
-        let blockers: Vec<Blocker> = self
-            .windows
+    /// Navigation guards a context switch would hit right now, without
+    /// moving any state.
+    pub fn context_switch_blockers(&self) -> Vec<Blocker> {
+        self.windows
             .iter()
             .flat_map(|window| match &window.content {
                 WindowContent::Resource(resource) => resource
@@ -547,11 +565,22 @@ where
                     .unwrap_or_default(),
                 WindowContent::Detail(detail) => detail.blockers(window.id),
             })
-            .collect();
+            .collect()
+    }
+
+    fn context_switch(&mut self, to: String) -> Vec<WorkspaceEvent<I>> {
+        let blockers: Vec<Blocker> = self.context_switch_blockers();
         if !blockers.is_empty() {
             return self.block(WorkspaceCommand::ContextSwitch { to }, blockers);
         }
 
+        // The switch is only requested here: the backend must validate the
+        // destination before any local state moves, so the application layer
+        // sends the request and commits through `CommitContextSwitch`.
+        vec![WorkspaceEvent::ContextSwitchRequested { to }]
+    }
+
+    fn commit_context_switch(&mut self, to: String) -> Vec<WorkspaceEvent<I>> {
         let mut events = Vec::new();
         let dedicated: Vec<WindowId> = self
             .windows
@@ -569,7 +598,7 @@ where
                 resource.detail = None;
             }
         }
-        // Every dirty buffer was resolved before the switch committed.
+        // Every dirty buffer was resolved before the commit could run.
         self.yaml_owner.clear();
         // The switch is observable: state records the target and the caller
         // learns it through the commit event.

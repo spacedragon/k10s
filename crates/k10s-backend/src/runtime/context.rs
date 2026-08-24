@@ -70,4 +70,47 @@ impl ContextRegistry {
     pub fn find(&self, name: &str) -> Option<&ContextInfo> {
         self.contexts.iter().find(|context| context.name == name)
     }
+
+    /// Prepare a candidate switch of the current context toward `to`.
+    ///
+    /// Validation-only phase of the same prepare-then-commit protocol the
+    /// registry itself follows: an unknown destination is rejected here
+    /// before anything observable moves, and callers still owe the commit a
+    /// successful destination read-path validation. The returned token is
+    /// inert until [`Self::commit_switch`] installs it.
+    pub fn prepare_switch(&self, to: &str) -> Result<PreparedSwitch, AdapterError> {
+        if self.find(to).is_none() {
+            return Err(AdapterError::InvalidContextSummaries {
+                detail: format!("unknown destination context '{to}'"),
+            });
+        }
+        Ok(PreparedSwitch {
+            to: to.to_owned(),
+            previous: self
+                .contexts
+                .iter()
+                .find(|context| context.is_current)
+                .map(|context| context.name.clone()),
+        })
+    }
+
+    /// Commit a prepared switch as one atomic step: exactly the destination
+    /// carries the current marker afterwards. Returns the previously current
+    /// context name, when one existed.
+    pub(crate) fn commit_switch(&mut self, prepared: PreparedSwitch) -> Option<String> {
+        let PreparedSwitch { to, previous } = prepared;
+        for context in &mut self.contexts {
+            context.is_current = context.name == to;
+        }
+        previous
+    }
+}
+
+/// A validated but not-yet-committed switch of the current context.
+#[derive(Debug, Clone)]
+pub struct PreparedSwitch {
+    /// Destination context name.
+    to: String,
+    /// Context holding the current marker before the commit, when any.
+    previous: Option<String>,
 }
