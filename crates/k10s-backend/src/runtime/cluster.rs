@@ -1,13 +1,19 @@
-//! Cluster-level registry of supervised demand-driven watch selections.
+//! Cluster-level registry of supervised demand-driven watch selections and
+//! resource-metrics poll collectors.
 //!
-//! One supervised task exists per `(context, GVK, scope)` selection: the
-//! first subscriber starts it, later subscribers of the same selection share
-//! its bounded broadcast channel (and immediately receive the current cache
-//! contents as a complete snapshot), and after the final unsubscribe the
-//! selection lingers briefly before its task exits. Rejoining inside the
+//! Watches: one supervised task exists per `(context, GVK, scope)` selection:
+//! the first subscriber starts it, later subscribers of the same selection
+//! share its bounded broadcast channel (and immediately receive the current
+//! cache contents as a complete snapshot), and after the final unsubscribe
+//! the selection lingers briefly before its task exits. Rejoining inside the
 //! linger window revives the warm selection without a relist.
+//!
+//! Metrics: one poll collector exists per context. It is started only by an
+//! active consumer (a metrics query), refreshed on every later consumer
+//! touch, and exits after the linger window passes with no consumer activity.
+//! No consumers means no polling.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -24,6 +30,331 @@ use crate::watch::WatchSelector;
 /// How long a selection stays warm after its last subscriber leaves before
 /// its supervised task exits.
 pub const WATCH_LINGER: Duration = Duration::from_secs(5);
+
+/// Poll cadence of a live metrics collector.
+pub const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a metrics collector stays up after its last consumer touch before
+/// its poll task exits. Deliberately longer than [`METRICS_POLL_INTERVAL`] so
+/// a steady consumer polling once per interval can never observe teardown.
+pub const METRICS_LINGER: Duration = Duration::from_secs(90);
+
+/// A collected Resource Metrics API cut for one context.
+///
+/// Everything here is what the cluster actually reported at poll time:
+/// absent samples stay absent ([`ResourceUsageSample`] fields are `Option`),
+/// coverage is computed against core Node membership, and pod capacity comes
+/// exclusively from core Node allocatable — never from metrics data, and
+/// never inferred from requests or capacity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsSnapshot {
+    /// Context the cut was collected from.
+    pub context: String,
+    /// Backend wall-clock time of poll completion, formatted as RFC 3339.
+    pub collected_at: String,
+    /// Newest source-reported sample timestamp (RFC 3339), when any sample
+    /// carried one.
+    pub source_updated_at: Option<String>,
+    /// Source-reported scrape window in seconds, when reported.
+    pub window_seconds: Option<u64>,
+    /// Explicit state of the Metrics API itself for this cut.
+    pub state: MetricsApiState,
+    /// Per-node usage keyed by node name; only reporting nodes appear.
+    pub node_usage: BTreeMap<String, ResourceUsageSample>,
+    /// Per-pod usage keyed by `namespace/name`; only reporting pods appear.
+    pub pod_usage: BTreeMap<String, ResourceUsageSample>,
+    /// Core Node names observed at collection time — the honest membership
+    /// against which node coverage is computed by identity, not count.
+    pub node_names: Vec<String>,
+    /// Summed allocatable pod capacity across core Nodes, when the core list
+    /// was readable.
+    pub pod_capacity_total: Option<u64>,
+}
+
+/// Whether the Metrics API answered, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsApiState {
+    /// The API served list cuts.
+    Ready,
+    /// The API is not installed on this cluster.
+    Absent,
+    /// Kubernetes RBAC denied the read.
+    Forbidden,
+    /// The API could not be reached this cycle.
+    Unreachable,
+}
+
+/// One usage sample as reported; absent fields stay absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceUsageSample {
+    /// CPU usage in millicores, absent when not reported.
+    pub cpu_millicores: Option<u64>,
+    /// Working-set memory in bytes, absent when not reported.
+    pub memory_bytes: Option<u64>,
+    /// Source-reported sample timestamp (RFC 3339), when the item carried
+    /// one; gates this sample's own freshness independently of its cut.
+    pub timestamp: Option<String>,
+    /// Source-reported scrape window in seconds, when reported.
+    pub window_seconds: Option<u64>,
+}
+
+/// Honest node coverage of one cut relative to core Node membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsCoverage {
+    /// Every known node reported.
+    Full,
+    /// Some nodes reported; the rest stay absent rather than zeroed.
+    Partial,
+    /// Nothing reported (or the API did not answer), so no usage exists.
+    Unavailable,
+}
+
+impl MetricsSnapshot {
+    /// Coverage of node usage against the core Node membership observed at
+    /// collection time. Every known node must have its own metrics entry:
+    /// matching counts mean nothing when membership shifts between the core
+    /// list and the metrics cut. Without a readable core denominator the cut
+    /// stays partial instead of claiming completeness.
+    #[must_use]
+    pub fn node_coverage(&self) -> MetricsCoverage {
+        if self.node_usage.is_empty() {
+            return MetricsCoverage::Unavailable;
+        }
+        if self.state != MetricsApiState::Ready
+            || self.node_names.is_empty()
+            || !self
+                .node_names
+                .iter()
+                .all(|name| self.node_usage.contains_key(name))
+        {
+            return MetricsCoverage::Partial;
+        }
+        MetricsCoverage::Full
+    }
+}
+
+/// One poll-cycle producer for [`ClusterMetrics`].
+///
+/// Implementations perform exactly one collection pass per call and always
+/// return a cut: failures are captured inside the snapshot's state instead of
+/// erroring, so consumers can distinguish absent from forbidden from stale.
+pub trait MetricsPollSource: Send + Sync + std::fmt::Debug {
+    /// Run one collection cycle.
+    fn poll(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MetricsSnapshot> + Send + '_>>;
+}
+
+/// Registry owning every live metrics poll collector of one adapter.
+///
+/// Clones share one registry. Collectors are keyed by context and started
+/// only through [`ClusterMetrics::collect_for_consumer`] — an active consumer
+/// request. Each collector's task re-polls on a fixed cadence, refreshes its
+/// cached cut atomically, and exits once no consumer has touched it for the
+/// linger window, so quiet contexts never generate cluster traffic.
+#[derive(Debug, Clone)]
+pub struct ClusterMetrics {
+    shared: Arc<MetricsShared>,
+}
+
+struct MetricsShared {
+    linger: Duration,
+    poll_interval: Duration,
+    collectors: StdMutex<HashMap<String, CollectorEntry>>,
+}
+
+impl std::fmt::Debug for MetricsShared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsShared")
+            .field("linger", &self.linger)
+            .field("poll_interval", &self.poll_interval)
+            .field(
+                "live_collectors",
+                &self
+                    .collectors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len(),
+            )
+            .finish()
+    }
+}
+
+/// One live collector registration.
+struct CollectorEntry {
+    id: u64,
+    snapshot: watch::Receiver<Option<Arc<MetricsSnapshot>>>,
+    /// Last consumer touch; drives the idle-linger exit of the poll task.
+    last_touch: Arc<StdMutex<std::time::Instant>>,
+}
+
+impl Default for ClusterMetrics {
+    fn default() -> Self {
+        Self::new(METRICS_LINGER, METRICS_POLL_INTERVAL)
+    }
+}
+
+impl ClusterMetrics {
+    /// Create an empty registry whose collectors exit after `linger` without
+    /// a consumer touch and re-poll every `poll_interval` while alive.
+    #[must_use]
+    pub fn new(linger: Duration, poll_interval: Duration) -> Self {
+        Self {
+            shared: Arc::new(MetricsShared {
+                linger,
+                poll_interval,
+                collectors: StdMutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Serve one consumer request for `context`: starts its collector on
+    /// first use (awaiting the first completed cycle), touches the linger
+    /// deadline otherwise, and returns the latest cached cut.
+    ///
+    /// `source_factory` runs only when a new collector must be spawned.
+    /// `None` means the collector exited between registration and the first
+    /// completed cycle; callers treat that as an absent cut.
+    pub async fn collect_for_consumer(
+        &self,
+        context: &str,
+        source_factory: impl FnOnce() -> Arc<dyn MetricsPollSource>,
+    ) -> Option<Arc<MetricsSnapshot>> {
+        let receiver = {
+            let mut collectors = self
+                .shared
+                .collectors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = collectors.get_mut(context) {
+                // Warm join: refresh the linger deadline and serve the cache.
+                *entry
+                    .last_touch
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
+                entry.snapshot.clone()
+            } else {
+                static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (sender, receiver) = watch::channel(None);
+                let entry = CollectorEntry {
+                    id,
+                    snapshot: receiver.clone(),
+                    last_touch: Arc::new(StdMutex::new(std::time::Instant::now())),
+                };
+                let last_touch = Arc::clone(&entry.last_touch);
+                collectors.insert(context.to_owned(), entry);
+                drop(collectors);
+                self.spawn_poll_task(context.to_owned(), id, sender, source_factory(), last_touch);
+                receiver
+            }
+        };
+        wait_for_first_cut(receiver).await
+    }
+
+    /// Latest cached cut for one context, without touching any linger
+    /// deadline. Observability seam for diagnostics and tests.
+    #[must_use]
+    pub fn snapshot_of(&self, context: &str) -> Option<Arc<MetricsSnapshot>> {
+        let collectors = self
+            .shared
+            .collectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        collectors
+            .get(context)
+            .and_then(|entry| entry.snapshot.borrow().as_ref().cloned())
+    }
+
+    /// Number of live collectors; observability for linger behavior.
+    #[must_use]
+    pub fn live_collectors(&self) -> usize {
+        self.shared
+            .collectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Spawn one supervised poll task: collect immediately, publish the cut
+    /// atomically onto the watch channel, then keep the cadence until no
+    /// consumer has touched the collector for the linger window. Exit removes
+    /// the registration only if it is still this task's own generation.
+    fn spawn_poll_task(
+        &self,
+        context: String,
+        id: u64,
+        sender: watch::Sender<Option<Arc<MetricsSnapshot>>>,
+        source: Arc<dyn MetricsPollSource>,
+        last_touch: Arc<StdMutex<std::time::Instant>>,
+    ) {
+        let shared = Arc::clone(&self.shared);
+        tokio::spawn(async move {
+            loop {
+                let snapshot = source.poll().await;
+                if sender.send(Some(Arc::new(snapshot))).is_err() {
+                    break; // registry gone: nothing left to serve
+                }
+                // Hold the cadence, but exit early the moment the collector
+                // has been idle past the linger window — quiet contexts must
+                // not generate cluster traffic between checks either.
+                let cadence_end = std::time::Instant::now() + shared.poll_interval;
+                let mut idle = false;
+                while std::time::Instant::now() < cadence_end {
+                    if last_touch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .elapsed()
+                        >= shared.linger
+                    {
+                        idle = true;
+                        break;
+                    }
+                    tokio::time::sleep(LINGER_POLL).await;
+                }
+                if idle
+                    || last_touch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .elapsed()
+                        >= shared.linger
+                {
+                    break;
+                }
+            }
+            remove_if_current(&shared, &context, id);
+        });
+    }
+}
+
+/// Await the first completed cut of a freshly spawned collector.
+async fn wait_for_first_cut(
+    mut receiver: watch::Receiver<Option<Arc<MetricsSnapshot>>>,
+) -> Option<Arc<MetricsSnapshot>> {
+    loop {
+        if let Some(snapshot) = receiver.borrow_and_update().as_ref().cloned() {
+            return Some(snapshot);
+        }
+        match receiver.changed().await {
+            Ok(()) => continue,
+            // A lagging consumer only missed intermediate cuts; keep waiting
+            // for the next completed cycle rather than giving up.
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Remove a collector registration only if it is still this generation's;
+/// a concurrent restart must never be torn down by a dying predecessor.
+fn remove_if_current(shared: &MetricsShared, context: &str, id: u64) {
+    let mut collectors = shared
+        .collectors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if collectors.get(context).is_some_and(|entry| entry.id == id) {
+        collectors.remove(context);
+    }
+}
 
 /// Poll cadence for subscriber-count checks while a selection is live; small
 /// enough that teardown feels prompt, rare enough to cost nothing.

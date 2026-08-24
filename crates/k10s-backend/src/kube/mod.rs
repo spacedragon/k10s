@@ -9,6 +9,7 @@
 mod config;
 mod discovery;
 mod events;
+mod metrics;
 mod normalize;
 mod owners;
 mod read;
@@ -29,7 +30,7 @@ use crate::port::{
     QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
-use crate::runtime::cluster::ClusterWatches;
+use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
 use crate::runtime::supervisor::WatchSource;
 use crate::watch::WatchSelector;
 
@@ -73,6 +74,10 @@ pub struct KubeAdapter {
     /// Supervised demand-driven watch runtime: one task per selection with
     /// atomic summary caches and lingered teardown.
     watches: ClusterWatches,
+    /// Demand-driven resource-metrics poll registry: one collector per
+    /// context, started only by active consumer requests and exited after a
+    /// linger window without them.
+    metrics: ClusterMetrics,
     /// Test-only scripted watch sources overriding the real kube-rs path.
     #[cfg(feature = "testkit")]
     watch_scripts: ScriptedWatches,
@@ -111,6 +116,7 @@ impl KubeAdapter {
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
+            metrics: ClusterMetrics::default(),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -156,6 +162,7 @@ impl KubeAdapter {
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
+            metrics: ClusterMetrics::default(),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -173,6 +180,33 @@ impl KubeAdapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(script);
         self
+    }
+
+    /// Override the metrics collector's linger and poll cadence.
+    ///
+    /// Test seam so lifecycle tests run at assertable timescales instead of
+    /// the production defaults (`METRICS_LINGER`, `METRICS_POLL_INTERVAL`).
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn with_metrics_timing(
+        mut self,
+        linger: std::time::Duration,
+        poll_interval: std::time::Duration,
+    ) -> Self {
+        self.metrics = ClusterMetrics::new(linger, poll_interval);
+        self
+    }
+
+    /// Shared handle to this adapter's metrics registry.
+    ///
+    /// Test/observability seam: clones observe the same collector state the
+    /// adapter serves, so diagnostics and tests can inspect cached cuts and
+    /// collector liveness (`snapshot_of` never touches a linger deadline)
+    /// while a kernel owns the adapter itself.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn metrics_registry(&self) -> ClusterMetrics {
+        self.metrics.clone()
     }
 }
 
@@ -200,7 +234,7 @@ impl KubernetesAccess for KubeAdapter {
                     namespace,
                 } => self.resource_list(context, gvk, namespace).await,
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
-                Query::ResourceMetrics { .. } => Err(BackendError::unsupported("resource.metrics")),
+                Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
                 Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
                 Query::OperationStatus { .. } => Err(BackendError::unsupported("operation.status")),
@@ -433,6 +467,42 @@ impl KubeAdapter {
         record.events = events::events_for(&client, &reference, descriptor.namespaced).await?;
         record.manifest = read.manifest;
         Ok(QueryResult::ResourceDetail(record))
+    }
+
+    /// Serve one availability-gated pod metrics sample.
+    ///
+    /// The exact identity is verified first (a reused name with another UID
+    /// is the same typed not-found as a vanished pod), then the context's
+    /// metrics collector is engaged as an active consumer — starting it on
+    /// first use, touching its linger deadline otherwise. The answer maps the
+    /// latest collected cut honestly onto the port type: absent samples stay
+    /// absent, stale cuts withhold their values while keeping their age, and
+    /// nothing is ever inferred from requests or capacity.
+    async fn resource_metrics(
+        &self,
+        reference: crate::port::ResourceRef,
+    ) -> Result<QueryResult, BackendError> {
+        if self.registry.find(&reference.context).is_none() {
+            return Err(BackendError::NotFound);
+        }
+        // Metrics identities exist only for pods.
+        if reference.gvk != Gvk::core("v1", "Pod") {
+            return Err(BackendError::NotFound);
+        }
+        let client = self.detail_client(&reference).await?;
+        metrics::verify_pod_identity(&client, &reference).await?;
+
+        let context = reference.context.clone();
+        let snapshot = self
+            .metrics
+            .collect_for_consumer(&context, || {
+                Arc::new(metrics::MetricsSource::new(client.clone(), context.clone()))
+            })
+            .await;
+        Ok(QueryResult::ResourceMetrics(metrics::sample_for_reference(
+            snapshot.as_deref(),
+            &reference,
+        )))
     }
 
     /// Serve one controller-UID relation traversal.
