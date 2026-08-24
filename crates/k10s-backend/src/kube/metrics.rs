@@ -127,7 +127,7 @@ async fn collect_once(client: &kube::Client, context: &str) -> MetricsSnapshot {
         state,
         node_usage,
         pod_usage,
-        nodes_known: core.node_names.len(),
+        node_names: core.node_names,
         pod_capacity_total: core.pod_capacity_total,
     }
 }
@@ -211,6 +211,17 @@ async fn core_nodes(client: &kube::Client) -> CoreNodes {
     }
 }
 
+/// Source-reported `timestamp`/`window` pair of one raw metrics item.
+fn item_time_meta(value: &serde_json::Value) -> (Option<String>, Option<u64>) {
+    (
+        value.get("timestamp").and_then(as_text),
+        value
+            .get("window")
+            .and_then(as_text)
+            .and_then(parse_window_seconds),
+    )
+}
+
 /// Absorb `timestamp`/`window` metadata from one raw metrics item.
 fn absorb_time_meta(item: &DynamicObject, newest: &mut Option<String>, window: &mut Option<u64>) {
     let Ok(value) = serde_json::to_value(item) else {
@@ -234,47 +245,71 @@ fn absorb_time_meta(item: &DynamicObject, newest: &mut Option<String>, window: &
     }
 }
 
-/// Normalize one raw NodeMetrics item into `(node name, usage)`.
+/// Normalize one raw NodeMetrics item into `(node name, usage)` carrying the
+/// item's own timestamp/window so freshness gates per sample.
 fn normalize_node_metrics(item: &DynamicObject) -> Option<(String, ResourceUsageSample)> {
     let name = item.metadata.name.clone()?;
     let value = serde_json::to_value(item).ok()?;
     let usage = value.get("usage")?;
+    let (timestamp, window_seconds) = item_time_meta(&value);
     Some((
         name,
         ResourceUsageSample {
             cpu_millicores: quantity_millicores(usage.get("cpu").and_then(as_text)),
             memory_bytes: quantity_bytes(usage.get("memory").and_then(as_text)),
+            timestamp,
+            window_seconds,
         },
     ))
 }
 
 /// Normalize one raw PodMetrics item into `((namespace, name), usage)` where
-/// the usage sums every container that reported each field independently.
+/// each field sums every container and fails closed to `None` unless all of
+/// them reported that field, alongside the item's own timestamp/window so
+/// freshness gates per sample.
 fn normalize_pod_metrics(item: &DynamicObject) -> Option<((String, String), ResourceUsageSample)> {
     let namespace = item.metadata.namespace.clone()?;
     let name = item.metadata.name.clone()?;
     let value = serde_json::to_value(item).ok()?;
     let containers = value.get("containers")?.as_array()?;
-    let mut sample = ResourceUsageSample::default();
-    for container in containers {
-        let Some(usage) = container.get("usage") else {
-            continue;
-        };
-        let cpu = quantity_millicores(usage.get("cpu").and_then(as_text));
-        let memory = quantity_bytes(usage.get("memory").and_then(as_text));
-        sample.cpu_millicores = add_optional(sample.cpu_millicores, cpu);
-        sample.memory_bytes = add_optional(sample.memory_bytes, memory);
-    }
-    Some(((namespace, name), sample))
+    let (timestamp, window_seconds) = item_time_meta(&value);
+    Some((
+        (namespace, name),
+        ResourceUsageSample {
+            cpu_millicores: sum_complete(containers.iter().map(|container| {
+                quantity_millicores(
+                    container
+                        .get("usage")
+                        .and_then(|usage| usage.get("cpu"))
+                        .and_then(as_text),
+                )
+            })),
+            memory_bytes: sum_complete(containers.iter().map(|container| {
+                quantity_bytes(
+                    container
+                        .get("usage")
+                        .and_then(|usage| usage.get("memory"))
+                        .and_then(as_text),
+                )
+            })),
+            timestamp,
+            window_seconds,
+        },
+    ))
 }
 
-/// Sum two independently-absent values; absence never fabricates zero.
-fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => left.checked_add(right),
-        (left, None) => left,
-        (None, right) => right,
+/// Sum one usage field across every container, failing closed to `None`
+/// unless at least one value arrived and no container left the field out —
+/// a skipped contribution is a fabricated zero, never an honest sum.
+fn sum_complete(contributions: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    let mut total = Some(0u64);
+    let mut reported = false;
+    for contribution in contributions {
+        let value = contribution?;
+        total = total.and_then(|running| running.checked_add(value));
+        reported = true;
     }
+    if reported { total } else { None }
 }
 
 fn as_text(value: &serde_json::Value) -> Option<String> {
@@ -283,9 +318,12 @@ fn as_text(value: &serde_json::Value) -> Option<String> {
 
 /// Map the latest cached cut onto one exact pod reference's port-type sample.
 ///
-/// Missing pods, non-ready APIs, unmetered pods, and stale cuts all produce
-/// explicitly absent fields — never inferred numbers. Stale cuts keep their
-/// source timestamp so consumers can display age without serving dead values.
+/// Missing pods, non-ready APIs, unmetered pods, and stale samples all
+/// produce explicitly absent fields — never inferred numbers. Freshness is
+/// judged by the requested pod's own source timestamp, so a fresh sibling
+/// item can never vouch for this pod's older or unparseable cut. Stale
+/// samples keep their own source timestamp so consumers can display age
+/// without serving dead values.
 pub(crate) fn sample_for_reference(
     snapshot: Option<&MetricsSnapshot>,
     reference: &ResourceRef,
@@ -308,23 +346,21 @@ pub(crate) fn sample_for_reference(
     else {
         return default();
     };
-    let stale = snapshot
-        .source_updated_at
-        .as_deref()
-        .and_then(parse_rfc3339_unix)
-        .map(|sampled| now_unix_secs() >= sampled.saturating_add(METRICS_FRESHNESS.as_secs()))
-        .unwrap_or(true);
-    if stale {
+    // An unparseable per-sample timestamp has nothing honest to display.
+    let Some(sampled) = usage.timestamp.as_deref().and_then(parse_rfc3339_unix) else {
+        return default();
+    };
+    if now_unix_secs() >= sampled.saturating_add(METRICS_FRESHNESS.as_secs()) {
         return MetricsSample {
             cpu_millicores: None,
             memory_bytes: None,
-            collected_at: snapshot.source_updated_at.clone(),
+            collected_at: usage.timestamp.clone(),
         };
     }
     MetricsSample {
         cpu_millicores: usage.cpu_millicores,
         memory_bytes: usage.memory_bytes,
-        collected_at: snapshot.source_updated_at.clone(),
+        collected_at: usage.timestamp.clone(),
     }
 }
 
@@ -538,10 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn absent_values_never_sum_to_zero() {
-        assert_eq!(add_optional(None, None), None);
-        assert_eq!(add_optional(Some(2), None), Some(2));
-        assert_eq!(add_optional(None, Some(3)), Some(3));
-        assert_eq!(add_optional(Some(2), Some(3)), Some(5));
+    fn incomplete_fields_fail_closed_when_summed() {
+        assert_eq!(sum_complete([]), None, "nothing reported stays absent");
+        assert_eq!(sum_complete([Some(2)]), Some(2));
+        assert_eq!(sum_complete([Some(2), Some(3)]), Some(5));
+        assert_eq!(sum_complete([Some(2), None]), None);
+        assert_eq!(sum_complete([None, Some(3)]), None);
     }
 }

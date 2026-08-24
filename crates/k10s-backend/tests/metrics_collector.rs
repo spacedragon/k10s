@@ -368,7 +368,7 @@ async fn partial_node_coverage_is_reported_honestly() {
         .metrics
         .snapshot_of(CONTEXT)
         .expect("the collector cached its cut");
-    assert_eq!(snapshot.nodes_known, 2);
+    assert_eq!(snapshot.node_names.len(), 2);
     assert_eq!(snapshot.node_usage.len(), 1);
     assert_eq!(snapshot.node_coverage(), MetricsCoverage::Partial);
     assert!(
@@ -376,6 +376,35 @@ async fn partial_node_coverage_is_reported_honestly() {
         "a node without metrics stays absent — never zero-filled"
     );
     assert_eq!(snapshot.pod_capacity_total, Some(330));
+}
+
+#[tokio::test]
+async fn coverage_requires_every_core_node_not_equal_counts() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    // node-c was just removed from the cluster yet still reports metrics;
+    // equal counts ({a,b} core vs {a,c} cut) must not read as full coverage.
+    record_node_metrics(&server, &["node-a", "node-c"], &timestamp);
+    record_pod_metrics(&server, Vec::new());
+    record_pod(&server, "web");
+    let world = world(&server);
+    let kernel = &world.kernel;
+
+    let _ = metrics_wire(kernel, pod_ref("web", "uid-web")).await;
+
+    let snapshot = world
+        .metrics
+        .snapshot_of(CONTEXT)
+        .expect("the collector cached its cut");
+    assert_eq!(snapshot.node_usage.len(), 2);
+    assert!(snapshot.node_names.contains(&"node-b".to_owned()));
+    assert!(snapshot.node_usage.contains_key("node-c"));
+    assert_eq!(
+        snapshot.node_coverage(),
+        MetricsCoverage::Partial,
+        "node-b never reported, so coverage stays partial despite equal counts"
+    );
 }
 
 #[tokio::test]
@@ -425,6 +454,92 @@ async fn stale_source_timestamps_are_never_served_as_values() {
 }
 
 #[tokio::test]
+async fn per_pod_freshness_gates_each_sample_by_its_own_timestamp() {
+    let server = RecordedApiServer::standard();
+    const ANCIENT: &str = "2020-01-01T00:00:00Z";
+    let fresh = recent_rfc3339(10);
+    record_core_nodes(&server);
+    // The node cut and pod "live" are fresh; "web" predates the freshness
+    // window and "garbled" carries no parseable timestamp at all.
+    record_node_metrics(&server, &["node-a", "node-b"], &fresh);
+    record_pod_metrics(
+        &server,
+        vec![
+            pod_metric_item(
+                "web",
+                ANCIENT,
+                json!([{"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}]),
+            ),
+            pod_metric_item(
+                "live",
+                &fresh,
+                json!([{"name": "app", "usage": {"cpu": "200m", "memory": "2Mi"}}]),
+            ),
+            // A valid object timestamp whose sample `timestamp` is garbage.
+            {
+                let mut item = pod_metric_item(
+                    "garbled",
+                    &fresh,
+                    json!([{"name": "app", "usage": {"cpu": "300m", "memory": "3Mi"}}]),
+                );
+                item["timestamp"] = json!("not-a-time");
+                item
+            },
+        ],
+    );
+    record_pod(&server, "web");
+    record_pod(&server, "live");
+    record_pod(&server, "garbled");
+    let world = world(&server);
+    let kernel = &world.kernel;
+
+    let web = metrics_wire(kernel, pod_ref("web", "uid-web")).await;
+    let live = metrics_wire(kernel, pod_ref("live", "uid-live")).await;
+    let garbled = metrics_wire(kernel, pod_ref("garbled", "uid-garbled")).await;
+
+    // A fresh sibling item must never vouch for this pod's ancient sample.
+    let web_metrics = web["metrics"].as_object().expect("metrics is an object");
+    assert_eq!(
+        web_metrics
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["availability", "collectedAt"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "the stale pod keeps only its own age, never fresh-vouched numbers: {web_metrics:?}"
+    );
+    assert_eq!(web["metrics"]["availability"], "unavailable");
+    assert_eq!(web["metrics"]["collectedAt"], ANCIENT);
+
+    // An unparseable per-pod timestamp fails closed to plain absence.
+    assert_eq!(
+        garbled["metrics"]
+            .as_object()
+            .expect("metrics is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["availability"],
+        "a pod without a parseable timestamp has nothing honest to show: {garbled:?}"
+    );
+    assert_eq!(garbled["metrics"]["availability"], "unavailable");
+
+    // The genuinely fresh pod next door is still served normally.
+    assert_eq!(live["metrics"]["availability"], "available");
+    assert_eq!(live["metrics"]["cpuMillicores"], 200);
+    assert_eq!(live["metrics"]["collectedAt"], json!(fresh));
+
+    // Shared cut metadata stayed fresh — per-sample gating did the work.
+    let snapshot = world
+        .metrics
+        .snapshot_of(CONTEXT)
+        .expect("the collector cached its cut");
+    assert_eq!(snapshot.source_updated_at.as_deref(), Some(fresh.as_str()));
+}
+
+#[tokio::test]
 async fn partially_reported_pods_map_to_partial_wire_availability() {
     let server = RecordedApiServer::standard();
     let timestamp = recent_rfc3339(10);
@@ -454,6 +569,52 @@ async fn partially_reported_pods_map_to_partial_wire_availability() {
         !metrics.contains_key("memoryBytes"),
         "missing memory stays absent instead of collapsing to zero: {metrics:?}"
     );
+}
+
+#[tokio::test]
+async fn pod_aggregates_fail_closed_when_a_container_omits_a_field() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    // "sidecar" reports memory but omits CPU entirely; skipping its missing
+    // CPU contribution would fabricate a 100m total.
+    record_pod_metrics(
+        &server,
+        vec![pod_metric_item(
+            "mixed",
+            &timestamp,
+            json!([
+                {"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}},
+                {"name": "sidecar", "usage": {"memory": "2Mi"}}
+            ]),
+        )],
+    );
+    record_pod(&server, "mixed");
+    let world = world(&server);
+    let kernel = &world.kernel;
+
+    let payload = metrics_wire(kernel, pod_ref("mixed", "uid-mixed")).await;
+
+    let metrics = payload["metrics"]
+        .as_object()
+        .expect("metrics is an object");
+    assert_eq!(
+        metrics
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["availability", "collectedAt", "memoryBytes"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "an incomplete CPU total stays absent even though memory completed: {metrics:?}"
+    );
+    assert_eq!(
+        metrics["availability"], "partial",
+        "an incomplete field must never read as fully available"
+    );
+    assert_eq!(metrics["memoryBytes"], 3_145_728);
 }
 
 #[tokio::test]
@@ -643,7 +804,7 @@ impl MetricsPollSource for ScriptedSource {
                 state: MetricsApiState::Ready,
                 node_usage: Default::default(),
                 pod_usage: Default::default(),
-                nodes_known: 0,
+                node_names: Vec::new(),
                 pod_capacity_total: None,
             }
         })

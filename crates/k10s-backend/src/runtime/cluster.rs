@@ -63,9 +63,9 @@ pub struct MetricsSnapshot {
     pub node_usage: BTreeMap<String, ResourceUsageSample>,
     /// Per-pod usage keyed by `namespace/name`; only reporting pods appear.
     pub pod_usage: BTreeMap<String, ResourceUsageSample>,
-    /// Number of core Nodes observed at collection time — the honest
-    /// denominator for node coverage.
-    pub nodes_known: usize,
+    /// Core Node names observed at collection time — the honest membership
+    /// against which node coverage is computed by identity, not count.
+    pub node_names: Vec<String>,
     /// Summed allocatable pod capacity across core Nodes, when the core list
     /// was readable.
     pub pod_capacity_total: Option<u64>,
@@ -85,12 +85,17 @@ pub enum MetricsApiState {
 }
 
 /// One usage sample as reported; absent fields stay absent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceUsageSample {
     /// CPU usage in millicores, absent when not reported.
     pub cpu_millicores: Option<u64>,
     /// Working-set memory in bytes, absent when not reported.
     pub memory_bytes: Option<u64>,
+    /// Source-reported sample timestamp (RFC 3339), when the item carried
+    /// one; gates this sample's own freshness independently of its cut.
+    pub timestamp: Option<String>,
+    /// Source-reported scrape window in seconds, when reported.
+    pub window_seconds: Option<u64>,
 }
 
 /// Honest node coverage of one cut relative to core Node membership.
@@ -106,16 +111,21 @@ pub enum MetricsCoverage {
 
 impl MetricsSnapshot {
     /// Coverage of node usage against the core Node membership observed at
-    /// collection time. Without a readable core denominator the cut stays
-    /// partial instead of claiming completeness.
+    /// collection time. Every known node must have its own metrics entry:
+    /// matching counts mean nothing when membership shifts between the core
+    /// list and the metrics cut. Without a readable core denominator the cut
+    /// stays partial instead of claiming completeness.
     #[must_use]
     pub fn node_coverage(&self) -> MetricsCoverage {
         if self.node_usage.is_empty() {
             return MetricsCoverage::Unavailable;
         }
         if self.state != MetricsApiState::Ready
-            || self.nodes_known == 0
-            || self.node_usage.len() < self.nodes_known
+            || self.node_names.is_empty()
+            || !self
+                .node_names
+                .iter()
+                .all(|name| self.node_usage.contains_key(name))
         {
             return MetricsCoverage::Partial;
         }
