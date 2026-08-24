@@ -86,6 +86,35 @@ async fn subscription_publishes_every_state_and_late_joiners_get_live_state() {
     assert_eq!(failed.state, OperationState::Failed);
 }
 
+#[tokio::test]
+async fn late_join_replays_every_live_operation_above_event_headroom() {
+    const LIVE: usize = 257;
+    let engine = OperationEngine::with_limits("server-a", LIVE, LIVE, Duration::from_secs(60));
+    let mut expected = Vec::new();
+    for index in 0..LIVE {
+        expected.push(accepted(
+            engine
+                .accept(&format!("key-{index}"), &format!("operation-{index}"))
+                .unwrap(),
+        ));
+    }
+    expected.sort();
+
+    let mut receiver = engine.subscribe();
+    let mut observed = Vec::new();
+    for _ in 0..LIVE {
+        let BackendEvent::Operation(event) = receiver.recv().await.unwrap() else {
+            panic!("operation")
+        };
+        observed.push(event.id);
+    }
+    assert_eq!(observed, expected);
+    assert!(
+        receiver.try_recv().is_err(),
+        "the initial cut has no duplicates"
+    );
+}
+
 #[test]
 fn bounded_ttl_eviction_and_restart_detection_fail_closed() {
     let engine = OperationEngine::with_limits("server-a", 1, 1, Duration::from_millis(5));

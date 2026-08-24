@@ -192,7 +192,15 @@ impl OperationEngine {
     pub fn subscribe(&self) -> broadcast::Receiver<BackendEvent> {
         let mut inner = self.lock();
         inner.expire(Instant::now());
-        let (sender, receiver) = broadcast::channel(EVENT_CAPACITY);
+        // The receiver cannot poll until this method returns, so its channel
+        // must hold the complete retained cut plus bounded headroom for live
+        // transitions immediately following registration. Otherwise a valid
+        // store with 129+ live entries would lag during its own initial replay.
+        let channel_capacity = inner
+            .operation_capacity
+            .saturating_add(EVENT_CAPACITY)
+            .max(1);
+        let (sender, receiver) = broadcast::channel(channel_capacity);
         let mut live: Vec<OperationRecord> = inner
             .operations
             .values()
