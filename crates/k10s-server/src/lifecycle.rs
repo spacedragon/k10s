@@ -438,6 +438,9 @@ pub async fn spawn_loopback(
     config: ServerConfig,
     kernel: BackendKernel,
 ) -> io::Result<ServerHandle> {
+    config
+        .validate()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let addr = listener.local_addr()?;
     let cancel = CancellationToken::new();
@@ -474,6 +477,9 @@ pub async fn run_with_assets(
     cancel: CancellationToken,
     dist_dir: Option<PathBuf>,
 ) -> io::Result<()> {
+    config
+        .validate()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let drain_timeout = config.drain_timeout;
     let flush_window = config.graceful_flush_timeout;
     let readiness = Readiness::new();
