@@ -503,20 +503,14 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         },
     )
     .await;
-    for _ in 0..100 {
-        if kubectl(&[
-            "-n",
-            NAMESPACE,
-            "get",
-            "pod/delete-me",
-            "--ignore-not-found",
-        ])
-        .is_empty()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "wait",
+        "--for=delete",
+        "pod/delete-me",
+        "--timeout=45s",
+    ]);
     assert!(
         kubectl(&[
             "-n",
