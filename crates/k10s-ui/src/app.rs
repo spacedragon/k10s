@@ -379,6 +379,151 @@ impl K10sApp {
         }
     }
 
+    /// Resource rows exposed to the semantic web host. They are the same
+    /// authoritative watch projection rendered by the egui resource table.
+    #[must_use]
+    pub fn web_resource_rows(&self, kind: WorkloadKind) -> Vec<k10s_protocol::ResourceListRow> {
+        self.build_resource_feed()
+            .lists
+            .remove(&kind)
+            .unwrap_or_default()
+    }
+
+    /// Open/focus a workload through the shared command-driven workspace.
+    pub fn web_activate_workload(&mut self, kind: WorkloadKind) -> Option<WindowId> {
+        let events = self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                crate::workspace::LauncherItem::Workload(kind),
+            ));
+        for event in events {
+            self.handle_workspace_event(event);
+        }
+        self.shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| window.kind == crate::workspace::WindowKind::Workload(kind))
+            .max_by_key(|window| window.z)
+            .map(|window| window.id)
+    }
+
+    /// Pin an exact projected row in a web-hosted workload window.
+    pub fn web_select_resource(&mut self, window: WindowId, identity: ResourceIdentity) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity))
+        {
+            self.handle_workspace_event(event);
+        }
+        self.refresh_details();
+    }
+
+    /// Select a detail tab through the same workspace state as native egui.
+    pub fn web_set_detail_tab(&mut self, window: WindowId, tab: crate::workspace::DetailTab) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(window, tab))
+        {
+            self.handle_workspace_event(event);
+        }
+    }
+
+    /// Resolve the currently pinned identity and backend detail for a window.
+    #[must_use]
+    pub fn web_selected_detail(
+        &self,
+        window: WindowId,
+    ) -> Option<(&ResourceIdentity, Option<&ResourceDetailResponse>)> {
+        let identity =
+            self.shell
+                .workspace()
+                .window(window)
+                .and_then(|window| match &window.content {
+                    crate::workspace::WindowContent::Detail(detail) => Some(&detail.identity),
+                    crate::workspace::WindowContent::Resource(resource) => {
+                        resource.detail.as_ref().map(|detail| &detail.identity)
+                    }
+                })?;
+        Some((identity, self.details.get(identity)))
+    }
+
+    /// Open the real shared scale dialog for the selected resource.
+    pub fn web_open_scale_dialog(&mut self, window: WindowId) {
+        if let Some(identity) = self
+            .web_selected_detail(window)
+            .map(|(identity, _)| identity.clone())
+        {
+            self.shell
+                .dialogs_mut()
+                .open_scale(window, identity, Some(1));
+        }
+    }
+
+    /// Current shared operation dialog kind, if one is open.
+    #[must_use]
+    pub fn web_dialog_kind(
+        &self,
+        window: WindowId,
+    ) -> Option<crate::ui::dialogs::ActiveDialogKind> {
+        self.shell.dialogs().active(window)
+    }
+
+    /// Request the selected Pod's real bounded logs stream.
+    pub fn web_connect_logs(&mut self, window: WindowId) -> Result<(), ClientError> {
+        let target = self.workspace_stream_target(window).ok_or_else(|| {
+            ClientError::Protocol("selected resource cannot stream logs".to_owned())
+        })?;
+        let stores = self.shell.stream_stores_mut();
+        stores.logs.ensure(window, target.clone()).connect();
+        stores.logs.queue(
+            window,
+            crate::ui::tools::LogsAction::OpenLogs { window, target },
+        );
+        self.process_stream_requests()
+    }
+
+    /// Request the selected Pod's real interactive exec stream.
+    pub fn web_connect_shell(&mut self, window: WindowId) -> Result<(), ClientError> {
+        let target = self
+            .workspace_stream_target(window)
+            .ok_or_else(|| ClientError::Protocol("selected resource cannot exec".to_owned()))?;
+        let stores = self.shell.stream_stores_mut();
+        stores.shells.ensure(window, target.clone()).connect();
+        stores.shells.queue_connect(window, target);
+        self.process_stream_requests()
+    }
+
+    /// Semantic stream state rendered by the web adapter.
+    #[must_use]
+    pub fn web_stream_text(&self, window: WindowId) -> (String, Vec<String>, String, Vec<String>) {
+        let logs = self.shell.stream_stores().logs.get(window);
+        let log_phase = logs
+            .map(|logs| format!("{:?}", logs.phase()))
+            .unwrap_or_else(|| "Disconnected".to_owned());
+        let log_lines = logs
+            .map(|logs| logs.visible_lines().cloned().collect())
+            .unwrap_or_default();
+        let shell = self.shell.stream_stores().shells.get(window);
+        let shell_phase = shell
+            .map(|shell| format!("{:?}", shell.phase()))
+            .unwrap_or_else(|| "Disconnected".to_owned());
+        let shell_lines = shell
+            .map(|shell| shell.buffer().cloned().collect())
+            .unwrap_or_default();
+        (log_phase, log_lines, shell_phase, shell_lines)
+    }
+
+    /// Intentionally recycle the control transport. This is both a useful
+    /// operator action and a deterministic browser-E2E entry into the normal
+    /// full-jitter reconnect/full-resync correctness path.
+    pub fn web_reconnect(&mut self) {
+        let now_ms = u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.jitter_counter = self.jitter_counter.wrapping_add(1);
+        let entropy = now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
+        self.transient_loss(now_ms, entropy);
+    }
+
     fn handle_event(
         &mut self,
         event: WsEvent,

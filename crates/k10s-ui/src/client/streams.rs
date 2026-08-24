@@ -169,6 +169,10 @@ pub struct StreamSession {
     target: StreamTarget,
     tty: bool,
     socket: Option<Box<dyn StreamIo>>,
+    /// The mandatory first frame is retained until `WsEvent::Opened`.
+    /// Browser WebSockets reject sends while CONNECTING and ewebsock cannot
+    /// report that rejection synchronously.
+    pending_hello: Option<String>,
     ended: bool,
 }
 
@@ -193,6 +197,7 @@ impl StreamSession {
             target,
             tty,
             socket: None,
+            pending_hello: None,
             ended: false,
         }
     }
@@ -216,9 +221,26 @@ impl StreamSession {
             return Ok(());
         }
         let url = derive_stream_url(control_url, self.route)?;
-        let mut socket = StreamSocket::connect(&url)?;
-        socket.send_hello(access_token, ticket_id)?;
-        self.socket = Some(Box::new(socket));
+        let socket = StreamSocket::connect(&url)?;
+        self.install_opening_socket(Box::new(socket), access_token, ticket_id)
+    }
+
+    fn install_opening_socket(
+        &mut self,
+        socket: Box<dyn StreamIo>,
+        access_token: &str,
+        ticket_id: &str,
+    ) -> Result<(), TransportError> {
+        let hello = StreamClientMessage::Hello {
+            protocol_major: PROTOCOL_MAJOR,
+            access_token: access_token.to_owned(),
+            stream_ticket: ticket_id.to_owned(),
+        };
+        self.pending_hello = Some(
+            serde_json::to_string(&hello)
+                .map_err(|error| TransportError(format!("could not encode hello: {error}")))?,
+        );
+        self.socket = Some(socket);
         Ok(())
     }
 
@@ -271,7 +293,11 @@ impl StreamSession {
         let mut signals = Vec::new();
         while let Some(event) = StreamIo::try_recv(socket.as_mut()) {
             match event {
-                WsEvent::Opened => {}
+                WsEvent::Opened => {
+                    if let Some(hello) = self.pending_hello.take() {
+                        socket.send_text(hello);
+                    }
+                }
                 WsEvent::Message(WsMessage::Text(text)) => {
                     match serde_json::from_str::<StreamServerMessage>(&text) {
                         Ok(StreamServerMessage::Ready {
@@ -335,6 +361,7 @@ impl StreamSession {
     /// Close the socket; the backend retires the session on next touch.
     pub fn disconnect(&mut self) {
         self.socket = None;
+        self.pending_hello = None;
         self.ended = true;
     }
 
@@ -348,5 +375,61 @@ impl StreamSession {
     #[must_use]
     pub fn tty(&self) -> bool {
         self.tty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct OpeningSocket {
+        events: VecDeque<WsEvent>,
+        sent: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl StreamIo for OpeningSocket {
+        fn try_recv(&mut self) -> Option<WsEvent> {
+            self.events.pop_front()
+        }
+
+        fn send_text(&mut self, text: String) {
+            self.sent.lock().unwrap().push(text);
+        }
+
+        fn send_binary(&mut self, _: Vec<u8>) {}
+    }
+
+    #[test]
+    fn stream_hello_waits_for_the_browser_socket_to_open() {
+        let target = StreamTarget {
+            context: "dev-local".into(),
+            namespace: "default".into(),
+            pod: "pod-a".into(),
+            uid: "uid-a".into(),
+            container: "app".into(),
+        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        session
+            .install_opening_socket(
+                Box::new(OpeningSocket {
+                    events: VecDeque::from([WsEvent::Opened]),
+                    sent: Arc::clone(&sent),
+                }),
+                "secret",
+                "ticket-1",
+            )
+            .unwrap();
+        assert!(sent.lock().unwrap().is_empty());
+        session.poll();
+
+        let frames = sent.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("ticket-1"));
+        assert!(session.pending_hello.is_none());
     }
 }

@@ -225,6 +225,12 @@ impl ShellSessions {
         self.sessions.get_mut(&window)
     }
 
+    /// Read one window's terminal without mutating its stream state.
+    #[must_use]
+    pub fn get(&self, window: WindowId) -> Option<&ShellTool> {
+        self.sessions.get(&window)
+    }
+
     /// Mark every session failed (control transport loss).
     pub fn connection_lost(&mut self) {
         for session in self.sessions.values_mut() {

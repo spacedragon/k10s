@@ -87,6 +87,7 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -176,7 +177,8 @@ jobs:
           cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture
           cargo test --locked -p k10s-desktop --test kube_factory
 
-  # Web foundation gate: pinned Trunk build plus the Chromium browser smoke.
+  # Browser release gate: full Chromium coverage and compatibility bootstrap /
+  # reconnect smokes on Firefox and WebKit.
   web:
     name: Web foundation
     runs-on: [self-hosted, Linux, X64]
@@ -190,6 +192,7 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -220,11 +223,124 @@ jobs:
           node-version: 24
 
       - name: Install Playwright dependencies
-        run: npm ci && npx playwright install chromium --with-deps
+        run: npm ci && npx playwright install chromium firefox webkit --with-deps
 
-      - name: Browser foundation smoke
+      - name: Browser E2E suite
         run: |
           # A self-hosted runner can retain a server from an interrupted job.
-          # Give every workflow run its own port instead of colliding on 8080.
+          # Give every workflow run its own port instead of colliding on 18080.
           export K10S_E2E_PORT="$((20000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT) % 20000))"
-          npx playwright test tests/browser/foundation.spec.ts --project=chromium
+          npx playwright test
+
+      # Failure-only retention supplies traces/screenshots/videos for diagnosis
+      # without continuously consuming GitHub artifact storage.
+      - name: Retain browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  windows-ui-smoke:
+    name: Windows build and loopback launch
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Checkout source (first attempt)
+        id: windows_checkout_1
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout source (retry)
+        if: steps.windows_checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$'
+          if (-not $match) { throw 'Unable to read rust-toolchain.toml' }
+          $channel = $match.Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed: $LASTEXITCODE" }
+          rustup target add wasm32-unknown-unknown --toolchain $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
+          rustup default $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed: $LASTEXITCODE" }
+
+      - name: Configure persistent Cargo build directory
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $target = Join-Path '${{ runner.tool_cache }}' 'k10s\cargo-target-platform-smoke'
+          New-Item -ItemType Directory -Force $target | Out-Null
+          "CARGO_TARGET_DIR=$target" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Windows server and Web target
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          cargo build --locked --release -p k10s-server-app --bin k10s-server
+          cargo check --locked -p k10s-web --target wasm32-unknown-unknown
+
+      - name: Launch loopback server and probe health
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Set-Content -Path dist/index.html -Value '<!doctype html><title>k10s smoke</title>'
+          $env:K10S_DIST_DIR = (Resolve-Path dist)
+          $port = 30000 + ([int64]'${{ github.run_id }}' % 10000)
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'release\k10s-server.exe'
+          $server = Start-Process -FilePath $binary -ArgumentList @(
+            '--fake', '--token-file', 'tests/browser/token.txt',
+            '--listen', "127.0.0.1:$port"
+          ) -PassThru -NoNewWindow
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              try {
+                $response = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$port/healthz"
+                if ($response.StatusCode -eq 200) { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $ready) { throw 'Windows loopback server did not become healthy' }
+          } finally {
+            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+            $server.WaitForExit()
+          }
+
+  # Enable after registering a self-hosted runner with labels macOS/X64.
+  # The conditional is evaluated before scheduling, so repositories without
+  # one neither queue forever nor consume hosted macOS minutes.
+  macos-ui-smoke:
+    name: macOS build and loopback launch
+    if: vars.K10S_MACOS_RUNNER == 'enabled'
+    runs-on: [self-hosted, macOS, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
+      - name: Build and launch smoke
+        run: |
+          cargo build --locked --release -p k10s-server-app --bin k10s-server
+          cargo check --locked -p k10s-web --target wasm32-unknown-unknown
+          mkdir -p dist
+          printf '<!doctype html><title>k10s smoke</title>' > dist/index.html
+          export K10S_DIST_DIR="$PWD/dist"
+          port="$((30000 + GITHUB_RUN_ID % 10000))"
+          target/release/k10s-server --fake --token-file tests/browser/token.txt \
+            --listen "127.0.0.1:${port}" &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo 'macOS loopback server did not become healthy' >&2
+          exit 1
