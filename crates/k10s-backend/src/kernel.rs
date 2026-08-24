@@ -660,6 +660,7 @@ impl ContextPermissionsResult {
                     .map(|check| k10s_protocol::PermissionCheck {
                         verb: check.verb,
                         resource: check.resource,
+                        group: check.group,
                         namespace: check.namespace,
                         outcome: match check.outcome {
                             crate::port::PermissionOutcome::Allowed => {

@@ -47,6 +47,10 @@ pub struct UiShell<I> {
     yaml: tools::YamlEditors,
     streams: tools::StreamStores,
     dialogs: dialogs::OperationDialogs,
+    /// A requested context switch awaiting backend validation; drained by
+    /// the application layer, which sends the request and commits locally
+    /// only after the response succeeds.
+    requested_context: Option<String>,
 }
 
 impl<I> Default for UiShell<I>
@@ -71,6 +75,7 @@ where
             yaml: tools::YamlEditors::default(),
             streams: tools::StreamStores::default(),
             dialogs: dialogs::OperationDialogs::default(),
+            requested_context: None,
         }
     }
 
@@ -86,6 +91,13 @@ where
         command: WorkspaceCommand<I>,
     ) -> Vec<WorkspaceEvent<I>> {
         self.workspace.apply(command)
+    }
+
+    /// Drain the context a switch was requested toward, if any. The caller
+    /// validates it against the backend and applies
+    /// [`WorkspaceCommand::CommitContextSwitch`] only after success.
+    pub fn take_requested_context(&mut self) -> Option<String> {
+        self.requested_context.take()
     }
 
     /// Drain the protocol actions queued by YAML editors during rendering.
@@ -226,7 +238,10 @@ where
         let context_change = context_change
             .or_else(|| selected.filter(|context| self.workspace.context() != context.as_str()));
         if let Some(context) = context_change {
-            queued.push(WorkspaceCommand::ContextSwitch { to: context });
+            // The request only stages: the application layer validates it
+            // against the backend and commits the workspace transition after
+            // the response succeeds.
+            self.requested_context = Some(context);
         }
 
         if !queued.is_empty() {
@@ -238,6 +253,12 @@ where
                         }
                         WorkspaceEvent::ContextSwitched { to } => {
                             *selected_context = Some(to);
+                        }
+                        // A guard-resolved switch request surfaces here when
+                        // a queued command finally executes; route it through
+                        // the same staged path as direct requests.
+                        WorkspaceEvent::ContextSwitchRequested { to } => {
+                            self.requested_context = Some(to);
                         }
                         WorkspaceEvent::Closed(_)
                         | WorkspaceEvent::Blocked(_)

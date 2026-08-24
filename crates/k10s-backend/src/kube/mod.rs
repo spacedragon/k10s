@@ -83,6 +83,10 @@ pub struct KubeAdapter {
     /// context, started only by active consumer requests and exited after a
     /// linger window without them.
     metrics: ClusterMetrics,
+    /// Serializes complete switch transactions: prepare, live destination
+    /// validation, commit, and retirement run under one guard so overlapping
+    /// switches cannot interleave their phases or retire the wrong runtime.
+    switch_lock: tokio::sync::Mutex<()>,
     /// Test-only scripted watch sources overriding the real kube-rs path.
     #[cfg(feature = "testkit")]
     watch_scripts: ScriptedWatches,
@@ -122,6 +126,7 @@ impl KubeAdapter {
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
+            switch_lock: tokio::sync::Mutex::new(()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -168,6 +173,7 @@ impl KubeAdapter {
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
+            switch_lock: tokio::sync::Mutex::new(()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -621,14 +627,18 @@ impl KubeAdapter {
 
     /// Switch the current context through the prepare-then-commit protocol.
     ///
-    /// Prepare validates twice: the destination must be a known registry
-    /// entry (before any traffic), and its minimal read path must actually
-    /// work — its client raises and discovery runs against it. A failed
-    /// prepare returns a sanitized error with nothing observable moved. Only
-    /// then does the commit swap the current marker atomically, followed by
-    /// retirement of the replaced context's live runtime so no watcher or
-    /// poller outlives its context's relevance.
+    /// The whole transaction runs under one switch guard so overlapping
+    /// switches serialize: each one captures `previous`, validates, commits,
+    /// and retires as an atomic unit relative to every other switch. Prepare
+    /// validates twice: the destination must be a known registry entry (before
+    /// any traffic), and its minimal read path must actually work *now* — its
+    /// client raises and discovery runs live against it even when a fresh
+    /// cached catalog exists. A failed prepare returns a sanitized error with
+    /// nothing observable moved. Only then does the commit swap the current
+    /// marker atomically, followed by retirement of the replaced context's
+    /// live runtime so no watcher or poller outlives its context's relevance.
     async fn context_switch(&self, to: String) -> Result<QueryResult, BackendError> {
+        let _switch = self.switch_lock.lock().await;
         // Prepare (registry): reject unknown destinations off-line.
         let prepared = self
             .registry
@@ -636,8 +646,9 @@ impl KubeAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .prepare_switch(&to)
             .map_err(|_| BackendError::NotFound)?;
-        // Prepare (cluster): validate the destination read path.
-        self.catalog_for(&to).await?;
+        // Prepare (cluster): validate the destination read path with live
+        // traffic — a fresh cached catalog proves nothing about right now.
+        self.discover_catalog(&to).await?;
         // Commit: install the new current marker as one atomic swap.
         let previous = {
             let mut registry = self
@@ -701,7 +712,17 @@ impl KubeAdapter {
             return Ok(data);
         }
 
-        // Slow path: discover through kube-rs, then publish under the bounds.
+        // Slow path: discover live, then publish under the bounds.
+        self.discover_catalog(context).await
+    }
+
+    /// Discover one context's catalog with live traffic and publish it under
+    /// the cache bounds, bypassing any fresh cached entry.
+    ///
+    /// This is the switch-validation path: a success here proves the
+    /// destination's read path works right now, not merely that it worked
+    /// within the TTL.
+    async fn discover_catalog(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
         let client = self.cluster_client(context).await?;
         let data = discovery::discover_resource_types(&client, context).await?;
 

@@ -1278,6 +1278,7 @@ impl KubernetesAccess for FakeKubernetes {
                                 .map(|probe| crate::port::PermissionCheck {
                                     verb: probe.verb,
                                     resource: probe.resource,
+                                    group: probe.group,
                                     namespace: probe.namespace,
                                     outcome: crate::port::PermissionOutcome::Unknown,
                                 })

@@ -111,6 +111,12 @@ pub struct K10sApp {
     types_request: Option<(String, PendingRequest)>,
     /// In-flight workload mutations awaiting their accepted operation.
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
+    /// In-flight context switch awaiting the backend's verdict; local state
+    /// moves only after it succeeds.
+    pending_switch: Option<PendingSwitch>,
+    /// The destination of the last failed switch, so a passive mismatch
+    /// cannot retry-spam a broken context every frame.
+    failed_switch: Option<String>,
     /// Backend-resolved details for every identity a window pinned, keyed by
     /// stable identity; rebuilt from `operation.status`-style queries.
     details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
@@ -138,6 +144,13 @@ struct PendingMutation {
     window: WindowId,
 }
 
+/// A context switch sent to the backend whose response has not arrived.
+#[derive(Debug)]
+struct PendingSwitch {
+    request: PendingRequest,
+    to: String,
+}
+
 impl std::fmt::Debug for K10sApp {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The access token is deliberately omitted: it never appears in
@@ -157,6 +170,7 @@ impl std::fmt::Debug for K10sApp {
             .field("infrastructure_context", &self.infrastructure_context)
             .field("stream_sessions", &self.stream_sessions.len())
             .field("pending_stream_tickets", &self.pending_stream_tickets.len())
+            .field("pending_switch", &self.pending_switch)
             .field("recovering", &self.recovering)
             .field("view", &self.view)
             .field("shell", &self.shell)
@@ -199,6 +213,8 @@ impl K10sApp {
             types_context: None,
             types_request: None,
             pending_mutations: BTreeMap::new(),
+            pending_switch: None,
+            failed_switch: None,
             details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
             recovering: false,
@@ -295,11 +311,11 @@ impl K10sApp {
             self.jitter_counter = self.jitter_counter.wrapping_add(1);
             let entropy = now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
             self.retry_now(now_ms, entropy)
-        } else if selected_after != selected_before {
-            selected_after.as_deref().map_or(Ok(()), |context| {
-                self.ensure_resource_streams(context)?;
-                self.select_infrastructure_context(context)
-            })
+        } else if let Some(to) = self.shell.take_requested_context() {
+            // A requested switch never moves local state here: it is sent to
+            // the backend, and the workspace transition plus resubscriptions
+            // happen only when the response confirms the destination.
+            self.stage_context_switch(&to)
         } else if refresh {
             selected_after
                 .as_deref()
@@ -456,6 +472,7 @@ impl K10sApp {
                     }
                 }
                 self.finish_infrastructure_request();
+                self.finish_context_switch()?;
                 if self.bootstrap.is_none() {
                     self.bootstrap = self.client.take_rebuilt_bootstrap();
                 }
@@ -512,6 +529,94 @@ impl K10sApp {
             }
             WsEvent::Message(_) => Ok(()),
             WsEvent::Error(_) | WsEvent::Closed => Err(AppEventError::Transient),
+        }
+    }
+
+    /// Send a requested context switch to the backend without touching any
+    /// local state.
+    ///
+    /// Local navigation guards run first so a dirty YAML buffer or connected
+    /// shell parks the request through the normal dialog flow; only a
+    /// guard-clear request reaches the wire. An in-flight switch toward a
+    /// different destination is superseded, and a previously failed
+    /// destination is not re-requested until something changes.
+    fn stage_context_switch(&mut self, to: &str) -> Result<(), ClientError> {
+        if self
+            .pending_switch
+            .as_ref()
+            .is_some_and(|pending| pending.to == to)
+        {
+            return Ok(());
+        }
+        let committed = self.client.local_ui().selected_context.as_deref() == Some(to);
+        let already_serving = self.shell.workspace().context() == to;
+        if self.failed_switch.as_deref() == Some(to) && !committed {
+            return Ok(());
+        }
+        if committed && already_serving {
+            return Ok(());
+        }
+        if self.shell.workspace().context_switch_blockers().is_empty() {
+            if let Some(pending) = self.pending_switch.take() {
+                let _ = self.client.cancel(&pending.request);
+            }
+            let request = self
+                .client
+                .begin(Query::ContextSwitch { to: to.to_owned() })?;
+            self.pending_switch = Some(PendingSwitch {
+                request,
+                to: to.to_owned(),
+            });
+            return Ok(());
+        }
+        // Guards are engaged: park the navigation through the normal
+        // blocking path; resolving it re-emits the request.
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ContextSwitch { to: to.to_owned() })
+        {
+            self.handle_workspace_event(event);
+        }
+        Ok(())
+    }
+
+    /// Complete the in-flight context switch: on success commit the local
+    /// transition, resubscribe streams on the new context, and clear any
+    /// failure record; on failure leave every local state untouched.
+    fn finish_context_switch(&mut self) -> Result<(), AppEventError> {
+        let Some(pending) = &self.pending_switch else {
+            return Ok(());
+        };
+        if self.client.is_pending(&pending.request) {
+            return Ok(());
+        }
+        let PendingSwitch { request, to } = self.pending_switch.take().expect("checked above");
+        match self.client.take(request) {
+            Some(QueryResult::ContextSwitch(response)) => {
+                self.failed_switch = None;
+                let current = response.current;
+                self.client.local_ui_mut().selected_context = Some(current.clone());
+                self.ensure_resource_streams(&current)
+                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                self.select_infrastructure_context(&current)
+                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                for event in self
+                    .shell
+                    .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to: current })
+                {
+                    self.handle_workspace_event(event);
+                }
+                Ok(())
+            }
+            Some(other) => Err(AppEventError::Terminal(format!(
+                "context switch to '{to}' produced an unexpected answer: {other:?}"
+            ))),
+            None => {
+                // The answer never arrived (transport loss or rebuild): the
+                // selection stays where it was and the user can retry.
+                self.failed_switch = Some(to);
+                Ok(())
+            }
         }
     }
 
@@ -596,6 +701,10 @@ impl K10sApp {
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
+        // An unanswered switch request died with the transport; the selection
+        // stays where it was and a retry needs a fresh user action.
+        self.pending_switch = None;
+        self.failed_switch = None;
         self.teardown_stream_sessions();
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
@@ -892,8 +1001,15 @@ impl K10sApp {
     }
 
     /// Apply workspace events produced by command application. Only the
-    /// focus-raising events matter at this layer.
-    fn handle_workspace_event(&mut self, _event: WorkspaceEvent<ResourceIdentity>) {}
+    /// focus-raising events matter at this layer, and guard-resolved switch
+    /// requests are staged toward the backend.
+    fn handle_workspace_event(&mut self, event: WorkspaceEvent<ResourceIdentity>) {
+        if let WorkspaceEvent::ContextSwitchRequested { to } = event
+            && let Err(error) = self.stage_context_switch(&to)
+        {
+            self.terminal_failure(error.to_string());
+        }
+    }
 
     /// Close every dedicated stream session, release any connected-shell
     /// guards it held, and mark its tool disconnected.
@@ -1669,6 +1785,142 @@ mod tests {
         assert_eq!(harness.state().client.phase(), ClientPhase::Authenticating);
         assert_eq!(harness.state().view(), &AppView::Connecting);
         assert!(harness.state().infrastructure_request.is_none());
+    }
+
+    fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+        let bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+            ]),
+            overflowed: false,
+        }]);
+        app.poll_at(100, 0);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        (app, state)
+    }
+
+    #[test]
+    fn context_switch_round_trips_through_the_backend_before_local_commit() {
+        let switched = ServerFrame::response(
+            RequestId::from_u128(4),
+            k10s_protocol::ContextSwitchResponse {
+                current: "prod-readonly".into(),
+                previous: Some("dev-local".into()),
+            },
+        );
+        let (mut app, state) = ready_app();
+
+        // Staging sends the switch request but moves no local state.
+        app.stage_context_switch("prod-readonly").unwrap();
+        app.flush_outbound().unwrap();
+        let kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get",
+                "context.switch"
+            ],
+            "the staged switch is sent to the backend"
+        );
+        assert_eq!(
+            app.client.local_ui().selected_context.as_deref(),
+            Some("dev-local"),
+            "the selection waits for the response"
+        );
+        // The bootstrap-selected context has not rendered a committed switch
+        // yet, so the workspace still serves its startup state.
+        assert_eq!(app.shell.workspace().context(), "");
+
+        // Only the successful response commits the local transition.
+        app.handle_event(server_message(&switched), 100, 0).unwrap();
+        assert_eq!(
+            app.client.local_ui().selected_context.as_deref(),
+            Some("prod-readonly")
+        );
+        assert_eq!(app.shell.workspace().context(), "prod-readonly");
+        let kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get",
+                "context.switch",
+                "resource.types",
+                "infrastructure.get"
+            ],
+            "streams and infrastructure resubscribe on the committed context"
+        );
+    }
+
+    #[test]
+    fn a_failed_switch_response_preserves_every_local_state() {
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(RequestId::from_u128(4)),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Internal,
+                "destination refused the read path",
+                Retryability::Never,
+                ErrorScope::Request,
+                "context-switch",
+            ))
+            .unwrap(),
+        };
+        let (mut app, state) = ready_app();
+
+        app.stage_context_switch("prod-readonly").unwrap();
+        app.flush_outbound().unwrap();
+        // The existing error policy surfaces request-scoped server errors as
+        // terminal for the session; the assertions below are about what the
+        // failed switch did NOT do: move any local state.
+        let outcome = app.handle_event(server_message(&rejection), 100, 0);
+        assert!(matches!(outcome, Err(super::AppEventError::Terminal(_))));
+
+        // The failed destination never cleared selections nor moved the
+        // workspace onto an unvalidated context.
+        assert_eq!(
+            app.client.local_ui().selected_context.as_deref(),
+            Some("dev-local")
+        );
+        assert_eq!(app.shell.workspace().context(), "");
+        let kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get",
+                "context.switch"
+            ],
+            "no resubscription happens for a failed destination"
+        );
     }
 }
 

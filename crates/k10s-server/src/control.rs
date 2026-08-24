@@ -1061,6 +1061,7 @@ fn parse_request(
                             .map(|probe| k10s_backend::PermissionProbe {
                                 verb: probe.verb,
                                 resource: probe.resource,
+                                group: probe.group,
                                 namespace: probe.namespace,
                             })
                             .collect(),

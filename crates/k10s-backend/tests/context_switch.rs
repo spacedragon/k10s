@@ -28,6 +28,7 @@ use k10s_backend::{
 
 const CONTEXT_A: &str = "switch-a";
 const CONTEXT_B: &str = "switch-b";
+const CONTEXT_C: &str = "switch-c";
 const NS: &str = "default";
 
 /// Request path of the SelfSubjectAccessReview submission endpoint.
@@ -48,7 +49,20 @@ fn probe(verb: &str, resource: &str, namespace: Option<&str>) -> PermissionProbe
     PermissionProbe {
         verb: verb.into(),
         resource: resource.into(),
+        group: None,
         namespace: namespace.map(str::to_owned),
+    }
+}
+
+fn probe_with_group(
+    verb: &str,
+    resource: &str,
+    group: Option<&str>,
+    namespace: Option<&str>,
+) -> PermissionProbe {
+    PermissionProbe {
+        group: group.map(str::to_owned),
+        ..probe(verb, resource, namespace)
     }
 }
 
@@ -67,6 +81,17 @@ fn contexts() -> Vec<ContextInfo> {
             is_current: false,
         },
     ]
+}
+
+fn three_contexts() -> Vec<ContextInfo> {
+    let mut contexts = contexts();
+    contexts.push(ContextInfo {
+        name: CONTEXT_C.into(),
+        cluster: "recorded-c".into(),
+        namespace: Some(NS.into()),
+        is_current: false,
+    });
+    contexts
 }
 
 /// One adapter whose two contexts are backed by two independent recorded API
@@ -494,16 +519,39 @@ struct ScriptedWorld {
     source: Arc<CountingSource>,
 }
 
+fn script_for(source: &Arc<CountingSource>) -> RuntimeWatchScript {
+    let source = Arc::clone(source);
+    Arc::new(move |_gvk, _namespace| Some(Arc::clone(&source) as Arc<dyn WatchSource>))
+}
+
 impl ScriptedWorld {
     fn new(context: &'static str) -> Self {
         let source = CountingSource::new(context);
-        let script: RuntimeWatchScript = {
-            let source = Arc::clone(&source);
-            Arc::new(move |_gvk, _namespace| Some(Arc::clone(&source) as Arc<dyn WatchSource>))
-        };
         let adapter =
             two_context_adapter(RecordedApiServer::standard(), RecordedApiServer::standard())
-                .with_scripted_watches(script);
+                .with_scripted_watches(script_for(&source));
+        let watches = adapter.watches_registry();
+        Self {
+            kernel: BackendKernel::new(adapter),
+            watches,
+            source,
+        }
+    }
+
+    /// The same world over three contexts backed by three recorded servers,
+    /// so overlapping switches have distinct valid destinations.
+    fn with_three_contexts() -> Self {
+        let source = CountingSource::new(CONTEXT_A);
+        let adapter = KubeAdapter::with_cluster_clients(
+            three_contexts(),
+            [
+                (CONTEXT_A, RecordedApiServer::standard().into_client(NS)),
+                (CONTEXT_B, RecordedApiServer::standard().into_client(NS)),
+                (CONTEXT_C, RecordedApiServer::standard().into_client(NS)),
+            ],
+        )
+        .expect("adapter builds around recorded clients")
+        .with_scripted_watches(script_for(&source));
         let watches = adapter.watches_registry();
         Self {
             kernel: BackendKernel::new(adapter),
@@ -786,4 +834,164 @@ async fn later_reads_still_reach_the_api_server_and_respect_authorization() {
         }
         other => panic!("expected a sanitized api-server rejection, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Review hardening: live validation, serialized switches, and grouped probes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn switch_validation_always_contacts_the_destination_even_with_a_fresh_cache() {
+    let server_a = RecordedApiServer::standard();
+    let server_b = RecordedApiServer::standard();
+    server_a.set_response(PODS_LIST_PATH, 200, &empty_pod_list());
+    let world = world(server_a.clone(), server_b.clone());
+
+    // Warm B's discovery cache while it works.
+    world
+        .kernel
+        .query(Query::ResourceTypes {
+            context: CONTEXT_B.into(),
+        })
+        .await
+        .expect("destination discovery warms the cache");
+    let b_apis_before = server_b.hit_count(APIS_PATH);
+    assert!(b_apis_before > 0, "the warm-up discovered through B");
+
+    // B breaks without its cached catalog expiring.
+    server_b.set_response(APIS_PATH, 500, &status_error(500, "api group list down"));
+
+    let failure = world
+        .kernel
+        .query(Query::ContextSwitch {
+            to: CONTEXT_B.into(),
+        })
+        .await
+        .expect_err("a fresh cached catalog must not stand in for a live check");
+    assert!(
+        matches!(failure, BackendError::Internal(ref detail) if detail.contains(CONTEXT_B)),
+        "prepare failures stay sanitized and name the context: {failure:?}"
+    );
+    assert!(
+        server_b.hit_count(APIS_PATH) > b_apis_before,
+        "validation sent live traffic to the destination"
+    );
+    // The healthy current context survives the aborted switch untouched.
+    assert_eq!(current_context(&world.kernel).await, CONTEXT_A);
+}
+
+#[tokio::test]
+async fn overlapping_switches_serialize_into_complete_transactions() {
+    let scripted = ScriptedWorld::with_three_contexts();
+    let mut events = subscribe_warm_watch(&scripted, CONTEXT_A).await;
+
+    // Two switches race toward different destinations; each must capture,
+    // validate, commit, and retire as one atomic transaction.
+    let first = scripted.kernel.query(Query::ContextSwitch {
+        to: CONTEXT_B.into(),
+    });
+    let second = scripted.kernel.query(Query::ContextSwitch {
+        to: CONTEXT_C.into(),
+    });
+    let (first, second) = tokio::join!(first, second,);
+
+    fn committed(result: Result<KernelQueryResult, BackendError>) -> (String, Option<String>) {
+        match result.expect("both validated switches commit") {
+            KernelQueryResult::ContextSwitch(switched) => {
+                let payload = switched.wire_payload();
+                (payload.current, payload.previous)
+            }
+            other => panic!("switch must map to its result, got {other:?}"),
+        }
+    }
+    let (to_a, previous_a) = committed(first);
+    let (to_b, previous_b) = committed(second);
+    assert_ne!(to_a, to_b);
+
+    // Exactly one switch replaced A: whoever committed second reports that
+    // destination as its previous — never a stale snapshot of A.
+    let (_first_to, second_to) = if previous_a.as_deref() == Some(CONTEXT_A) {
+        (to_a.as_str(), to_b.as_str())
+    } else {
+        assert_eq!(
+            previous_b.as_deref(),
+            Some(CONTEXT_A),
+            "exactly one racing switch replaces A"
+        );
+        (to_b.as_str(), to_a.as_str())
+    };
+    assert_ne!(
+        previous_a, previous_b,
+        "each commit saw its own predecessor"
+    );
+
+    // The final marker belongs to the last committer, and retirement chased
+    // exactly the contexts each commit replaced: nothing leaks.
+    assert_eq!(current_context(&scripted.kernel).await, second_to);
+    wait_until("the replaced context's watch channel closes", || {
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        )
+    })
+    .await;
+    drop(events);
+    assert_eq!(
+        scripted.watches.live_selections(),
+        0,
+        "no watch selection outlives its context's retirement"
+    );
+}
+
+#[tokio::test]
+async fn permission_reviews_carry_the_api_group_of_the_reviewed_resource() {
+    let server = RecordedApiServer::standard();
+    record_ssar(&server, &ssar_allowed("RBAC: allowed"));
+    let world = world(server.clone(), RecordedApiServer::default());
+
+    let payload = permissions_of(
+        &world.kernel,
+        CONTEXT_A,
+        vec![
+            probe_with_group("list", "deployments", Some("apps"), Some(NS)),
+            probe_with_group("get", "nodes", None, None),
+            probe_with_group("list", "deployments", None, Some(NS)),
+        ],
+    )
+    .await;
+
+    // The submitted reviews ask about the exact API group: a core-group
+    // default would review `deployments` as if it were `apps/deployments`
+    // (or vice versa), turning advisory outcomes into false denials.
+    let bodies = server.request_bodies(SSAR_PATH);
+    assert_eq!(bodies.len(), 3, "one review per distinct probe");
+    let submitted: Vec<serde_json::Value> = bodies
+        .iter()
+        .map(|body| serde_json::from_str(body).expect("review bodies are json"))
+        .collect();
+    assert_eq!(
+        submitted[0]["spec"]["resourceAttributes"]["group"], "apps",
+        "the grouped resource reviews its own group"
+    );
+    assert!(
+        submitted[1]["spec"]["resourceAttributes"]
+            .get("group")
+            .is_none(),
+        "core probes leave the authorizer default untouched"
+    );
+    assert!(
+        submitted[2]["spec"]["resourceAttributes"]
+            .get("group")
+            .is_none(),
+        "an unset group reviews the core group explicitly by absence"
+    );
+    // The grouped and core deployments probes are distinct reviews.
+    assert_ne!(submitted[0], submitted[2]);
+
+    // Group is part of the probe identity and echoes back on every check.
+    let checks = payload["checks"].as_array().expect("checks are an array");
+    assert_eq!(checks.len(), 3);
+    assert_eq!(checks[0]["group"], "apps");
+    assert!(checks[1].get("group").is_none());
+    assert!(checks[2].get("group").is_none());
 }

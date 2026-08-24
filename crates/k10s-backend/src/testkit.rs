@@ -28,6 +28,9 @@ struct RecordedState {
     hanging: BTreeSet<String>,
     /// Per-path request hit counts for refresh assertions.
     hits: BTreeMap<String, usize>,
+    /// Per-path submitted bodies in arrival order, so tests can inspect the
+    /// exact payloads a client sent.
+    bodies: BTreeMap<String, Vec<String>>,
 }
 
 /// A recorded Kubernetes API server implemented as a tower Service.
@@ -65,6 +68,23 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                 *shared.hits.entry(path.clone()).or_insert(0) += 1;
                 shared.hanging.contains(&path)
             };
+            // Buffer the submitted payload before any stall so request-body
+            // assertions stay deterministic even for hanging paths.
+            let body = http_body_util::BodyExt::collect(request.into_body())
+                .await
+                .map(|collected| collected.to_bytes())
+                .map(|bytes| bytes.to_vec())
+                .unwrap_or_default();
+            {
+                let mut shared = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                shared
+                    .bodies
+                    .entry(path.clone())
+                    .or_default()
+                    .push(String::from_utf8_lossy(&body).into_owned());
+            }
             if hanging {
                 // A stalled connection: the request never completes.
                 std::future::pending::<()>().await;
@@ -93,6 +113,7 @@ impl Default for RecordedApiServer {
                 responses: BTreeMap::new(),
                 hanging: BTreeSet::new(),
                 hits: BTreeMap::new(),
+                bodies: BTreeMap::new(),
             })),
         }
     }
@@ -136,6 +157,19 @@ impl RecordedApiServer {
             .get(path)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// The submitted request bodies of one path in arrival order, so tests
+    /// can assert the exact payloads a client sent.
+    #[must_use]
+    pub fn request_bodies(&self, path: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bodies
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// A recorded discovery surface matching the standard fake Kubernetes

@@ -120,6 +120,9 @@ pub struct PermissionProbe {
     pub verb: String,
     /// Resource plural to review, such as `pods`.
     pub resource: String,
+    /// API group of the reviewed resource; absent means the core group, so
+    /// grouped resources such as `apps/deployments` review the right group.
+    pub group: Option<String>,
     /// Namespace restriction, when reviewed within one.
     pub namespace: Option<String>,
 }
@@ -147,6 +150,8 @@ pub struct PermissionCheck {
     pub verb: String,
     /// Resource plural that was reviewed.
     pub resource: String,
+    /// API group the review asked about, echoed from the probe.
+    pub group: Option<String>,
     /// Namespace restriction, when reviewed within one.
     pub namespace: Option<String>,
     /// What authorization reported.

@@ -38,6 +38,10 @@ pub struct PermissionProbe {
     pub verb: String,
     /// Resource plural to review, such as `pods`.
     pub resource: String,
+    /// API group of the reviewed resource; empty means the core group, and
+    /// `None` lets the authorizer apply its default (core) group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Namespace restriction, when reviewed within one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -77,6 +81,9 @@ pub struct PermissionCheck {
     pub verb: String,
     /// Resource plural that was reviewed.
     pub resource: String,
+    /// API group the review asked about, echoed from the probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Namespace restriction, when reviewed within one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,

@@ -1097,15 +1097,19 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
         PermissionProbe {
             verb: verb.into(),
             resource: resource.into(),
+            group: None,
             namespace: namespace.map(str::to_owned),
         }
     }
 
     async fn permissions_wire(kernel: &BackendKernel, context: &str) -> Value {
-        let probes = vec![
+        let mut probes = vec![
             probe("list", "pods", Some("default")),
             probe("delete", "deployments", Some("production")),
         ];
+        // The grouped resource reviews its own API group, never the core
+        // group default.
+        probes[1].group = Some("apps".into());
         match kernel
             .query(Query::ContextPermissions {
                 context: context.into(),
@@ -1166,33 +1170,49 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
         );
         let checks = payload["checks"].as_array().unwrap();
         assert_eq!(checks.len(), 2, "{label}: every probe yields one check");
-        for check in checks {
-            let entry_keys = check
+        // The core probe omits its group; the grouped probe echoes it.
+        let entry_keys = |check: &Value| {
+            check
                 .as_object()
                 .expect("check entries are objects")
                 .keys()
                 .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(
-                entry_keys,
-                ["namespace", "outcome", "resource", "verb"]
-                    .map(str::to_owned)
-                    .into_iter()
-                    .collect(),
-                "{label}: check-entry keys drifted"
-            );
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            entry_keys(&checks[0]),
+            ["namespace", "outcome", "resource", "verb"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            "{label}: core check-entry keys drifted"
+        );
+        assert_eq!(
+            entry_keys(&checks[1]),
+            ["group", "namespace", "outcome", "resource", "verb"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            "{label}: grouped check-entry keys drifted"
+        );
+        for check in checks {
             let outcome = check["outcome"].as_str().expect("outcome is a string");
             assert!(
                 matches!(outcome, "allowed" | "denied" | "unknown"),
                 "{label}: outcome vocabulary drifted: {outcome}"
             );
         }
-        // Probes echo verbatim, in order.
+        // Probes echo verbatim, in order; the grouped probe carries its group.
         assert_eq!(checks[0]["verb"], "list");
         assert_eq!(checks[0]["resource"], "pods");
         assert_eq!(checks[0]["namespace"], "default");
+        assert!(
+            checks[0].get("group").is_none(),
+            "core probes carry no group"
+        );
         assert_eq!(checks[1]["verb"], "delete");
         assert_eq!(checks[1]["resource"], "deployments");
+        assert_eq!(checks[1]["group"], "apps");
         assert_eq!(checks[1]["namespace"], "production");
     }
 

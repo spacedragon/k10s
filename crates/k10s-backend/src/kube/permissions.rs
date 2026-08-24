@@ -59,6 +59,7 @@ pub(crate) async fn project_capabilities(
         checks.push(PermissionCheck {
             verb: probe.verb,
             resource: probe.resource,
+            group: probe.group,
             namespace: probe.namespace,
             outcome,
         });
@@ -78,6 +79,10 @@ async fn review_once(
                 namespace: probe.namespace.clone(),
                 verb: Some(probe.verb.clone()),
                 resource: Some(probe.resource.clone()),
+                // The authorizer must see the exact group: leaving it unset
+                // would review core-group resources, so `apps/deployments`
+                // or a CRD could read as a false denial.
+                group: probe.group.clone(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -139,6 +144,7 @@ mod tests {
             .map(|index| PermissionProbe {
                 verb: "list".into(),
                 resource: format!("kind{index}"),
+                group: None,
                 namespace: None,
             })
             .collect();
