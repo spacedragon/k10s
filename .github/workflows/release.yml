@@ -109,7 +109,8 @@ jobs:
       # dtolnay/rust-toolchain has no toolchain-file input and would install
       # the target for stable instead, so the pinned 1.97.1 cross-builds
       # would fail with "target not installed".
-      - name: Install pinned Rust toolchain and matrix target
+      - name: Install pinned Rust toolchain and matrix target (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
@@ -117,11 +118,40 @@ jobs:
           rustup target add "${{ matrix.target }}" --toolchain "${CHANNEL}"
           rustup default "${CHANNEL}"
 
-      - name: Verify toolchain and matrix target
+      - name: Install pinned Rust toolchain and matrix target (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$'
+          if (-not $match) { throw 'Unable to read channel from rust-toolchain.toml' }
+          $channel = $match.Matches[0].Groups[1].Value
+
+          rustup toolchain install $channel --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
+          rustup target add "${{ matrix.target }}" --toolchain $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE" }
+          rustup default $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
+
+      - name: Verify toolchain and matrix target (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           rustc --version
           rustup target list --installed | grep -Fx "${{ matrix.target }}"
+
+      - name: Verify toolchain and matrix target (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { throw "rustc failed with exit code $LASTEXITCODE" }
+          $installed = @(rustup target list --installed)
+          if ($LASTEXITCODE -ne 0) { throw "rustup target list failed with exit code $LASTEXITCODE" }
+          if ($installed -notcontains "${{ matrix.target }}") {
+            throw "Required target ${{ matrix.target }} is not installed"
+          }
 
       - name: Cache cargo registry and target
         if: matrix.self_hosted != true
