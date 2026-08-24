@@ -247,7 +247,11 @@ jobs:
       - name: Build release binaries (Windows)
         if: runner.os == 'Windows'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Package (zip)
         if: runner.os == 'Windows'
