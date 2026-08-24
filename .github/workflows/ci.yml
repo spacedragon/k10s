@@ -26,7 +26,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -61,7 +62,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Unit tests (UI and apps)
         run: cargo test --locked -p k10s-ui -p k10s-desktop -p k10s-server-app -p k10s-web --all-targets
@@ -83,7 +85,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -106,7 +109,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Install container and kind prerequisites
         run: |
@@ -184,20 +188,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain-file: rust-toolchain.toml
+          toolchain: 1.97.1
+          components: rustfmt, clippy
 
       - name: Rust version
         run: rustc --version && cargo --version
 
       - name: Install pinned Trunk 0.21.14
         run: |
-          curl -fsSL -o /tmp/trunk.tar.gz \
-            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz
-          curl -fsSL -o /tmp/trunk.sha256 \
-            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz.sha256
-          echo "$(cat /tmp/trunk.sha256)  /tmp/trunk.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/trunk.tar.gz -C "$HOME/.cargo/bin"
-          trunk --version
+          tool_bin="${RUNNER_TOOL_CACHE}/k10s/trunk-0.21.14/bin"
+          mkdir -p "$tool_bin"
+          if [ ! -x "$tool_bin/trunk" ]; then
+            curl -fsSL -o /tmp/trunk.tar.gz \
+              https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz
+            curl -fsSL -o /tmp/trunk.sha256 \
+              https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz.sha256
+            echo "$(cat /tmp/trunk.sha256)  /tmp/trunk.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/trunk.tar.gz -C "$tool_bin"
+          fi
+          echo "$tool_bin" >> "$GITHUB_PATH"
+          "$tool_bin/trunk" --version
 
       - name: Build the wasm distribution
         run: trunk build --release
