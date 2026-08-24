@@ -33,6 +33,8 @@ struct RecordedState {
     /// Per-path submitted bodies in arrival order, so tests can inspect the
     /// exact payloads a client sent.
     bodies: BTreeMap<String, Vec<String>>,
+    /// Full request URIs (including query parameters) in arrival order.
+    uris: BTreeMap<String, Vec<String>>,
 }
 
 /// A recorded Kubernetes API server implemented as a tower Service.
@@ -61,6 +63,7 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
 
     fn call(&mut self, request: Request<kube::client::Body>) -> Self::Future {
         let path = request.uri().path().to_owned();
+        let uri = request.uri().to_string();
         let method_path = format!("{} {path}", request.method());
         let state = self.state.clone();
         Box::pin(async move {
@@ -87,6 +90,7 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                     .entry(path.clone())
                     .or_default()
                     .push(String::from_utf8_lossy(&body).into_owned());
+                shared.uris.entry(path.clone()).or_default().push(uri);
             }
             if hanging {
                 // A stalled connection: the request never completes.
@@ -122,6 +126,7 @@ impl Default for RecordedApiServer {
                 hanging: BTreeSet::new(),
                 hits: BTreeMap::new(),
                 bodies: BTreeMap::new(),
+                uris: BTreeMap::new(),
             })),
         }
     }
@@ -187,6 +192,19 @@ impl RecordedApiServer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .bodies
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Full request URIs for one path, retaining dry-run and validation query
+    /// parameters for exact contract assertions.
+    #[must_use]
+    pub fn request_uris(&self, path: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .uris
             .get(path)
             .cloned()
             .unwrap_or_default()

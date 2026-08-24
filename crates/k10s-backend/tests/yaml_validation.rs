@@ -61,6 +61,9 @@ async fn exact_object_is_dry_run_and_issued_an_opaque_process_local_ticket() {
     let submitted = server.request_bodies(PATH);
     assert_eq!(submitted.len(), 2);
     assert!(submitted[1].contains("\"replicas\":3"));
+    let uris = server.request_uris(PATH);
+    assert!(uris[1].contains("dryRun=All"), "{uris:?}");
+    assert!(uris[1].contains("fieldValidation=Strict"), "{uris:?}");
 }
 
 #[tokio::test]
@@ -103,7 +106,8 @@ async fn parse_schema_identity_and_dry_run_fail_closed_without_secret_echoes() {
         422,
         r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"TOP-SECRET invalid","reason":"Invalid","code":422}"#,
     );
-    let rejected = validate(&kernel, YAML).await.unwrap();
+    let unknown_field = YAML.replace("replicas: 3", "replicas: 3\n  replics: 99");
+    let rejected = validate(&kernel, &unknown_field).await.unwrap();
     let YamlOutcome::Invalid { diagnostics } = rejected else {
         panic!("invalid")
     };

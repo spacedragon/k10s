@@ -76,7 +76,10 @@ impl KubeAdapter {
             ));
         }
 
-        let params = PatchParams::apply("k10s").dry_run();
+        // Kubernetes defaults field validation to Warn, which can silently
+        // drop an unknown field while still accepting the dry-run. Tickets
+        // are authoritative, so fail closed on every unknown/duplicate field.
+        let params = PatchParams::apply("k10s").dry_run().validation_strict();
         if let Err(error) = api
             .patch(&parsed.name, &params, &Patch::Apply(&parsed.object))
             .await
