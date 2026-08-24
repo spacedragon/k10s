@@ -44,7 +44,7 @@ fn render_shell(ui: &mut egui::Ui, fixture: &mut ShellFixture) {
     // after success. These shell-level fixtures treat every guard-clear
     // destination as confirmed, and route guarded ones through the normal
     // blocking path.
-    if let Some(to) = fixture.shell.take_requested_context() {
+    if let Some((to, _origin)) = fixture.shell.take_requested_context() {
         if fixture
             .shell
             .workspace()
