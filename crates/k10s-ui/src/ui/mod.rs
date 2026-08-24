@@ -138,9 +138,21 @@ where
         &mut self.streams
     }
 
+    /// Read the connected stream stores for semantic adapters and tests.
+    #[must_use]
+    pub fn stream_stores(&self) -> &tools::StreamStores {
+        &self.streams
+    }
+
     /// Mutable access to the open operation dialogs.
     pub fn dialogs_mut(&mut self) -> &mut dialogs::OperationDialogs {
         &mut self.dialogs
+    }
+
+    /// Read operation dialogs without changing submission state.
+    #[must_use]
+    pub fn dialogs(&self) -> &dialogs::OperationDialogs {
+        &self.dialogs
     }
 
     /// Drain every queued operation dialog action.

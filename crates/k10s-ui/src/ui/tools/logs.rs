@@ -287,6 +287,12 @@ impl LogsViews {
         self.views.get_mut(&window)
     }
 
+    /// Read one window's log viewer without mutating its stream state.
+    #[must_use]
+    pub fn get(&self, window: WindowId) -> Option<&LogsTool> {
+        self.views.get(&window)
+    }
+
     /// Queue one protocol action produced during rendering.
     pub fn queue(&mut self, window: WindowId, action: LogsAction) {
         self.actions.push((window, action));
