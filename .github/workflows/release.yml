@@ -65,31 +65,82 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: verify-version
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: '"ubuntu-latest"'
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
+          - runner: '["self-hosted", "Windows", "X64"]'
             target: x86_64-pc-windows-msvc
+            self_hosted: true
           # macOS 13 (Intel) runners are deprecated, so both macOS
           # targets are produced from the arm64 runner by cross-compiling
           # the x86_64 target with the same Apple SDK.
-          - os: macos-14
+          - runner: '"macos-14"'
             target: aarch64-apple-darwin
-          - os: macos-14
+          - runner: '"macos-14"'
             target: x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - name: Configure Windows Git transport
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: git config --global http.version HTTP/1.1
+
+      - name: Checkout source (hosted runners)
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+
+      # This runner's route to github.com occasionally resets connections.
+      # Each checkout action already retries three times; allow two complete
+      # attempts before failing the release job.
+      - name: Checkout source (Windows, first attempt)
+        id: windows_checkout_1
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Checkout source (Windows, retry)
+        if: runner.os == 'Windows' && steps.windows_checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
+
+      - name: Configure persistent Cargo build cache
+        if: matrix.self_hosted == true
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $now = [DateTime]::UtcNow
+          $calendar = [System.Globalization.CultureInfo]::InvariantCulture.Calendar
+          $week = $calendar.GetWeekOfYear(
+            $now,
+            [System.Globalization.CalendarWeekRule]::FirstFourDayWeek,
+            [DayOfWeek]::Monday
+          )
+          $weekYear = $now.Year
+          if ($now.Month -eq 1 -and $week -ge 52) { $weekYear-- }
+          if ($now.Month -eq 12 -and $week -eq 1) { $weekYear++ }
+          $generation = "{0:D4}-W{1:D2}" -f $weekYear, $week
+          $cacheRoot = Join-Path "${{ runner.tool_cache }}" "k10s\cargo-target-weekly"
+          $targetDir = Join-Path $cacheRoot $generation
+          New-Item -ItemType Directory -Force $targetDir | Out-Null
+
+          # Retain only the current and previous weekly generations.
+          Get-ChildItem -Path $cacheRoot -Directory |
+            Where-Object { $_.Name -match '^\d{4}-W\d{2}$' } |
+            Sort-Object Name -Descending |
+            Select-Object -Skip 2 |
+            Remove-Item -Recurse -Force
+
+          "CARGO_TARGET_DIR=$targetDir" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # The repository pins Rust via rust-toolchain.toml. Install the pinned
       # channel explicitly and add the matrix target to THAT channel —
       # dtolnay/rust-toolchain has no toolchain-file input and would install
       # the target for stable instead, so the pinned 1.97.1 cross-builds
       # would fail with "target not installed".
-      - name: Install pinned Rust toolchain and matrix target
+      - name: Install pinned Rust toolchain and matrix target (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
@@ -97,13 +148,87 @@ jobs:
           rustup target add "${{ matrix.target }}" --toolchain "${CHANNEL}"
           rustup default "${CHANNEL}"
 
-      - name: Verify toolchain and matrix target
+      - name: Install pinned Rust toolchain and matrix target (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$'
+          if (-not $match) { throw 'Unable to read channel from rust-toolchain.toml' }
+          $channel = $match.Matches[0].Groups[1].Value
+
+          $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+          $rustup = Join-Path $cargoBin "rustup.exe"
+          if (-not (Test-Path $rustup)) {
+            $installer = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe" `
+              -OutFile $installer
+            & $installer -y --profile minimal --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed with exit code $LASTEXITCODE" }
+          }
+          $env:PATH = "$cargoBin;$env:PATH"
+          $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          & $rustup toolchain install $channel --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
+          & $rustup target add "${{ matrix.target }}" --toolchain $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE" }
+          & $rustup default $channel
+          if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
+
+      - name: Verify toolchain and matrix target (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           rustc --version
           rustup target list --installed | grep -Fx "${{ matrix.target }}"
 
+      - name: Verify toolchain and matrix target (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { throw "rustc failed with exit code $LASTEXITCODE" }
+          $installed = @(rustup target list --installed)
+          if ($LASTEXITCODE -ne 0) { throw "rustup target list failed with exit code $LASTEXITCODE" }
+          if ($installed -notcontains "${{ matrix.target }}") {
+            throw "Required target ${{ matrix.target }} is not installed"
+          }
+
+      - name: Initialize MSVC build environment
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw 'Visual Studio Build Tools are required, but vswhere.exe was not found'
+          }
+          $installationPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $installationPath) {
+            throw 'Install Visual Studio Build Tools with the MSVC x64/x86 C++ component'
+          }
+          $devCmd = Join-Path $installationPath "Common7\Tools\VsDevCmd.bat"
+          $configured = cmd.exe /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          if ($LASTEXITCODE -ne 0) { throw "VsDevCmd failed with exit code $LASTEXITCODE" }
+
+          $names = @(
+            'INCLUDE', 'LIB', 'LIBPATH', 'PATH', 'UniversalCRTSdkDir',
+            'UCRTVersion', 'VCINSTALLDIR', 'VCToolsInstallDir',
+            'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion'
+          )
+          foreach ($name in $names) {
+            $line = $configured | Where-Object { $_ -like "$name=*" } | Select-Object -Last 1
+            if ($line) {
+              $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+
       - name: Cache cargo registry and target
+        if: matrix.self_hosted != true
         uses: actions/cache@v4
         with:
           path: |
@@ -115,15 +240,26 @@ jobs:
           restore-keys: |
             release-${{ matrix.target }}-
 
-      - name: Build release binaries
+      - name: Build release binaries (Unix)
+        if: runner.os != 'Windows'
         run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+
+      - name: Build release binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Package (zip)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/${{ matrix.target }}/release/k10s-desktop.exe, target/${{ matrix.target }}/release/k10s-server.exe `
+          $releaseDir = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}\release"
+          Compress-Archive -Path (Join-Path $releaseDir "k10s-desktop.exe"), (Join-Path $releaseDir "k10s-server.exe") `
             -DestinationPath dist/k10s-${{ matrix.target }}.zip
 
       - name: Package (tar.gz)
@@ -131,7 +267,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -czf dist/k10s-${{ matrix.target }}.tar.gz \
-            -C target/${{ matrix.target }}/release k10s-desktop k10s-server
+            -C "${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release" k10s-desktop k10s-server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
