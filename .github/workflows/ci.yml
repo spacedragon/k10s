@@ -125,7 +125,7 @@ jobs:
               "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64"
             curl -fsSLo /tmp/kind.sha256 \
               "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64.sha256sum"
-            (cd "$tool_bin" && sha256sum -c /tmp/kind.sha256)
+            echo "$(cut -d ' ' -f 1 /tmp/kind.sha256)  $tool_bin/kind" | sha256sum -c -
             chmod +x "$tool_bin/kind"
           fi
           if [ ! -x "$tool_bin/kubectl" ]; then
