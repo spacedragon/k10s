@@ -441,6 +441,7 @@ fn pod_detail_disconnected_logs() {
         context: CONTEXT.to_owned(),
         namespace: "default".to_owned(),
         pod: "db-postgres-0".to_owned(),
+        uid: format!("uid-{CONTEXT}-pod-default-db-postgres-0"),
         container: "app".to_owned(),
     };
     {

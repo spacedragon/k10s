@@ -26,7 +26,12 @@ async fn stream_tickets_validate_targets_and_issue_single_use_grants() {
                 context: "dev-local".into(),
                 namespace: "default".into(),
                 pod: "no-such-pod".into(),
+                uid: String::new(),
                 container: "app".into(),
+                tail_lines: Some(200),
+                since_seconds: None,
+                timestamps: true,
+                follow: true,
             },
         })
         .await
@@ -40,7 +45,12 @@ async fn stream_tickets_validate_targets_and_issue_single_use_grants() {
                 context: "dev-local".into(),
                 namespace: "default".into(),
                 pod: "web-frontend-7d9f8-00001".into(),
+                uid: String::new(),
                 container: "app".into(),
+                tail_lines: Some(200),
+                since_seconds: None,
+                timestamps: true,
+                follow: true,
             },
         })
         .await

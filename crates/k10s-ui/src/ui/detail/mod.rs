@@ -241,6 +241,7 @@ where
             .clone()
             .unwrap_or_else(|| "default".to_owned()),
         pod: identity.name.clone(),
+        uid: identity.uid.clone(),
         container: DEFAULT_CONTAINER.to_owned(),
     })
 }

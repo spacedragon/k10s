@@ -1182,7 +1182,7 @@ impl KubernetesAccess for FakeKubernetes {
                         },
                     ))
                 }
-                Query::StreamTicket { stream } => {
+                Query::StreamTicket { mut stream } => {
                     let mut state = self.lock();
                     let (context, namespace, pod, container) = match &stream {
                         crate::port::StreamKind::Logs {
@@ -1190,6 +1190,7 @@ impl KubernetesAccess for FakeKubernetes {
                             namespace,
                             pod,
                             container,
+                            ..
                         } => (context, namespace, pod, container),
                         crate::port::StreamKind::Exec {
                             context,
@@ -1208,16 +1209,17 @@ impl KubernetesAccess for FakeKubernetes {
                     }
                     // The pod must exist with its stable identity.
                     let pod_gvk = Gvk::core("v1", "Pod");
-                    let exists = state.records.iter().any(|record| {
+                    let observed_uid = state.records.iter().find_map(|record| {
                         let reference = &record.reference;
-                        reference.context == context.as_str()
+                        (reference.context == context.as_str()
                             && reference.gvk == pod_gvk
                             && reference.namespace.as_deref() == Some(namespace.as_str())
-                            && reference.name == pod.as_str()
+                            && reference.name == pod.as_str())
+                        .then(|| reference.uid.clone())
                     });
-                    if !exists {
+                    let Some(observed_uid) = observed_uid else {
                         return Err(BackendError::NotFound);
-                    }
+                    };
                     // Container fixtures: every pod runs the `app` container;
                     // `distroless` exists too (so its logs remain readable)
                     // but carries no executable binary, making exec fail.
@@ -1234,6 +1236,15 @@ impl KubernetesAccess for FakeKubernetes {
                             }
                         }
                         _ => return Err(BackendError::NotFound),
+                    }
+                    match &mut stream {
+                        crate::port::StreamKind::Logs { uid, .. }
+                        | crate::port::StreamKind::Exec { uid, .. } => {
+                            if !uid.is_empty() && *uid != observed_uid {
+                                return Err(BackendError::Conflict("the pod was replaced".into()));
+                            }
+                            *uid = observed_uid;
+                        }
                     }
                     let revision = state.current_revision();
                     let ticket_id = state.streams.issue_ticket(stream.clone(), revision)?;

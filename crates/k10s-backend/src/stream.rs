@@ -329,16 +329,19 @@ impl StreamTicketResult {
     /// Map a backend-owned grant into the protocol-facing response.
     #[must_use]
     pub fn new(grant: crate::port::StreamGrant) -> Self {
-        let (context, namespace, pod, container, stream_type, tty) = match &grant.stream {
+        let (context, namespace, pod, uid, container, stream_type, tty) = match &grant.stream {
             StreamKind::Logs {
                 context,
                 namespace,
                 pod,
+                uid,
                 container,
+                ..
             } => (
                 context.clone(),
                 namespace.clone(),
                 pod.clone(),
+                uid.clone(),
                 container.clone(),
                 k10s_protocol::StreamType::Logs,
                 false,
@@ -347,12 +350,15 @@ impl StreamTicketResult {
                 context,
                 namespace,
                 pod,
+                uid,
                 container,
                 tty,
+                ..
             } => (
                 context.clone(),
                 namespace.clone(),
                 pod.clone(),
+                uid.clone(),
                 container.clone(),
                 k10s_protocol::StreamType::Exec,
                 *tty,
@@ -365,6 +371,7 @@ impl StreamTicketResult {
                     context,
                     namespace,
                     pod,
+                    uid,
                     container,
                 },
                 stream_type,

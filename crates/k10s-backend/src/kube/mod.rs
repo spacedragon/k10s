@@ -10,6 +10,7 @@ mod config;
 mod create;
 mod discovery;
 mod events;
+mod logs;
 mod metrics;
 mod mutate;
 mod normalize;
@@ -95,6 +96,8 @@ pub struct KubeAdapter {
     /// Process-local validation authority. Restarting the adapter drops every
     /// issued ticket, and the store itself enforces TTL and capacity bounds.
     validation_tickets: StdMutex<crate::validation::ticket::TicketStore>,
+    /// Bounded single-use authority for real Kubernetes log streams.
+    log_tickets: logs::LogTickets,
     /// Test-only scripted watch sources overriding the real kube-rs path.
     #[cfg(feature = "testkit")]
     watch_scripts: ScriptedWatches,
@@ -137,6 +140,7 @@ impl KubeAdapter {
             switch_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
+            log_tickets: logs::LogTickets::new(),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -186,6 +190,7 @@ impl KubeAdapter {
             switch_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
+            log_tickets: logs::LogTickets::new(),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -281,7 +286,7 @@ impl KubernetesAccess for KubeAdapter {
                 // Cluster-facing capabilities arrive with later Plan 3 tasks;
                 // until then they are typed, not guessed.
                 Query::ValidateApply { context, yaml } => self.validate_apply(context, yaml).await,
-                Query::StreamTicket { .. } => Err(BackendError::unsupported("stream.ticket")),
+                Query::StreamTicket { stream } => self.issue_stream_ticket(stream).await,
                 Query::ResourceList {
                     context,
                     gvk,
@@ -324,7 +329,9 @@ impl KubernetesAccess for KubeAdapter {
                 Subscribe::Infrastructure { .. } => {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
-                Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
+                Subscribe::StreamRedeem { ticket_id, route } => {
+                    self.redeem_stream_ticket(ticket_id, route).await
+                }
                 Subscribe::Operations => Ok(SubscriptionHandle::with_events(
                     "operations",
                     self.operations.subscribe(),

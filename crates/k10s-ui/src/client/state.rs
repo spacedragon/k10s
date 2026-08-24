@@ -548,6 +548,10 @@ impl PendingAction {
                 target: target.clone(),
                 stream_type: *stream_type,
                 tty: *tty,
+                tail_lines: (*stream_type == k10s_protocol::StreamType::Logs).then_some(200),
+                since_seconds: None,
+                timestamps: *stream_type == k10s_protocol::StreamType::Logs,
+                follow: *stream_type == k10s_protocol::StreamType::Logs,
             }),
             Self::Query(Query::OperationStatus(ids)) => encode(OperationStatusRequest {
                 operation_ids: ids.clone(),

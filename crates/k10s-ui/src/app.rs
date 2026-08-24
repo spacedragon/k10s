@@ -1061,6 +1061,7 @@ impl K10sApp {
                 .clone()
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
+            uid: identity.uid.clone(),
             container: "app".to_owned(),
         })
     }
@@ -2384,6 +2385,7 @@ mod stream_lifecycle_tests {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: pod_name.into(),
+            uid: format!("uid-{pod_name}"),
             container: "app".into(),
         }
     }
