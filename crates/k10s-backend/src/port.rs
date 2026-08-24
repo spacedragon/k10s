@@ -335,6 +335,10 @@ pub struct ResourceRecord {
     pub owner_references: Vec<OwnerRef>,
     /// Deterministic events observed for this object.
     pub events: Vec<RecordEvent>,
+    /// Authoritative YAML of the fetched object, rendered by the adapter and
+    /// bound to its UID/resourceVersion. Empty for watch rows; detail reads
+    /// always carry it so guarded edits can detect drift.
+    pub manifest: String,
 }
 
 /// A reference from a child object to its owner.

@@ -419,7 +419,13 @@ impl ResourceDetailResult {
     #[must_use]
     pub fn new(record: ResourceRecord, related: RelatedData) -> Self {
         let identity = map_identity(&record.reference);
-        let manifest = crate::operation::manifest_for(&record);
+        // Adapters that fetched the real object render its YAML themselves,
+        // bound to UID/resourceVersion; others keep the synthesized header.
+        let manifest = if record.manifest.is_empty() {
+            crate::operation::manifest_for(&record)
+        } else {
+            record.manifest.clone()
+        };
         let mut sections = vec![DetailSection {
             title: "Overview".into(),
             rows: vec![

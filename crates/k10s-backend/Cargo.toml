@@ -19,6 +19,8 @@ futures-util = "0.3.34"
 kube = { version = "4.2", default-features = false, features = ["config", "client", "rustls-tls", "ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# YAML rendering of fetched objects for detail manifests.
+serde_yaml = "0.9"
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "time"] }
 # Cancellation tokens for supervised watch tasks.
 tokio-util = { version = "0.7.19", features = ["rt"] }
