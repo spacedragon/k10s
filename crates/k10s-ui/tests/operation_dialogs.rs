@@ -333,6 +333,36 @@ fn every_mutation_command_travels_with_an_exact_scope_identity_and_idempotency_k
         QueryResult::Applied(_)
     ));
 
+    let mut cron = deployment("nightly");
+    cron.gvk = k10s_protocol::GroupVersionKind {
+        group: "batch".into(),
+        version: "v1".into(),
+        kind: "CronJob".into(),
+    };
+    let _create = client
+        .begin_command(Command::CreateJob {
+            source: cron.clone(),
+            idempotency_key: "idem-run-now".into(),
+        })
+        .unwrap();
+    let (_, kind, payload, idem) = encoded_request(&mut client);
+    assert_eq!(kind, "job.create");
+    assert_eq!(idem.as_deref(), Some("idem-run-now"));
+    assert_eq!(payload["source"]["uid"], cron.uid);
+
+    let _suspend = client
+        .begin_command(Command::SetCronJobSuspended {
+            target: cron.clone(),
+            suspended: true,
+            idempotency_key: "idem-suspend".into(),
+        })
+        .unwrap();
+    let (_, kind, payload, idem) = encoded_request(&mut client);
+    assert_eq!(kind, "cronjob.suspend");
+    assert_eq!(idem.as_deref(), Some("idem-suspend"));
+    assert_eq!(payload["identity"]["uid"], cron.uid);
+    assert_eq!(payload["suspended"], true);
+
     assert_eq!(
         client
             .submitted_operation("idem-scale-1")

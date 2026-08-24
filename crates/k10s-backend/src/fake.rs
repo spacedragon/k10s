@@ -946,6 +946,93 @@ impl FakeKubernetes {
         Ok(Self::begin_operation(&mut state, &idempotency_key))
     }
 
+    async fn create_job(
+        &self,
+        source: ResourceRef,
+        idempotency_key: String,
+    ) -> Result<OperationId, BackendError> {
+        if !matches!(source.gvk.kind.as_str(), "Job" | "CronJob") {
+            return Err(BackendError::unsupported("job.create"));
+        }
+        if let Some(existing) = self.lock().idempotency.get(&idempotency_key).cloned() {
+            return Ok(OperationId::new(existing));
+        }
+        let mut state = self.lock();
+        if source.context == READONLY_CONTEXT {
+            return Err(BackendError::Forbidden);
+        }
+        let Some(record) = state.find_by_name(
+            &source.context,
+            &source.gvk,
+            source.namespace.as_deref(),
+            &source.name,
+        ) else {
+            return Err(BackendError::NotFound);
+        };
+        if record.reference.uid != source.uid {
+            return Err(BackendError::Conflict("the source was recreated".into()));
+        }
+        let operation = Self::begin_operation(&mut state, &idempotency_key);
+        let revision = state.advance_revision();
+        let name = format!("{}-run-{}", source.name, revision);
+        let reference = ResourceRef {
+            context: source.context.clone(),
+            gvk: Gvk::new("batch", "v1", "Job"),
+            namespace: source.namespace.clone(),
+            uid: uid(&source.context, "Job", source.namespace.as_deref(), &name),
+            name,
+        };
+        let created = ResourceRecord {
+            reference: reference.clone(),
+            revision,
+            labels: BTreeMap::new(),
+            summary: "Running".into(),
+            created_at: rfc3339(FAKE_EPOCH_SECS),
+            owner_references: Vec::new(),
+            events: Vec::new(),
+            manifest: String::new(),
+        };
+        state.records.push(created.clone());
+        state.notify_matching(&reference, crate::port::BackendEvent::Changed(created));
+        Ok(operation)
+    }
+
+    async fn set_cronjob_suspended(
+        &self,
+        target: ResourceRef,
+        suspended: bool,
+        key: String,
+    ) -> Result<OperationId, BackendError> {
+        if target.gvk != Gvk::new("batch", "v1", "CronJob") {
+            return Err(BackendError::unsupported("cronjob.suspend"));
+        }
+        if let Some(existing) = self.lock().idempotency.get(&key).cloned() {
+            return Ok(OperationId::new(existing));
+        }
+        let mut state = self.lock();
+        if target.context == READONLY_CONTEXT {
+            return Err(BackendError::Forbidden);
+        }
+        let Some(index) = state.find_index(
+            &target.context,
+            &target.gvk,
+            target.namespace.as_deref(),
+            &target.name,
+        ) else {
+            return Err(BackendError::NotFound);
+        };
+        if state.records[index].reference.uid != target.uid {
+            return Err(BackendError::Conflict("the target was recreated".into()));
+        }
+        let operation = Self::begin_operation(&mut state, &key);
+        let revision = state.advance_revision();
+        state.records[index].revision = revision;
+        state.records[index].summary = if suspended { "Suspended" } else { "Running" }.into();
+        let changed = state.records[index].clone();
+        state.notify_matching(&target, crate::port::BackendEvent::Changed(changed));
+        Ok(operation)
+    }
+
     /// Number of registered watchers; test-only observability for pruning.
     #[cfg(test)]
     fn watcher_count(&self) -> usize {
@@ -1246,6 +1333,7 @@ impl KubernetesAccess for FakeKubernetes {
                             // The fake world's watches always attach.
                             supports_watch: true,
                             supports_patch: true,
+                            supports_create: true,
                             supports_delete: true,
                             gvk,
                             namespaced,
@@ -1385,6 +1473,18 @@ impl KubernetesAccess for FakeKubernetes {
                     target,
                     idempotency_key,
                 } => self.restart(target, idempotency_key).await,
+                Command::CreateJob {
+                    source,
+                    idempotency_key,
+                } => self.create_job(source, idempotency_key).await,
+                Command::SetCronJobSuspended {
+                    target,
+                    suspended,
+                    idempotency_key,
+                } => {
+                    self.set_cronjob_suspended(target, suspended, idempotency_key)
+                        .await
+                }
             }
         })
     }

@@ -12,14 +12,14 @@ use k10s_backend::{
     Subscribe as BackendSubscribe,
 };
 use k10s_protocol::{
-    ClientKind, ClientPayload, ContextPermissionsRequest, ContextSwitchRequest, DeletePropagation,
-    DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, InfrastructureRequest, OperationAccepted,
-    OperationId, OperationStatusRequest, OperationUpdate, REQUEST_CONTEXT_PERMISSIONS,
-    REQUEST_CONTEXT_SWITCH, RequestId, ResourceIdentity, ResourceListRequest, ResourceRefRequest,
-    ResourceTypesRequest, RestartRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame,
-    ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
-    SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest,
-    decode_client_frame,
+    ClientKind, ClientPayload, ContextPermissionsRequest, ContextSwitchRequest, CreateJobRequest,
+    CronJobSuspendRequest, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
+    InfrastructureRequest, OperationAccepted, OperationId, OperationStatusRequest, OperationUpdate,
+    REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH, RequestId, ResourceIdentity,
+    ResourceListRequest, ResourceRefRequest, ResourceTypesRequest, RestartRequest, ResumeStatus,
+    Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin,
+    SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome,
+    YamlApplyRequest, YamlValidateRequest, decode_client_frame,
 };
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -1130,6 +1130,35 @@ fn parse_request(
                     }))
                 })
                 .map_err(|error| format!("invalid workload.restart payload: {error}"))
+        }
+        k10s_protocol::REQUEST_JOB_CREATE => {
+            let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
+                return Err("job.create requires a non-empty envelope-level idempotencyKey".into());
+            };
+            serde_json::from_value::<CreateJobRequest>(payload.clone())
+                .map(|request| {
+                    Some(ParsedRequest::Execute(Command::CreateJob {
+                        source: backend_reference(request.source),
+                        idempotency_key,
+                    }))
+                })
+                .map_err(|error| format!("invalid job.create payload: {error}"))
+        }
+        k10s_protocol::REQUEST_CRONJOB_SUSPEND => {
+            let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
+                return Err(
+                    "cronjob.suspend requires a non-empty envelope-level idempotencyKey".into(),
+                );
+            };
+            serde_json::from_value::<CronJobSuspendRequest>(payload.clone())
+                .map(|request| {
+                    Some(ParsedRequest::Execute(Command::SetCronJobSuspended {
+                        target: backend_reference(request.identity),
+                        suspended: request.suspended,
+                        idempotency_key,
+                    }))
+                })
+                .map_err(|error| format!("invalid cronjob.suspend payload: {error}"))
         }
         k10s_protocol::REQUEST_OPERATION_STATUS => {
             serde_json::from_value::<OperationStatusRequest>(payload.clone())

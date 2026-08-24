@@ -84,6 +84,18 @@ impl KubeAdapter {
                         .map(|_| ())
                 })
             }
+            Command::CreateJob {
+                source,
+                idempotency_key,
+            } => self.create_job(source, idempotency_key).await,
+            Command::SetCronJobSuspended {
+                target,
+                suspended,
+                idempotency_key,
+            } => {
+                self.set_cronjob_suspended(target, suspended, idempotency_key)
+                    .await
+            }
             Command::Delete {
                 target,
                 propagation,
@@ -176,7 +188,7 @@ impl KubeAdapter {
         }
     }
 
-    async fn mutation_target(
+    pub(super) async fn mutation_target(
         &self,
         target: &ResourceRef,
     ) -> Result<
@@ -215,7 +227,7 @@ impl KubeAdapter {
             .inspect(id)
     }
 
-    fn spawn_mutation<F>(
+    pub(super) fn spawn_mutation<F>(
         &self,
         key: String,
         fingerprint: String,
