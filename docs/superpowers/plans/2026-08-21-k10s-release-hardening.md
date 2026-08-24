@@ -1,5 +1,9 @@
 # k10s Release Hardening Implementation Plan
 
+**Status:** implementation complete; final release gates are enforced by CI
+and the Release workflow. Task checkboxes below preserve the original build
+plan; merged issue/PR history is the execution record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prove the complete k10s system is bounded, resumable, secure in its single-user model, performant at the approved capacity, and distributable on macOS, Linux, Windows, and web.

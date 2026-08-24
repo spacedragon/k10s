@@ -2,17 +2,16 @@
 
 A local Kubernetes control-plane client with a Rust workspace foundation: a
 protocol crate shared by native and web frontends, a fake-backed backend
-kernel, and an embeddable Axum control server. The current milestone is the
-**connected UI prototype** — resource windows, details, guarded YAML, logs,
-shell tools, operation dialogs, resilient states, accessibility coverage, and
-capacity baselines over the real control protocol.
+kernel, and an embeddable Axum control server. The release candidate includes
+real kubeconfig-backed reads and operations, guarded YAML, logs, exec, bounded
+recovery, browser/native frontends, load budgets, and native/server packages.
 
 ## Scope
 
-Everything is **fake-backed** today: `BackendKernel` serves deterministic fake
-Kubernetes data (`FakeKubernetes`) over the loopback control WebSocket. No real
-cluster access, no credentials, and no mutation operations exist yet; all UI
-states are reproducible deterministically without cluster infrastructure.
+Normal desktop and standalone launches use the real Kubernetes adapter and
+standard kubeconfig discovery. Deterministic fake mode remains available only
+through the explicit standalone `--fake` development/test flag; a missing or
+invalid kubeconfig never silently changes backend.
 
 ## Workspace layout
 
@@ -46,6 +45,10 @@ Standalone server environment:
 
 The server logs structured, credential-free telemetry to stderr at `info`
 level. `SIGINT`/`SIGTERM` trigger the ordered drain described below.
+
+Operator references: [configuration](docs/configuration.md),
+[deployment](docs/deployment.md), [security](docs/security.md),
+[troubleshooting](docs/troubleshooting.md), and [protocol](docs/protocol.md).
 
 ## Security model
 

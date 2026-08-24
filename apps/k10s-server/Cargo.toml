@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "packaging_server"
 path = "../../packaging/smoke/server.rs"
 
+[[test]]
+name = "documentation_acceptance"
+path = "../../tests/documentation_acceptance.rs"
+
 [dependencies]
 k10s-backend = { path = "../../crates/k10s-backend" }
 k10s-server = { path = "../../crates/k10s-server" }
