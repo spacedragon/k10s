@@ -334,6 +334,17 @@ fn free_port() -> u16 {
 #[ignore = "requires tests/kind/cluster.sh up"]
 async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     let _guard = KIND_LOCK.lock().await;
+    // The outcome-unknown test may have just changed replica count. Wait for
+    // the controller's status writes to settle before binding an exact
+    // resourceVersion into the guarded apply document.
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "rollout",
+        "status",
+        "deployment/operations-web",
+        "--timeout=60s",
+    ]);
     let adapter = adapter();
     let deployment = reference(
         &adapter,
@@ -341,7 +352,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "operations-web",
     )
     .await;
-    let resource_version = kubectl(&[
+    let mut resource_version = kubectl(&[
         "-n",
         NAMESPACE,
         "get",
@@ -349,6 +360,21 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "-o",
         "jsonpath={.metadata.resourceVersion}",
     ]);
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let observed = kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "deployment/operations-web",
+            "-o",
+            "jsonpath={.metadata.resourceVersion}",
+        ]);
+        if observed == resource_version {
+            break;
+        }
+        resource_version = observed;
+    }
     let replicas: u32 = kubectl(&[
         "-n",
         NAMESPACE,
