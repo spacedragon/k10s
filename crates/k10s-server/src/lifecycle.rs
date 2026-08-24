@@ -29,6 +29,7 @@ use crate::{
     config::ServerConfig,
     control::serve_socket,
     probes::{Readiness, ReadinessState, health, ready},
+    resume::{ResumeState, ResumeStore},
 };
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,7 @@ pub(crate) struct AppState {
     admission: Arc<Admission>,
     readiness: Arc<Readiness>,
     gate: Arc<MutationGate>,
+    resume: ResumeStore,
 }
 
 /// Registry of spawned connection tasks giving shutdown hard-abort ownership.
@@ -586,6 +588,11 @@ pub fn router(
     signals: DrainSignals,
     dist_dir: Option<PathBuf>,
 ) -> Router {
+    let resume = Arc::new(Mutex::new(ResumeState::new(
+        config.resume_max_journal_entries,
+        config.resume_max_sessions,
+        config.resume_entry_max_age,
+    )));
     let state = AppState {
         unauthenticated: Arc::new(Semaphore::new(config.max_unauthenticated_connections)),
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
@@ -598,6 +605,7 @@ pub fn router(
         admission,
         readiness,
         gate,
+        resume,
     };
     let mut app = Router::new()
         .route("/healthz", get(health))
@@ -737,6 +745,7 @@ async fn control_upgrade(
     let gate = state.gate.clone();
     let connections = state.connections.clone();
     let tasks = state.tasks.clone();
+    let resume = state.resume.clone();
     Ok(ws
         .max_frame_size(config.max_frame_size)
         .max_message_size(config.max_message_size)
@@ -757,6 +766,7 @@ async fn control_upgrade(
                     gate,
                     signals,
                     tasks_for_session,
+                    resume,
                 )
                 .await;
             });

@@ -152,6 +152,12 @@ pub struct ServerConfig {
     pub stream_rate_budget_bytes_per_sec: usize,
     /// Maximum concurrent dedicated stream sockets.
     pub max_stream_connections: usize,
+    /// Maximum journaled frames retained per control session for resume replay.
+    pub resume_max_journal_entries: usize,
+    /// Maximum retained control sessions, including disconnected resumable sessions.
+    pub resume_max_sessions: usize,
+    /// Maximum age of a journaled frame before it is no longer replayable.
+    pub resume_entry_max_age: Duration,
 }
 
 impl Default for ServerConfig {
@@ -174,6 +180,9 @@ impl Default for ServerConfig {
             stream_hello_timeout: Duration::from_secs(5),
             stream_rate_budget_bytes_per_sec: 512 << 10,
             max_stream_connections: 64,
+            resume_max_journal_entries: 1_024,
+            resume_max_sessions: 256,
+            resume_entry_max_age: Duration::from_secs(30),
         }
     }
 }
@@ -209,6 +218,12 @@ impl std::fmt::Debug for ServerConfig {
                 &self.stream_rate_budget_bytes_per_sec,
             )
             .field("max_stream_connections", &self.max_stream_connections)
+            .field(
+                "resume_max_journal_entries",
+                &self.resume_max_journal_entries,
+            )
+            .field("resume_max_sessions", &self.resume_max_sessions)
+            .field("resume_entry_max_age", &self.resume_entry_max_age)
             .finish()
     }
 }

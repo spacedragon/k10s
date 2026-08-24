@@ -9,6 +9,7 @@ mod logs;
 mod origin;
 mod outbound;
 mod probes;
+mod resume;
 mod streams;
 
 pub use config::{
