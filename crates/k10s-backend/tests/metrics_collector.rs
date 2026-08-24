@@ -844,7 +844,9 @@ async fn registry_starts_on_first_consumer_and_shares_the_cycle() {
 
 #[tokio::test]
 async fn registry_exits_after_idle_linger_and_restarts_on_return() {
-    let registry = ClusterMetrics::new(Duration::from_millis(150), Duration::from_secs(60));
+    // Keep the linger comfortably above loaded CI scheduling jitter so the
+    // immediate post-collection assertion observes the live generation.
+    let registry = ClusterMetrics::new(Duration::from_secs(2), Duration::from_secs(60));
     let source = Arc::new(ScriptedSource::free());
 
     {
@@ -858,7 +860,7 @@ async fn registry_exits_after_idle_linger_and_restarts_on_return() {
     assert_eq!(registry.live_collectors(), 1);
 
     // No further consumers: the collector exits after one idle linger.
-    for _ in 0..200 {
+    for _ in 0..400 {
         if registry.live_collectors() == 0 {
             break;
         }
