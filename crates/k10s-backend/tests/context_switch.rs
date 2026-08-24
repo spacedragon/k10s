@@ -167,6 +167,15 @@ fn status_error(code: u16, message: &str) -> String {
     )
 }
 
+/// The recorded /apis group list with the CRD-backed group removed, so live
+/// discovery observes a surface the warm cache predates.
+const APIS_GROUP_LIST_WITHOUT_CRD_GROUP: &str = r#"{"kind":"APIGroupList","apiVersion":"v1","groups":[
+  {"name":"apps","versions":[{"groupVersion":"apps/v1","version":"v1"}],"preferredVersion":{"groupVersion":"apps/v1","version":"v1"}},
+  {"name":"batch","versions":[{"groupVersion":"batch/v1","version":"v1"}],"preferredVersion":{"groupVersion":"batch/v1","version":"v1"}},
+  {"name":"apiextensions.k8s.io","versions":[{"groupVersion":"apiextensions.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"apiextensions.k8s.io/v1","version":"v1"}},
+  {"name":"storage.k8s.io","versions":[{"groupVersion":"storage.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"storage.k8s.io/v1","version":"v1"}}
+]}"#;
+
 fn empty_pod_list() -> String {
     r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"41"},"items":[]}"#.into()
 }
@@ -878,6 +887,64 @@ async fn switch_validation_always_contacts_the_destination_even_with_a_fresh_cac
     );
     // The healthy current context survives the aborted switch untouched.
     assert_eq!(current_context(&world.kernel).await, CONTEXT_A);
+}
+
+#[tokio::test]
+async fn a_successful_switch_publishes_the_freshly_observed_destination_catalog() {
+    async fn resource_types_wire(kernel: &BackendKernel, context: &str) -> serde_json::Value {
+        match kernel
+            .query(Query::ResourceTypes {
+                context: context.to_owned(),
+            })
+            .await
+            .expect("destination discovery works")
+        {
+            KernelQueryResult::ResourceTypes(types) => {
+                serde_json::to_value(types.wire_payload()).expect("types payload serializes")
+            }
+            other => panic!("types must map to their result, got {other:?}"),
+        }
+    }
+
+    fn carries_crd_group(payload: &serde_json::Value) -> bool {
+        payload["types"]
+            .as_array()
+            .expect("types are an array")
+            .iter()
+            .any(|entry| entry["gvk"]["group"] == "k10s.example.com")
+    }
+
+    let server_a = RecordedApiServer::standard();
+    let server_b = RecordedApiServer::standard();
+    server_a.set_response(PODS_LIST_PATH, 200, &empty_pod_list());
+    let world = world(server_a.clone(), server_b.clone());
+
+    // Warm B's catalog while its CRD group still exists.
+    let warm = resource_types_wire(&world.kernel, CONTEXT_B).await;
+    assert!(
+        carries_crd_group(&warm),
+        "the warm cache carries the CRD group's Gadget type"
+    );
+
+    // B loses its CRD group without the warm catalog expiring.
+    server_b.set_response(APIS_PATH, 200, APIS_GROUP_LIST_WITHOUT_CRD_GROUP);
+
+    world
+        .kernel
+        .query(Query::ContextSwitch {
+            to: CONTEXT_B.into(),
+        })
+        .await
+        .expect("validated switch commits");
+    assert_eq!(current_context(&world.kernel).await, CONTEXT_B);
+
+    // The picker reflects what live discovery just observed during switch
+    // validation — never the stale warm cache.
+    let fresh = resource_types_wire(&world.kernel, CONTEXT_B).await;
+    assert!(
+        !carries_crd_group(&fresh),
+        "the post-switch catalog must come from the live discovery, not the cache"
+    );
 }
 
 #[tokio::test]

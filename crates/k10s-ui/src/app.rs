@@ -475,6 +475,22 @@ impl K10sApp {
                                 }
                             }
                         }
+                        // A request-scoped switch rejection is projected into
+                        // the switch flow itself: pending clears, the failed
+                        // destination is recorded so passive reconciliation
+                        // cannot retry-spam it, and selection, workspace, and
+                        // the control connection all stay alive.
+                        ClientError::Server(_)
+                            if stream_request_id.as_ref().is_some_and(|id| {
+                                self.pending_switch
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.request.id() == id)
+                            }) =>
+                        {
+                            if let Some(pending) = self.pending_switch.take() {
+                                self.failed_switch = Some(pending.to);
+                            }
+                        }
                         _ if self.client.phase() == ClientPhase::Disconnected => {
                             return Err(AppEventError::Transient);
                         }
@@ -509,15 +525,25 @@ impl K10sApp {
                         .instance_id;
                     let context_names: Vec<String> = response
                         .contexts
-                        .into_iter()
-                        .map(|context| context.name)
+                        .iter()
+                        .map(|context| context.name.clone())
                         .collect();
-                    let selected = self
-                        .client
-                        .local_ui()
-                        .selected_context
-                        .clone()
-                        .filter(|selected| context_names.contains(selected))
+                    // The server's `is_current` marker is the reconnect
+                    // authority: a stale local selection must never outrank
+                    // what the backend just reported as current. The local
+                    // preference only breaks ties when no marker is carried.
+                    let selected = response
+                        .contexts
+                        .iter()
+                        .find(|context| context.is_current)
+                        .map(|context| context.name.clone())
+                        .or_else(|| {
+                            self.client
+                                .local_ui()
+                                .selected_context
+                                .clone()
+                                .filter(|selected| context_names.contains(selected))
+                        })
                         .or_else(|| context_names.first().cloned());
                     self.client.local_ui_mut().selected_context = selected.clone();
                     self.view = AppView::Ready {
@@ -1403,7 +1429,7 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable as _};
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BootstrapResponse, ClientFrame, ClientKind, ErrorCode, ErrorFrame, ErrorScope,
+        BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode, ErrorFrame, ErrorScope,
         ProtocolVersion, RequestId, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId,
         Subscribed, SubscriptionId, Welcome,
     };
@@ -1969,7 +1995,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_switch_response_preserves_every_local_state() {
+    fn a_request_scoped_switch_rejection_keeps_the_session_and_switch_flow_alive() {
+        // A third destination proves the switch flow survives the rejection.
+        let mut bootstrap_payload = BootstrapResponse::fixture();
+        bootstrap_payload.contexts.push(Context {
+            name: "staging".into(),
+            cluster: "staging-cluster".into(),
+            namespace: None,
+            is_current: false,
+        });
+        let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap_payload);
         let rejection = ServerFrame {
             kind: ServerKind::Error,
             request_id: Some(RequestId::from_u128(4)),
@@ -1984,23 +2019,153 @@ mod tests {
             ))
             .unwrap(),
         };
-        let (mut app, state) = ready_app();
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+            ]),
+            overflowed: false,
+        }]);
 
+        app.poll_at(100, 0);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
         app.stage_context_switch("prod-readonly").unwrap();
         app.flush_outbound().unwrap();
-        // The existing error policy surfaces request-scoped server errors as
-        // terminal for the session; the assertions below are about what the
-        // failed switch did NOT do: move any local state.
-        let outcome = app.handle_event(server_message(&rejection), 100, 0);
-        assert!(matches!(outcome, Err(super::AppEventError::Terminal(_))));
 
-        // The failed destination never cleared selections nor moved the
-        // workspace onto an unvalidated context.
+        // The rejection is projected into the switch flow itself — it never
+        // becomes terminal for the session.
+        app.handle_event(server_message(&rejection), 150, 0)
+            .unwrap();
+        assert_eq!(
+            app.client.phase(),
+            ClientPhase::Ready,
+            "the session stays ready"
+        );
+        assert!(
+            app.connection.is_some(),
+            "the control connection stays alive"
+        );
+        assert_eq!(
+            app.client.local_ui().selected_context.as_deref(),
+            Some("dev-local"),
+            "the selection never moved"
+        );
+        assert_eq!(app.shell.workspace().context(), "");
+        assert!(app.pending_switch.is_none(), "pending cleared");
+        assert_eq!(
+            app.failed_switch.as_deref(),
+            Some("prod-readonly"),
+            "the failed destination is recorded so reconciliation cannot retry-spam it"
+        );
+
+        // A NEW staged switch toward another destination still works.
+        app.stage_context_switch("staging").unwrap();
+        app.flush_outbound().unwrap();
+        let kinds: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            kinds.last(),
+            Some(&"context.switch".to_owned()),
+            "a fresh switch goes out after the rejection"
+        );
+        assert_eq!(
+            app.pending_switch
+                .as_ref()
+                .map(|pending| pending.to.as_str()),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn reconnect_bootstrap_is_current_marker_overrides_the_stale_local_selection() {
+        fn bootstrap_marking_payload(current: &str) -> BootstrapResponse {
+            let mut payload = BootstrapResponse::fixture();
+            for context in &mut payload.contexts {
+                context.is_current = context.name == current;
+            }
+            payload
+        }
+
+        let (mut app, state) = test_app(vec![
+            ConnectionScript::default(),
+            ConnectionScript {
+                events: VecDeque::from([WsEvent::Opened, server_message(&welcome())]),
+                overflowed: false,
+            },
+        ]);
+
+        // First generation: bootstrap marks dev-local current.
+        app.handle_event(WsEvent::Opened, 100, 0).unwrap();
+        app.flush_outbound().unwrap();
+        app.handle_event(server_message(&welcome()), 100, 0)
+            .unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                RequestId::from_u128(1),
+                bootstrap_marking_payload("dev-local"),
+            )),
+            100,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(app.view(), AppView::Ready { .. }));
         assert_eq!(
             app.client.local_ui().selected_context.as_deref(),
             Some("dev-local")
         );
-        assert_eq!(app.shell.workspace().context(), "");
+
+        // Stage a switch and lose the transport before its answer arrives:
+        // the local selection still says dev-local while the backend may have
+        // moved on without this client.
+        app.stage_context_switch("prod-readonly").unwrap();
+        app.flush_outbound().unwrap();
+
+        app.transient_loss(150, 40);
+        assert_eq!(
+            app.client.phase(),
+            ClientPhase::Disconnected,
+            "the transport died with the switch unanswered"
+        );
+        assert!(app.pending_switch.is_none());
+
+        // Second generation: reconnect, welcome, and the client's own fresh
+        // bootstrap request.
+        app.poll_at(200, 0);
+        app.poll_at(210, 0);
+        let bootstrap_request_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| {
+                frame.kind == ClientKind::Request
+                    && request_kind(frame).as_deref() == Some("bootstrap")
+            })
+            .and_then(|frame| frame.request_id.clone())
+            .expect("the reconnect issues a bootstrap request");
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                bootstrap_request_id,
+                bootstrap_marking_payload("prod-readonly"),
+            )),
+            220,
+            0,
+        )
+        .unwrap();
+
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert_eq!(
+            app.client.local_ui().selected_context.as_deref(),
+            Some("prod-readonly"),
+            "the bootstrap is_current marker is authoritative over the stale local selection"
+        );
+        assert!(app.pending_switch.is_none());
         let kinds: Vec<_> = state
             .borrow()
             .sent
@@ -2014,9 +2179,12 @@ mod tests {
                 "bootstrap",
                 "resource.types",
                 "infrastructure.get",
-                "context.switch"
+                "context.switch",
+                "bootstrap",
+                "resource.types",
+                "infrastructure.get"
             ],
-            "no resubscription happens for a failed destination"
+            "streams and infrastructure resubscribe onto the marker context after reconnect"
         );
     }
 }

@@ -1268,12 +1268,15 @@ impl KubernetesAccess for FakeKubernetes {
                     if !state.contexts.iter().any(|c| c.name == context) {
                         return Err(BackendError::NotFound);
                     }
-                    // The fake world serves no authorization truth: every
-                    // probe stays explicitly Unknown instead of a fabricated
-                    // allow/deny verdict.
+                    // The same cross-adapter contract as the kube adapter:
+                    // probes are bounded, and duplicates collapse onto their
+                    // first occurrence. The fake world serves no authorization
+                    // truth: every surviving probe stays explicitly Unknown
+                    // instead of a fabricated allow/deny verdict.
+                    crate::port::validate_probe_count(&probes)?;
                     Ok(QueryResult::ContextPermissions(
                         crate::port::ContextPermissionsData {
-                            checks: probes
+                            checks: crate::port::distinct_probes(probes)
                                 .into_iter()
                                 .map(|probe| crate::port::PermissionCheck {
                                     verb: probe.verb,

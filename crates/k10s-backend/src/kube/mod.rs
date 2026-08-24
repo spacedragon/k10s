@@ -685,7 +685,7 @@ impl KubeAdapter {
         if !self.knows_context(context) {
             return Err(BackendError::NotFound);
         }
-        permissions::validate_probe_count(&probes)?;
+        crate::port::validate_probe_count(&probes)?;
         let client = self.cluster_client(context).await?;
         let checks = permissions::project_capabilities(&client, probes).await;
         Ok(QueryResult::ContextPermissions(ContextPermissionsData {
@@ -721,7 +721,9 @@ impl KubeAdapter {
     ///
     /// This is the switch-validation path: a success here proves the
     /// destination's read path works right now, not merely that it worked
-    /// within the TTL.
+    /// within the TTL. What was just observed is authoritative — the live
+    /// result always replaces whatever a concurrent query may have refreshed,
+    /// so post-switch availability reflects this discovery, not stale cache.
     async fn discover_catalog(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
         let client = self.cluster_client(context).await?;
         let data = discovery::discover_resource_types(&client, context).await?;
@@ -730,10 +732,6 @@ impl KubeAdapter {
             .catalogs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A concurrent query may have refreshed the catalog while we discovered.
-        if let Some(data) = catalogs.fresh(context).cloned() {
-            return Ok(data);
-        }
         catalogs.insert(context.to_owned(), data.clone());
         Ok(data)
     }

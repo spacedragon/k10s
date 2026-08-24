@@ -14,29 +14,13 @@
 //! fabricating allow/deny verdicts. Raw Kubernetes Status text never crosses
 //! the seam.
 
-use std::collections::HashSet;
-
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
     SubjectAccessReviewStatus,
 };
 use kube::api::{Api, PostParams};
 
-use crate::port::{BackendError, PermissionCheck, PermissionOutcome, PermissionProbe};
-
-/// Hard bound on probes carried by one permission query, so one request can
-/// never fan out into unbounded cluster traffic.
-pub(crate) const MAX_PROBES: usize = 32;
-
-/// Reject probe sets past the documented bound before any cluster traffic.
-pub(crate) fn validate_probe_count(probes: &[PermissionProbe]) -> Result<(), BackendError> {
-    if probes.len() > MAX_PROBES {
-        return Err(BackendError::Conflict(format!(
-            "permission review requests carry at most {MAX_PROBES} probes"
-        )));
-    }
-    Ok(())
-}
+use crate::port::{PermissionCheck, PermissionOutcome, PermissionProbe, distinct_probes};
 
 /// Project each distinct probe through one SelfSubjectAccessReview call.
 ///
@@ -49,12 +33,8 @@ pub(crate) async fn project_capabilities(
     probes: Vec<PermissionProbe>,
 ) -> Vec<PermissionCheck> {
     let api: Api<SelfSubjectAccessReview> = Api::all(client.clone());
-    let mut seen = HashSet::new();
     let mut checks = Vec::new();
-    for probe in probes {
-        if !seen.insert(probe.clone()) {
-            continue;
-        }
+    for probe in distinct_probes(probes) {
         let outcome = review_once(&api, &probe).await;
         checks.push(PermissionCheck {
             verb: probe.verb,
@@ -109,6 +89,7 @@ fn verdict(status: Option<SubjectAccessReviewStatus>) -> PermissionOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::port::MAX_PROBES;
 
     #[test]
     fn statuses_interpret_without_fabricating_verdicts() {
@@ -148,7 +129,7 @@ mod tests {
                 namespace: None,
             })
             .collect();
-        assert!(validate_probe_count(&probes).is_err());
-        assert!(validate_probe_count(&probes[..MAX_PROBES]).is_ok());
+        assert!(crate::port::validate_probe_count(&probes).is_err());
+        assert!(crate::port::validate_probe_count(&probes[..MAX_PROBES]).is_ok());
     }
 }

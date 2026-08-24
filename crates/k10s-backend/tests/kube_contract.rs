@@ -1231,3 +1231,118 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
         );
     }
 }
+
+/// Shared permission-probe hardening contract: both adapters enforce the
+/// identical probe bound with the same typed conflict, and duplicate probes
+/// collapse onto their first occurrence in identical order.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_permission_probe_bound_and_duplicate_handling() {
+    use k10s_backend::{BackendError, PermissionProbe};
+
+    const SSAR_PATH: &str = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews";
+
+    fn probe(verb: &str, resource: &str, namespace: Option<&str>) -> PermissionProbe {
+        PermissionProbe {
+            verb: verb.into(),
+            resource: resource.into(),
+            group: None,
+            namespace: namespace.map(str::to_owned),
+        }
+    }
+
+    async fn check_sequence(
+        kernel: &BackendKernel,
+        context: &str,
+        probes: Vec<PermissionProbe>,
+    ) -> Vec<(String, String)> {
+        match kernel
+            .query(Query::ContextPermissions {
+                context: context.to_owned(),
+                probes,
+            })
+            .await
+            .expect("permission projection succeeds")
+        {
+            KernelQueryResult::ContextPermissions(data) => data
+                .wire_payload()
+                .checks
+                .into_iter()
+                .map(|check| (check.verb, check.resource))
+                .collect(),
+            other => panic!("kernel must map permissions into their wire payload, got {other:?}"),
+        }
+    }
+
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        SSAR_PATH,
+        200,
+        r#"{"kind":"SelfSubjectAccessReview","apiVersion":"authorization.k8s.io/v1",
+            "metadata":{"creationTimestamp":null},
+            "spec":{},"status":{"allowed":true,"reason":"RBAC: allowed by role binding"}}"#,
+    );
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", server.clone().into_client("default"))],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+
+    // The probe bound is identical on both sides: one past the limit is a
+    // typed conflict carrying the same reason, never unbounded fan-out.
+    let oversized: Vec<PermissionProbe> = (0..33)
+        .map(|index| probe("list", &format!("kind{index}"), None))
+        .collect();
+    let expected =
+        BackendError::Conflict("permission review requests carry at most 32 probes".into());
+    let fake_error = fake_kernel
+        .query(Query::ContextPermissions {
+            context: "dev-local".into(),
+            probes: oversized.clone(),
+        })
+        .await
+        .expect_err("the fake adapter enforces the probe bound");
+    let kube_error = kube_kernel
+        .query(Query::ContextPermissions {
+            context: "contract-mock".into(),
+            probes: oversized,
+        })
+        .await
+        .expect_err("the kube adapter enforces the probe bound");
+    assert_eq!(fake_error, expected);
+    assert_eq!(kube_error, expected);
+
+    // Duplicate probes collapse onto their first occurrence in the same
+    // first-seen order on both adapters; the real adapter additionally burns
+    // exactly one review per distinct probe.
+    let duplicated = vec![
+        probe("list", "pods", Some("default")),
+        probe("get", "nodes", None),
+        probe("list", "pods", Some("default")),
+        probe("delete", "pods", Some("default")),
+        probe("get", "nodes", None),
+    ];
+    let expected_sequence = vec![
+        ("list".to_owned(), "pods".to_owned()),
+        ("get".to_owned(), "nodes".to_owned()),
+        ("delete".to_owned(), "pods".to_owned()),
+    ];
+    let fake_checks = check_sequence(&fake_kernel, "dev-local", duplicated.clone()).await;
+    assert_eq!(fake_checks, expected_sequence, "fake dedup drifted");
+    let kube_checks = check_sequence(&kube_kernel, "contract-mock", duplicated).await;
+    assert_eq!(kube_checks, expected_sequence, "kube dedup drifted");
+    assert_eq!(kube_checks, fake_checks);
+    assert_eq!(
+        server.hit_count(SSAR_PATH),
+        3,
+        "identical probes share one review on the real adapter too"
+    );
+}

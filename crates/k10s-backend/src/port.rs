@@ -5,7 +5,7 @@
 //! adding side doors. The kernel is the sole protocol-facing interface and
 //! owns mapping to normalized protocol payloads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -125,6 +125,31 @@ pub struct PermissionProbe {
     pub group: Option<String>,
     /// Namespace restriction, when reviewed within one.
     pub namespace: Option<String>,
+}
+
+/// Hard bound on probes carried by one permission query, so one request can
+/// never fan out into unbounded review traffic. Every adapter sharing this
+/// port enforces the same bound.
+pub(crate) const MAX_PROBES: usize = 32;
+
+/// Reject probe sets past the documented bound before any backend work.
+pub(crate) fn validate_probe_count(probes: &[PermissionProbe]) -> Result<(), BackendError> {
+    if probes.len() > MAX_PROBES {
+        return Err(BackendError::Conflict(format!(
+            "permission review requests carry at most {MAX_PROBES} probes"
+        )));
+    }
+    Ok(())
+}
+
+/// Collapse duplicate probes onto their first occurrence, preserving
+/// first-seen order, so repeating a probe never changes the answer's shape.
+pub(crate) fn distinct_probes(probes: Vec<PermissionProbe>) -> Vec<PermissionProbe> {
+    let mut seen = HashSet::new();
+    probes
+        .into_iter()
+        .filter(|probe| seen.insert(probe.clone()))
+        .collect()
 }
 
 /// What authorization reported for one probe.
