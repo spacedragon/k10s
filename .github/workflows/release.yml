@@ -124,9 +124,20 @@ jobs:
           rustup default $channel
           $root = Join-Path '${{ runner.tool_cache }}' 'k10s\release-tools'
           New-Item -ItemType Directory -Force (Join-Path $root 'bin') | Out-Null
-          $zip = Join-Path '${{ runner.temp }}' 'trunk.zip'
-          Invoke-WebRequest -UseBasicParsing "https://github.com/trunk-rs/trunk/releases/download/v$env:TRUNK_VERSION/trunk-x86_64-pc-windows-msvc.zip" -OutFile $zip
-          Expand-Archive -Force $zip (Join-Path $root 'bin')
+          $trunk = Join-Path $root 'bin\trunk.exe'
+          if (-not (Test-Path $trunk) -or -not ((& $trunk --version) -like "*$env:TRUNK_VERSION*")) {
+            $zip = Join-Path '${{ runner.temp }}' 'trunk.zip'
+            foreach ($attempt in 1..3) {
+              try {
+                Invoke-WebRequest -UseBasicParsing "https://github.com/trunk-rs/trunk/releases/download/v$env:TRUNK_VERSION/trunk-x86_64-pc-windows-msvc.zip" -OutFile $zip
+                break
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Start-Sleep -Seconds (5 * $attempt)
+              }
+            }
+            Expand-Archive -Force $zip (Join-Path $root 'bin')
+          }
           $env:PATH = "$(Join-Path $root 'bin');$env:PATH"
           if (-not (Get-Command cargo-packager -ErrorAction SilentlyContinue) -or -not ((cargo-packager --version) -like "*$env:CARGO_PACKAGER_VERSION*")) { cargo install cargo-packager --version $env:CARGO_PACKAGER_VERSION --locked --root $root }
           if (-not (Get-Command dist -ErrorAction SilentlyContinue) -or -not ((dist --version) -like "*$env:CARGO_DIST_VERSION*")) { cargo install cargo-dist --version $env:CARGO_DIST_VERSION --locked --root $root }
