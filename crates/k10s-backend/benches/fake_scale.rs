@@ -122,9 +122,9 @@ fn main() {
         k10s_backend::QueryResult::ResourceList(data) => data.rows.len(),
         other => fail(format!("unexpected query result: {other:?}")),
     };
-    if rows < EXPECTED_POD_ROWS {
+    if rows != EXPECTED_POD_ROWS {
         fail(format!(
-            "expected at least {EXPECTED_POD_ROWS} pod rows, got {rows}"
+            "expected exactly {EXPECTED_POD_ROWS} pod rows, got {rows}"
         ));
     }
     println!("pod list rows per query: {rows}");
