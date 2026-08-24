@@ -558,6 +558,207 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
     );
 }
 
+/// Shared resource-metrics wire contract: the fake adapter's stored samples
+/// and the real kube adapter (driven by a recorded metrics.k8s.io cut) must
+/// map onto the same availability-gated wire shape through the kernel —
+/// identical top-level keys, identical per-case availability, and absent or
+/// withheld values that never degrade into zeroes on either wire.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
+    use k10s_backend::{Gvk, ResourceRef};
+
+    /// RFC 3339 UTC timestamp `age_secs` seconds before the test ran, so the
+    /// recorded metrics cut stays inside the freshness window.
+    fn recent_rfc3339(age_secs: u64) -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock advances")
+            .as_secs()
+            - age_secs;
+        let days = secs / 86_400;
+        let secs_of_day = secs % 86_400;
+        let z = days as i64 + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100 + yoe / 400);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+            secs_of_day / 3_600,
+            (secs_of_day % 3_600) / 60,
+            secs_of_day % 60
+        )
+    }
+
+    async fn metrics_wire(kernel: &BackendKernel, reference: ResourceRef) -> Value {
+        match kernel.query(Query::ResourceMetrics { reference }).await {
+            Ok(KernelQueryResult::ResourceMetrics(result)) => {
+                serde_json::to_value(result.wire_payload()).expect("payload serializes")
+            }
+            other => panic!("kernel must map metrics into its wire payload, got {other:?}"),
+        }
+    }
+
+    // Fake side: one fully sampled pod, one partially sampled pod, and one
+    // existing pod with no stored sample at all.
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+    fn fake_pod(name: &str) -> ResourceRef {
+        ResourceRef {
+            context: "dev-local".into(),
+            gvk: Gvk::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-dev-local-pod-default-{name}"),
+        }
+    }
+    let fake_full = metrics_wire(&fake_kernel, fake_pod("web-frontend-7d9f8-00001")).await;
+    let fake_partial = metrics_wire(&fake_kernel, fake_pod("api-server-5cc4d-qw8rt")).await;
+    let fake_absent = metrics_wire(&fake_kernel, fake_pod("db-postgres-0")).await;
+
+    // Real side: the same three roles served from one recorded cut, sampled
+    // moments ago so the freshness window keeps the values servable.
+    let sampled_at = recent_rfc3339(5);
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/nodes",
+        200,
+        r#"{"kind":"NodeList","apiVersion":"v1","metadata":{"resourceVersion":"100"},"items":[
+      {"metadata":{"name":"node-a","uid":"uid-node-a"},"status":{"allocatable":{"pods":"110"}}}
+    ]}"#,
+    );
+    server.set_response(
+        "/apis/metrics.k8s.io/v1beta1/nodes",
+        200,
+        &format!(
+            r#"{{"kind":"NodeMetricsList","apiVersion":"metrics.k8s.io/v1beta1","metadata":{{}},"items":[
+      {{"metadata":{{"name":"node-a"}},"timestamp":"{sampled_at}","window":"30s","usage":{{"cpu":"1250m","memory":"123456Ki"}}}}
+    ]}}"#
+        ),
+    );
+    server.set_response(
+        "/apis/metrics.k8s.io/v1beta1/pods",
+        200,
+        &format!(
+            r#"{{"kind":"PodMetricsList","apiVersion":"metrics.k8s.io/v1beta1","metadata":{{}},"items":[
+      {{"metadata":{{"name":"web","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+       "containers":[{{"name":"app","usage":{{"cpu":"220m","memory":"134217728Ki"}}}}]}},
+      {{"metadata":{{"name":"half","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+       "containers":[{{"name":"app","usage":{{"cpu":"90m"}}}}]}}
+    ]}}"#
+        ),
+    );
+    for (name, uid) in [
+        ("web", "uid-kube-web"),
+        ("half", "uid-kube-half"),
+        ("idle", "uid-kube-idle"),
+    ] {
+        server.set_response(
+            &format!("/api/v1/namespaces/default/pods/{name}"),
+            200,
+            &format!(
+                r#"{{"kind":"Pod","apiVersion":"v1","metadata":{{"name":"{name}","namespace":"default","uid":"{uid}","resourceVersion":"41","creationTimestamp":"2026-08-21T00:00:00Z"}},"status":{{"phase":"Running"}}}}"#
+            ),
+        );
+    }
+    let client = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+    fn kube_pod(name: &str, uid: &str) -> ResourceRef {
+        ResourceRef {
+            context: "contract-mock".into(),
+            gvk: Gvk::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: uid.into(),
+        }
+    }
+    let kube_full = metrics_wire(&kube_kernel, kube_pod("web", "uid-kube-web")).await;
+    let kube_partial = metrics_wire(&kube_kernel, kube_pod("half", "uid-kube-half")).await;
+    let kube_absent = metrics_wire(&kube_kernel, kube_pod("idle", "uid-kube-idle")).await;
+
+    let metric_keys = |payload: &Value| {
+        payload["metrics"]
+            .as_object()
+            .unwrap_or_else(|| panic!("metrics is an object: {payload:?}"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for (label, fake, kube) in [
+        ("full", &fake_full, &kube_full),
+        ("partial", &fake_partial, &kube_partial),
+        ("absent", &fake_absent, &kube_absent),
+    ] {
+        // Top-level wire shape agrees across adapters.
+        for payload in [fake, kube] {
+            let keys = payload
+                .as_object()
+                .expect("payload is an object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                keys,
+                ["identity", "metrics"]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                "{label}: resource-metrics top-level keys drifted"
+            );
+        }
+        // Per-case availability agrees, and the present-key sets match.
+        assert_eq!(
+            metric_keys(fake),
+            metric_keys(kube),
+            "{label}: key sets drifted"
+        );
+        assert_eq!(
+            fake["metrics"]["availability"], kube["metrics"]["availability"],
+            "{label}: availability drifted"
+        );
+        // The opaque Kubernetes vocabulary never crosses either wire.
+        let text = payload_text(&[fake, kube]);
+        assert!(!text.contains("resourceVersion"), "{label}: rv leaked");
+    }
+
+    assert_eq!(fake_full["metrics"]["availability"], "available");
+    assert_eq!(fake_partial["metrics"]["availability"], "partial");
+    assert_eq!(fake_absent["metrics"]["availability"], "unavailable");
+
+    // Absent samples carry no fabricated value keys on either adapter.
+    assert_eq!(
+        metric_keys(&fake_absent),
+        ["availability"].map(str::to_owned).into_iter().collect()
+    );
+    assert_eq!(
+        metric_keys(&kube_absent),
+        ["availability"].map(str::to_owned).into_iter().collect()
+    );
+}
+
+fn payload_text(payloads: &[&Value]) -> String {
+    payloads
+        .iter()
+        .map(|payload| payload.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Shared resource-watch wire contract: the fake adapter and the real kube
 /// adapter (driven by a fully scripted watch source, no cluster) must
 /// normalize identical backend types, so the kernel maps both onto the same
