@@ -42,7 +42,7 @@ pub(crate) async fn list_resource(
     let listed = api
         .list(&ListParams::default())
         .await
-        .map_err(|error| BackendError::Internal(sanitize_list_error(error)))?;
+        .map_err(sanitize_read_list_error)?;
     let rows = listed
         .items
         .iter()
@@ -105,10 +105,20 @@ fn render_manifest(object: &kube::core::DynamicObject) -> String {
 pub(crate) fn sanitize_get_error(error: kube::Error) -> BackendError {
     match error {
         kube::Error::Api(status) if status.code == 404 => BackendError::NotFound,
+        kube::Error::Api(status) if status.code == 403 => BackendError::Forbidden,
         kube::Error::Api(status) => BackendError::Internal(format!(
             "resource get rejected by the api server with HTTP {}",
             status.code
         )),
         _ => BackendError::Internal("kubernetes api unreachable for resource get".to_owned()),
+    }
+}
+
+/// Preserve authorization denials as the typed protocol error while keeping
+/// all Kubernetes Status messages out of the normalized boundary.
+fn sanitize_read_list_error(error: kube::Error) -> BackendError {
+    match error {
+        kube::Error::Api(status) if status.code == 403 => BackendError::Forbidden,
+        other => BackendError::Internal(sanitize_list_error(other)),
     }
 }

@@ -90,6 +90,65 @@ jobs:
       - name: Check k10s-web for wasm32-unknown-unknown
         run: cargo check --locked -p k10s-web --target wasm32-unknown-unknown
 
+  # Plan 3 release gate: exercise the real kube-rs adapter and control socket
+  # against an ephemeral, least-privilege kind cluster. This stays on the
+  # self-hosted Linux runner so the gate does not consume hosted minutes.
+  kind-read-path:
+    name: kind read-path E2E
+    needs: [ci, ui-tests]
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure persistent Cargo build cache
+        run: bash .github/scripts/configure-cargo-cache.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain-file: rust-toolchain.toml
+
+      - name: Install container and kind prerequisites
+        run: |
+          if ! command -v docker >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y acl docker.io
+          fi
+          sudo systemctl start docker
+          sudo setfacl -m "u:$(id -u):rw" /var/run/docker.sock
+
+          kind_version=v0.32.0
+          kubectl_version=v1.36.1
+          tool_bin="${RUNNER_TOOL_CACHE}/k10s/${kind_version}-${kubectl_version}/bin"
+          mkdir -p "$tool_bin"
+          if [ ! -x "$tool_bin/kind" ]; then
+            curl -fsSLo "$tool_bin/kind" \
+              "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64"
+            curl -fsSLo /tmp/kind.sha256 \
+              "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64.sha256sum"
+            (cd "$tool_bin" && sha256sum -c /tmp/kind.sha256)
+            chmod +x "$tool_bin/kind"
+          fi
+          if [ ! -x "$tool_bin/kubectl" ]; then
+            curl -fsSLo "$tool_bin/kubectl" \
+              "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+            curl -fsSLo /tmp/kubectl.sha256 \
+              "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl.sha256"
+            echo "$(cat /tmp/kubectl.sha256)  $tool_bin/kubectl" | sha256sum -c -
+            chmod +x "$tool_bin/kubectl"
+          fi
+          echo "$tool_bin" >> "$GITHUB_PATH"
+
+      - name: Verify the live Kubernetes read path
+        run: |
+          trap 'tests/kind/cluster.sh down' EXIT
+          tests/kind/cluster.sh up
+          # kube-rs treats proxy variables as an explicit proxy_url, even for
+          # the loopback API endpoint exposed by kind.
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+          cargo test --locked -p k10s-backend --test kind_read_path -- --ignored --nocapture
+          cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture
+          cargo test --locked -p k10s-desktop --test kube_factory
+
   # Web foundation gate: pinned Trunk build plus the Chromium browser smoke.
   web:
     name: Web foundation

@@ -1,0 +1,15 @@
+# Deterministic responses for an optional aggregated-API proxy. The default
+# kind gate deliberately leaves metrics.k8s.io absent and verifies that k10s
+# reports unavailable values honestly. Environments testing partial coverage
+# can serve these payloads from their aggregation proxy without depending on
+# nondeterministic kubelet statistics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k10s-metrics-responses
+  namespace: k10s-read
+data:
+  pods.json: |
+    {"apiVersion":"metrics.k8s.io/v1beta1","kind":"PodMetricsList","items":[{"metadata":{"name":"partial-pod","namespace":"k10s-read"},"timestamp":"2026-08-24T00:00:00Z","window":"30s","containers":[{"name":"web","usage":{"cpu":"25m"}}]}]}
+  nodes.json: |
+    {"apiVersion":"metrics.k8s.io/v1beta1","kind":"NodeMetricsList","items":[]}
