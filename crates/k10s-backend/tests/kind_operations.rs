@@ -77,7 +77,7 @@ async fn reference(adapter: &KubeAdapter, gvk: Gvk, name: &str) -> ResourceRef {
         .reference
 }
 
-async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
+async fn terminal(adapter: &KubeAdapter, id: &str) -> (OperationState, Option<String>) {
     for _ in 0..200 {
         let QueryResult::OperationStatus(status) = adapter
             .query(Query::OperationStatus {
@@ -94,7 +94,7 @@ async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
                 OperationState::Succeeded | OperationState::Failed | OperationState::OutcomeUnknown
             )
         {
-            return record.state;
+            return (record.state, record.detail.clone());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -103,9 +103,11 @@ async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
 
 async fn run(adapter: &KubeAdapter, command: Command) {
     let id = adapter.execute(command).await.unwrap();
+    let (state, detail) = terminal(adapter, id.as_str()).await;
     assert_eq!(
-        terminal(adapter, id.as_str()).await,
-        OperationState::Succeeded
+        state,
+        OperationState::Succeeded,
+        "operation failed: {detail:?}"
     );
 }
 
@@ -280,7 +282,7 @@ async fn dropped_mutation_response_is_unknown_until_authoritative_refresh() {
         .await
         .unwrap();
     assert_eq!(
-        terminal(&adapter, id.as_str()).await,
+        terminal(&adapter, id.as_str()).await.0,
         OperationState::OutcomeUnknown
     );
 
@@ -314,7 +316,7 @@ async fn dropped_mutation_response_is_unknown_until_authoritative_refresh() {
         .operation_engine()
         .refresh_scope(&deployment.coalescing_key());
     assert_eq!(
-        terminal(&adapter, id.as_str()).await,
+        terminal(&adapter, id.as_str()).await.0,
         OperationState::OutcomeUnknown,
         "refresh releases admission but never rewrites history as success"
     );
@@ -347,8 +349,18 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "-o",
         "jsonpath={.metadata.resourceVersion}",
     ]);
+    let replicas: u32 = kubectl(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "deployment/operations-web",
+        "-o",
+        "jsonpath={.spec.replicas}",
+    ])
+    .parse()
+    .unwrap();
     let yaml = format!(
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-log-ready; sleep 3600']\n",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-log-ready; sleep 3600']\n",
         deployment.uid
     );
     let QueryResult::YamlValidation(validation) = adapter
@@ -386,7 +398,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-o",
             "jsonpath={.spec.replicas}"
         ]),
-        "2"
+        replicas.to_string()
     );
 
     let mut stale = deployment.clone();
@@ -409,7 +421,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             namespace: deployment.namespace.clone(),
             name: deployment.name.clone(),
             uid: deployment.uid.clone(),
-            replicas: 1,
+            replicas: if replicas == 1 { 2 } else { 1 },
             idempotency_key: "kind-scale".into(),
         },
     )
@@ -446,6 +458,14 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "--",
         "sleep",
         "3600",
+    ]);
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "wait",
+        "--for=condition=Ready",
+        "pod/delete-me",
+        "--timeout=60s",
     ]);
     let target = reference(&adapter, Gvk::core("v1", "Pod"), "delete-me").await;
     run(
