@@ -80,6 +80,8 @@ pub struct ApiResourceDescriptor {
     pub supports_watch: bool,
     /// Whether discovery advertises patch on the main resource.
     pub supports_patch: bool,
+    /// Whether discovery advertises create on the main resource collection.
+    pub supports_create: bool,
     /// Whether discovery advertises delete on the main resource.
     pub supports_delete: bool,
 }
@@ -285,6 +287,17 @@ pub enum Command {
     /// Request a rollout restart of one exact workload object.
     Restart {
         target: ResourceRef,
+        idempotency_key: String,
+    },
+    /// Create a Job from one exact Job or CronJob source.
+    CreateJob {
+        source: ResourceRef,
+        idempotency_key: String,
+    },
+    /// Suspend or resume one exact CronJob.
+    SetCronJobSuspended {
+        target: ResourceRef,
+        suspended: bool,
         idempotency_key: String,
     },
     /// Delete one exact object with an explicit propagation mode.

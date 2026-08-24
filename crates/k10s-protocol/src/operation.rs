@@ -19,6 +19,10 @@ pub const REQUEST_YAML_APPLY: &str = "yaml.apply";
 pub const REQUEST_WORKLOAD_SCALE: &str = "workload.scale";
 /// Request kind carrying a [`RestartRequest`] payload.
 pub const REQUEST_WORKLOAD_RESTART: &str = "workload.restart";
+/// Request kind creating a Job from an exact Job or CronJob source.
+pub const REQUEST_JOB_CREATE: &str = "job.create";
+/// Request kind changing an exact CronJob's suspend state.
+pub const REQUEST_CRONJOB_SUSPEND: &str = "cronjob.suspend";
 /// Request kind carrying a [`DeleteRequest`] payload.
 pub const REQUEST_WORKLOAD_DELETE: &str = "workload.delete";
 /// Request kind carrying an [`OperationStatusRequest`] payload.
@@ -173,6 +177,24 @@ pub struct RestartRequest {
     pub identity: ResourceIdentity,
 }
 
+/// Command payload creating a new Job from an exact Job or CronJob source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateJobRequest {
+    /// Exact immutable identity of the source object.
+    pub source: ResourceIdentity,
+}
+
+/// Command payload changing an exact CronJob's suspend state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronJobSuspendRequest {
+    /// Exact immutable identity of the CronJob.
+    pub identity: ResourceIdentity,
+    /// Desired suspend state (`false` resumes scheduling).
+    pub suspended: bool,
+}
+
 /// How dependents are handled when an object is deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +347,27 @@ mod tests {
         let value = serde_json::to_value(&delete).unwrap();
         assert_eq!(value["propagation"], "foreground");
         assert_eq!(value["identity"]["uid"], "uid-p");
+
+        let create = CreateJobRequest {
+            source: delete.identity.clone(),
+        };
+        let value = serde_json::to_value(&create).unwrap();
+        assert_eq!(value["source"]["uid"], "uid-p");
+        assert_eq!(
+            serde_json::from_value::<CreateJobRequest>(value).unwrap(),
+            create
+        );
+
+        let suspend = CronJobSuspendRequest {
+            identity: delete.identity,
+            suspended: true,
+        };
+        let value = serde_json::to_value(&suspend).unwrap();
+        assert_eq!(value["suspended"], true);
+        assert_eq!(
+            serde_json::from_value::<CronJobSuspendRequest>(value).unwrap(),
+            suspend
+        );
     }
 
     #[test]

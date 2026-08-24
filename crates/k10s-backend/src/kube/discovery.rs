@@ -60,6 +60,7 @@ pub(crate) async fn discover_resource_types(
                         .any(|(sub, _)| sub.plural == "scale"),
                     supports_watch: capabilities.supports_operation(verbs::WATCH),
                     supports_patch: capabilities.supports_operation(verbs::PATCH),
+                    supports_create: capabilities.supports_operation(verbs::CREATE),
                     supports_delete: capabilities.supports_operation(verbs::DELETE),
                 });
             }

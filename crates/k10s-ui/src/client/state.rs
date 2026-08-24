@@ -254,6 +254,17 @@ pub enum Command {
         target: ResourceIdentity,
         idempotency_key: String,
     },
+    /// Create a Job from an exact Job or CronJob source.
+    CreateJob {
+        source: ResourceIdentity,
+        idempotency_key: String,
+    },
+    /// Suspend or resume an exact CronJob.
+    SetCronJobSuspended {
+        target: ResourceIdentity,
+        suspended: bool,
+        idempotency_key: String,
+    },
     /// Delete one exact object with an explicit propagation mode.
     Delete {
         /// Exact target identity including its immutable UID.
@@ -495,6 +506,10 @@ impl PendingAction {
             Self::Command(Command::YamlApply { .. }) => "yaml.apply",
             Self::Command(Command::Scale { .. }) => "workload.scale",
             Self::Command(Command::Restart { .. }) => "workload.restart",
+            Self::Command(Command::CreateJob { .. }) => k10s_protocol::REQUEST_JOB_CREATE,
+            Self::Command(Command::SetCronJobSuspended { .. }) => {
+                k10s_protocol::REQUEST_CRONJOB_SUSPEND
+            }
             Self::Command(Command::Delete { .. }) => "workload.delete",
         }
     }
@@ -557,6 +572,17 @@ impl PendingAction {
                     identity: target.clone(),
                 })
             }
+            Self::Command(Command::CreateJob { source, .. }) => {
+                encode(k10s_protocol::CreateJobRequest {
+                    source: source.clone(),
+                })
+            }
+            Self::Command(Command::SetCronJobSuspended {
+                target, suspended, ..
+            }) => encode(k10s_protocol::CronJobSuspendRequest {
+                identity: target.clone(),
+                suspended: *suspended,
+            }),
             Self::Command(Command::Delete {
                 target,
                 propagation,
@@ -577,6 +603,12 @@ impl PendingAction {
                 idempotency_key, ..
             })
             | Self::Command(Command::Restart {
+                idempotency_key, ..
+            })
+            | Self::Command(Command::CreateJob {
+                idempotency_key, ..
+            })
+            | Self::Command(Command::SetCronJobSuspended {
                 idempotency_key, ..
             })
             | Self::Command(Command::Delete {

@@ -44,11 +44,12 @@ pub use metrics::{
     MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use operation::{
-    DeletePropagation, DeleteRequest, OperationAccepted, OperationProgress, OperationSnapshotEntry,
-    OperationStatusRequest, OperationStatusResponse, REQUEST_OPERATION_STATUS,
-    REQUEST_WORKLOAD_DELETE, REQUEST_WORKLOAD_RESTART, REQUEST_WORKLOAD_SCALE, REQUEST_YAML_APPLY,
-    REQUEST_YAML_VALIDATE, RestartRequest, ScaleRequest, ValidationTicket, YamlApplyRequest,
-    YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
+    CreateJobRequest, CronJobSuspendRequest, DeletePropagation, DeleteRequest, OperationAccepted,
+    OperationProgress, OperationSnapshotEntry, OperationStatusRequest, OperationStatusResponse,
+    REQUEST_CRONJOB_SUSPEND, REQUEST_JOB_CREATE, REQUEST_OPERATION_STATUS, REQUEST_WORKLOAD_DELETE,
+    REQUEST_WORKLOAD_RESTART, REQUEST_WORKLOAD_SCALE, REQUEST_YAML_APPLY, REQUEST_YAML_VALIDATE,
+    RestartRequest, ScaleRequest, ValidationTicket, YamlApplyRequest, YamlDiagnostic, YamlOutcome,
+    YamlValidateRequest, buffer_hash,
 };
 pub use resource::{
     AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,
