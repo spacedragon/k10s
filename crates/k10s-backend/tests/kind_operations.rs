@@ -470,7 +470,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-n",
             NAMESPACE,
             "delete",
-            "pod/delete-me",
+            "configmap/delete-me",
             "--ignore-not-found",
             "--wait=true",
         ])
@@ -478,22 +478,12 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     kubectl(&[
         "-n",
         NAMESPACE,
-        "run",
+        "create",
+        "configmap",
         "delete-me",
-        "--image=busybox:1.36.1",
-        "--",
-        "sleep",
-        "3600",
+        "--from-literal=value=fixture",
     ]);
-    kubectl(&[
-        "-n",
-        NAMESPACE,
-        "wait",
-        "--for=condition=Ready",
-        "pod/delete-me",
-        "--timeout=60s",
-    ]);
-    let target = reference(&adapter, Gvk::core("v1", "Pod"), "delete-me").await;
+    let target = reference(&adapter, Gvk::core("v1", "ConfigMap"), "delete-me").await;
     run(
         &adapter,
         Command::Delete {
@@ -503,20 +493,26 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         },
     )
     .await;
-    kubectl(&[
-        "-n",
-        NAMESPACE,
-        "wait",
-        "--for=delete",
-        "pod/delete-me",
-        "--timeout=45s",
-    ]);
+    for _ in 0..100 {
+        if kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "configmap/delete-me",
+            "--ignore-not-found",
+        ])
+        .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         kubectl(&[
             "-n",
             NAMESPACE,
             "get",
-            "pod/delete-me",
+            "configmap/delete-me",
             "--ignore-not-found"
         ])
         .is_empty()
