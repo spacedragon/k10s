@@ -61,8 +61,8 @@ jobs:
       - name: Smoke native artifacts
         shell: bash
         env:
-          K10S_PACKAGE_DIR: target/release/packages
-          K10S_SERVER_BINARY: target/release/k10s-server
+          K10S_PACKAGE_DIR: ${{ github.workspace }}/target/release/packages
+          K10S_SERVER_BINARY: ${{ github.workspace }}/target/release/k10s-server
           K10S_PACKAGING_SMOKE: "1"
         run: |
           cargo test --locked -p k10s-desktop --test packaging_desktop
@@ -230,8 +230,8 @@ jobs:
           cargo build --locked --release --workspace
           cargo packager --release
           dist build --artifacts=local --target x86_64-apple-darwin --allow-dirty
-          K10S_PACKAGE_DIR=target/release/packages K10S_SERVER_BINARY=target/release/k10s-server cargo test --locked -p k10s-desktop --test packaging_desktop
-          K10S_PACKAGING_SMOKE=1 K10S_SERVER_BINARY=target/release/k10s-server cargo test --locked -p k10s-server-app --test packaging_server
+          K10S_PACKAGE_DIR="${GITHUB_WORKSPACE}/target/release/packages" K10S_SERVER_BINARY="${GITHUB_WORKSPACE}/target/release/k10s-server" cargo test --locked -p k10s-desktop --test packaging_desktop
+          K10S_PACKAGING_SMOKE=1 K10S_SERVER_BINARY="${GITHUB_WORKSPACE}/target/release/k10s-server" cargo test --locked -p k10s-server-app --test packaging_server
           test -x target/release/packages/*.app/Contents/MacOS/k10s-desktop
           test -f target/release/packages/*.dmg
           mount="$(mktemp -d)"
