@@ -68,7 +68,9 @@ impl BackendKernel {
 
     /// Execute a behavior-level query with an optional deadline.
     ///
-    /// If the deadline elapses before the adapter responds, the query is
+    /// The deadline covers the whole composed operation: the adapter read,
+    /// any relation traversal composed onto detail responses, and mapping.
+    /// If it elapses anywhere along that path, the remaining work is
     /// cancelled and a [`BackendError::Timeout`] is returned.
     pub async fn query_with_deadline(
         &self,
@@ -83,61 +85,65 @@ impl BackendKernel {
             Query::ResourceDetail { reference } => Some(reference.clone()),
             _ => None,
         };
-        let fut = self.adapter.query(req);
-        let result = match deadline {
+        // One budget spans the full composition: relation traversal after a
+        // successful read must never outlive the caller's deadline.
+        let fut = async move {
+            let result = self.adapter.query(req).await?;
+            Ok(match result {
+                QueryResult::Bootstrap(info) => KernelQueryResult::Bootstrap(BootstrapResult::new(
+                    info,
+                    self.server_instance_id.clone(),
+                )),
+                QueryResult::ResourceList(data) => {
+                    KernelQueryResult::ResourceList(ResourceListResult::new(data))
+                }
+                QueryResult::ResourceDetail(record) => {
+                    // Owner traversal belongs to the kernel: detail responses
+                    // always carry the backend-resolved related rows, so no
+                    // caller can forget them. Adapters without traversal keep a
+                    // detail-only response.
+                    let related = match detail_reference {
+                        Some(reference) => self.adapter_relations(reference).await,
+                        None => RelatedData::empty(record.reference.clone()),
+                    };
+                    KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record, related))
+                }
+                QueryResult::ResourceMetrics(sample) => {
+                    KernelQueryResult::ResourceMetrics(ResourceMetricsResult::new(
+                        metrics_reference
+                            .as_ref()
+                            .expect("resource metrics queries carry a reference"),
+                        sample,
+                    ))
+                }
+                QueryResult::ResourceTypes(data) => {
+                    KernelQueryResult::ResourceTypes(ResourceTypesResult::new(data))
+                }
+                QueryResult::Infrastructure(snapshot) => {
+                    KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
+                }
+                QueryResult::YamlValidation(data) => {
+                    KernelQueryResult::YamlValidate(crate::operation::YamlValidateResult::new(data))
+                }
+                QueryResult::StreamTicket(grant) => {
+                    KernelQueryResult::StreamTicket(crate::stream::StreamTicketResult::new(grant))
+                }
+                QueryResult::OperationStatus(data) => KernelQueryResult::OperationStatus(
+                    crate::operation::OperationStatusResult::new(data),
+                ),
+                QueryResult::ResourceRelations(_) => {
+                    // Relations are an internal composition of resource.detail
+                    // and are never exposed as a standalone kernel result.
+                    return Err(BackendError::unsupported("resource.relations"));
+                }
+            })
+        };
+        match deadline {
             Some(d) => tokio::time::timeout(d, fut)
                 .await
                 .map_err(|_| BackendError::Timeout)?,
             None => fut.await,
-        };
-        Ok(match result? {
-            QueryResult::Bootstrap(info) => KernelQueryResult::Bootstrap(BootstrapResult::new(
-                info,
-                self.server_instance_id.clone(),
-            )),
-            QueryResult::ResourceList(data) => {
-                KernelQueryResult::ResourceList(ResourceListResult::new(data))
-            }
-            QueryResult::ResourceDetail(record) => {
-                // Owner traversal belongs to the kernel: detail responses
-                // always carry the backend-resolved related rows, so no
-                // caller can forget them. Adapters without traversal keep a
-                // detail-only response.
-                let related = match detail_reference {
-                    Some(reference) => self.adapter_relations(reference).await,
-                    None => RelatedData::empty(record.reference.clone()),
-                };
-                KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record, related))
-            }
-            QueryResult::ResourceMetrics(sample) => {
-                KernelQueryResult::ResourceMetrics(ResourceMetricsResult::new(
-                    metrics_reference
-                        .as_ref()
-                        .expect("resource metrics queries carry a reference"),
-                    sample,
-                ))
-            }
-            QueryResult::ResourceTypes(data) => {
-                KernelQueryResult::ResourceTypes(ResourceTypesResult::new(data))
-            }
-            QueryResult::Infrastructure(snapshot) => {
-                KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
-            }
-            QueryResult::YamlValidation(data) => {
-                KernelQueryResult::YamlValidate(crate::operation::YamlValidateResult::new(data))
-            }
-            QueryResult::StreamTicket(grant) => {
-                KernelQueryResult::StreamTicket(crate::stream::StreamTicketResult::new(grant))
-            }
-            QueryResult::OperationStatus(data) => KernelQueryResult::OperationStatus(
-                crate::operation::OperationStatusResult::new(data),
-            ),
-            QueryResult::ResourceRelations(_) => {
-                // Relations are an internal composition of resource.detail
-                // and are never exposed as a standalone kernel result.
-                return Err(BackendError::unsupported("resource.relations"));
-            }
-        })
+        }
     }
 
     /// Resolve the related rows of one resource through the adapter.

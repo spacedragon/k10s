@@ -6,6 +6,8 @@
 //! Every test drives a real kube-rs client against a recorded tower-level
 //! API server; no live cluster is contacted.
 
+use std::time::Duration;
+
 use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{
     BackendError, BackendKernel, ContextInfo, Gvk, KernelQueryResult, KubeAdapter,
@@ -448,6 +450,79 @@ async fn events_normalize_both_api_variants_newest_first() {
     );
 }
 
+/// core/v1 and events.k8s.io/v1 mirror the same persisted Event store: one
+/// Event UID served through both endpoints surfaces exactly one row.
+#[tokio::test]
+async fn duplicate_event_uid_across_both_variants_is_emitted_once() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/namespaces/default/pods/web",
+        200,
+        &json!({
+            "kind": "Pod",
+            "apiVersion": "v1",
+            "metadata": {
+                "name": "web",
+                "namespace": NS,
+                "uid": "uid-pod",
+                "resourceVersion": "44",
+                "creationTimestamp": "2026-08-21T00:00:00Z",
+            },
+            "status": {"phase": "Running"},
+        })
+        .to_string(),
+    );
+    server.set_response(
+        "/api/v1/namespaces/default/events",
+        200,
+        &json!({
+            "kind": "EventList",
+            "apiVersion": "v1",
+            "metadata": {"resourceVersion": "45"},
+            "items": [{
+                "metadata": {"name": "web.1", "namespace": NS, "uid": "uid-ev-shared"},
+                "involvedObject": {"kind": "Pod", "name": "web", "namespace": NS, "uid": "uid-pod"},
+                "reason": "Started",
+                "message": "Started container",
+                "count": 3,
+                "lastTimestamp": "2026-08-21T00:03:00Z",
+            }]
+        })
+        .to_string(),
+    );
+    // The same persisted Event again through the dedicated API under its
+    // alternative field spellings.
+    server.set_response(
+        "/apis/events.k8s.io/v1/namespaces/default/events",
+        200,
+        &json!({
+            "kind": "EventList",
+            "apiVersion": "events.k8s.io/v1",
+            "metadata": {"resourceVersion": "46"},
+            "items": [{
+                "metadata": {"name": "web.x1", "namespace": NS, "uid": "uid-ev-shared"},
+                "regarding": {"kind": "Pod", "name": "web", "namespace": NS, "uid": "uid-pod"},
+                "reason": "Started",
+                "note": "Started container",
+                "series": {"count": 3, "lastObservedTime": "2026-08-21T00:03:00Z"},
+                "eventTime": "2026-08-21T00:03:00Z",
+            }]
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(&kernel, reference(pods_gvk(), "web", "uid-pod"))
+        .await
+        .expect("pod resolves");
+
+    assert_eq!(detail.events.len(), 1, "one persisted Event, one row");
+    assert_eq!(detail.events[0].reason, "Started");
+    assert_eq!(detail.events[0].message, "Started container");
+    assert_eq!(detail.events[0].count, 3);
+    assert_eq!(detail.events[0].last_seen, "2026-08-21T00:03:00Z");
+}
+
 /// The rendered YAML comes from the fetched object and is bound to its UID
 /// and opaque resourceVersion, so guarded edits can detect drift.
 #[tokio::test]
@@ -495,6 +570,36 @@ async fn relations_on_a_vanished_target_are_not_found() {
         .await
         .expect_err("vanished targets are typed not-founds");
     assert_eq!(error, BackendError::NotFound);
+}
+
+/// Relation traversal shares the caller's detail deadline: a relation sweep
+/// that stalls past the deadline returns Timeout instead of waiting on
+/// unbounded cluster I/O after the detail read already succeeded.
+#[tokio::test]
+async fn slow_relations_traversal_returns_timeout_at_the_deadline() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/deployments/web",
+        200,
+        &recorded_deployment(),
+    );
+    server.set_hanging_path("/apis/apps/v1/namespaces/default/replicasets");
+    let kernel = kernel(&server);
+
+    let error = kernel
+        .query_with_deadline(
+            Query::ResourceDetail {
+                reference: reference(deployments_gvk(), "web", "uid-web"),
+            },
+            Some(Duration::from_millis(500)),
+        )
+        .await
+        .expect_err("relation traversal past the deadline must be cancelled");
+    assert_eq!(error, BackendError::Timeout);
+    assert!(
+        server.hit_count("/apis/apps/v1/namespaces/default/replicasets") >= 1,
+        "the deadline cut a relation sweep that had already begun"
+    );
 }
 
 fn hit_once(server: &RecordedApiServer, path: &str) {

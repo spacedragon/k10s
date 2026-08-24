@@ -3,10 +3,14 @@
 //! Kubernetes serves events through two parallel APIs — core/v1 `Event`
 //! (involvedObject/message/lastTimestamp) and events.k8s.io/v1 `Event`
 //! (regarding/note/series.lastObservedTime). Both normalize into the same
-//! backend [`RecordEvent`] projection and merge newest-first. Events are
+//! backend [`RecordEvent`] projection, merge newest-first, and collapse to
+//! one row per persisted Event: the endpoints mirror one store, so rows are
+//! deduplicated by the Event object's own metadata UID. Events are
 //! matched by exact object UID, never by reused names or labels; unreadable
 //! or unavailable event APIs contribute nothing rather than failing the
 //! detail read they decorate.
+
+use std::collections::HashSet;
 
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
@@ -49,6 +53,11 @@ pub(crate) async fn events_for(
             events.extend(items);
         }
     }
+    // The two endpoints mirror one persisted Event store: the same Event
+    // object arrives through both, so its own metadata UID keeps it to
+    // exactly one row.
+    let mut seen = HashSet::new();
+    events.retain(|event| event.object_uid.is_empty() || seen.insert(event.object_uid.clone()));
     // Only events regarding exactly this object (UID equality).
     events.retain(|event| event_uid_matches(&event.message_meta_uid, reference));
     // Newest first; ties break deterministically by reason then message.
@@ -88,6 +97,8 @@ struct RawEvent {
     record: RecordEvent,
     /// UID of the object the event regards.
     message_meta_uid: String,
+    /// UID of the persisted Event itself, shared by both API views.
+    object_uid: String,
 }
 
 fn event_uid_matches(uid: &str, reference: &ResourceRef) -> bool {
@@ -164,6 +175,11 @@ fn normalize_event(object: &DynamicObject) -> Option<RawEvent> {
             .get("uid")
             .and_then(serde_json::Value::as_str)
             .or_else(|| metadata.get("uid").and_then(serde_json::Value::as_str))
+            .unwrap_or_default()
+            .to_owned(),
+        object_uid: metadata
+            .get("uid")
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_owned(),
     })

@@ -7,7 +7,10 @@
 //! deterministic, credential-free fixtures. Never enable this feature in
 //! production builds; it is wired exclusively through dev-dependencies.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use http::{Request, Response};
@@ -21,6 +24,8 @@ type Recorded = (u16, String);
 struct RecordedState {
     /// Canned responses keyed by request path.
     responses: BTreeMap<String, Recorded>,
+    /// Paths whose requests never complete (stalled api server simulation).
+    hanging: BTreeSet<String>,
     /// Per-path request hit counts for refresh assertions.
     hits: BTreeMap<String, usize>,
 }
@@ -53,13 +58,25 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
         let path = request.uri().path().to_owned();
         let state = self.state.clone();
         Box::pin(async move {
-            let mut shared = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *shared.hits.entry(path.clone()).or_insert(0) += 1;
-            let (status, body) = match shared.responses.get(&path) {
-                Some(recorded) => recorded.clone(),
-                None => (404u16, status_json("no recorded response for /{path}")),
+            let hanging = {
+                let mut shared = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *shared.hits.entry(path.clone()).or_insert(0) += 1;
+                shared.hanging.contains(&path)
+            };
+            if hanging {
+                // A stalled connection: the request never completes.
+                std::future::pending::<()>().await;
+            }
+            let (status, body) = {
+                let shared = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match shared.responses.get(&path) {
+                    Some(recorded) => recorded.clone(),
+                    None => (404u16, status_json("no recorded response for /{path}")),
+                }
             };
             Ok(Response::builder()
                 .status(status)
@@ -74,6 +91,7 @@ impl Default for RecordedApiServer {
         Self {
             state: Arc::new(std::sync::Mutex::new(RecordedState {
                 responses: BTreeMap::new(),
+                hanging: BTreeSet::new(),
                 hits: BTreeMap::new(),
             })),
         }
@@ -96,6 +114,16 @@ impl RecordedApiServer {
         shared
             .responses
             .insert(path.to_owned(), (status, body.to_owned()));
+    }
+
+    /// Mark one request path as never completing, simulating a stalled api
+    /// server connection for deadline and cancellation assertions.
+    pub fn set_hanging_path(&self, path: &str) {
+        let mut shared = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared.hanging.insert(path.to_owned());
     }
 
     /// How many times one path has been requested so far.
