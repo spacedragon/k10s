@@ -37,6 +37,35 @@ fn lifecycle_separates_pre_submit_cancel_from_post_submit_unknown_outcome() {
 }
 
 #[test]
+fn an_authoritative_refresh_releases_only_the_unknown_target_gate() {
+    let engine = OperationEngine::with_limits("instance", 8, 8, Duration::from_secs(60));
+    let first = accepted(
+        engine
+            .accept_scoped("first", "scale/5", "deployment/web")
+            .unwrap(),
+    );
+    engine.running(&first, None).unwrap();
+    engine.outcome_unknown(&first).unwrap();
+
+    assert!(
+        engine
+            .accept_scoped("too-soon", "scale/6", "deployment/web")
+            .is_err()
+    );
+    engine.refresh_scope("deployment/web");
+    assert!(matches!(
+        engine
+            .accept_scoped("after-refresh", "scale/6", "deployment/web")
+            .unwrap(),
+        AcceptOutcome::Accepted(_)
+    ));
+    assert_eq!(
+        engine.status(std::slice::from_ref(&first)).operations[0].state,
+        OperationState::OutcomeUnknown
+    );
+}
+
+#[test]
 fn idempotency_replays_exact_requests_and_blocks_ambiguous_duplicates() {
     let engine = OperationEngine::new("server-a");
     let first = accepted(engine.accept("same-key", "scale/ns/web/3").unwrap());

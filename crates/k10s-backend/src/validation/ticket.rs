@@ -60,6 +60,24 @@ impl TicketStore {
         Ok(ticket)
     }
 
+    /// Inspect a current ticket without consuming it. Mutation admission uses
+    /// this before idempotency acceptance; only a fresh accepted operation
+    /// consumes the ticket, while an exact replay returns its original ID.
+    pub(crate) fn inspect(&mut self, id: &str) -> Result<Ticket, BackendError> {
+        self.expire();
+        if !id.starts_with(&self.instance_id) {
+            return Err(BackendError::Conflict(
+                "the validation ticket is unknown or expired".into(),
+            ));
+        }
+        self.tickets
+            .get(id)
+            .map(|(ticket, _)| ticket.clone())
+            .ok_or_else(|| {
+                BackendError::Conflict("the validation ticket is unknown or expired".into())
+            })
+    }
+
     fn expire(&mut self) {
         let now = Instant::now();
         self.tickets

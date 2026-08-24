@@ -28,6 +28,8 @@ struct RecordedState {
     method_responses: BTreeMap<String, Recorded>,
     /// Paths whose requests never complete (stalled api server simulation).
     hanging: BTreeSet<String>,
+    /// Method/path keys that fail at the transport layer.
+    failing: BTreeSet<String>,
     /// Per-path request hit counts for refresh assertions.
     hits: BTreeMap<String, usize>,
     /// Per-path submitted bodies in arrival order, so tests can inspect the
@@ -96,6 +98,14 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                 // A stalled connection: the request never completes.
                 std::future::pending::<()>().await;
             }
+            let failing = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .failing
+                .contains(&method_path);
+            if failing {
+                return Err(std::io::Error::other("recorded transport failure").into());
+            }
             let (status, body) = {
                 let shared = state
                     .lock()
@@ -124,6 +134,7 @@ impl Default for RecordedApiServer {
                 responses: BTreeMap::new(),
                 method_responses: BTreeMap::new(),
                 hanging: BTreeSet::new(),
+                failing: BTreeSet::new(),
                 hits: BTreeMap::new(),
                 bodies: BTreeMap::new(),
                 uris: BTreeMap::new(),
@@ -170,6 +181,17 @@ impl RecordedApiServer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shared.hanging.insert(path.to_owned());
+    }
+
+    /// Fail one HTTP method/path before an API response exists.
+    pub fn set_transport_error(&self, method: &str, path: &str) {
+        let mut shared = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared
+            .failing
+            .insert(format!("{} {path}", method.to_ascii_uppercase()));
     }
 
     /// How many times one path has been requested so far.
