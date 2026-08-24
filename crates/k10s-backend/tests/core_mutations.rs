@@ -10,6 +10,7 @@ const CONTEXT: &str = "recorded";
 const DEPLOYMENT: &str = "/apis/apps/v1/namespaces/default/deployments/web";
 const SCALE: &str = "/apis/apps/v1/namespaces/default/deployments/web/scale";
 const OBJECT: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default","uid":"uid-web","resourceVersion":"42"},"spec":{"replicas":2}}"#;
+const RECREATED_OBJECT: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default","uid":"uid-recreated","resourceVersion":"84"},"spec":{"replicas":2}}"#;
 const YAML: &str = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: default\n  uid: uid-web\n  resourceVersion: '42'\nspec:\n  replicas: 4\n";
 
 fn adapter(server: &RecordedApiServer) -> KubeAdapter {
@@ -138,6 +139,144 @@ async fn delete_carries_uid_rv_preconditions_and_all_propagation_policies() {
                 .contains(&format!("{propagation:?}").to_ascii_lowercase())
         );
     }
+}
+
+#[tokio::test]
+async fn completed_delete_replays_before_a_live_target_preflight() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);
+    server.set_method_response("DELETE", DEPLOYMENT, 200, OBJECT);
+    let adapter = adapter(&server);
+    let command = Command::Delete {
+        target: target(),
+        propagation: Propagation::Foreground,
+        idempotency_key: "delete-replay".into(),
+    };
+
+    let id = adapter.execute(command.clone()).await.unwrap();
+    assert_eq!(
+        terminal(&adapter, id.as_str()).await,
+        OperationState::Succeeded
+    );
+    let hits = server.hit_count(DEPLOYMENT);
+    server.set_method_response(
+        "GET",
+        DEPLOYMENT,
+        404,
+        r#"{"kind":"Status","status":"Failure","reason":"NotFound","code":404}"#,
+    );
+
+    assert_eq!(adapter.execute(command).await.unwrap(), id);
+    assert_eq!(
+        server.hit_count(DEPLOYMENT),
+        hits,
+        "a retained replay must not require the deleted object to exist"
+    );
+}
+
+#[tokio::test]
+async fn retained_keys_distinguish_recreated_uids_and_api_versions() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);
+    server.set_method_response("PATCH", SCALE, 200, OBJECT);
+    let adapter = adapter(&server);
+    let id = adapter
+        .execute(Command::Scale {
+            context: CONTEXT.into(),
+            gvk: target().gvk,
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+            replicas: 3,
+            idempotency_key: "exact-key".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&adapter, id.as_str()).await,
+        OperationState::Succeeded
+    );
+
+    server.set_method_response("GET", DEPLOYMENT, 200, RECREATED_OBJECT);
+    assert!(matches!(
+        adapter
+            .execute(Command::Scale {
+                context: CONTEXT.into(),
+                gvk: target().gvk,
+                namespace: Some("default".into()),
+                name: "web".into(),
+                uid: "uid-recreated".into(),
+                replicas: 3,
+                idempotency_key: "exact-key".into(),
+            })
+            .await,
+        Err(BackendError::Conflict(_))
+    ));
+
+    let mut other_version = target();
+    other_version.gvk.version = "v2".into();
+    assert!(matches!(
+        adapter.operation_engine().replay(
+            "exact-key",
+            &format!("scale/{}/3", other_version.exact_identity_key())
+        ),
+        Err(BackendError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn authoritative_absence_releases_an_unknown_delete_scope() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);
+    server.set_transport_error("DELETE", DEPLOYMENT);
+    let adapter = adapter(&server);
+    let id = adapter
+        .execute(Command::Delete {
+            target: target(),
+            propagation: Propagation::Background,
+            idempotency_key: "unknown-delete".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&adapter, id.as_str()).await,
+        OperationState::OutcomeUnknown
+    );
+
+    server.set_method_response(
+        "GET",
+        DEPLOYMENT,
+        404,
+        r#"{"kind":"Status","status":"Failure","reason":"NotFound","code":404}"#,
+    );
+    assert_eq!(
+        adapter
+            .query(Query::ResourceDetail {
+                reference: target(),
+            })
+            .await
+            .unwrap_err(),
+        BackendError::NotFound
+    );
+
+    server.set_method_response("GET", DEPLOYMENT, 200, RECREATED_OBJECT);
+    server.set_method_response("PATCH", SCALE, 200, RECREATED_OBJECT);
+    let retry = adapter
+        .execute(Command::Scale {
+            context: CONTEXT.into(),
+            gvk: target().gvk,
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-recreated".into(),
+            replicas: 4,
+            idempotency_key: "after-delete-refresh".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&adapter, retry.as_str()).await,
+        OperationState::Succeeded
+    );
 }
 
 #[tokio::test]

@@ -520,7 +520,7 @@ impl KubeAdapter {
             return Err(BackendError::NotFound);
         }
 
-        let read = read::get_resource(
+        let read = match read::get_resource(
             &client,
             &descriptor.gvk,
             &descriptor.plural,
@@ -528,7 +528,19 @@ impl KubeAdapter {
             reference.namespace.as_deref(),
             &reference,
         )
-        .await?;
+        .await
+        {
+            Ok(read) => read,
+            Err(BackendError::NotFound) => {
+                // An authoritative 404 or UID mismatch reconciles this exact
+                // stale identity just as surely as a successful read. It does
+                // not establish whether an outcome-unknown write succeeded,
+                // but it may safely release the name-scoped retry gate.
+                self.operations.refresh_scope(&reference.coalescing_key());
+                return Err(BackendError::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
 
         let revision = self.watches.next_revision();
         let mut record = crate::runtime::record_from_row(&read.row, revision);

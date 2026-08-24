@@ -449,6 +449,29 @@ impl ResourceRef {
             self.name
         )
     }
+
+    /// Return an unambiguous key for the exact immutable object identity.
+    ///
+    /// Unlike [`Self::coalescing_key`], this includes API version and UID and
+    /// therefore must be used by idempotency fingerprints. Length prefixes
+    /// prevent separator characters in context names from creating aliases.
+    #[must_use]
+    pub fn exact_identity_key(&self) -> String {
+        let fields = [
+            self.context.as_str(),
+            self.gvk.group.as_str(),
+            self.gvk.version.as_str(),
+            self.gvk.kind.as_str(),
+            self.namespace.as_deref().unwrap_or(""),
+            self.name.as_str(),
+            self.uid.as_str(),
+        ];
+        fields
+            .into_iter()
+            .map(|field| format!("{}:{field}", field.len()))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
 }
 
 /// One normalized resource row as observed by the backend.

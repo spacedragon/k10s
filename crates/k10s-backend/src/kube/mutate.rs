@@ -37,6 +37,10 @@ impl KubeAdapter {
                     name,
                     uid,
                 };
+                let fingerprint = format!("scale/{}/{replicas}", target.exact_identity_key());
+                if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
+                    return Ok(id);
+                }
                 let (api, current, descriptor) = self.mutation_target(&target).await?;
                 if !descriptor.supports_scale || !descriptor.supports_patch {
                     return Err(BackendError::unsupported("workload.scale"));
@@ -45,7 +49,6 @@ impl KubeAdapter {
                     BackendError::Conflict("the target has no resourceVersion".into())
                 })?;
                 let patch = json!({"metadata":{"resourceVersion":resource_version},"spec":{"replicas":replicas}});
-                let fingerprint = format!("scale/{}/{replicas}", target.coalescing_key());
                 let scope = target.coalescing_key();
                 self.spawn_mutation(idempotency_key, fingerprint, scope, async move {
                     api.patch_subresource(
@@ -62,6 +65,10 @@ impl KubeAdapter {
                 target,
                 idempotency_key,
             } => {
+                let fingerprint = format!("restart/{}", target.exact_identity_key());
+                if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
+                    return Ok(id);
+                }
                 if !matches!(
                     (target.gvk.group.as_str(), target.gvk.kind.as_str()),
                     ("apps", "Deployment" | "StatefulSet" | "DaemonSet")
@@ -76,7 +83,6 @@ impl KubeAdapter {
                     BackendError::Conflict("the target has no resourceVersion".into())
                 })?;
                 let patch = json!({"metadata":{"resourceVersion":resource_version},"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":crate::runtime::now_rfc3339()}}}}});
-                let fingerprint = format!("restart/{}", target.coalescing_key());
                 let scope = target.coalescing_key();
                 self.spawn_mutation(idempotency_key, fingerprint, scope, async move {
                     api.patch(&target.name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -101,6 +107,10 @@ impl KubeAdapter {
                 propagation,
                 idempotency_key,
             } => {
+                let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
+                if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
+                    return Ok(id);
+                }
                 let (api, current, descriptor) = self.mutation_target(&target).await?;
                 if !descriptor.supports_delete {
                     return Err(BackendError::unsupported("workload.delete"));
@@ -121,7 +131,6 @@ impl KubeAdapter {
                     }),
                     ..DeleteParams::default()
                 };
-                let fingerprint = format!("delete/{}/{propagation:?}", target.coalescing_key());
                 let scope = target.coalescing_key();
                 self.spawn_mutation(idempotency_key, fingerprint, scope, async move {
                     api.delete(&target.name, &params).await.map(|_| ())
@@ -135,7 +144,7 @@ impl KubeAdapter {
                 buffer_hash,
                 target,
             } => {
-                let fingerprint = format!("apply/{}/{}", target.coalescing_key(), buffer_hash);
+                let fingerprint = format!("apply/{}/{}", target.exact_identity_key(), buffer_hash);
                 if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
                     return Ok(id);
                 }
