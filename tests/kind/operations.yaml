@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k10s-operations
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k10s-operations-forbidden
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k10s-operator
+  namespace: k10s-operations
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k10s-operator
+  namespace: k10s-operations
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k10s-operator
+  namespace: k10s-operations
+subjects:
+  - kind: ServiceAccount
+    name: k10s-operator
+    namespace: k10s-operations
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: k10s-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operations-web
+  namespace: k10s-operations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operations-web
+  template:
+    metadata:
+      labels:
+        app: operations-web
+    spec:
+      containers:
+        - name: shell
+          image: busybox:1.36.1
+          command: ["sh", "-c", "echo k10s-log-ready; trap : TERM INT; sleep 3600 & wait"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: operations-shell
+  namespace: k10s-operations
+  labels:
+    app: operations-shell
+spec:
+  containers:
+    - name: shell
+      image: busybox:1.36.1
+      command: ["sh", "-c", "echo k10s-log-ready; trap : TERM INT; sleep 3600 & wait"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: operations-cron
+  namespace: k10s-operations
+spec:
+  schedule: "0 0 1 1 *"
+  suspend: false
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: task
+              image: busybox:1.36.1
+              command: ["sh", "-c", "echo k10s-job-ready"]

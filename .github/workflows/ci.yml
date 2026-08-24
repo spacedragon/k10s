@@ -166,6 +166,7 @@ jobs:
           # the loopback API endpoint exposed by kind.
           unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           cargo test --locked -p k10s-backend --test kind_read_path -- --ignored --nocapture
+          cargo test --locked -p k10s-backend --test kind_operations -- --ignored --nocapture
           cargo build --locked -p k10s-server-app --bin k10s-server
           cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture
           cargo test --locked -p k10s-desktop --test kube_factory
