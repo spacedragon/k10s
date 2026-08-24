@@ -26,6 +26,21 @@ up() {
     --kubeconfig "$KUBECONFIG_PATH" \
     --wait 120s
 
+  # The kind node cannot reach Docker Hub directly on the self-hosted runner.
+  # Fetch the pinned fixture image through skopeo (which honors the runner's
+  # proxy), import it into Docker, and preload it into the cluster. Keeping the
+  # Docker image around also makes subsequent CI runs fully local.
+  if ! docker image inspect busybox:1.36.1 >/dev/null 2>&1; then
+    require skopeo
+    local busybox_archive
+    busybox_archive="${RUNNER_TEMP:-/tmp}/k10s-busybox-1.36.1.tar"
+    skopeo copy \
+      docker://docker.io/library/busybox:1.36.1 \
+      "oci-archive:${busybox_archive}:docker.io/library/busybox:1.36.1"
+    docker load --input "$busybox_archive"
+  fi
+  kind load docker-image busybox:1.36.1 --name "$CLUSTER_NAME"
+
   awk 'BEGIN { RS="---" } /kind: CustomResourceDefinition/ { print }' \
     "$ROOT_DIR/tests/kind/fixtures.yaml" | \
     kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
