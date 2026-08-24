@@ -136,8 +136,34 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           trunk build --release
+          if ($LASTEXITCODE -ne 0) { throw "Trunk build failed: $LASTEXITCODE" }
           cargo build --locked --release --workspace
-          cargo packager --release
+          if ($LASTEXITCODE -ne 0) { throw "workspace build failed: $LASTEXITCODE" }
+          # Build each Windows installer independently: cargo-packager stops at
+          # the first format failure, so `all` can otherwise hide a missing
+          # NSIS output behind a WiX failure.
+          cargo packager --release --formats nsis
+          if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed: $LASTEXITCODE" }
+          cargo packager --release --formats wix
+          if ($LASTEXITCODE -ne 0) {
+            # WiX 3 ICE validation cannot run as the runner's NetworkService
+            # account on some self-hosted Windows machines. Relink the exact
+            # candle output without ICE validation; the next step performs an
+            # administrative extraction and verifies the installed binary.
+            $packageRoot = Resolve-Path 'target/release/packages'
+            $packageVersion = (Select-String -Path 'Packager.toml' -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
+            $wixRoot = Join-Path $packageRoot '.cargo-packager\WixTools'
+            $intermediate = Join-Path $packageRoot '.cargo-packager\wix\x64'
+            $light = Join-Path $wixRoot 'light.exe'
+            Push-Location $intermediate
+            try {
+              & $light '-sval' '-ext' (Join-Path $wixRoot 'WixUIExtension.dll') '-ext' (Join-Path $wixRoot 'WixUtilExtension.dll') '-o' 'output.msi' '-cultures:en-us' '-loc' 'locale.wxl' '*.wixobj'
+              if ($LASTEXITCODE -ne 0) { throw "WiX relink failed: $LASTEXITCODE" }
+              Move-Item -Force 'output.msi' (Join-Path $packageRoot "k10s-desktop_${packageVersion}_x64_en-US.msi")
+            } finally {
+              Pop-Location
+            }
+          }
           dist build --artifacts=local --target x86_64-pc-windows-msvc --allow-dirty
           if ($LASTEXITCODE -ne 0) { throw "release build failed: $LASTEXITCODE" }
       - name: Smoke native artifacts
