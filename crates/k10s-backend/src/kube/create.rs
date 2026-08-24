@@ -15,6 +15,10 @@ impl KubeAdapter {
         source: ResourceRef,
         key: String,
     ) -> Result<OperationId, BackendError> {
+        let fingerprint = format!("create-job/{}", source.exact_identity_key());
+        if let Some(id) = self.operations.replay(&key, &fingerprint)? {
+            return Ok(id);
+        }
         if source.namespace.is_none()
             || source.gvk.group != "batch"
             || source.gvk.version != "v1"
@@ -52,7 +56,7 @@ impl KubeAdapter {
             source.namespace.clone(),
         );
         let scope = source.coalescing_key();
-        self.spawn_mutation(key, format!("create-job/{scope}"), scope, async move {
+        self.spawn_mutation(key, fingerprint, scope, async move {
             api.create(&PostParams::default(), &object)
                 .await
                 .map(|_| ())
@@ -65,6 +69,14 @@ impl KubeAdapter {
         suspended: bool,
         key: String,
     ) -> Result<OperationId, BackendError> {
+        let fingerprint = format!(
+            "cronjob-suspend/{}/{}",
+            target.exact_identity_key(),
+            suspended
+        );
+        if let Some(id) = self.operations.replay(&key, &fingerprint)? {
+            return Ok(id);
+        }
         if target.gvk != Gvk::new("batch", "v1", "CronJob") {
             return Err(BackendError::unsupported("cronjob.suspend"));
         }
@@ -77,16 +89,11 @@ impl KubeAdapter {
             .ok_or_else(|| BackendError::Conflict("the target has no resourceVersion".into()))?;
         let patch = json!({"metadata":{"resourceVersion":rv},"spec":{"suspend":suspended}});
         let scope = target.coalescing_key();
-        self.spawn_mutation(
-            key,
-            format!("cronjob-suspend/{scope}/{suspended}"),
-            scope,
-            async move {
-                api.patch(&target.name, &PatchParams::default(), &Patch::Merge(&patch))
-                    .await
-                    .map(|_| ())
-            },
-        )
+        self.spawn_mutation(key, fingerprint, scope, async move {
+            api.patch(&target.name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+                .map(|_| ())
+        })
     }
 }
 
