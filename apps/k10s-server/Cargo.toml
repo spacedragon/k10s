@@ -2,10 +2,15 @@
 name = "k10s-server-app"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "k10s-server"
 path = "src/main.rs"
+
+[[test]]
+name = "packaging_server"
+path = "../../packaging/smoke/server.rs"
 
 [dependencies]
 k10s-backend = { path = "../../crates/k10s-backend" }

@@ -36,7 +36,8 @@ cargo run -p k10s-server-app             # standalone server on 127.0.0.1:8080
 Standalone server environment:
 
 - `K10S_BIND_ADDR` — listener address (default `127.0.0.1:8080`)
-- `K10S_DIST_DIR` — exact Trunk output tree to host (default `dist`)
+- `K10S_DIST_DIR` — optional external Trunk output tree for development. Release
+  binaries embed the exact fingerprinted `dist/` built before Cargo runs.
 - `K10S_ACCESS_TOKEN_FILE` — path of a file containing the access token
   (surrounding whitespace trimmed). When set, it always takes precedence over
   `K10S_ACCESS_TOKEN`. An empty or unreadable file refuses startup.
@@ -185,11 +186,36 @@ error payloads or probe bodies.
 
 ## Releasing
 
-Release builds are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml) — pushing a tag `v<version>` builds the `k10s-desktop` and `k10s-server` binaries for Linux (x86_64), Windows (x86_64), and macOS (arm64 + x86_64) and publishes them as a GitHub Release with checksums.
+Release builds are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+on self-hosted native runners. The fixed build order is Trunk 0.21.14, the
+locked release workspace, cargo-packager 0.11.8, cargo-dist 0.32.0, then the
+OCI image. Desktop outputs are `.deb` + `.AppImage`, `.msi` + NSIS `.exe`, and
+`.app` + `.dmg`; the standalone server is a per-target `.tar.xz`/`.zip` with
+the same web bundle embedded, plus a non-root OCI image.
+
+Local release verification uses the same order:
+
+```sh
+trunk build --release
+cargo build --locked --release --workspace
+cargo install cargo-packager --version 0.11.8 --locked
+cargo packager --release
+cargo install cargo-dist --version 0.32.0 --locked
+dist build --artifacts=local
+docker buildx build --load -f packaging/container/Dockerfile -t k10s:test .
+```
+
+Signing remains opt-in and secrets are never stored in the repository. Windows
+signing supplies the certificate to the runner and configures the packager
+thumbprint/timestamp inputs at release time. macOS signing/notarization supplies
+an Apple signing identity, App Store Connect issuer/key ID, and private key via
+the runner keychain/environment. Unsigned pull-request builds exercise the same
+packaging and smoke checks.
 
 To cut a release:
 
-1. Bump `version` under `[workspace.package]` in `Cargo.toml` and merge the change (CI on `main` must stay green).
+1. Bump the matching `version` in `Cargo.toml` and `Packager.toml`, then merge
+   the change (CI on `main` must stay green).
 2. Tag exactly `v<version>` (the workflow fails if the tag does not match the workspace version):
 
    ```sh

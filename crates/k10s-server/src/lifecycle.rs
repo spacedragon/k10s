@@ -482,6 +482,7 @@ pub async fn run_with_assets(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let drain_timeout = config.drain_timeout;
     let flush_window = config.graceful_flush_timeout;
+    let probe_drain_grace = config.probe_drain_grace;
     let readiness = Readiness::new();
     let connections = Arc::new(TaskTracker::new());
     let tasks = ConnectionTasks::new();
@@ -491,6 +492,7 @@ pub async fn run_with_assets(
         drain: CancellationToken::new(),
         force: CancellationToken::new(),
     };
+    let startup_readiness_delay = config.startup_readiness_delay;
     let app = router(
         config,
         kernel,
@@ -502,7 +504,20 @@ pub async fn run_with_assets(
         signals.clone(),
         dist_dir,
     );
-    readiness.set(ReadinessState::Ready);
+    if startup_readiness_delay.is_zero() {
+        readiness.set(ReadinessState::Ready);
+    } else {
+        let startup_readiness = Arc::clone(&readiness);
+        let startup_cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(startup_readiness_delay) => {
+                    startup_readiness.set(ReadinessState::Ready);
+                }
+                () = startup_cancel.cancelled() => {}
+            }
+        });
+    }
     let coordinator = Arc::new(std::sync::Mutex::new(ShutdownCoordinator {
         stage: ShutdownStage::Serving,
         readiness: Arc::clone(&readiness),
@@ -534,6 +549,9 @@ pub async fn run_with_assets(
                 coordinator.stop_accepting_application_connections();
                 coordinator.send_notice_and_close_mutation_gate(&signals.drain);
                 coordinator.cancel_watches_logs_and_exec();
+            }
+            if !probe_drain_grace.is_zero() {
+                tokio::time::sleep(probe_drain_grace).await;
             }
             let completed = drain_tracked_tasks(
                 deadline,

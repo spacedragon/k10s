@@ -1,301 +1,230 @@
-name: Release
-
-# Publish a GitHub Release with prebuilt binaries.
-#
-# Triggers:
-#   - Pushing a tag `v<version>` (e.g. `v0.1.0`) builds all platform
-#     artifacts and creates a GitHub Release. The tag must exactly match
-#     the `version` in the workspace root Cargo.toml, otherwise the run
-#     fails fast (see the `verify-version` job).
-#   - `workflow_dispatch` runs the build matrix only — handy for testing
-#     the pipeline before tagging.
-#
-# To cut a release:
-#   1. Bump `version` in Cargo.toml and commit (CI on main stays green).
-#   2. `git tag v<version> && git push origin v<version>`
-#   3. The workflow uploads k10s-desktop / k10s-server archives for
-#      Linux, Windows, and macOS to the release with checksums.
+name: Release packaging
 
 on:
+  pull_request:
+    paths: ["Packager.toml", "dist-workspace.toml", "packaging/**", "apps/k10s-server/**", ".github/workflows/release.yml"]
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
-
-# Cancel a superseded release run for the same tag (e.g. after a retag).
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
+  TRUNK_VERSION: 0.21.14
+  CARGO_PACKAGER_VERSION: 0.11.8
+  CARGO_DIST_VERSION: 0.32.0
 
 jobs:
-  # Fail fast when the tag does not match the workspace version, so we
-  # never publish a release whose binaries claim a different version.
-  verify-version:
-    name: Verify tag matches workspace version
-    runs-on: ubuntu-latest
+  linux:
+    name: Package Linux and OCI
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Read workspace version
-        id: version
+        with: { clean: true }
+      - name: Verify release versions
+        shell: bash
         run: |
-          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Enforce v<version> tag
-        if: startsWith(github.ref, 'refs/tags/')
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          packager_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Packager.toml)"
+          test "$cargo_version" = "$packager_version"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then test "${GITHUB_REF#refs/tags/}" = "v${cargo_version}"; fi
+      - name: Install pinned tools
+        shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          EXPECTED="v${{ steps.version.outputs.version }}"
-          if [ "$TAG" != "$EXPECTED" ]; then
-            echo "::error::Tag '$TAG' does not match workspace version '$EXPECTED'. Bump Cargo.toml first, or retag."
-            exit 1
+          if ! sudo docker buildx version >/dev/null 2>&1 || ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y docker-buildx skopeo
           fi
-          echo "Tag $TAG matches workspace version. Building..."
-
-  # Build release binaries for every supported platform/target pair and
-  # upload the packaged archives. `fail-fast: false` keeps all platforms
-  # building even if one target breaks.
-  build:
-    name: Build ${{ matrix.target }}
-    needs: verify-version
-    runs-on: ${{ fromJSON(matrix.runner) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: '"ubuntu-latest"'
-            target: x86_64-unknown-linux-gnu
-          - runner: '["self-hosted", "Windows", "X64"]'
-            target: x86_64-pc-windows-msvc
-            self_hosted: true
-          # macOS 13 (Intel) runners are deprecated, so both macOS
-          # targets are produced from the arm64 runner by cross-compiling
-          # the x86_64 target with the same Apple SDK.
-          - runner: '"macos-14"'
-            target: aarch64-apple-darwin
-          - runner: '"macos-14"'
-            target: x86_64-apple-darwin
-    steps:
-      - name: Configure Windows Git transport
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: git config --global http.version HTTP/1.1
-
-      - name: Checkout source (hosted runners)
-        if: runner.os != 'Windows'
-        uses: actions/checkout@v4
-
-      # This runner's route to github.com occasionally resets connections.
-      # Each checkout action already retries three times; allow two complete
-      # attempts before failing the release job.
-      - name: Checkout source (Windows, first attempt)
-        id: windows_checkout_1
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        uses: actions/checkout@v4
-
-      - name: Checkout source (Windows, retry)
-        if: runner.os == 'Windows' && steps.windows_checkout_1.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        if: matrix.self_hosted == true
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          $now = [DateTime]::UtcNow
-          $calendar = [System.Globalization.CultureInfo]::InvariantCulture.Calendar
-          $week = $calendar.GetWeekOfYear(
-            $now,
-            [System.Globalization.CalendarWeekRule]::FirstFourDayWeek,
-            [DayOfWeek]::Monday
-          )
-          $weekYear = $now.Year
-          if ($now.Month -eq 1 -and $week -ge 52) { $weekYear-- }
-          if ($now.Month -eq 12 -and $week -eq 1) { $weekYear++ }
-          $generation = "{0:D4}-W{1:D2}" -f $weekYear, $week
-          $cacheRoot = Join-Path "${{ runner.tool_cache }}" "k10s\cargo-target-weekly"
-          $targetDir = Join-Path $cacheRoot $generation
-          New-Item -ItemType Directory -Force $targetDir | Out-Null
-
-          # Retain only the current and previous weekly generations.
-          Get-ChildItem -Path $cacheRoot -Directory |
-            Where-Object { $_.Name -match '^\d{4}-W\d{2}$' } |
-            Sort-Object Name -Descending |
-            Select-Object -Skip 2 |
-            Remove-Item -Recurse -Force
-
-          "CARGO_TARGET_DIR=$targetDir" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # The repository pins Rust via rust-toolchain.toml. Install the pinned
-      # channel explicitly and add the matrix target to THAT channel —
-      # dtolnay/rust-toolchain has no toolchain-file input and would install
-      # the target for stable instead, so the pinned 1.97.1 cross-builds
-      # would fail with "target not installed".
-      - name: Install pinned Rust toolchain and matrix target (Unix)
-        if: runner.os != 'Windows'
+          sudo systemctl start docker
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup target add wasm32-unknown-unknown --toolchain "$channel"
+          rustup default "$channel"
+          root="$RUNNER_TOOL_CACHE/k10s/release-tools"
+          mkdir -p "$root/bin"
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$root/bin" trunk
+          export PATH="$root/bin:$PATH"
+          cargo-packager --version | grep -Fq "$CARGO_PACKAGER_VERSION" || cargo install cargo-packager --version "$CARGO_PACKAGER_VERSION" --locked --root "$root"
+          dist --version | grep -Fq "$CARGO_DIST_VERSION" || cargo install cargo-dist --version "$CARGO_DIST_VERSION" --locked --root "$root"
+          echo "$root/bin" >> "$GITHUB_PATH"
+      - name: Build in release dependency order
         shell: bash
         run: |
-          CHANNEL="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
-          rustup toolchain install "${CHANNEL}" --profile minimal --no-self-update
-          rustup target add "${{ matrix.target }}" --toolchain "${CHANNEL}"
-          rustup default "${CHANNEL}"
-
-      - name: Install pinned Rust toolchain and matrix target (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+          trunk build --release
+          cargo build --locked --release --workspace
+          cargo packager --release
+          dist build --artifacts=local --target x86_64-unknown-linux-gnu --allow-dirty
+      - name: Smoke native artifacts
+        shell: bash
+        env:
+          K10S_PACKAGE_DIR: target/release/packages
+          K10S_SERVER_BINARY: target/release/k10s-server
+          K10S_PACKAGING_SMOKE: "1"
         run: |
-          $ErrorActionPreference = 'Stop'
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$'
-          if (-not $match) { throw 'Unable to read channel from rust-toolchain.toml' }
-          $channel = $match.Matches[0].Groups[1].Value
-
-          $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-          $rustup = Join-Path $cargoBin "rustup.exe"
-          if (-not (Test-Path $rustup)) {
-            $installer = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
-            Invoke-WebRequest -UseBasicParsing `
-              -Uri "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe" `
-              -OutFile $installer
-            & $installer -y --profile minimal --default-toolchain none
-            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed with exit code $LASTEXITCODE" }
-          }
-          $env:PATH = "$cargoBin;$env:PATH"
-          $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-          & $rustup toolchain install $channel --profile minimal --no-self-update
-          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install failed with exit code $LASTEXITCODE" }
-          & $rustup target add "${{ matrix.target }}" --toolchain $channel
-          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE" }
-          & $rustup default $channel
-          if ($LASTEXITCODE -ne 0) { throw "rustup default failed with exit code $LASTEXITCODE" }
-
-      - name: Verify toolchain and matrix target (Unix)
-        if: runner.os != 'Windows'
+          cargo test --locked -p k10s-desktop --test packaging_desktop
+          cargo test --locked -p k10s-server-app --test packaging_server
+          dpkg-deb --contents target/release/packages/*.deb | grep -F '/usr/bin/k10s-desktop'
+          test -x target/release/packages/*.AppImage
+          appimage="$(realpath target/release/packages/*.AppImage)"
+          extract="$(mktemp -d)"
+          (cd "$extract" && "$appimage" --appimage-extract >/dev/null)
+          test -x "$extract/squashfs-root/usr/bin/k10s-desktop"
+          archive="$(find target/distrib -name '*.tar.xz' -print -quit)"
+          test -n "$archive"
+          tar -tJf "$archive" | grep -F 'k10s-server'
+      - name: Build and smoke non-root OCI image
         shell: bash
         run: |
-          rustc --version
-          rustup target list --installed | grep -Fx "${{ matrix.target }}"
-
-      - name: Verify toolchain and matrix target (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          rustc --version
-          if ($LASTEXITCODE -ne 0) { throw "rustc failed with exit code $LASTEXITCODE" }
-          $installed = @(rustup target list --installed)
-          if ($LASTEXITCODE -ne 0) { throw "rustup target list failed with exit code $LASTEXITCODE" }
-          if ($installed -notcontains "${{ matrix.target }}") {
-            throw "Required target ${{ matrix.target }} is not installed"
-          }
-
-      - name: Initialize MSVC build environment
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) {
-            throw 'Visual Studio Build Tools are required, but vswhere.exe was not found'
-          }
-          $installationPath = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-          if (-not $installationPath) {
-            throw 'Install Visual Studio Build Tools with the MSVC x64/x86 C++ component'
-          }
-          $devCmd = Join-Path $installationPath "Common7\Tools\VsDevCmd.bat"
-          $configured = cmd.exe /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
-          if ($LASTEXITCODE -ne 0) { throw "VsDevCmd failed with exit code $LASTEXITCODE" }
-
-          $names = @(
-            'INCLUDE', 'LIB', 'LIBPATH', 'PATH', 'UniversalCRTSdkDir',
-            'UCRTVersion', 'VCINSTALLDIR', 'VCToolsInstallDir',
-            'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion'
-          )
-          foreach ($name in $names) {
-            $line = $configured | Where-Object { $_ -like "$name=*" } | Select-Object -Last 1
-            if ($line) {
-              $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            }
-          }
-
-      - name: Cache cargo registry and target
-        if: matrix.self_hosted != true
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            release-${{ matrix.target }}-
-
-      - name: Build release binaries (Unix)
-        if: runner.os != 'Windows'
-        run: cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
-
-      - name: Build release binaries (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          cargo build --locked --release --target ${{ matrix.target }} -p k10s-desktop -p k10s-server-app
-          if ($LASTEXITCODE -ne 0) {
-            throw "cargo build failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Package (zip)
-        if: runner.os == 'Windows'
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $releaseDir = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}\release"
-          Compress-Archive -Path (Join-Path $releaseDir "k10s-desktop.exe"), (Join-Path $releaseDir "k10s-server.exe") `
-            -DestinationPath dist/k10s-${{ matrix.target }}.zip
-
-      - name: Package (tar.gz)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          tar -czf dist/k10s-${{ matrix.target }}.tar.gz \
-            -C "${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release" k10s-desktop k10s-server
-
-      - name: Upload artifacts
+          for image in rust:1.97-slim-bookworm debian:bookworm-slim; do
+            archive="$RUNNER_TEMP/k10s-${GITHUB_RUN_ID}-${image%%:*}.tar"
+            rm -f "$archive"
+            skopeo copy "docker://docker.io/library/${image}" "docker-archive:${archive}:${image}"
+            sudo docker load --input "$archive"
+          done
+          for attempt in 1 2 3; do
+            sudo docker buildx build --pull=false --load -f packaging/container/Dockerfile -t k10s:test . && break
+            test "$attempt" -lt 3
+            sleep "$((attempt * 10))"
+          done
+          test "$(sudo docker image inspect k10s:test --format '{{.Config.User}}')" = "10001:10001"
+          port="$((32000 + GITHUB_RUN_ID % 10000))"
+          sudo docker run --rm -d --name k10s-release-smoke -p "127.0.0.1:${port}:8080" -e K10S_ACCESS_TOKEN=container-smoke-token k10s:test --fake --listen 0.0.0.0:8080
+          trap 'sudo docker rm -f k10s-release-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 100); do curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null && break; sleep 0.1; done
+          curl -fsS "http://127.0.0.1:${port}/healthz"
+          curl -fsS "http://127.0.0.1:${port}/" | grep -F 'k10s-web-'
+      - name: Upload Linux release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: k10s-${{ matrix.target }}
-          path: dist/*
+          name: release-linux
+          path: |
+            target/release/packages/*
+            target/distrib/*
           if-no-files-found: error
+          retention-days: 3
 
-  # Create the GitHub Release from the tag, attach all platform archives
-  # plus a SHA256 checksum file. Tags with a pre-release suffix
-  # (e.g. v0.2.0-rc.1) are marked as prereleases.
-  release:
-    name: Publish GitHub Release
-    needs: build
+  windows:
+    name: Package Windows
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with: { clean: true }
+      - name: Install pinned tools
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$').Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal --no-self-update
+          rustup target add wasm32-unknown-unknown --toolchain $channel
+          rustup default $channel
+          $root = Join-Path '${{ runner.tool_cache }}' 'k10s\release-tools'
+          New-Item -ItemType Directory -Force (Join-Path $root 'bin') | Out-Null
+          $zip = Join-Path '${{ runner.temp }}' 'trunk.zip'
+          Invoke-WebRequest -UseBasicParsing "https://github.com/trunk-rs/trunk/releases/download/v$env:TRUNK_VERSION/trunk-x86_64-pc-windows-msvc.zip" -OutFile $zip
+          Expand-Archive -Force $zip (Join-Path $root 'bin')
+          $env:PATH = "$(Join-Path $root 'bin');$env:PATH"
+          if (-not (Get-Command cargo-packager -ErrorAction SilentlyContinue) -or -not ((cargo-packager --version) -like "*$env:CARGO_PACKAGER_VERSION*")) { cargo install cargo-packager --version $env:CARGO_PACKAGER_VERSION --locked --root $root }
+          if (-not (Get-Command dist -ErrorAction SilentlyContinue) -or -not ((dist --version) -like "*$env:CARGO_DIST_VERSION*")) { cargo install cargo-dist --version $env:CARGO_DIST_VERSION --locked --root $root }
+          if ($LASTEXITCODE -ne 0) { throw "tool installation failed: $LASTEXITCODE" }
+          Join-Path $root 'bin' | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build in release dependency order
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          trunk build --release
+          cargo build --locked --release --workspace
+          cargo packager --release
+          dist build --artifacts=local --target x86_64-pc-windows-msvc --allow-dirty
+          if ($LASTEXITCODE -ne 0) { throw "release build failed: $LASTEXITCODE" }
+      - name: Smoke native artifacts
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $env:K10S_PACKAGE_DIR = (Resolve-Path target/release/packages)
+          $env:K10S_SERVER_BINARY = (Resolve-Path target/release/k10s-server.exe)
+          $env:K10S_PACKAGING_SMOKE = '1'
+          cargo test --locked -p k10s-desktop --test packaging_desktop
+          cargo test --locked -p k10s-server-app --test packaging_server
+          if (-not (Get-ChildItem target/release/packages/*.msi)) { throw 'missing MSI' }
+          if (-not (Get-ChildItem target/release/packages/*.exe)) { throw 'missing NSIS installer' }
+          $msiRoot = Join-Path $env:RUNNER_TEMP 'k10s-msi-smoke'
+          New-Item -ItemType Directory -Force $msiRoot | Out-Null
+          $msi = (Get-ChildItem target/release/packages/*.msi | Select-Object -First 1).FullName
+          $process = Start-Process msiexec.exe -ArgumentList @('/a', $msi, '/qn', "TARGETDIR=$msiRoot") -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Get-ChildItem $msiRoot -Recurse -Filter k10s-desktop.exe)) { throw 'MSI lacks k10s-desktop.exe' }
+          $nsisRoot = Join-Path $env:RUNNER_TEMP 'k10s-nsis-smoke'
+          New-Item -ItemType Directory -Force $nsisRoot | Out-Null
+          $nsis = (Get-ChildItem target/release/packages/*.exe | Select-Object -First 1).FullName
+          $process = Start-Process $nsis -ArgumentList @('/S', "/D=$nsisRoot") -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Get-ChildItem $nsisRoot -Recurse -Filter k10s-desktop.exe)) { throw 'NSIS lacks k10s-desktop.exe' }
+          $archive = Get-ChildItem target/distrib/*.zip | Select-Object -First 1
+          if (-not $archive -or (tar -tf $archive.FullName) -notmatch 'k10s-server.exe') { throw 'invalid server zip' }
+      - name: Upload Windows release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            target/release/packages/*
+            target/distrib/*
+          if-no-files-found: error
+          retention-days: 3
+
+  macos:
+    name: Package macOS
+    if: vars.K10S_MACOS_RUNNER == 'enabled'
+    runs-on: [self-hosted, macOS, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with: { clean: true }
+      - name: Install, build, and smoke
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup target add wasm32-unknown-unknown --toolchain "$channel"
+          rustup default "$channel"
+          cargo install trunk --version "$TRUNK_VERSION" --locked
+          cargo install cargo-packager --version "$CARGO_PACKAGER_VERSION" --locked
+          cargo install cargo-dist --version "$CARGO_DIST_VERSION" --locked
+          trunk build --release
+          cargo build --locked --release --workspace
+          cargo packager --release
+          dist build --artifacts=local --target x86_64-apple-darwin --allow-dirty
+          K10S_PACKAGE_DIR=target/release/packages K10S_SERVER_BINARY=target/release/k10s-server cargo test --locked -p k10s-desktop --test packaging_desktop
+          K10S_PACKAGING_SMOKE=1 K10S_SERVER_BINARY=target/release/k10s-server cargo test --locked -p k10s-server-app --test packaging_server
+          test -x target/release/packages/*.app/Contents/MacOS/k10s-desktop
+          test -f target/release/packages/*.dmg
+          mount="$(mktemp -d)"
+          device="$(hdiutil attach -nobrowse -mountpoint "$mount" target/release/packages/*.dmg | tail -1 | awk '{print $1}')"
+          trap 'hdiutil detach "$device" >/dev/null' EXIT
+          test -x "$mount"/*.app/Contents/MacOS/k10s-desktop
+          tar -tJf "$(find target/distrib -name '*.tar.xz' -print -quit)" | grep -F 'k10s-server'
+      - name: Upload macOS release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            target/release/packages/*
+            target/distrib/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    needs: [linux, windows]
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: artifacts
-        run: sha256sum k10s-* > SHA256SUMS.txt
-
-      - name: Create release
-        uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true

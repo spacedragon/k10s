@@ -116,6 +116,10 @@ pub fn resolve_backend_mode(fake_requested: bool, kubeconfig_path: Option<&Path>
 pub struct ServerConfig {
     /// Shared bearer secret accepted in the first `Hello` frame.
     pub access_token: String,
+    /// Time to remain live but not ready while standalone bootstrap settles.
+    pub startup_readiness_delay: Duration,
+    /// Minimum externally observable draining interval for process probes.
+    pub probe_drain_grace: Duration,
     /// Maximum time allowed for the first frame.
     pub hello_timeout: Duration,
     /// Maximum best-effort writer flush period before cancellation.
@@ -166,6 +170,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             access_token: String::new(),
+            startup_readiness_delay: Duration::ZERO,
+            probe_drain_grace: Duration::ZERO,
             hello_timeout: Duration::from_secs(5),
             graceful_flush_timeout: Duration::from_millis(250),
             max_frame_size: 1 << 20,
@@ -197,6 +203,8 @@ impl std::fmt::Debug for ServerConfig {
         formatter
             .debug_struct("ServerConfig")
             .field("access_token", &"[REDACTED]")
+            .field("startup_readiness_delay", &self.startup_readiness_delay)
+            .field("probe_drain_grace", &self.probe_drain_grace)
             .field("hello_timeout", &self.hello_timeout)
             .field("graceful_flush_timeout", &self.graceful_flush_timeout)
             .field("max_frame_size", &self.max_frame_size)
