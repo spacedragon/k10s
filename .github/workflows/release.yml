@@ -65,24 +65,33 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: verify-version
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: '["self-hosted", "Linux", "X64"]'
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
+            self_hosted: true
+          - runner: '"windows-latest"'
             target: x86_64-pc-windows-msvc
           # macOS 13 (Intel) runners are deprecated, so both macOS
           # targets are produced from the arm64 runner by cross-compiling
           # the x86_64 target with the same Apple SDK.
-          - os: macos-14
+          - runner: '"macos-14"'
             target: aarch64-apple-darwin
-          - os: macos-14
+          - runner: '"macos-14"'
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure persistent Cargo build cache
+        if: matrix.self_hosted == true
+        shell: bash
+        run: |
+          target_dir="${{ runner.tool_cache }}/k10s/cargo-target"
+          mkdir -p "$target_dir"
+          echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
 
       # The repository pins Rust via rust-toolchain.toml. Install the pinned
       # channel explicitly and add the matrix target to THAT channel —
@@ -104,6 +113,7 @@ jobs:
           rustup target list --installed | grep -Fx "${{ matrix.target }}"
 
       - name: Cache cargo registry and target
+        if: matrix.self_hosted != true
         uses: actions/cache@v4
         with:
           path: |
@@ -131,7 +141,7 @@ jobs:
         run: |
           mkdir -p dist
           tar -czf dist/k10s-${{ matrix.target }}.tar.gz \
-            -C target/${{ matrix.target }}/release k10s-desktop k10s-server
+            -C "${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release" k10s-desktop k10s-server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
