@@ -12,6 +12,7 @@ mod events;
 mod metrics;
 mod normalize;
 mod owners;
+mod permissions;
 mod read;
 mod watch;
 
@@ -26,8 +27,9 @@ pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 use crate::port::ContextInfo;
 
 use crate::port::{
-    AdapterError, BackendError, BootstrapInfo, Command, Gvk, KubernetesAccess, OperationId, Query,
-    QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    AdapterError, BackendError, BootstrapInfo, Command, ContextPermissionsData, ContextSwitchData,
+    Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData, ResourceTypesData,
+    StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
@@ -61,7 +63,10 @@ impl std::fmt::Debug for ScriptedWatches {
 /// driven watch runtime are runtime state. Kube-rs types never leave this
 /// module tree.
 pub struct KubeAdapter {
-    registry: ContextRegistry,
+    /// Committed bootstrap state behind a lock so context switches can swap
+    /// the current-context marker atomically; readers always see one
+    /// consistent registry snapshot.
+    registry: StdMutex<ContextRegistry>,
     /// Shared cluster client per context name: pre-injected in tests through
     /// [`Self::with_cluster_clients`], otherwise built on first use from the
     /// stored kubeconfig and cached here for reuse.
@@ -111,7 +116,7 @@ impl KubeAdapter {
         let (prepared, kubeconfig) = config::load_with_source(path)?;
         // Commit: install the complete registry and shared runtime state.
         Ok(Self {
-            registry: ContextRegistry::prepare(prepared)?,
+            registry: StdMutex::new(ContextRegistry::prepare(prepared)?),
             clients: tokio::sync::Mutex::new(HashMap::new()),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -157,7 +162,7 @@ impl KubeAdapter {
         }
 
         Ok(Self {
-            registry,
+            registry: StdMutex::new(registry),
             clients: tokio::sync::Mutex::new(client_map),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -208,6 +213,17 @@ impl KubeAdapter {
     pub fn metrics_registry(&self) -> ClusterMetrics {
         self.metrics.clone()
     }
+
+    /// Shared handle to this adapter's watch registry.
+    ///
+    /// Test/observability seam: clones observe the same live selections the
+    /// adapter serves, so tests can assert warm state and retirement while a
+    /// kernel owns the adapter itself.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn watches_registry(&self) -> ClusterWatches {
+        self.watches.clone()
+    }
 }
 
 impl KubernetesAccess for KubeAdapter {
@@ -220,10 +236,22 @@ impl KubernetesAccess for KubeAdapter {
             match req {
                 // Bootstrap is fully supported in Task 1: safe summaries only.
                 Query::Bootstrap => Ok(QueryResult::Bootstrap(BootstrapInfo {
-                    contexts: self.registry.contexts().to_vec(),
+                    contexts: self
+                        .registry
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contexts()
+                        .to_vec(),
                 })),
                 // Discovery is live in this task through the cached catalog path.
                 Query::ResourceTypes { context } => self.resource_types(&context).await,
+                // Prepare-then-commit context switching with advisory
+                // permission projection.
+                Query::ContextSwitch { to } => self.context_switch(to).await,
+                Query::ContextPermissions {
+                    context,
+                    probes: checks,
+                } => self.context_permissions(&context, checks).await,
                 // Cluster-facing capabilities arrive with later Plan 3 tasks;
                 // until then they are typed, not guessed.
                 Query::ValidateApply { .. } => Err(BackendError::unsupported("validate.apply")),
@@ -300,7 +328,7 @@ impl KubeAdapter {
         gvk: Gvk,
         namespace: Option<String>,
     ) -> Result<SubscriptionHandle, BackendError> {
-        if self.registry.find(&context).is_none() {
+        if !self.knows_context(&context) {
             return Err(BackendError::NotFound);
         }
         let catalog = self.catalog_for(&context).await?;
@@ -391,7 +419,7 @@ impl KubeAdapter {
         gvk: Gvk,
         namespace: Option<String>,
     ) -> Result<QueryResult, BackendError> {
-        if self.registry.find(&context).is_none() {
+        if !self.knows_context(&context) {
             return Err(BackendError::NotFound);
         }
         let catalog = self.catalog_for(&context).await?;
@@ -482,7 +510,7 @@ impl KubeAdapter {
         &self,
         reference: crate::port::ResourceRef,
     ) -> Result<QueryResult, BackendError> {
-        if self.registry.find(&reference.context).is_none() {
+        if !self.knows_context(&reference.context) {
             return Err(BackendError::NotFound);
         }
         // Metrics identities exist only for pods.
@@ -552,7 +580,7 @@ impl KubeAdapter {
         &self,
         reference: &crate::port::ResourceRef,
     ) -> Result<kube::Client, BackendError> {
-        if self.registry.find(&reference.context).is_none() {
+        if !self.knows_context(&reference.context) {
             return Err(BackendError::NotFound);
         }
         self.cluster_client(&reference.context).await
@@ -582,9 +610,82 @@ impl KubeAdapter {
         Ok(QueryResult::ResourceTypes(self.catalog_for(context).await?))
     }
 
+    /// Whether `context` names a committed registry entry.
+    fn knows_context(&self, context: &str) -> bool {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .find(context)
+            .is_some()
+    }
+
+    /// Switch the current context through the prepare-then-commit protocol.
+    ///
+    /// Prepare validates twice: the destination must be a known registry
+    /// entry (before any traffic), and its minimal read path must actually
+    /// work — its client raises and discovery runs against it. A failed
+    /// prepare returns a sanitized error with nothing observable moved. Only
+    /// then does the commit swap the current marker atomically, followed by
+    /// retirement of the replaced context's live runtime so no watcher or
+    /// poller outlives its context's relevance.
+    async fn context_switch(&self, to: String) -> Result<QueryResult, BackendError> {
+        // Prepare (registry): reject unknown destinations off-line.
+        let prepared = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare_switch(&to)
+            .map_err(|_| BackendError::NotFound)?;
+        // Prepare (cluster): validate the destination read path.
+        self.catalog_for(&to).await?;
+        // Commit: install the new current marker as one atomic swap.
+        let previous = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.commit_switch(prepared)
+        };
+        // Retire: end the replaced context's watchers, collectors, and cached
+        // catalog immediately. A redundant switch to the already-current
+        // context retires nothing.
+        if let Some(retired) = previous.as_deref().filter(|name| *name != to) {
+            self.watches.retire_context(retired);
+            self.metrics.retire_context(retired);
+            self.invalidate_discovery(retired);
+        }
+        Ok(QueryResult::ContextSwitch(ContextSwitchData {
+            current: to,
+            previous,
+        }))
+    }
+
+    /// Project advisory RBAC capabilities for one context.
+    ///
+    /// Every distinct probe becomes exactly one SelfSubjectAccessReview
+    /// through the context's own client. The projection never fails the
+    /// query over review outcomes — unavailable reviews degrade to explicit
+    /// Unknown checks — and it never gates later reads or mutations.
+    async fn context_permissions(
+        &self,
+        context: &str,
+        probes: Vec<crate::port::PermissionProbe>,
+    ) -> Result<QueryResult, BackendError> {
+        if !self.knows_context(context) {
+            return Err(BackendError::NotFound);
+        }
+        permissions::validate_probe_count(&probes)?;
+        let client = self.cluster_client(context).await?;
+        let checks = permissions::project_capabilities(&client, probes).await;
+        Ok(QueryResult::ContextPermissions(ContextPermissionsData {
+            context: context.to_owned(),
+            checks,
+        }))
+    }
+
     /// Resolve one context's discovery catalog through the bounded cache.
     async fn catalog_for(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
-        if self.registry.find(context).is_none() {
+        if !self.knows_context(context) {
             return Err(BackendError::NotFound);
         }
 

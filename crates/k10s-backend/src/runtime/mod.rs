@@ -24,7 +24,7 @@ pub use self::cluster::{
     ClusterMetrics, ClusterWatches, METRICS_LINGER, METRICS_POLL_INTERVAL, MetricsApiState,
     MetricsCoverage, MetricsPollSource, MetricsSnapshot, ResourceUsageSample, WATCH_LINGER,
 };
-pub use self::context::ContextRegistry;
+pub use self::context::{ContextRegistry, PreparedSwitch};
 pub use self::supervisor::{
     ListedState, SelectionPublisher, WatchPhase, WatchRow, WatchSource, WatchUpdate,
 };

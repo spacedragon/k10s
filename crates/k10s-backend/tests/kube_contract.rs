@@ -991,3 +991,223 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
         assert!(!text.contains("resource_version"));
     }
 }
+
+/// Shared context-switch wire contract: both adapters commit a validated
+/// switch through the same kernel mapping onto an identical wire shape, and
+/// both keep exactly one current context afterwards.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_context_switch_shape() {
+    async fn switch_wire(kernel: &BackendKernel, to: &str) -> Value {
+        match kernel
+            .query(Query::ContextSwitch { to: to.to_owned() })
+            .await
+            .expect("validated switch commits")
+        {
+            KernelQueryResult::ContextSwitch(result) => {
+                serde_json::to_value(result.wire_payload()).expect("payload serializes")
+            }
+            other => panic!("kernel must map the switch into its wire payload, got {other:?}"),
+        }
+    }
+
+    async fn current_of(kernel: &BackendKernel) -> Vec<String> {
+        let payload = match kernel
+            .query(Query::Bootstrap)
+            .await
+            .expect("bootstrap works")
+        {
+            KernelQueryResult::Bootstrap(bootstrap) => bootstrap.wire_payload(),
+            other => panic!("kernel must map bootstrap, got {other:?}"),
+        };
+        payload
+            .contexts
+            .iter()
+            .filter(|context| context.is_current)
+            .map(|context| context.name.clone())
+            .collect()
+    }
+
+    // Fake side: switching from the standard world's current context.
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+    let fake_payload = switch_wire(&fake_kernel, "prod-readonly").await;
+    assert_eq!(current_of(&fake_kernel).await, vec!["prod-readonly"]);
+
+    // Real side: two contexts backed by one recorded standard API server,
+    // so the destination's prepare discovers successfully.
+    let server = RecordedApiServer::standard();
+    let client_a = server.clone().into_client("default");
+    let client_b = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![
+            ContextInfo {
+                name: "contract-a".into(),
+                cluster: "recorded-apiserver".into(),
+                namespace: Some("default".into()),
+                is_current: true,
+            },
+            ContextInfo {
+                name: "contract-b".into(),
+                cluster: "recorded-apiserver".into(),
+                namespace: Some("default".into()),
+                is_current: false,
+            },
+        ],
+        [("contract-a", client_a), ("contract-b", client_b)],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+    let kube_payload = switch_wire(&kube_kernel, "contract-b").await;
+
+    for (label, origin, destination, payload) in [
+        ("fake", "dev-local", "prod-readonly", &fake_payload),
+        ("kube", "contract-a", "contract-b", &kube_payload),
+    ] {
+        let keys = payload
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: payload is an object"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["current", "previous"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            "{label}: context-switch top-level keys drifted"
+        );
+        assert_eq!(payload["current"], destination);
+        assert_eq!(payload["previous"], origin);
+    }
+
+    // Exactly one current context survives the commit on both adapters.
+    assert_eq!(current_of(&kube_kernel).await, vec!["contract-b"]);
+}
+
+/// Shared advisory-permissions wire contract: both adapters normalize the
+/// same probes onto identical check-entry shapes. Verdict values differ by
+/// design — the fake serves no authorization truth and stays explicitly
+/// Unknown, while the real adapter reports what its review answered.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
+    use k10s_backend::PermissionProbe;
+
+    fn probe(verb: &str, resource: &str, namespace: Option<&str>) -> PermissionProbe {
+        PermissionProbe {
+            verb: verb.into(),
+            resource: resource.into(),
+            namespace: namespace.map(str::to_owned),
+        }
+    }
+
+    async fn permissions_wire(kernel: &BackendKernel, context: &str) -> Value {
+        let probes = vec![
+            probe("list", "pods", Some("default")),
+            probe("delete", "deployments", Some("production")),
+        ];
+        match kernel
+            .query(Query::ContextPermissions {
+                context: context.into(),
+                probes,
+            })
+            .await
+            .expect("permission projection succeeds")
+        {
+            KernelQueryResult::ContextPermissions(result) => {
+                serde_json::to_value(result.wire_payload()).expect("payload serializes")
+            }
+            other => panic!("kernel must map permissions into their wire payload, got {other:?}"),
+        }
+    }
+
+    // Fake side: no fabricated verdicts.
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+    let fake_payload = permissions_wire(&fake_kernel, "dev-local").await;
+
+    // Real side: one recorded SelfSubjectAccessReview answer for all probes.
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+        200,
+        r#"{"kind":"SelfSubjectAccessReview","apiVersion":"authorization.k8s.io/v1",
+            "metadata":{"creationTimestamp":null},
+            "spec":{},"status":{"allowed":true,"reason":"RBAC: allowed by role binding"}}"#,
+    );
+    let client = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+    let kube_payload = permissions_wire(&kube_kernel, "contract-mock").await;
+
+    for (label, payload) in [("fake", &fake_payload), ("kube", &kube_payload)] {
+        let keys = payload
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: payload is an object"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["checks", "context"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            "{label}: context-permissions top-level keys drifted"
+        );
+        let checks = payload["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 2, "{label}: every probe yields one check");
+        for check in checks {
+            let entry_keys = check
+                .as_object()
+                .expect("check entries are objects")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                entry_keys,
+                ["namespace", "outcome", "resource", "verb"]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                "{label}: check-entry keys drifted"
+            );
+            let outcome = check["outcome"].as_str().expect("outcome is a string");
+            assert!(
+                matches!(outcome, "allowed" | "denied" | "unknown"),
+                "{label}: outcome vocabulary drifted: {outcome}"
+            );
+        }
+        // Probes echo verbatim, in order.
+        assert_eq!(checks[0]["verb"], "list");
+        assert_eq!(checks[0]["resource"], "pods");
+        assert_eq!(checks[0]["namespace"], "default");
+        assert_eq!(checks[1]["verb"], "delete");
+        assert_eq!(checks[1]["resource"], "deployments");
+        assert_eq!(checks[1]["namespace"], "production");
+    }
+
+    // Each side is honest about what it knows.
+    assert_eq!(fake_payload["checks"][0]["outcome"], "unknown");
+    assert_eq!(fake_payload["checks"][1]["outcome"], "unknown");
+    assert_eq!(kube_payload["checks"][0]["outcome"], "allowed");
+    assert_eq!(kube_payload["checks"][1]["outcome"], "allowed");
+
+    // Raw Kubernetes review vocabulary never crosses either wire.
+    let wire = format!("{}\n{}", fake_payload, kube_payload);
+    for marker in ["evaluationError", "selfsubjectaccessreviews"] {
+        assert!(
+            !wire.contains(marker),
+            "{marker}: raw review vocabulary leaked onto the wire"
+        );
+    }
+}

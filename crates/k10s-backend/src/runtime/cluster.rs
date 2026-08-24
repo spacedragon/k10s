@@ -186,6 +186,8 @@ struct CollectorEntry {
     snapshot: watch::Receiver<Option<Arc<MetricsSnapshot>>>,
     /// Last consumer touch; drives the idle-linger exit of the poll task.
     last_touch: Arc<StdMutex<std::time::Instant>>,
+    /// Immediate teardown path used by explicit retirements.
+    cancel: CancellationToken,
 }
 
 impl Default for ClusterMetrics {
@@ -241,11 +243,20 @@ impl ClusterMetrics {
                     id,
                     snapshot: receiver.clone(),
                     last_touch: Arc::new(StdMutex::new(std::time::Instant::now())),
+                    cancel: CancellationToken::new(),
                 };
                 let last_touch = Arc::clone(&entry.last_touch);
+                let cancel = entry.cancel.clone();
                 collectors.insert(context.to_owned(), entry);
                 drop(collectors);
-                self.spawn_poll_task(context.to_owned(), id, sender, source_factory(), last_touch);
+                self.spawn_poll_task(
+                    context.to_owned(),
+                    id,
+                    sender,
+                    source_factory(),
+                    last_touch,
+                    cancel,
+                );
                 receiver
             }
         };
@@ -276,10 +287,34 @@ impl ClusterMetrics {
             .len()
     }
 
+    /// Immediately cancel and remove every collector serving one context.
+    ///
+    /// Context-switch retirement path: the replaced context's poll task ends
+    /// now instead of waiting out its linger window, so no poller outlives
+    /// its context's relevance. Returns how many collectors were retired.
+    pub fn retire_context(&self, context: &str) -> usize {
+        let victim = {
+            let mut collectors = self
+                .shared
+                .collectors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            collectors.remove(context).map(|entry| entry.cancel)
+        };
+        match victim {
+            Some(cancel) => {
+                cancel.cancel();
+                1
+            }
+            None => 0,
+        }
+    }
+
     /// Spawn one supervised poll task: collect immediately, publish the cut
     /// atomically onto the watch channel, then keep the cadence until no
-    /// consumer has touched the collector for the linger window. Exit removes
-    /// the registration only if it is still this task's own generation.
+    /// consumer has touched the collector for the linger window or an
+    /// explicit retirement cancels it. Exit removes the registration only if
+    /// it is still this task's own generation.
     fn spawn_poll_task(
         &self,
         context: String,
@@ -287,32 +322,37 @@ impl ClusterMetrics {
         sender: watch::Sender<Option<Arc<MetricsSnapshot>>>,
         source: Arc<dyn MetricsPollSource>,
         last_touch: Arc<StdMutex<std::time::Instant>>,
+        cancel: CancellationToken,
     ) {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
             loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let snapshot = source.poll().await;
                 if sender.send(Some(Arc::new(snapshot))).is_err() {
                     break; // registry gone: nothing left to serve
                 }
                 // Hold the cadence, but exit early the moment the collector
-                // has been idle past the linger window — quiet contexts must
-                // not generate cluster traffic between checks either.
+                // is retired or has been idle past the linger window —
+                // quiet contexts must not generate cluster traffic between
+                // checks either.
                 let cadence_end = std::time::Instant::now() + shared.poll_interval;
-                let mut idle = false;
+                let mut stop = false;
                 while std::time::Instant::now() < cadence_end {
-                    if last_touch
+                    let idle = last_touch
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .elapsed()
-                        >= shared.linger
-                    {
-                        idle = true;
+                        >= shared.linger;
+                    if idle || cancel.is_cancelled() {
+                        stop = true;
                         break;
                     }
                     tokio::time::sleep(LINGER_POLL).await;
                 }
-                if idle
+                if stop
                     || last_touch
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -462,6 +502,7 @@ impl ClusterWatches {
                 sender: sender.clone(),
                 phases: phase_rx.clone(),
                 publisher: Arc::clone(&publisher),
+                cancel: cancel.clone(),
                 last_join: StdMutex::new(std::time::Instant::now()),
             },
         );
@@ -514,6 +555,34 @@ impl ClusterWatches {
             .len()
     }
 
+    /// Immediately cancel and remove every selection serving one context.
+    ///
+    /// Context-switch retirement path: the replaced context's supervised
+    /// tasks end now instead of lingering, so no watcher outlives its
+    /// context's relevance. Late subscribers start fresh selections.
+    ///
+    /// Returns how many selections were retired.
+    pub fn retire_context(&self, context: &str) -> usize {
+        let victims: Vec<CancellationToken> = {
+            let mut selections = self
+                .shared
+                .selections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let victims = selections
+                .iter()
+                .filter(|(selector, _)| selector.context == context)
+                .map(|(_, handle)| handle.cancel.clone())
+                .collect();
+            selections.retain(|selector, _| selector.context != context);
+            victims
+        };
+        for token in &victims {
+            token.cancel();
+        }
+        victims.len()
+    }
+
     /// Cached rows of one warm selection, when it exists.
     #[must_use]
     pub fn cached_rows(
@@ -544,7 +613,8 @@ impl ClusterWatches {
     /// the same registry lock as [`ClusterWatches::subscribe`] and rechecks
     /// the live receiver count, so a join racing the teardown either lands
     /// on the warm entry (monitor keeps waiting) or starts a fresh selection
-    /// — never on a dying one.
+    /// — never on a dying one. The monitor itself ends the moment its token
+    /// is cancelled by an explicit retirement.
     fn spawn_linger_monitor(
         &self,
         selector: WatchSelector,
@@ -557,7 +627,11 @@ impl ClusterWatches {
             let poll = shared.linger.min(LINGER_POLL).max(Duration::from_millis(5));
             let mut empty_since: Option<tokio::time::Instant> = None;
             loop {
-                tokio::time::sleep(poll).await;
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    () = tokio::time::sleep(poll) => {}
+                }
                 if sender.receiver_count() > 0 {
                     // Any live subscriber resets the linger deadline.
                     empty_since = None;

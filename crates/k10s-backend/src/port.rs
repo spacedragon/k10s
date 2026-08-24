@@ -43,6 +43,16 @@ pub enum Query {
     ResourceMetrics { reference: ResourceRef },
     /// List the selectable resource types (built-ins and CRDs) of a context.
     ResourceTypes { context: String },
+    /// Switch the current context after validating the destination's minimal
+    /// read path. A failed prepare leaves the current context unchanged.
+    ContextSwitch { to: String },
+    /// Project advisory RBAC capabilities of one context through
+    /// SelfSubjectAccessReviews. Outcomes are metadata only: later
+    /// operations still hit the API server and respect its decisions.
+    ContextPermissions {
+        context: String,
+        probes: Vec<PermissionProbe>,
+    },
     /// Fetch the complete Overview, Nodes, and Storage projection.
     Infrastructure { context: String },
     /// Look up the current state of specific operations by ID. IDs the
@@ -100,6 +110,65 @@ impl ResourceTypesData {
             .filter(|entry| entry.gvk.group == group && entry.gvk.version == version)
             .collect()
     }
+}
+
+/// One requested advisory permission check behind
+/// [`Query::ContextPermissions`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionProbe {
+    /// Kubernetes verb to review, such as `list` or `delete`.
+    pub verb: String,
+    /// Resource plural to review, such as `pods`.
+    pub resource: String,
+    /// Namespace restriction, when reviewed within one.
+    pub namespace: Option<String>,
+}
+
+/// What authorization reported for one probe.
+///
+/// Advisory metadata only: it tells callers what later operations are
+/// expected to be allowed so UIs can hint, and is never enforced client-side.
+/// [`PermissionOutcome::Unknown`] is distinct from denied — it means the
+/// review itself could not be evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionOutcome {
+    /// The review reported the action as allowed.
+    Allowed,
+    /// The review reported the action as denied.
+    Denied,
+    /// The review could not answer (rejected, unreachable, or errored).
+    Unknown,
+}
+
+/// One answered advisory permission check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionCheck {
+    /// Kubernetes verb that was reviewed.
+    pub verb: String,
+    /// Resource plural that was reviewed.
+    pub resource: String,
+    /// Namespace restriction, when reviewed within one.
+    pub namespace: Option<String>,
+    /// What authorization reported.
+    pub outcome: PermissionOutcome,
+}
+
+/// Advisory RBAC capability projection of one context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPermissionsData {
+    /// Context the checks were reviewed against.
+    pub context: String,
+    /// One answered check per distinct probe, in request order.
+    pub checks: Vec<PermissionCheck>,
+}
+
+/// A committed context switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSwitchData {
+    /// Context that is current after the commit.
+    pub current: String,
+    /// Context that lost the current marker, when one existed.
+    pub previous: Option<String>,
 }
 
 /// Kind of stream to open.
@@ -233,6 +302,10 @@ pub enum QueryResult {
     ResourceMetrics(MetricsSample),
     /// Selectable resource types of one context.
     ResourceTypes(ResourceTypesData),
+    /// A committed context switch.
+    ContextSwitch(ContextSwitchData),
+    /// Advisory RBAC capability projection of one context.
+    ContextPermissions(ContextPermissionsData),
     /// Overview, Nodes, Storage, and cluster metrics catalog.
     Infrastructure(CatalogSnapshot),
     /// Guarded YAML validation outcome with an issued ticket when valid.

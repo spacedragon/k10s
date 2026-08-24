@@ -119,6 +119,12 @@ impl BackendKernel {
                 QueryResult::ResourceTypes(data) => {
                     KernelQueryResult::ResourceTypes(ResourceTypesResult::new(data))
                 }
+                QueryResult::ContextSwitch(data) => {
+                    KernelQueryResult::ContextSwitch(ContextSwitchResult::new(data))
+                }
+                QueryResult::ContextPermissions(data) => {
+                    KernelQueryResult::ContextPermissions(ContextPermissionsResult::new(data))
+                }
                 QueryResult::Infrastructure(snapshot) => {
                     KernelQueryResult::Infrastructure(InfrastructureResult::new(snapshot))
                 }
@@ -264,6 +270,10 @@ pub enum KernelQueryResult {
     ResourceMetrics(ResourceMetricsResult),
     /// Selectable resource types for the GVK picker.
     ResourceTypes(ResourceTypesResult),
+    /// A committed context switch.
+    ContextSwitch(ContextSwitchResult),
+    /// Advisory RBAC capability projection of one context.
+    ContextPermissions(ContextPermissionsResult),
     /// Overview, Nodes, Storage, and metrics result.
     Infrastructure(InfrastructureResult),
     /// Guarded YAML validation outcome with its issued ticket when valid.
@@ -296,6 +306,8 @@ impl KernelQueryResult {
             Self::ResourceDetail(r) => r.serialized(),
             Self::ResourceMetrics(r) => r.serialized(),
             Self::ResourceTypes(r) => r.serialized(),
+            Self::ContextSwitch(r) => r.serialized(),
+            Self::ContextPermissions(r) => r.serialized(),
             Self::Infrastructure(r) => r.serialized(),
             Self::YamlValidate(r) => r.serialized(),
             Self::StreamTicket(r) => r.serialized(),
@@ -594,6 +606,88 @@ impl ResourceTypesResult {
     #[must_use]
     pub fn serialized(&self) -> String {
         serde_json::to_string(&self.payload).expect("ResourceTypesResponse must serialize")
+    }
+}
+
+/// A committed context switch mapped for the protocol.
+#[derive(Debug, Clone)]
+pub struct ContextSwitchResult {
+    payload: k10s_protocol::ContextSwitchResponse,
+}
+
+impl ContextSwitchResult {
+    /// Map backend-owned switch data into the protocol-facing payload.
+    #[must_use]
+    pub fn new(data: crate::port::ContextSwitchData) -> Self {
+        Self {
+            payload: k10s_protocol::ContextSwitchResponse {
+                current: data.current,
+                previous: data.previous,
+            },
+        }
+    }
+
+    /// Return the exact response payload for a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> k10s_protocol::ContextSwitchResponse {
+        self.payload.clone()
+    }
+
+    /// Serialize the wire payload to a JSON string.
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("ContextSwitchResponse must serialize")
+    }
+}
+
+/// An advisory RBAC capability projection mapped for the protocol.
+#[derive(Debug, Clone)]
+pub struct ContextPermissionsResult {
+    payload: k10s_protocol::ContextPermissionsResponse,
+}
+
+impl ContextPermissionsResult {
+    /// Map backend-owned permission checks into the protocol-facing payload,
+    /// keeping unknown states distinct from denied ones.
+    #[must_use]
+    pub fn new(data: crate::port::ContextPermissionsData) -> Self {
+        Self {
+            payload: k10s_protocol::ContextPermissionsResponse {
+                context: data.context,
+                checks: data
+                    .checks
+                    .into_iter()
+                    .map(|check| k10s_protocol::PermissionCheck {
+                        verb: check.verb,
+                        resource: check.resource,
+                        namespace: check.namespace,
+                        outcome: match check.outcome {
+                            crate::port::PermissionOutcome::Allowed => {
+                                k10s_protocol::PermissionOutcome::Allowed
+                            }
+                            crate::port::PermissionOutcome::Denied => {
+                                k10s_protocol::PermissionOutcome::Denied
+                            }
+                            crate::port::PermissionOutcome::Unknown => {
+                                k10s_protocol::PermissionOutcome::Unknown
+                            }
+                        },
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// Return the exact response payload for a `response` frame.
+    #[must_use]
+    pub fn wire_payload(&self) -> k10s_protocol::ContextPermissionsResponse {
+        self.payload.clone()
+    }
+
+    /// Serialize the wire payload to a JSON string.
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("ContextPermissionsResponse must serialize")
     }
 }
 
