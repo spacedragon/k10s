@@ -77,7 +77,7 @@ async fn reference(adapter: &KubeAdapter, gvk: Gvk, name: &str) -> ResourceRef {
         .reference
 }
 
-async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
+async fn terminal(adapter: &KubeAdapter, id: &str) -> (OperationState, Option<String>) {
     for _ in 0..200 {
         let QueryResult::OperationStatus(status) = adapter
             .query(Query::OperationStatus {
@@ -94,18 +94,20 @@ async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
                 OperationState::Succeeded | OperationState::Failed | OperationState::OutcomeUnknown
             )
         {
-            return record.state;
+            return (record.state, record.detail.clone());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("operation {id} did not settle")
 }
 
-async fn run(adapter: &KubeAdapter, command: Command) {
+async fn run(adapter: &KubeAdapter, label: &str, command: Command) {
     let id = adapter.execute(command).await.unwrap();
+    let (state, detail) = terminal(adapter, id.as_str()).await;
     assert_eq!(
-        terminal(adapter, id.as_str()).await,
-        OperationState::Succeeded
+        state,
+        OperationState::Succeeded,
+        "{label} operation failed: {detail:?}"
     );
 }
 
@@ -280,7 +282,7 @@ async fn dropped_mutation_response_is_unknown_until_authoritative_refresh() {
         .await
         .unwrap();
     assert_eq!(
-        terminal(&adapter, id.as_str()).await,
+        terminal(&adapter, id.as_str()).await.0,
         OperationState::OutcomeUnknown
     );
 
@@ -314,7 +316,7 @@ async fn dropped_mutation_response_is_unknown_until_authoritative_refresh() {
         .operation_engine()
         .refresh_scope(&deployment.coalescing_key());
     assert_eq!(
-        terminal(&adapter, id.as_str()).await,
+        terminal(&adapter, id.as_str()).await.0,
         OperationState::OutcomeUnknown,
         "refresh releases admission but never rewrites history as success"
     );
@@ -332,6 +334,17 @@ fn free_port() -> u16 {
 #[ignore = "requires tests/kind/cluster.sh up"]
 async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     let _guard = KIND_LOCK.lock().await;
+    // The outcome-unknown test may have just changed replica count. Wait for
+    // the controller's status writes to settle before binding an exact
+    // resourceVersion into the guarded apply document.
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "rollout",
+        "status",
+        "deployment/operations-web",
+        "--timeout=60s",
+    ]);
     let adapter = adapter();
     let deployment = reference(
         &adapter,
@@ -339,7 +352,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "operations-web",
     )
     .await;
-    let resource_version = kubectl(&[
+    let mut resource_version = kubectl(&[
         "-n",
         NAMESPACE,
         "get",
@@ -347,8 +360,33 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "-o",
         "jsonpath={.metadata.resourceVersion}",
     ]);
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let observed = kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "deployment/operations-web",
+            "-o",
+            "jsonpath={.metadata.resourceVersion}",
+        ]);
+        if observed == resource_version {
+            break;
+        }
+        resource_version = observed;
+    }
+    let replicas: u32 = kubectl(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "deployment/operations-web",
+        "-o",
+        "jsonpath={.spec.replicas}",
+    ])
+    .parse()
+    .unwrap();
     let yaml = format!(
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-log-ready; sleep 3600']\n",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-log-ready; sleep 3600']\n",
         deployment.uid
     );
     let QueryResult::YamlValidation(validation) = adapter
@@ -367,6 +405,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     let hash = k10s_protocol::buffer_hash(&yaml);
     run(
         &adapter,
+        "apply",
         Command::Apply {
             context: CONTEXT.into(),
             yaml,
@@ -386,7 +425,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-o",
             "jsonpath={.spec.replicas}"
         ]),
-        "2"
+        replicas.to_string()
     );
 
     let mut stale = deployment.clone();
@@ -403,19 +442,29 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
 
     run(
         &adapter,
+        "scale",
         Command::Scale {
             context: CONTEXT.into(),
             gvk: deployment.gvk.clone(),
             namespace: deployment.namespace.clone(),
             name: deployment.name.clone(),
             uid: deployment.uid.clone(),
-            replicas: 1,
+            replicas: if replicas == 1 { 2 } else { 1 },
             idempotency_key: "kind-scale".into(),
         },
     )
     .await;
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "rollout",
+        "status",
+        "deployment/operations-web",
+        "--timeout=60s",
+    ]);
     run(
         &adapter,
+        "restart",
         Command::Restart {
             target: deployment,
             idempotency_key: "kind-restart".into(),
@@ -432,7 +481,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-n",
             NAMESPACE,
             "delete",
-            "pod/delete-me",
+            "configmap/delete-me",
             "--ignore-not-found",
             "--wait=true",
         ])
@@ -440,16 +489,15 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     kubectl(&[
         "-n",
         NAMESPACE,
-        "run",
+        "create",
+        "configmap",
         "delete-me",
-        "--image=busybox:1.36.1",
-        "--",
-        "sleep",
-        "3600",
+        "--from-literal=value=fixture",
     ]);
-    let target = reference(&adapter, Gvk::core("v1", "Pod"), "delete-me").await;
+    let target = reference(&adapter, Gvk::core("v1", "ConfigMap"), "delete-me").await;
     run(
         &adapter,
+        "delete",
         Command::Delete {
             target,
             propagation: Propagation::Foreground,
@@ -462,7 +510,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-n",
             NAMESPACE,
             "get",
-            "pod/delete-me",
+            "configmap/delete-me",
             "--ignore-not-found",
         ])
         .is_empty()
@@ -476,7 +524,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             "-n",
             NAMESPACE,
             "get",
-            "pod/delete-me",
+            "configmap/delete-me",
             "--ignore-not-found"
         ])
         .is_empty()
@@ -543,6 +591,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "cronjob suspend",
         Command::SetCronJobSuspended {
             target: cronjob.clone(),
             suspended: true,
@@ -552,6 +601,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "cronjob resume",
         Command::SetCronJobSuspended {
             target: cronjob.clone(),
             suspended: false,
@@ -561,6 +611,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
     .await;
     run(
         &adapter,
+        "job creation",
         Command::CreateJob {
             source: cronjob,
             idempotency_key: "kind-create-job".into(),
