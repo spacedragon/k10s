@@ -60,6 +60,7 @@ pub(crate) fn record_from_row(row: &WatchRow, revision: u64) -> ResourceRecord {
         created_at: row.created_at.clone(),
         owner_references: row.owner_references.clone(),
         events: Vec::new(),
+        manifest: String::new(),
     }
 }
 

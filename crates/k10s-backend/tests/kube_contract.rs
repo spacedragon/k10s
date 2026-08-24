@@ -377,6 +377,187 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
     assert_eq!(kube_rows[0]["summary"], "Running");
 }
 
+/// Shared resource-detail wire contract: the fake adapter's stored records
+/// and the real kube adapter (driven by a recorded Deployment → ReplicaSet →
+/// Pod cut) must map onto the same detail wire shape through the kernel —
+/// identical top-level keys, section shapes, related-group shapes, event-row
+/// shapes, and no opaque Kubernetes resourceVersion anywhere.
+#[tokio::test]
+async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
+    use k10s_backend::{Gvk, ResourceRef};
+
+    let deployments_gvk = Gvk::new("apps", "v1", "Deployment");
+
+    // Real side: one recorded cut serving the deployment, its replicaset,
+    // its pod, and both event API variants.
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/deployments/web",
+        200,
+        r#"{"kind":"Deployment","apiVersion":"apps/v1","metadata":{"name":"web","namespace":"default","uid":"uid-kube-web","resourceVersion":"41","creationTimestamp":"2026-08-21T00:00:00Z","labels":{"app":"web"}},"spec":{"replicas":2},"status":{"readyReplicas":2}}"#,
+    );
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/replicasets",
+        200,
+        r#"{"kind":"ReplicaSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"42"},"items":[
+          {"metadata":{"name":"web-rs","namespace":"default","uid":"uid-kube-rs","creationTimestamp":"2026-08-21T00:01:00Z",
+           "ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"web","uid":"uid-kube-web","controller":true}]}}
+        ]}"#,
+    );
+    server.set_response(
+        "/api/v1/namespaces/default/pods",
+        200,
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"43"},"items":[
+          {"metadata":{"name":"web-pod","namespace":"default","uid":"uid-kube-pod","creationTimestamp":"2026-08-21T00:02:00Z",
+           "ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"web-rs","uid":"uid-kube-rs","controller":true}]},
+           "status":{"phase":"Running"}}
+        ]}"#,
+    );
+    server.set_response(
+        "/api/v1/namespaces/default/events",
+        200,
+        r#"{"kind":"EventList","apiVersion":"v1","metadata":{"resourceVersion":"44"},"items":[
+          {"metadata":{"name":"ev.1","namespace":"default","uid":"uid-ev"},"involvedObject":{"kind":"Deployment","name":"web","namespace":"default","uid":"uid-kube-web"},"reason":"ScalingReplicaSet","message":"Scaled up replica set","count":1,"lastTimestamp":"2026-08-21T00:01:00Z"}
+        ]}"#,
+    );
+
+    async fn detail_wire_payload(kernel: &BackendKernel, reference: ResourceRef) -> Value {
+        match kernel.query(Query::ResourceDetail { reference }).await {
+            Ok(KernelQueryResult::ResourceDetail(result)) => {
+                serde_json::to_value(result.wire_payload()).expect("payload serializes")
+            }
+            other => panic!("kernel must map the detail into its wire payload, got {other:?}"),
+        }
+    }
+
+    // Fake side: standard dataset's deployment detail, resolved through the
+    // same kernel composition (related rows + events + manifest).
+    let fake_kernel =
+        BackendKernel::new_with_instance_id(FakeKubernetes::standard(), "contract-instance");
+    let fake_payload = detail_wire_payload(
+        &fake_kernel,
+        ResourceRef {
+            context: "dev-local".into(),
+            gvk: deployments_gvk.clone(),
+            namespace: Some("default".into()),
+            name: "web-frontend".into(),
+            uid: "uid-dev-local-deployment-default-web-frontend".into(),
+        },
+    )
+    .await;
+
+    let client = server.clone().into_client("default");
+    let kube_adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+        }],
+        [("contract-mock", client)],
+    )
+    .expect("adapter builds around the recorded server");
+    let kube_kernel = BackendKernel::new(kube_adapter);
+    let kube_payload = detail_wire_payload(
+        &kube_kernel,
+        ResourceRef {
+            context: "contract-mock".into(),
+            gvk: deployments_gvk.clone(),
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-kube-web".into(),
+        },
+    )
+    .await;
+
+    for (label, payload) in [("fake", &fake_payload), ("kube", &kube_payload)] {
+        let keys = payload
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: payload is an object"))
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "capabilities",
+                "createdAt",
+                "events",
+                "identity",
+                "manifest",
+                "ownerReferences",
+                "related",
+                "revision",
+                "sections"
+            ]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+            "{label}: resource-detail top-level keys drifted"
+        );
+        // Section and row shapes agree across adapters.
+        let sections = payload["sections"].as_array().unwrap();
+        assert!(!sections.is_empty(), "{label}: details carry sections");
+        for section in sections {
+            let section_keys = section
+                .as_object()
+                .expect("section is an object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                section_keys,
+                ["rows", "title"].map(str::to_owned).into_iter().collect(),
+                "{label}: section keys drifted"
+            );
+        }
+        for group in payload["related"].as_array().unwrap() {
+            let group_keys = group
+                .as_object()
+                .expect("related group is an object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                group_keys,
+                ["gvk", "rows", "title"]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                "{label}: related-group keys drifted"
+            );
+        }
+        for event in payload["events"].as_array().unwrap() {
+            let event_keys = event
+                .as_object()
+                .expect("event is an object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                event_keys,
+                ["count", "lastSeen", "message", "reason"]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                "{label}: event keys drifted"
+            );
+        }
+        // The opaque Kubernetes resourceVersion never crosses either wire —
+        // only inside the backend-rendered manifest is it bound to the UID.
+        let text = payload.to_string();
+        assert!(!text.contains("\"resourceVersion\""), "{label}: rv leaked");
+        assert!(text.contains("manifest"), "{label}: manifest missing");
+    }
+
+    // The kube side resolves the traversal with honest recorded data.
+    let related = kube_payload["related"].as_array().unwrap();
+    assert!(
+        related.iter().any(|group| group["gvk"]["kind"] == "Pod"),
+        "the kube traversal reaches pods transitively"
+    );
+}
+
 /// Shared resource-watch wire contract: the fake adapter and the real kube
 /// adapter (driven by a fully scripted watch source, no cluster) must
 /// normalize identical backend types, so the kernel maps both onto the same

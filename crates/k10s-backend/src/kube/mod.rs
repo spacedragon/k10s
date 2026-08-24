@@ -8,7 +8,9 @@
 
 mod config;
 mod discovery;
+mod events;
 mod normalize;
+mod owners;
 mod read;
 mod watch;
 
@@ -197,11 +199,9 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_list(context, gvk, namespace).await,
-                Query::ResourceDetail { .. } => Err(BackendError::unsupported("resource.detail")),
+                Query::ResourceDetail { reference } => self.resource_detail(reference).await,
                 Query::ResourceMetrics { .. } => Err(BackendError::unsupported("resource.metrics")),
-                Query::ResourceRelations { .. } => {
-                    Err(BackendError::unsupported("resource.relations"))
-                }
+                Query::ResourceRelations { reference } => self.resource_relations(reference).await,
                 Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
                 Query::OperationStatus { .. } => Err(BackendError::unsupported("operation.status")),
             }
@@ -397,6 +397,110 @@ impl KubeAdapter {
             rows: records,
             generated_at: crate::runtime::now_rfc3339(),
         }))
+    }
+
+    /// Serve one exact-identity detail read.
+    ///
+    /// The object is fetched by name, its UID is re-checked against the
+    /// caller's reference (a reused name with another UID never resolves),
+    /// and the response carries tailored normalized fields, newest-first
+    /// events from both Event API variants, and YAML bound to the fetched
+    /// UID/resourceVersion. The kernel composes related rows on top.
+    async fn resource_detail(
+        &self,
+        reference: crate::port::ResourceRef,
+    ) -> Result<QueryResult, BackendError> {
+        let client = self.detail_client(&reference).await?;
+        let descriptor = self
+            .descriptor_for(&reference.context, &reference.gvk)
+            .await?;
+        if reference.namespace.is_some() && !descriptor.namespaced {
+            return Err(BackendError::NotFound);
+        }
+
+        let read = read::get_resource(
+            &client,
+            &descriptor.gvk,
+            &descriptor.plural,
+            descriptor.namespaced,
+            reference.namespace.as_deref(),
+            &reference,
+        )
+        .await?;
+
+        let revision = self.watches.next_revision();
+        let mut record = crate::runtime::record_from_row(&read.row, revision);
+        record.events = events::events_for(&client, &reference, descriptor.namespaced).await?;
+        record.manifest = read.manifest;
+        Ok(QueryResult::ResourceDetail(record))
+    }
+
+    /// Serve one controller-UID relation traversal.
+    ///
+    /// The target's exact identity is verified first; candidates are swept
+    /// once over the context's namespaced catalog inside the target's
+    /// namespace (cluster-wide for cluster-scoped targets), then resolved
+    /// transitively by controller owner UIDs only.
+    async fn resource_relations(
+        &self,
+        reference: crate::port::ResourceRef,
+    ) -> Result<QueryResult, BackendError> {
+        let client = self.detail_client(&reference).await?;
+        // Existence check with UID equality: relations on a vanished or
+        // recreated object are typed not-founds, never guessed empties.
+        let _ = read::get_resource(
+            &client,
+            &reference.gvk,
+            &self
+                .descriptor_for(&reference.context, &reference.gvk)
+                .await?
+                .plural,
+            reference.namespace.is_some(),
+            reference.namespace.as_deref(),
+            &reference,
+        )
+        .await?;
+
+        let candidates = owners::sweep_candidates(
+            &client,
+            &reference.context,
+            &self.catalog_for(&reference.context).await?.types,
+            reference.namespace.as_deref(),
+        )
+        .await;
+        let revision = self.watches.next_revision();
+        Ok(QueryResult::ResourceRelations(owners::related_data(
+            reference,
+            &candidates,
+            revision,
+        )))
+    }
+
+    /// Validate that a reference names a known context, then resolve its
+    /// shared cluster client.
+    async fn detail_client(
+        &self,
+        reference: &crate::port::ResourceRef,
+    ) -> Result<kube::Client, BackendError> {
+        if self.registry.find(&reference.context).is_none() {
+            return Err(BackendError::NotFound);
+        }
+        self.cluster_client(&reference.context).await
+    }
+
+    /// Resolve one context's discovery descriptor for a GVK.
+    async fn descriptor_for(
+        &self,
+        context: &str,
+        gvk: &Gvk,
+    ) -> Result<crate::port::ApiResourceDescriptor, BackendError> {
+        let catalog = self.catalog_for(context).await?;
+        catalog
+            .types
+            .iter()
+            .find(|entry| entry.gvk == *gvk)
+            .cloned()
+            .ok_or(BackendError::NotFound)
     }
 
     /// Serve one context's resource catalog through discovery.

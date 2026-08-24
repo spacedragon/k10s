@@ -780,6 +780,7 @@ impl FakeKubernetes {
                     created_at: rfc3339(FAKE_EPOCH_SECS),
                     owner_references: Vec::new(),
                     events: Vec::new(),
+                    manifest: String::new(),
                 };
                 let changed = ResourceRecord {
                     reference: ticket.target.clone(),
@@ -789,6 +790,7 @@ impl FakeKubernetes {
                     created_at: rfc3339(FAKE_EPOCH_SECS),
                     owner_references: Vec::new(),
                     events: Vec::new(),
+                    manifest: String::new(),
                 };
                 let reference = ticket.target.clone();
                 state.records.push(record);
@@ -1520,6 +1522,7 @@ fn record(seed: RecordSeed<'_>) -> ResourceRecord {
         created_at: rfc3339(FAKE_EPOCH_SECS + seed.offset_secs),
         owner_references: seed.owner_references,
         events,
+        manifest: String::new(),
     }
 }
 
