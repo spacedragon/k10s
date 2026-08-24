@@ -67,7 +67,7 @@ jobs:
         run: |
           cargo test --locked -p k10s-desktop --test packaging_desktop
           cargo test --locked -p k10s-server-app --test packaging_server
-          dpkg-deb --contents target/release/packages/*.deb | grep -F '/usr/bin/k10s-desktop'
+          dpkg-deb --contents target/release/packages/*.deb | grep -F 'usr/bin/k10s-desktop'
           test -x target/release/packages/*.AppImage
           appimage="$(realpath target/release/packages/*.AppImage)"
           extract="$(mktemp -d)"
@@ -212,7 +212,9 @@ jobs:
           $process = Start-Process $nsis -ArgumentList @('/S', "/D=$nsisRoot") -Wait -PassThru
           if ($process.ExitCode -ne 0 -or -not (Get-ChildItem $nsisRoot -Recurse -Filter k10s-desktop.exe)) { throw 'NSIS lacks k10s-desktop.exe' }
           $archive = Get-ChildItem target/distrib/*.zip | Select-Object -First 1
-          if (-not $archive -or (tar -tf $archive.FullName) -notmatch 'k10s-server.exe') { throw 'invalid server zip' }
+          if (-not $archive) { throw 'missing server zip' }
+          $archiveEntries = tar -tf $archive.FullName
+          if ($LASTEXITCODE -ne 0 -or -not ($archiveEntries -match 'k10s-server.exe')) { throw 'invalid server zip' }
       - name: Upload Windows release artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
