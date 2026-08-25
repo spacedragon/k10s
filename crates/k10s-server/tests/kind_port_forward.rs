@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use k10s_backend::{BackendMode, PortForwardPortSelection, build_kernel};
+use k10s_backend::{BackendMode, PortForwardPortSelection, Query, build_kernel};
 use k10s_protocol::{GroupVersionKind, ResourceIdentity};
 use k10s_server::port_forward::{PortForwardManager, StopOutcome};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,6 +61,10 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
         kubeconfig: Some(kubeconfig()),
     })
     .unwrap();
+    kernel
+        .query(Query::Bootstrap)
+        .await
+        .expect("bootstrap initializes the context client used by the desktop");
     let connector = kernel.port_forward_connector().expect("kube connector");
     let cancel = CancellationToken::new();
     let (events, _) = tokio::sync::broadcast::channel(64);
