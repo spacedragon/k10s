@@ -396,11 +396,10 @@ pub(crate) async fn serve_socket(
                         () = fwd_cancel.cancelled() => break,
                         event = events.recv() => match event {
                             Ok(BackendEvent::Operation(update)) => {
-                                let correlation = fwd_correlations
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .get(&update.id)
-                                    .cloned();
+                                let correlation = operation_correlation(
+                                    &fwd_correlations,
+                                    &update,
+                                );
                                 let outcome = forward_operation_update(
                                     &fwd_outbound,
                                     &fwd_counter,
@@ -456,6 +455,10 @@ pub(crate) async fn serve_socket(
     }
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
+        // Completed tasks retain their JoinSet allocation until joined. Do
+        // this before polling a potentially always-readable socket so inbound
+        // churn cannot starve task reclamation.
+        reap_completed_tasks(&mut request_tasks);
         let next = tokio::select! {
             biased;
             _ = &mut takeover_rx => {
@@ -1000,6 +1003,27 @@ pub(crate) async fn serve_socket(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .release_lease(session_id.as_str(), lease_generation);
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
+}
+
+fn reap_completed_tasks(tasks: &mut JoinSet<()>) {
+    while tasks.try_join_next().is_some() {}
+}
+
+fn operation_correlation(
+    correlations: &std::sync::Mutex<HashMap<String, String>>,
+    update: &k10s_backend::OperationEvent,
+) -> Option<String> {
+    let mut correlations = correlations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(
+        update.state,
+        k10s_backend::OperationState::Pending | k10s_backend::OperationState::Running
+    ) {
+        correlations.get(&update.id).cloned()
+    } else {
+        correlations.remove(&update.id)
+    }
 }
 
 /// Outcome of mapping a request kind and payload onto backend behavior.
@@ -2003,6 +2027,60 @@ mod tests {
             })
             .unwrap();
         client
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_request_task_churn_is_reaped_to_zero() {
+        let mut tasks = JoinSet::new();
+        for batch in 0..64 {
+            for _ in 0..32 {
+                tasks.spawn(async {});
+            }
+            tokio::task::yield_now().await;
+            reap_completed_tasks(&mut tasks);
+            assert_eq!(
+                tasks.len(),
+                0,
+                "completed task records survive churn batch {batch}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_operation_churn_retires_every_correlation() {
+        let correlations = std::sync::Mutex::new(HashMap::new());
+        for index in 0..2_048 {
+            let operation_id = format!("operation-{index}");
+            let request_id = format!("request-{index}");
+            correlations
+                .lock()
+                .unwrap()
+                .insert(operation_id.clone(), request_id.clone());
+            let pending = k10s_backend::OperationEvent {
+                id: operation_id.clone(),
+                state: k10s_backend::OperationState::Running,
+                progress: Some((1, 2)),
+                detail: None,
+            };
+            assert_eq!(
+                operation_correlation(&correlations, &pending),
+                Some(request_id.clone())
+            );
+            let terminal = k10s_backend::OperationEvent {
+                id: operation_id,
+                state: k10s_backend::OperationState::Succeeded,
+                progress: None,
+                detail: None,
+            };
+            assert_eq!(
+                operation_correlation(&correlations, &terminal),
+                Some(request_id)
+            );
+        }
+        assert!(
+            correlations.lock().unwrap().is_empty(),
+            "terminal operation correlations remain bounded under churn"
+        );
     }
 
     #[tokio::test]
