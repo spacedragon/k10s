@@ -306,9 +306,24 @@ impl ServerConfig {
                 });
             }
         }
-        if self.graceful_flush_timeout > self.drain_timeout {
+        let Some(graceful_shutdown_budget) = self
+            .drain_grace_timeout
+            .checked_add(self.graceful_flush_timeout)
+        else {
             return Err(BudgetConfigError {
-                field: "graceful_flush_timeout",
+                field: "drain_grace_timeout",
+                reason: "plus graceful_flush_timeout must not overflow",
+            });
+        };
+        if graceful_shutdown_budget > self.drain_timeout {
+            return Err(BudgetConfigError {
+                field: "drain_grace_timeout",
+                reason: "plus graceful_flush_timeout must not exceed drain_timeout",
+            });
+        }
+        if self.probe_drain_grace > self.drain_timeout {
+            return Err(BudgetConfigError {
+                field: "probe_drain_grace",
                 reason: "must not exceed drain_timeout",
             });
         }

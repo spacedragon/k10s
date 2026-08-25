@@ -50,11 +50,41 @@ fn zero_durations_and_impossible_lifecycle_budgets_are_rejected() {
     }
 
     let mut flush = ServerConfig::default();
-    flush.graceful_flush_timeout = flush.drain_timeout + Duration::from_millis(1);
+    flush.drain_grace_timeout = flush.drain_timeout;
+    assert_eq!(flush.validate().unwrap_err().field(), "drain_grace_timeout");
+
+    let combined = ServerConfig {
+        drain_grace_timeout: Duration::from_secs(6),
+        graceful_flush_timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
     assert_eq!(
-        flush.validate().unwrap_err().field(),
-        "graceful_flush_timeout"
+        combined.validate().unwrap_err().field(),
+        "drain_grace_timeout"
     );
+
+    let exact = ServerConfig {
+        drain_grace_timeout: Duration::from_secs(6),
+        graceful_flush_timeout: Duration::from_secs(4),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    exact.validate().unwrap();
+
+    let probe = ServerConfig {
+        probe_drain_grace: Duration::from_secs(11),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    assert_eq!(probe.validate().unwrap_err().field(), "probe_drain_grace");
+
+    let probe_boundary = ServerConfig {
+        probe_drain_grace: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    probe_boundary.validate().unwrap();
 }
 
 #[tokio::test]

@@ -396,11 +396,10 @@ pub(crate) async fn serve_socket(
                         () = fwd_cancel.cancelled() => break,
                         event = events.recv() => match event {
                             Ok(BackendEvent::Operation(update)) => {
-                                let correlation = fwd_correlations
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .get(&update.id)
-                                    .cloned();
+                                let correlation = operation_correlation(
+                                    &fwd_correlations,
+                                    &update,
+                                );
                                 let outcome = forward_operation_update(
                                     &fwd_outbound,
                                     &fwd_counter,
@@ -456,6 +455,10 @@ pub(crate) async fn serve_socket(
     }
     let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
+        // Completed tasks retain their JoinSet allocation until joined. Do
+        // this before polling a potentially always-readable socket so inbound
+        // churn cannot starve task reclamation.
+        reap_completed_tasks(&mut request_tasks);
         let next = tokio::select! {
             biased;
             _ = &mut takeover_rx => {
@@ -608,13 +611,12 @@ pub(crate) async fn serve_socket(
                                         Err(RequestFailure::Backend(BackendError::Cancelled)),
                                     result = task_kernel.execute_with_deadline(command, deadline) => {
                                         result.map(|operation_id| {
-                                            task_correlations
-                                                .lock()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                                .insert(
-                                                    operation_id.as_str().to_owned(),
-                                                    request_id.as_str().to_owned(),
-                                                );
+                                            insert_operation_correlation(
+                                                &task_correlations,
+                                                operation_id.as_str().to_owned(),
+                                                request_id.as_str().to_owned(),
+                                                queue_capacity,
+                                            );
                                             RequestOutcome::Applied(OperationAccepted {
                                                 operation_id: OperationId::new(operation_id.as_str()),
                                             })
@@ -1000,6 +1002,45 @@ pub(crate) async fn serve_socket(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .release_lease(session_id.as_str(), lease_generation);
     finish_writer(outbound, child, writer, config.graceful_flush_timeout).await;
+}
+
+fn reap_completed_tasks(tasks: &mut JoinSet<()>) {
+    while tasks.try_join_next().is_some() {}
+}
+
+fn operation_correlation(
+    correlations: &std::sync::Mutex<HashMap<String, String>>,
+    update: &k10s_backend::OperationEvent,
+) -> Option<String> {
+    let mut correlations = correlations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(
+        update.state,
+        k10s_backend::OperationState::Pending | k10s_backend::OperationState::Running
+    ) {
+        correlations.get(&update.id).cloned()
+    } else {
+        correlations.remove(&update.id)
+    }
+}
+
+fn insert_operation_correlation(
+    correlations: &std::sync::Mutex<HashMap<String, String>>,
+    operation_id: String,
+    request_id: String,
+    capacity: usize,
+) {
+    let mut correlations = correlations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !correlations.contains_key(&operation_id)
+        && correlations.len() >= capacity
+        && let Some(evicted) = correlations.keys().next().cloned()
+    {
+        correlations.remove(&evicted);
+    }
+    correlations.insert(operation_id, request_id);
 }
 
 /// Outcome of mapping a request kind and payload onto backend behavior.
@@ -2003,6 +2044,87 @@ mod tests {
             })
             .unwrap();
         client
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_request_task_churn_is_reaped_to_zero() {
+        let mut tasks = JoinSet::new();
+        for batch in 0..64 {
+            for _ in 0..32 {
+                tasks.spawn(async {});
+            }
+            tokio::task::yield_now().await;
+            reap_completed_tasks(&mut tasks);
+            assert_eq!(
+                tasks.len(),
+                0,
+                "completed task records survive churn batch {batch}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_operation_churn_retires_every_correlation() {
+        let correlations = std::sync::Mutex::new(HashMap::new());
+        for index in 0..2_048 {
+            let operation_id = format!("operation-{index}");
+            let request_id = format!("request-{index}");
+            correlations
+                .lock()
+                .unwrap()
+                .insert(operation_id.clone(), request_id.clone());
+            let pending = k10s_backend::OperationEvent {
+                id: operation_id.clone(),
+                state: k10s_backend::OperationState::Running,
+                progress: Some((1, 2)),
+                detail: None,
+            };
+            assert_eq!(
+                operation_correlation(&correlations, &pending),
+                Some(request_id.clone())
+            );
+            let terminal = k10s_backend::OperationEvent {
+                id: operation_id,
+                state: k10s_backend::OperationState::Succeeded,
+                progress: None,
+                detail: None,
+            };
+            assert_eq!(
+                operation_correlation(&correlations, &terminal),
+                Some(request_id)
+            );
+        }
+        assert!(
+            correlations.lock().unwrap().is_empty(),
+            "terminal operation correlations remain bounded under churn"
+        );
+    }
+
+    #[test]
+    fn terminal_before_replay_insertion_stays_at_the_hard_capacity() {
+        let correlations = std::sync::Mutex::new(HashMap::new());
+        let capacity = 16;
+        for index in 0..2_048 {
+            let operation_id = format!("completed-operation-{index}");
+            let terminal = k10s_backend::OperationEvent {
+                id: operation_id.clone(),
+                state: k10s_backend::OperationState::Succeeded,
+                progress: None,
+                detail: None,
+            };
+            assert_eq!(operation_correlation(&correlations, &terminal), None);
+            insert_operation_correlation(
+                &correlations,
+                operation_id,
+                format!("replay-request-{index}"),
+                capacity,
+            );
+            assert!(
+                correlations.lock().unwrap().len() <= capacity,
+                "terminal-before-insert replay exceeded its session bound"
+            );
+        }
+        assert_eq!(correlations.lock().unwrap().len(), capacity);
     }
 
     #[tokio::test]

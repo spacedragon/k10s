@@ -315,14 +315,14 @@ async fn embedded_desktop_launch_shuts_down_through_the_same_lifecycle() {
 }
 
 #[tokio::test]
-async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_window() {
+async fn valid_grace_and_flush_budget_bounds_an_active_socket_shutdown() {
     let (_capture, _) = install_capture();
     let drain_timeout = Duration::from_millis(400);
     let graceful_flush = ServerConfig::default().graceful_flush_timeout;
     let server = spawn_loopback(
         ServerConfig {
             access_token: ACCESS_TOKEN.into(),
-            drain_grace_timeout: Duration::from_secs(30),
+            drain_grace_timeout: Duration::from_millis(100),
             drain_timeout,
             ..ServerConfig::default()
         },
@@ -334,20 +334,20 @@ async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_windo
     let mut ws = connect_authenticated(addr).await;
 
     let started = std::time::Instant::now();
-    // The connected socket wants 30s of grace, but the drain deadline is one
-    // absolute bound measured from shutdown start.
+    // The active socket consumes its configured grace window, while the
+    // complete grace-plus-flush budget remains inside the hard deadline.
     let result = tokio::time::timeout(Duration::from_secs(10), server.shutdown())
         .await
         .expect("shutdown must stay bounded by the drain deadline");
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::TimedOut),
-        "an abandoned socket must surface as a timed-out shutdown: {result:?}"
+        result.is_ok(),
+        "valid drain budget must complete: {result:?}"
     );
     assert!(
-        elapsed >= drain_timeout,
-        "shutdown returned before the configured deadline: {elapsed:?}"
+        elapsed >= Duration::from_millis(100),
+        "shutdown skipped the configured grace window: {elapsed:?}"
     );
     // One deadline plus one bounded forced-unwind window, with scheduler slack.
     let bound = drain_timeout + graceful_flush * 2 + Duration::from_millis(500);
@@ -376,14 +376,14 @@ async fn drain_deadline_bounds_shutdown_even_when_a_socket_holds_its_grace_windo
 }
 
 #[tokio::test]
-async fn healthz_stays_reachable_through_forced_teardown() {
+async fn healthz_stays_reachable_through_graceful_teardown() {
     let (_capture, _) = install_capture();
     let drain_timeout = Duration::from_millis(400);
     let graceful_flush = ServerConfig::default().graceful_flush_timeout;
     let server = spawn_loopback(
         ServerConfig {
             access_token: ACCESS_TOKEN.into(),
-            drain_grace_timeout: Duration::from_secs(30),
+            drain_grace_timeout: Duration::from_millis(100),
             drain_timeout,
             ..ServerConfig::default()
         },
@@ -399,7 +399,7 @@ async fn healthz_stays_reachable_through_forced_teardown() {
     let notice = receive_frame(&mut ws).await;
     assert_eq!(notice.kind, ServerKind::ShutdownNotice);
 
-    // Probe /healthz until shutdown resolves: forced teardown must run while
+    // Probe /healthz until shutdown resolves: graceful teardown must run while
     // the listener is still serving, so at least one late probe succeeds.
     let mut healthy_after_notice = false;
     let outcome = loop {
@@ -415,10 +415,10 @@ async fn healthz_stays_reachable_through_forced_teardown() {
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(&outcome, Err(error) if error.kind() == std::io::ErrorKind::TimedOut),
-        "an abandoned socket must surface as a timed-out shutdown: {outcome:?}"
+        outcome.is_ok(),
+        "valid drain budget must complete: {outcome:?}"
     );
-    assert!(elapsed >= drain_timeout);
+    assert!(elapsed >= Duration::from_millis(100));
     let bound = drain_timeout + graceful_flush * 2 + Duration::from_millis(500);
     assert!(
         elapsed < bound,
@@ -447,7 +447,7 @@ async fn accepted_upgrade_racing_shutdown_cannot_outlive_it() {
     let server = spawn_loopback(
         ServerConfig {
             access_token: ACCESS_TOKEN.into(),
-            drain_grace_timeout: Duration::from_secs(30),
+            drain_grace_timeout: Duration::from_millis(20),
             drain_timeout,
             ..ServerConfig::default()
         },
