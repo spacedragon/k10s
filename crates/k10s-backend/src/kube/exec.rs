@@ -334,17 +334,12 @@ async fn pump_output<R: AsyncRead + Unpin>(
 ) {
     let mut buffer = vec![0_u8; OUTPUT_CHUNK_BYTES];
     let mut undecoded = Vec::new();
-    let mut pending_text = String::new();
     loop {
         tokio::select! {
             _ = sender.closed() => break,
             read = reader.read(&mut buffer) => match read {
                 Ok(0) => {
                     if let Some(text) = super::logs::decode_utf8(&mut undecoded, true) {
-                        pending_text.push_str(&text);
-                    }
-                    if !pending_text.is_empty() {
-                        let text = std::mem::take(&mut pending_text);
                         let _ = sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None }));
                     }
                     break;
@@ -352,15 +347,10 @@ async fn pump_output<R: AsyncRead + Unpin>(
                 Err(_) => break,
                 Ok(count) => {
                     undecoded.extend_from_slice(&buffer[..count]);
-                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, false) {
-                        pending_text.push_str(&text);
-                    }
-                    if let Some(last_newline) = pending_text.rfind('\n') {
-                        let remainder = pending_text.split_off(last_newline + 1);
-                        let text = std::mem::replace(&mut pending_text, remainder);
-                        if sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err() {
-                            break;
-                        }
+                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, false)
+                        && sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err()
+                    {
+                        break;
                     }
                 }
             }
@@ -543,12 +533,9 @@ mod tests {
             events.push(chunk.text);
         }
         assert_eq!(
-            events,
-            vec![
-                format!("{}🦀\n", "x".repeat(OUTPUT_CHUNK_BYTES - 1)),
-                "last".into(),
-            ],
-            "arbitrary reads neither corrupt UTF-8 nor fabricate line boundaries"
+            events.concat(),
+            format!("{}🦀\nlast", "x".repeat(OUTPUT_CHUNK_BYTES - 1)),
+            "arbitrary reads preserve the exact UTF-8 stream"
         );
     }
 }

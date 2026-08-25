@@ -153,6 +153,41 @@ fn tty_output_merges_into_one_terminal_buffer() {
 }
 
 #[test]
+fn tty_chunks_continue_one_visible_bounded_line() {
+    let mut shell = ShellTool::new(StreamTarget {
+        context: "dev-local".into(),
+        namespace: "default".into(),
+        pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
+        container: "app".into(),
+    });
+    shell.connect();
+    shell.attach();
+
+    shell.apply_output("$ ");
+    assert_eq!(
+        shell.buffer().map(String::as_str).collect::<Vec<_>>(),
+        ["$ "]
+    );
+    shell.apply_output("echo");
+    shell.apply_output(" ok\nnext");
+    assert_eq!(
+        shell.buffer().map(String::as_str).collect::<Vec<_>>(),
+        ["$ echo ok", "next"]
+    );
+
+    for _ in 0..8 {
+        shell.apply_output(&"x".repeat(16 * 1024));
+    }
+    let lines = shell.buffer().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "read chunks do not fabricate lines");
+    assert!(
+        lines[1].len() <= 64 * 1024,
+        "one unfinished line stays bounded"
+    );
+}
+
+#[test]
 fn stdin_and_resize_are_queued_as_drainable_actions() {
     let mut shell = ShellTool::new(StreamTarget {
         context: "dev-local".into(),

@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 
 use k10s_protocol::StreamTarget;
 
+const SCROLLBACK_LINE_CAPACITY: usize = 64 * 1024;
+
 /// Lifecycle of one connected terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellPhase {
@@ -40,6 +42,7 @@ pub struct ShellTool {
     target: StreamTarget,
     phase: ShellPhase,
     buffer: VecDeque<String>,
+    continuation: bool,
     actions: Vec<ShellAction>,
     scrollback_capacity: usize,
 }
@@ -52,6 +55,7 @@ impl ShellTool {
             target,
             phase: ShellPhase::Disconnected,
             buffer: VecDeque::new(),
+            continuation: false,
             actions: Vec::new(),
             scrollback_capacity: 4_096,
         }
@@ -107,14 +111,21 @@ impl ShellTool {
             return;
         }
         let normalized = text.replace("\r\n", "\n");
-        let mut lines: Vec<&str> = normalized.split('\n').collect();
-        // A trailing newline terminates the last line; it does not open a
-        // new blank one.
-        if normalized.ends_with('\n') {
-            lines.pop();
-        }
-        for line in lines {
-            self.buffer.push_back(line.to_owned());
+        for segment in normalized.split_inclusive('\n') {
+            let complete = segment.ends_with('\n');
+            let text = segment.strip_suffix('\n').unwrap_or(segment);
+            if self.continuation {
+                if let Some(line) = self.buffer.back_mut() {
+                    line.push_str(text);
+                    truncate_line_start(line);
+                }
+            } else {
+                self.buffer.push_back(text.to_owned());
+                if let Some(line) = self.buffer.back_mut() {
+                    truncate_line_start(line);
+                }
+            }
+            self.continuation = !complete;
         }
         while self.buffer.len() > self.scrollback_capacity {
             self.buffer.pop_front();
@@ -180,6 +191,17 @@ impl ShellTool {
             self.actions.clear();
         }
     }
+}
+
+fn truncate_line_start(line: &mut String) {
+    if line.len() <= SCROLLBACK_LINE_CAPACITY {
+        return;
+    }
+    let mut start = line.len() - SCROLLBACK_LINE_CAPACITY;
+    while !line.is_char_boundary(start) {
+        start += 1;
+    }
+    line.drain(..start);
 }
 
 use std::collections::HashMap;
