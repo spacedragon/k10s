@@ -577,7 +577,7 @@ async fn relations_on_a_vanished_target_are_not_found() {
 /// Relation traversal shares the caller's detail deadline: a relation sweep
 /// that stalls past the deadline returns Timeout instead of waiting on
 /// unbounded cluster I/O after the detail read already succeeded.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn slow_relations_traversal_returns_timeout_at_the_deadline() {
     let server = RecordedApiServer::standard();
     server.set_response(
