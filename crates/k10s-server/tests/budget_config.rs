@@ -71,6 +71,20 @@ fn zero_durations_and_impossible_lifecycle_budgets_are_rejected() {
         ..ServerConfig::default()
     };
     exact.validate().unwrap();
+
+    let probe = ServerConfig {
+        probe_drain_grace: Duration::from_secs(11),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    assert_eq!(probe.validate().unwrap_err().field(), "probe_drain_grace");
+
+    let probe_boundary = ServerConfig {
+        probe_drain_grace: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    };
+    probe_boundary.validate().unwrap();
 }
 
 #[tokio::test]

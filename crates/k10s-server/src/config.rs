@@ -321,6 +321,12 @@ impl ServerConfig {
                 reason: "plus graceful_flush_timeout must not exceed drain_timeout",
             });
         }
+        if self.probe_drain_grace > self.drain_timeout {
+            return Err(BudgetConfigError {
+                field: "probe_drain_grace",
+                reason: "must not exceed drain_timeout",
+            });
+        }
         Ok(())
     }
 }

@@ -611,13 +611,12 @@ pub(crate) async fn serve_socket(
                                         Err(RequestFailure::Backend(BackendError::Cancelled)),
                                     result = task_kernel.execute_with_deadline(command, deadline) => {
                                         result.map(|operation_id| {
-                                            task_correlations
-                                                .lock()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                                .insert(
-                                                    operation_id.as_str().to_owned(),
-                                                    request_id.as_str().to_owned(),
-                                                );
+                                            insert_operation_correlation(
+                                                &task_correlations,
+                                                operation_id.as_str().to_owned(),
+                                                request_id.as_str().to_owned(),
+                                                queue_capacity,
+                                            );
                                             RequestOutcome::Applied(OperationAccepted {
                                                 operation_id: OperationId::new(operation_id.as_str()),
                                             })
@@ -1024,6 +1023,24 @@ fn operation_correlation(
     } else {
         correlations.remove(&update.id)
     }
+}
+
+fn insert_operation_correlation(
+    correlations: &std::sync::Mutex<HashMap<String, String>>,
+    operation_id: String,
+    request_id: String,
+    capacity: usize,
+) {
+    let mut correlations = correlations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !correlations.contains_key(&operation_id)
+        && correlations.len() >= capacity
+        && let Some(evicted) = correlations.keys().next().cloned()
+    {
+        correlations.remove(&evicted);
+    }
+    correlations.insert(operation_id, request_id);
 }
 
 /// Outcome of mapping a request kind and payload onto backend behavior.
@@ -2081,6 +2098,33 @@ mod tests {
             correlations.lock().unwrap().is_empty(),
             "terminal operation correlations remain bounded under churn"
         );
+    }
+
+    #[test]
+    fn terminal_before_replay_insertion_stays_at_the_hard_capacity() {
+        let correlations = std::sync::Mutex::new(HashMap::new());
+        let capacity = 16;
+        for index in 0..2_048 {
+            let operation_id = format!("completed-operation-{index}");
+            let terminal = k10s_backend::OperationEvent {
+                id: operation_id.clone(),
+                state: k10s_backend::OperationState::Succeeded,
+                progress: None,
+                detail: None,
+            };
+            assert_eq!(operation_correlation(&correlations, &terminal), None);
+            insert_operation_correlation(
+                &correlations,
+                operation_id,
+                format!("replay-request-{index}"),
+                capacity,
+            );
+            assert!(
+                correlations.lock().unwrap().len() <= capacity,
+                "terminal-before-insert replay exceeded its session bound"
+            );
+        }
+        assert_eq!(correlations.lock().unwrap().len(), capacity);
     }
 
     #[tokio::test]
