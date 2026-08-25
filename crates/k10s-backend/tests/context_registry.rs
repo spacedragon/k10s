@@ -145,7 +145,7 @@ async fn missing_kubeconfig_files_report_a_clear_typed_error() {
 }
 
 #[tokio::test]
-async fn exec_plugin_credentials_are_rejected_before_commit() {
+async fn exec_plugin_context_is_accepted_for_lazy_validation() {
     let yaml = r#"apiVersion: v1
 kind: Config
 current-context: aks-cluster
@@ -167,17 +167,12 @@ users:
       args: ["get-access-token"]
 "#;
     let path = write_fixture("kubeconfig", yaml);
-    let error = KubeAdapter::from_kubeconfig(Some(&path)).expect_err(
-        "k10s must refuse to execute external credential helpers instead of committing them",
-    );
-
-    assert_eq!(
-        error,
-        AdapterError::ExecPluginRejected {
-            context: "aks-cluster".into(),
-            user: "aks-admin".into()
-        }
-    );
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path))
+        .expect("exec credential helpers are accepted and validated lazily");
+    let contexts = bootstrap_contexts(&adapter).await;
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].name, "aks-cluster");
+    assert_eq!(contexts[0].availability, ContextAvailability::Unknown);
     std::fs::remove_file(&path).ok();
 }
 

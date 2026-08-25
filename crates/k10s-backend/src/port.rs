@@ -732,9 +732,6 @@ pub enum AdapterError {
     /// The kubeconfig exists but cannot be read, parsed, or validated; the
     /// detail names the problem without exposing file contents.
     KubeconfigInvalid { source: String, detail: String },
-    /// A context's user relies on an exec-based credential plugin; k10s never
-    /// executes external helpers and refuses to commit such registries.
-    ExecPluginRejected { context: String, user: String },
     /// Context summaries violated registry invariants (duplicate names or
     /// multiple current contexts), so nothing was committed.
     InvalidContextSummaries { detail: String },
@@ -751,12 +748,6 @@ impl std::fmt::Display for AdapterError {
             }
             Self::KubeconfigInvalid { source, detail } => {
                 write!(f, "invalid kubeconfig from {source}: {detail}")
-            }
-            Self::ExecPluginRejected { context, user } => {
-                write!(
-                    f,
-                    "context '{context}' uses exec-plugin credentials (user '{user}'), which k10s does not support"
-                )
             }
             Self::InvalidContextSummaries { detail } => {
                 write!(f, "invalid context summaries: {detail}")

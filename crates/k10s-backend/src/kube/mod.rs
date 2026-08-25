@@ -6,6 +6,7 @@
 //! through kube-rs against injected clients in tests or live API servers in
 //! production, cached per context behind bounded, refreshable state.
 
+mod auth;
 mod config;
 mod create;
 mod discovery;
@@ -810,12 +811,22 @@ impl KubeAdapter {
             )));
         };
 
+        let kubeconfig = match config::noninteractive_for_context(kubeconfig_source, context) {
+            Ok(kubeconfig) => kubeconfig,
+            Err(reason) => {
+                self.mark_context_unavailable(context, reason.clone());
+                return Err(BackendError::ContextUnavailable {
+                    context: context.to_owned(),
+                    reason,
+                });
+            }
+        };
         let options = kube::config::KubeConfigOptions {
             context: Some(context.to_owned()),
             ..Default::default()
         };
         // Build this context's config offline; no network traffic happens here.
-        let config = kube::config::Config::from_custom_kubeconfig(kubeconfig_source.clone(), &options)
+        let config = kube::config::Config::from_custom_kubeconfig(kubeconfig, &options)
             .await
             .map_err(|_| {
                 BackendError::Internal(format!(
@@ -823,11 +834,29 @@ impl KubeAdapter {
                 ))
             })?;
         // Raise the shared transport stack for this validated config.
-        let builder = kube::client::ClientBuilder::try_from(config).map_err(|_| {
-            BackendError::Internal(format!(
-                "cluster client for context '{context}' could not raise its transport"
-            ))
-        })?;
+        let builder =
+            tokio::task::spawn_blocking(move || kube::client::ClientBuilder::try_from(config))
+                .await
+                .map_err(|_| {
+                    BackendError::Internal(format!(
+                        "cluster client for context '{context}' could not raise its transport"
+                    ))
+                })?;
+        let builder = match builder {
+            Ok(builder) => builder,
+            Err(error) => {
+                if let Some(reason) = auth::classify_kube_error(&error) {
+                    self.mark_context_unavailable(context, reason.clone());
+                    return Err(BackendError::ContextUnavailable {
+                        context: context.to_owned(),
+                        reason,
+                    });
+                }
+                return Err(BackendError::Internal(format!(
+                    "cluster client for context '{context}' could not raise its transport"
+                )));
+            }
+        };
 
         let client = builder.build();
         // Commit: share the built client with later queries of this context.
@@ -836,6 +865,17 @@ impl KubeAdapter {
             clients.insert(context.to_owned(), client.clone());
         }
         Ok(client)
+    }
+
+    fn mark_context_unavailable(&self, context: &str, reason: String) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (generation, _) = registry.snapshot();
+        if registry.mark_unavailable(generation, context, reason) {
+            registry.choose_available_fallback();
+        }
     }
 }
 

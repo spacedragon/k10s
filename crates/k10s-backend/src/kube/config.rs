@@ -8,7 +8,7 @@
 use std::io;
 use std::path::Path;
 
-use kube::config::{Config, Kubeconfig, KubeconfigError};
+use kube::config::{Config, ExecInteractiveMode, Kubeconfig, KubeconfigError};
 
 use crate::port::{AdapterError, ContextAvailability, ContextInfo};
 
@@ -124,21 +124,6 @@ fn validate_and_map(
     let mut summaries = Vec::with_capacity(kubeconfig.contexts.len());
 
     for named in &kubeconfig.contexts {
-        // Refuse exec-based credential helpers before anything is committed:
-        // k10s never executes external binaries to obtain credentials.
-        if let Some(user_name) = named
-            .context
-            .as_ref()
-            .and_then(|context| context.user.clone())
-            .filter(|user| !user.is_empty())
-            && has_exec_plugin(kubeconfig, &user_name)
-        {
-            return Err(AdapterError::ExecPluginRejected {
-                context: named.name.clone(),
-                user: user_name,
-            });
-        }
-
         let Some(context) = named.context.as_ref() else {
             return Err(AdapterError::KubeconfigInvalid {
                 source: source.to_owned(),
@@ -197,8 +182,8 @@ fn validate_and_map(
     // Final gate: run kube-rs's own config loader over the selected context.
     // Kubeconfig::read only deserializes and merges, so cluster references,
     // server URLs, and current-context resolution are validated here instead.
-    // This is safe offline: exec plugins were rejected above (and the loader
-    // never executes them at this stage), no network calls happen.
+    // This is safe offline: the loader does not execute credential plugins at
+    // this stage and no network calls happen.
     Config::try_from(kubeconfig.clone()).map_err(|error| AdapterError::KubeconfigInvalid {
         source: source.to_owned(),
         detail: describe(error),
@@ -207,12 +192,90 @@ fn validate_and_map(
     Ok(summaries)
 }
 
-/// Whether the referenced user relies on an exec-based credential plugin.
-fn has_exec_plugin(kubeconfig: &Kubeconfig, user_name: &str) -> bool {
-    kubeconfig
-        .auth_infos
+/// Clone a kubeconfig for one context and force credential helpers to be
+/// non-interactive. Desktop execution never has a terminal contract.
+pub(crate) fn noninteractive_for_context(
+    kubeconfig: &Kubeconfig,
+    context_name: &str,
+) -> Result<Kubeconfig, String> {
+    let mut normalized = kubeconfig.clone();
+    let user_name = normalized
+        .contexts
         .iter()
+        .find(|named| named.name == context_name)
+        .and_then(|named| named.context.as_ref())
+        .and_then(|context| context.user.as_deref());
+    let Some(user_name) = user_name else {
+        return Ok(normalized);
+    };
+    let Some(exec) = normalized
+        .auth_infos
+        .iter_mut()
         .find(|named| named.name == user_name)
-        .and_then(|named| named.auth_info.as_ref())
-        .is_some_and(|auth_info| auth_info.exec.is_some())
+        .and_then(|named| named.auth_info.as_mut())
+        .and_then(|auth| auth.exec.as_mut())
+    else {
+        return Ok(normalized);
+    };
+    match exec.interactive_mode {
+        Some(ExecInteractiveMode::Always) => {
+            Err("credential plugin requires interactive input, which is unavailable in k10s".into())
+        }
+        Some(ExecInteractiveMode::IfAvailable) => {
+            exec.interactive_mode = Some(ExecInteractiveMode::Never);
+            Ok(normalized)
+        }
+        Some(ExecInteractiveMode::Never) | None => Ok(normalized),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kube::config::{ExecInteractiveMode, Kubeconfig};
+
+    use super::noninteractive_for_context;
+
+    fn kubeconfig(mode: &str) -> Kubeconfig {
+        serde_yaml::from_str(&format!(
+            r#"apiVersion: v1
+kind: Config
+current-context: exec-context
+clusters:
+- name: cluster
+  cluster:
+    server: https://example.invalid
+contexts:
+- name: exec-context
+  context:
+    cluster: cluster
+    user: exec-user
+users:
+- name: exec-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: helper
+      interactiveMode: {mode}
+"#
+        ))
+        .expect("fixture kubeconfig parses")
+    }
+
+    #[test]
+    fn interactive_exec_policy_is_normalized() {
+        let error = noninteractive_for_context(&kubeconfig("Always"), "exec-context")
+            .expect_err("always-interactive plugins are unavailable");
+        assert!(error.contains("requires interactive input"));
+
+        for mode in ["IfAvailable", "Never"] {
+            let normalized = noninteractive_for_context(&kubeconfig(mode), "exec-context")
+                .expect("non-interactive policy is accepted");
+            let exec = normalized.auth_infos[0]
+                .auth_info
+                .as_ref()
+                .and_then(|auth| auth.exec.as_ref())
+                .expect("exec config remains present");
+            assert_eq!(exec.interactive_mode, Some(ExecInteractiveMode::Never));
+        }
+    }
 }
