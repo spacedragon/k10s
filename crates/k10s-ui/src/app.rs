@@ -567,6 +567,7 @@ impl K10sApp {
                 let server_rebuild_requested =
                     frame.kind == k10s_protocol::ServerKind::ResyncRequired;
                 let stream_request_id = frame.request_id.clone();
+                let stream_subscription_id = frame.subscription_id.clone();
                 let apply_result = self.client.apply_at(frame, now_ms, entropy);
                 let applied = apply_result.is_ok();
                 if let Err(error) = apply_result {
@@ -598,6 +599,20 @@ impl K10sApp {
                             .as_ref()
                             .is_none_or(|destination| destination == context)
                     });
+                    let recovering_bootstrap_status_transition = context_unavailable.is_some()
+                        && matches!(
+                            &error,
+                            ClientError::Server(server_error)
+                                if server_error.scope == k10s_protocol::ErrorScope::Subscription
+                                    && server_error.retryability
+                                        == k10s_protocol::Retryability::AfterRefresh
+                        )
+                        && stream_subscription_id.as_ref().is_some_and(|id| {
+                            self.bootstrap_subscription
+                                .as_ref()
+                                .is_some_and(|subscription| subscription.id() == id)
+                        })
+                        && (self.recovering || matches!(self.view, AppView::Connecting));
                     let reconciled_context_unavailable =
                         if let Some((context_name, reason)) = context_unavailable {
                             let found = if let AppView::Ready { contexts, .. } = &mut self.view {
@@ -720,6 +735,17 @@ impl K10sApp {
                             }
                         }
                         _ if reconciled_context_unavailable => {}
+                        _ if recovering_bootstrap_status_transition => {
+                            if self.bootstrap.is_none() {
+                                self.bootstrap = self.client.take_rebuilt_bootstrap();
+                            }
+                            if self.bootstrap.is_none() {
+                                self.bootstrap =
+                                    Some(self.client.begin(Query::Bootstrap).map_err(|error| {
+                                        AppEventError::Terminal(error.to_string())
+                                    })?);
+                            }
+                        }
                         _ if self.client.phase() == ClientPhase::Disconnected => {
                             return Err(AppEventError::Transient);
                         }
@@ -2825,6 +2851,78 @@ mod tests {
             Some("background plugin denied")
         );
         assert!(app.bootstrap.is_some(), "authoritative refresh is queued");
+    }
+
+    #[test]
+    fn bootstrap_status_failure_during_reconnect_waits_for_rebuilt_bootstrap() {
+        let initial_bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let (mut app, _) = test_app(vec![
+            ConnectionScript {
+                events: VecDeque::from([
+                    WsEvent::Opened,
+                    server_message(&welcome()),
+                    server_message(&initial_bootstrap),
+                ]),
+                overflowed: false,
+            },
+            ConnectionScript::default(),
+        ]);
+        app.poll_at(100, 0);
+        let subscription_id = app
+            .bootstrap_subscription
+            .as_ref()
+            .expect("ready app retains its status subscription")
+            .id()
+            .clone();
+
+        app.transient_loss(150, 0);
+        app.retry_now(200, 0).unwrap();
+        app.handle_event(WsEvent::Opened, 200, 0).unwrap();
+        let mut resumed = welcome();
+        resumed.payload = serde_json::to_value(Welcome {
+            protocol: ProtocolVersion { major: 1, minor: 1 },
+            capabilities: vec![],
+            session_id: SessionId::new("resumed-session"),
+            server_instance_id: "resumed-server".to_owned(),
+            resume_status: ResumeStatus::ResyncRequired,
+        })
+        .unwrap();
+        app.handle_event(server_message(&resumed), 210, 0).unwrap();
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(app.bootstrap.is_some(), "rebuilt Bootstrap is pending");
+
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(
+                ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "context unavailable",
+                    Retryability::AfterRefresh,
+                    ErrorScope::Subscription,
+                    "bootstrap-status",
+                )
+                .with_details(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": "dev-local",
+                    "reason": "plugin failed during reconnect",
+                })),
+            )
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 220, 0)
+            .expect("a retained status transition stays nonterminal during recovery");
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(app.connection.is_some());
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(
+            app.bootstrap.is_some(),
+            "authoritative rebuild remains pending"
+        );
     }
 
     #[test]

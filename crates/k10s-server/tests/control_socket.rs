@@ -71,13 +71,11 @@ impl KubernetesAccess for StatusKubernetes {
         request: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            match request {
-                Subscribe::BootstrapStatus => Ok(SubscriptionHandle::with_events(
-                    "bootstrap-status",
-                    self.events.subscribe(),
-                )),
-                _ => Err(BackendError::unsupported("subscribe")),
-            }
+            let id = match request {
+                Subscribe::BootstrapStatus => "bootstrap-status",
+                _ => "resource-watch",
+            };
+            Ok(SubscriptionHandle::with_events(id, self.events.subscribe()))
         })
     }
 
@@ -392,6 +390,89 @@ async fn bootstrap_status_subscription_is_acknowledged() {
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(response.kind, ServerKind::Subscribed);
     assert_eq!(response.subscription_id.unwrap().as_str(), "sub-1");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_status_is_singleton_without_consuming_resource_watch_capacity() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            max_resource_subscriptions_per_session: 1,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(StatusKubernetes::new(), "status-limit-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+
+    for id in ["status-1", "status-2"] {
+        ws.send(Message::Text(
+            json!({
+                "kind":"subscribe", "subscriptionId":id,
+                "payload":{"kind":"bootstrapStatus"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let response = receive_frame(&mut ws).await;
+        assert_eq!(
+            response.kind,
+            if id == "status-1" {
+                ServerKind::Subscribed
+            } else {
+                ServerKind::Error
+            },
+            "{response:?}"
+        );
+    }
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"resource-1",
+            "payload":{
+                "kind":"resource", "context":"dev-local",
+                "gvk":{"group":"","version":"v1","kind":"Pod"},
+                "namespace":"default"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        receive_frame(&mut ws).await.kind,
+        ServerKind::Subscribed,
+        "the status receiver must not consume resource-watch capacity"
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"unsubscribe", "subscriptionId":"status-1",
+            "payload":null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"status-2",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
     server.shutdown().await.unwrap();
 }
 

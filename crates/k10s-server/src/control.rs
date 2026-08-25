@@ -62,6 +62,13 @@ struct WatchGeneration {
 struct ActiveWatchSubscription {
     task_id: u128,
     cancel: CancellationToken,
+    kind: ActiveSubscriptionKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveSubscriptionKind {
+    BootstrapStatus,
+    Resource,
 }
 
 impl WatchRecovery {
@@ -745,6 +752,7 @@ pub(crate) async fn serve_socket(
                 let Some(subscription_id) = frame.subscription_id else {
                     continue;
                 };
+                let mut active_kind = None;
                 let selector_kind = selector
                     .0
                     .get("kind")
@@ -752,15 +760,33 @@ pub(crate) async fn serve_socket(
                     .map(str::to_owned);
                 let outcome = match serde_json::from_value::<SubscriptionSelector>(selector.0) {
                     Ok(SubscriptionSelector::BootstrapStatus) => {
-                        match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
-                            Ok(handle) => Ok(Some(handle)),
-                            Err(error) => Err(backend_rejection(&error)),
+                        active_kind = Some(ActiveSubscriptionKind::BootstrapStatus);
+                        if watch_subscriptions.iter().any(|(id, active)| {
+                            id != &subscription_id
+                                && active.kind == ActiveSubscriptionKind::BootstrapStatus
+                        }) {
+                            Err((
+                                ErrorCode::Conflict,
+                                "bootstrap status subscription already exists".to_owned(),
+                            ))
+                        } else {
+                            match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
+                            }
                         }
                     }
                     Ok(SubscriptionSelector::Resource(spec)) => {
-                        if !watch_subscriptions.contains_key(&subscription_id)
-                            && watch_subscriptions.len()
-                                >= config.max_resource_subscriptions_per_session
+                        active_kind = Some(ActiveSubscriptionKind::Resource);
+                        let consumes_slot = watch_subscriptions
+                            .get(&subscription_id)
+                            .is_none_or(|active| active.kind != ActiveSubscriptionKind::Resource);
+                        let resource_count = watch_subscriptions
+                            .values()
+                            .filter(|active| active.kind == ActiveSubscriptionKind::Resource)
+                            .count();
+                        if consumes_slot
+                            && resource_count >= config.max_resource_subscriptions_per_session
                         {
                             Err((
                                 ErrorCode::Conflict,
@@ -788,9 +814,16 @@ pub(crate) async fn serve_socket(
                         }
                     }
                     Ok(SubscriptionSelector::Infrastructure(spec)) => {
-                        if !watch_subscriptions.contains_key(&subscription_id)
-                            && watch_subscriptions.len()
-                                >= config.max_resource_subscriptions_per_session
+                        active_kind = Some(ActiveSubscriptionKind::Resource);
+                        let consumes_slot = watch_subscriptions
+                            .get(&subscription_id)
+                            .is_none_or(|active| active.kind != ActiveSubscriptionKind::Resource);
+                        let resource_count = watch_subscriptions
+                            .values()
+                            .filter(|active| active.kind == ActiveSubscriptionKind::Resource)
+                            .count();
+                        if consumes_slot
+                            && resource_count >= config.max_resource_subscriptions_per_session
                         {
                             Err((
                                 ErrorCode::Conflict,
@@ -850,6 +883,7 @@ pub(crate) async fn serve_socket(
                                 ActiveWatchSubscription {
                                     task_id,
                                     cancel: cancel.clone(),
+                                    kind: active_kind.expect("accepted subscription has a kind"),
                                 },
                             );
                         }
