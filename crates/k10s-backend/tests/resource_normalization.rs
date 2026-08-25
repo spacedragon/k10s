@@ -712,3 +712,230 @@ async fn dynamic_objects_normalize_standard_metadata_only() {
         }
     }
 }
+
+/// Recorded core/v1 Service list cut exercising every projection dimension:
+/// declared port kinds, omitted-`targetPort` defaulting, node ports, UDP and
+/// SCTP visibility, traffic policies, headless and ExternalName types.
+#[tokio::test]
+async fn services_normalize_declared_ports_and_structured_projections() {
+    let case = Case {
+        label: "services",
+        gvk: gvk("", "v1", "Service"),
+        plural: "services",
+        namespace: Some("default"),
+        list_body: r#"{"kind":"ServiceList","apiVersion":"v1","items":[
+          {"metadata":{"name":"api","uid":"uid-api","namespace":"default","creationTimestamp":"2026-08-21T00:00:00Z"},
+           "spec":{"type":"ClusterIP","clusterIP":"10.96.0.20","clusterIPs":["10.96.0.20"],
+             "selector":{"app":"api"},"sessionAffinity":"ClientIP",
+             "ports":[{"name":"https","port":443,"targetPort":"https","protocol":"TCP","appProtocol":"https"},
+                      {"name":"metrics","port":9100,"targetPort":9100,"protocol":"UDP"}]}},
+          {"metadata":{"name":"web","uid":"uid-web","namespace":"default","creationTimestamp":"2026-08-20T12:00:00Z"},
+           "spec":{"type":"NodePort","clusterIP":"10.96.0.10","clusterIPs":["10.96.0.10"],
+             "externalTrafficPolicy":"Local","internalTrafficPolicy":"Cluster",
+             "ports":[{"name":"http","port":80,"protocol":"TCP","nodePort":31000},
+                      {"name":"dns","port":53,"protocol":"SCTP"}]}},
+          {"metadata":{"name":"headless","uid":"uid-headless","namespace":"default","creationTimestamp":"2026-08-19T00:00:00Z"},
+           "spec":{"clusterIP":"None","clusterIPs":["None"],"ports":[{"name":"data","port":7000,"targetPort":7001}]}},
+          {"metadata":{"name":"external","uid":"uid-external","namespace":"default","creationTimestamp":"2026-08-18T00:00:00Z"},
+           "spec":{"type":"ExternalName","externalName":"example.com"}}
+        ]}"#,
+        expect: vec![
+            ExpectedRow {
+                name: "api",
+                uid: "uid-api",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "ClusterIP",
+                created_at_prefix: "2026-08-21T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "external",
+                uid: "uid-external",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "example.com",
+                created_at_prefix: "2026-08-18T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "headless",
+                uid: "uid-headless",
+                namespace: Some("default"),
+                labels: &[],
+                // An omitted type means the ClusterIP default.
+                summary: "ClusterIP",
+                created_at_prefix: "2026-08-19T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "web",
+                uid: "uid-web",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "NodePort",
+                created_at_prefix: "2026-08-20T12:00:00",
+                owner: None,
+            },
+        ],
+    };
+    let data = run_case(&case).await;
+    assert_rows(&case, &data);
+    let payload = run_case_wire(&case).await;
+    assert_wire_shape(&case, &payload);
+
+    use k10s_protocol::{TargetPort, TransportProtocol};
+    let projection_of =
+        |payload: &ResourceListResponse, name: &str| -> k10s_protocol::ServiceProjection {
+            let row = payload
+                .rows
+                .iter()
+                .find(|row| row.identity.name == name)
+                .unwrap_or_else(|| panic!("{name} row present"));
+            match &row.projection {
+                Some(k10s_protocol::ResourceProjection::Service(service)) => service.clone(),
+                other => panic!("{name}: expected a Service projection, got {other:?}"),
+            }
+        };
+
+    // Named TCP port with a named targetPort and app protocol; the UDP port
+    // stays visible read-only.
+    let api = projection_of(&payload, "api");
+    assert_eq!(api.service_type, "ClusterIP");
+    assert_eq!(api.cluster_ips, ["10.96.0.20"]);
+    assert_eq!(api.selector.get("app").map(String::as_str), Some("api"));
+    assert_eq!(api.session_affinity.as_deref(), Some("ClientIP"));
+    assert_eq!(api.external_name, None);
+    assert_eq!(api.ports.len(), 2);
+    let https = &api.ports[0];
+    assert_eq!(https.name.as_deref(), Some("https"));
+    assert_eq!(https.service_port, 443);
+    assert_eq!(
+        https.target_port,
+        TargetPort::Name {
+            name: "https".into()
+        }
+    );
+    assert_eq!(https.protocol, TransportProtocol::Tcp);
+    assert_eq!(https.app_protocol.as_deref(), Some("https"));
+    let metrics = &api.ports[1];
+    assert_eq!(metrics.protocol, TransportProtocol::Udp);
+    assert_eq!(metrics.target_port, TargetPort::Number { number: 9_100 });
+
+    // NodePort with traffic policies; an omitted targetPort normalizes to
+    // the Service port number, and SCTP ports stay visible.
+    let web = projection_of(&payload, "web");
+    assert_eq!(web.service_type, "NodePort");
+    assert_eq!(web.external_traffic_policy.as_deref(), Some("Local"));
+    assert_eq!(web.internal_traffic_policy.as_deref(), Some("Cluster"));
+    let http = &web.ports[0];
+    assert_eq!(
+        http.target_port,
+        TargetPort::Number { number: 80 },
+        "omitted targetPort normalizes to the Service port"
+    );
+    assert_eq!(http.node_port, Some(31_000));
+    assert_eq!(http.protocol, TransportProtocol::Tcp);
+    assert_eq!(web.ports[1].protocol, TransportProtocol::Sctp);
+    assert_eq!(web.ports[1].target_port, TargetPort::Number { number: 53 });
+    assert_eq!(web.ports[1].node_port, None);
+
+    // Headless Services keep their literal None cluster IP.
+    let headless = projection_of(&payload, "headless");
+    assert_eq!(headless.cluster_ips, ["None"]);
+    assert_eq!(
+        headless.ports[0].target_port,
+        TargetPort::Number { number: 7_001 }
+    );
+
+    // ExternalName Services carry the external name instead of IPs.
+    let external = projection_of(&payload, "external");
+    assert_eq!(external.service_type, "ExternalName");
+    assert_eq!(external.external_name.as_deref(), Some("example.com"));
+    assert!(external.cluster_ips.is_empty());
+
+    // The wire payload never leaks the raw Kubernetes object or
+    // credential-bearing fields; structured projection keys are expected.
+    for row in &payload.rows {
+        let serialized = serde_json::to_string(row).expect("row serializes");
+        for marker in ["\"spec\":", "\"status\":", "kubeconfig", "token"] {
+            assert!(
+                !serialized.contains(marker),
+                "{}: raw field leaked: {marker}",
+                row.identity.name
+            );
+        }
+    }
+}
+
+/// The fake adapter exposes Services with structured projections while rows
+/// of every other kind keep `projection: None`.
+#[tokio::test]
+async fn fake_services_carry_projections_and_other_kinds_do_not() {
+    use k10s_backend::FakeKubernetes;
+
+    let adapter = FakeKubernetes::standard();
+    let kernel = BackendKernel::new(adapter);
+    let result = kernel
+        .query(Query::ResourceList {
+            context: "dev-local".into(),
+            gvk: Gvk::core("v1", "Service"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("service list succeeds");
+    let KernelQueryResult::ResourceList(list) = result else {
+        panic!("expected a resource list, got {result:?}")
+    };
+    let payload = list.wire_payload();
+    assert_eq!(payload.rows.len(), 2, "dev-local seeds two Services");
+
+    let web = payload
+        .rows
+        .iter()
+        .find(|row| row.identity.name == "web-frontend")
+        .expect("web-frontend service seeded");
+    let Some(k10s_protocol::ResourceProjection::Service(projection)) = &web.projection else {
+        panic!(
+            "web-frontend carries a Service projection, got {:?}",
+            web.projection
+        )
+    };
+    assert_eq!(projection.service_type, "ClusterIP");
+    assert_eq!(projection.ports.len(), 1);
+    assert_eq!(projection.ports[0].service_port, 80);
+    assert_eq!(
+        projection.ports[0].target_port,
+        k10s_protocol::TargetPort::Number { number: 8_080 }
+    );
+
+    let api = payload
+        .rows
+        .iter()
+        .find(|row| row.identity.name == "api-server")
+        .expect("api-server service seeded");
+    let Some(k10s_protocol::ResourceProjection::Service(projection)) = &api.projection else {
+        panic!("api-server carries a Service projection")
+    };
+    assert_eq!(projection.ports.len(), 2, "declared UDP port stays visible");
+
+    // Rows of kinds without a designed projection keep `projection: None`.
+    let result = kernel
+        .query(Query::ResourceList {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("deployment list succeeds");
+    let KernelQueryResult::ResourceList(list) = result else {
+        panic!("expected a resource list")
+    };
+    for row in list.wire_payload().rows {
+        assert!(
+            row.projection.is_none(),
+            "{} must not carry a projection",
+            row.identity.name
+        );
+    }
+}

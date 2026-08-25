@@ -103,6 +103,7 @@ fn list_row(group: &str, version: &str, kind: &str, name: &str, summary: &str) -
         labels: Default::default(),
         summary: summary.to_owned(),
         created_at: "2026-08-21T00:00:00Z".to_owned(),
+        projection: None,
     }
 }
 
@@ -170,6 +171,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n"),
+        projection: None,
     }
 }
 
@@ -193,6 +195,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
+        projection: None,
     }
 }
 
@@ -224,7 +227,9 @@ fn detail_window(
 fn pinned_identity(workspace: &WorkspaceState<ResourceIdentity>) -> &ResourceIdentity {
     match &detail_window(workspace).content {
         WindowContent::Detail(detail) => &detail.identity,
-        WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+        WindowContent::Resource(_) | WindowContent::Services(_) => {
+            panic!("detail windows pin a single identity")
+        }
     }
 }
 
@@ -401,7 +406,9 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         .filter(|window| window.kind == WindowKind::Detail)
         .map(|window| match &window.content {
             WindowContent::Detail(detail) => detail.identity.clone(),
-            WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+            WindowContent::Resource(_) | WindowContent::Services(_) => {
+                panic!("detail windows pin a single identity")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -531,7 +538,9 @@ fn tabs_stay_independent_between_integrated_and_pinned_views() {
                 "the pinned view must not inherit the integrated tab"
             );
         }
-        WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+        WindowContent::Resource(_) | WindowContent::Services(_) => {
+            panic!("detail windows pin a single identity")
+        }
     }
 
     assert_eq!(

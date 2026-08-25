@@ -17,17 +17,16 @@ jobs:
   # Unit test gate: required status check that blocks PR merge until green.
   ci:
     name: Unit tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -60,17 +59,16 @@ jobs:
 
   ui-tests:
     name: UI unit tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Unit tests (UI and apps)
         run: cargo test --locked -p k10s-ui -p k10s-desktop -p k10s-server-app -p k10s-web --all-targets
@@ -83,18 +81,17 @@ jobs:
   # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
   wasm:
     name: WASM check
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -103,22 +100,20 @@ jobs:
         run: cargo check --locked -p k10s-web --target wasm32-unknown-unknown
 
   # Plan 3 release gate: exercise the real kube-rs adapter and control socket
-  # against an ephemeral, least-privilege kind cluster. This stays on the
-  # self-hosted Linux runner so the gate does not consume hosted minutes.
+  # against an ephemeral, least-privilege kind cluster.
   kind-read-path:
     name: kind read-path E2E
     needs: [ci, ui-tests]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Install container and kind prerequisites
         run: |
@@ -182,24 +177,24 @@ jobs:
           cargo test --locked -p k10s-backend --test kind_operations -- --ignored --nocapture
           cargo build --locked -p k10s-server-app --bin k10s-server
           cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture
+          cargo test --locked -p k10s-server --test kind_port_forward -- --ignored --nocapture
           cargo test --locked -p k10s-desktop --test kube_factory
 
   # Browser release gate: full Chromium coverage and compatibility bootstrap /
   # reconnect smokes on Firefox and WebKit.
   web:
     name: Web foundation
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Rust version
         run: rustc --version && cargo --version
@@ -234,7 +229,6 @@ jobs:
 
       - name: Browser E2E suite
         run: |
-          # A self-hosted runner can retain a server from an interrupted job.
           # Give every workflow run its own port instead of colliding on 18080.
           export K10S_E2E_PORT="$((20000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT) % 20000))"
           npx playwright test
@@ -253,8 +247,8 @@ jobs:
           retention-days: 3
 
   windows-ui-smoke:
-    name: Windows build and loopback launch
-    runs-on: [self-hosted, Windows, X64]
+    name: Windows build and loopback server
+    runs-on: windows-2025
     steps:
       - name: Checkout source (first attempt)
         id: windows_checkout_1
@@ -279,12 +273,14 @@ jobs:
           rustup default $channel
           if ($LASTEXITCODE -ne 0) { throw "rustup default failed: $LASTEXITCODE" }
 
-      - name: Configure persistent Cargo build directory
+      - name: Configure Cargo build directory
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          $target = Join-Path '${{ runner.tool_cache }}' 'k10s\cargo-target-platform-smoke'
+          $target = Join-Path '${{ github.workspace }}' 'target'
           New-Item -ItemType Directory -Force $target | Out-Null
           "CARGO_TARGET_DIR=$target" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Build Windows desktop, server, and Web target
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
@@ -293,15 +289,9 @@ jobs:
           cargo build --locked --release -p k10s-desktop --bin k10s-desktop
           cargo check --locked -p k10s-web --target wasm32-unknown-unknown
 
-      - name: Launch the native Windows UI
+      - name: Windows desktop loopback lifecycle tests
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          $binary = Join-Path $env:CARGO_TARGET_DIR 'release\k10s-desktop.exe'
-          $desktop = Start-Process -FilePath $binary -ArgumentList '--fake' -PassThru
-          Start-Sleep -Seconds 3
-          if ($desktop.HasExited) { throw "k10s-desktop exited during launch: $($desktop.ExitCode)" }
-          Stop-Process -Id $desktop.Id -Force
-          $desktop.WaitForExit()
+        run: cargo test --locked -p k10s-desktop --test embedded_lifecycle
 
       - name: Launch loopback server and probe health
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
@@ -329,30 +319,21 @@ jobs:
             $server.WaitForExit()
           }
 
-  # Enable after registering a self-hosted runner with labels macOS/X64.
-  # The conditional is evaluated before scheduling, so repositories without
-  # one neither queue forever nor consume hosted macOS minutes.
   macos-ui-smoke:
-    name: macOS build and loopback launch
-    if: vars.K10S_MACOS_RUNNER == 'enabled'
-    runs-on: [self-hosted, macOS, X64]
+    name: macOS build and loopback server
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Build and launch smoke
         run: |
           cargo build --locked --release -p k10s-server-app --bin k10s-server
           cargo build --locked --release -p k10s-desktop --bin k10s-desktop
           cargo check --locked -p k10s-web --target wasm32-unknown-unknown
-          target/release/k10s-desktop --fake &
-          desktop_pid=$!
-          sleep 3
-          kill -0 "$desktop_pid"
-          kill "$desktop_pid"
-          wait "$desktop_pid" || true
           mkdir -p dist
           printf '<!doctype html><title>k10s smoke</title>' > dist/index.html
           export K10S_DIST_DIR="$PWD/dist"

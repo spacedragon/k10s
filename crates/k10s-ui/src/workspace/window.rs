@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::detail::DetailState;
 use super::resource::ResourceWindowState;
+use super::service::ServiceWindowState;
 
 /// Stable identity of a workspace window. Ids are never reused after a
 /// window closes.
@@ -55,6 +56,8 @@ pub enum WindowKind {
     Overview,
     Nodes,
     Storage,
+    /// The singleton Services panel.
+    Services,
     Workload(WorkloadKind),
     /// A dedicated detail window pinned to one resource identity.
     Detail,
@@ -66,6 +69,7 @@ impl WindowKind {
             WindowKind::Overview => "Overview",
             WindowKind::Nodes => "Nodes",
             WindowKind::Storage => "Storage",
+            WindowKind::Services => "Services",
             WindowKind::Workload(kind) => kind.title(),
             WindowKind::Detail => "Detail",
         }
@@ -97,10 +101,12 @@ impl WindowGeom {
     }
 }
 
-/// Window-local content: either a resource list or a pinned detail.
+/// Window-local content: a resource list, the singleton Services list, or
+/// a pinned detail.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowContent<I> {
     Resource(ResourceWindowState<I>),
+    Services(ServiceWindowState<I>),
     Detail(DetailState<I>),
 }
 

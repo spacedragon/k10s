@@ -11,6 +11,8 @@ use super::window::WindowId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DetailTab {
     Overview,
+    /// Structured Service ports (and later port-forward controls).
+    Ports,
     Pods,
     Yaml,
     Events,

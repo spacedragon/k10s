@@ -8,6 +8,7 @@ mod lifecycle;
 mod logs;
 mod origin;
 mod outbound;
+pub mod port_forward;
 mod probes;
 mod resume;
 mod streams;

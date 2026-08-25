@@ -166,6 +166,7 @@ fn list_row(group: &str, version: &str, kind: &str, name: &str, summary: &str) -
         labels: Default::default(),
         summary: summary.to_owned(),
         created_at: "2026-08-21T00:00:00Z".to_owned(),
+        projection: None,
     }
 }
 
@@ -205,6 +206,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
+        projection: None,
     }
 }
 

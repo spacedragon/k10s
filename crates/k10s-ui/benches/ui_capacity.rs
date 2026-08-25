@@ -165,6 +165,7 @@ fn build_feed() -> ResourceFeed {
                     (index / 60) % 60,
                     index % 60
                 ),
+                projection: None,
             });
     }
     lists.extend(by_kind);

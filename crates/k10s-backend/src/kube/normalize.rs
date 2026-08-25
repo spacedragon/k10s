@@ -12,7 +12,10 @@
 
 use serde::de::DeserializeOwned;
 
-use crate::port::{Gvk, OwnerRef, ResourceRef};
+use crate::port::{
+    Gvk, OwnerRef, ResourceProjection, ResourceRef, ServicePort, ServiceProjection, TargetPort,
+    TransportProtocol,
+};
 use crate::runtime::supervisor::WatchRow;
 
 /// Normalize one cluster object into its list view-model row.
@@ -67,6 +70,17 @@ pub(crate) fn normalize_row(
             .map(|time| time.0.to_string())
             .unwrap_or_default(),
         owner_references,
+        projection: project(gvk, object),
+    }
+}
+
+/// Per-kind structured projection, derived from typed fields only.
+fn project(gvk: &Gvk, object: &kube::core::DynamicObject) -> Option<ResourceProjection> {
+    match (gvk.group.as_str(), gvk.version.as_str(), gvk.kind.as_str()) {
+        ("", "v1", "Service") => typed_object(object, |s: &k8s_openapi::api::core::v1::Service| {
+            service_projection(s)
+        }),
+        _ => None,
     }
 }
 
@@ -105,6 +119,9 @@ fn summarize(gvk: &Gvk, object: &kube::core::DynamicObject) -> String {
             cronjob_summary(c)
         }),
         ("", "v1", "Pod") => typed(object, |p: &k8s_openapi::api::core::v1::Pod| pod_summary(p)),
+        ("", "v1", "Service") => typed(object, |s: &k8s_openapi::api::core::v1::Service| {
+            service_summary(s)
+        }),
         ("", "v1", "Node") => typed(object, |n: &k8s_openapi::api::core::v1::Node| {
             node_summary(n)
         }),
@@ -138,11 +155,20 @@ where
     K: DeserializeOwned,
     F: FnOnce(&K) -> String,
 {
+    typed_object(object, summarize).unwrap_or_default()
+}
+
+/// Deserialize a full object JSON into its typed form and derive an optional
+/// value; any shape mismatch yields `None` instead of a guess.
+fn typed_object<K, F, T>(object: &kube::core::DynamicObject, derive: F) -> Option<T>
+where
+    K: DeserializeOwned,
+    F: FnOnce(&K) -> T,
+{
     serde_json::to_value(object)
         .ok()
         .and_then(|value| serde_json::from_value::<K>(value).ok())
-        .map(|typed| summarize(&typed))
-        .unwrap_or_default()
+        .map(|typed| derive(&typed))
 }
 
 /// `ready/desired ready`, clamped to non-negative counts.
@@ -232,6 +258,79 @@ fn node_summary(node: &k8s_openapi::api::core::v1::Node) -> String {
         };
     }
     "Unknown".into()
+}
+
+/// Service summary: the Service type, or the external name for
+/// ExternalName Services.
+fn service_summary(service: &k8s_openapi::api::core::v1::Service) -> String {
+    match service.spec.as_ref() {
+        Some(spec) if spec.type_.as_deref() == Some("ExternalName") => spec
+            .external_name
+            .clone()
+            .unwrap_or_else(|| "ExternalName".into()),
+        Some(spec) => spec.type_.clone().unwrap_or_else(|| "ClusterIP".to_owned()),
+        None => String::new(),
+    }
+}
+
+/// Build the normalized Service projection from typed fields only.
+///
+/// Every declared port is projected, including UDP and SCTP entries. An
+/// omitted `targetPort` normalizes to the Service port number so the
+/// defaulted case is explicit on the wire.
+fn service_projection(service: &k8s_openapi::api::core::v1::Service) -> ResourceProjection {
+    let spec = service.spec.as_ref();
+    let ports = spec
+        .map(|spec| spec.ports.iter().flatten().map(service_port).collect())
+        .unwrap_or_default();
+    ResourceProjection::Service(ServiceProjection {
+        service_type: spec
+            .and_then(|spec| spec.type_.clone())
+            .unwrap_or_else(|| "ClusterIP".into()),
+        cluster_ips: spec
+            .and_then(|spec| spec.cluster_ips.clone())
+            .unwrap_or_default(),
+        selector: spec
+            .and_then(|spec| spec.selector.clone())
+            .unwrap_or_default(),
+        external_name: spec.and_then(|spec| spec.external_name.clone()),
+        session_affinity: spec.and_then(|spec| spec.session_affinity.clone()),
+        external_traffic_policy: spec.and_then(|spec| spec.external_traffic_policy.clone()),
+        internal_traffic_policy: spec.and_then(|spec| spec.internal_traffic_policy.clone()),
+        ports,
+    })
+}
+
+/// Project one declared Service port.
+fn service_port(port: &k8s_openapi::api::core::v1::ServicePort) -> ServicePort {
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    let target_port = port.target_port.as_ref().map(|target| match target {
+        IntOrString::Int(number) => TargetPort::Number(u16::try_from(*number).unwrap_or(0)),
+        IntOrString::String(name) => match name.parse::<u16>() {
+            Ok(number) => TargetPort::Number(number),
+            Err(_) => TargetPort::Name(name.clone()),
+        },
+    });
+    // Kubernetes defaults an omitted targetPort to the Service port.
+    let target_port =
+        target_port.unwrap_or_else(|| TargetPort::Number(u16::try_from(port.port).unwrap_or(0)));
+    ServicePort {
+        name: port.name.clone(),
+        service_port: u16::try_from(port.port).unwrap_or(0),
+        target_port,
+        node_port: port.node_port.and_then(|p| u16::try_from(p).ok()),
+        protocol: transport_protocol(port.protocol.as_deref()),
+        app_protocol: port.app_protocol.clone(),
+    }
+}
+
+/// Map a Kubernetes port protocol; the omitted value means TCP.
+fn transport_protocol(protocol: Option<&str>) -> TransportProtocol {
+    match protocol {
+        Some("UDP") => TransportProtocol::Udp,
+        Some("SCTP") => TransportProtocol::Sctp,
+        _ => TransportProtocol::Tcp,
+    }
 }
 
 fn split_api_version(api_version: &str) -> (String, String) {

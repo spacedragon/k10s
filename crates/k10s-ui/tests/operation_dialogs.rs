@@ -656,6 +656,7 @@ fn staggered_unknown_operations_get_causally_ordered_target_refreshes() {
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),
                 manifest: String::new(),
+                projection: None,
             },
         ))
         .unwrap();
@@ -680,6 +681,7 @@ fn staggered_unknown_operations_get_causally_ordered_target_refreshes() {
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),
                 manifest: String::new(),
+                projection: None,
             },
         ))
         .unwrap();
@@ -864,6 +866,7 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),
                 manifest: String::new(),
+                projection: None,
             },
         ))
         .unwrap();

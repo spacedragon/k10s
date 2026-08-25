@@ -31,6 +31,7 @@ use crate::auth::{AuthenticationError, authenticate};
 use crate::config::ServerConfig;
 use crate::lifecycle::{DrainSignals, MutationGate};
 use crate::outbound::{EnqueueError, Priority, Scheduler};
+use crate::port_forward::PortForwardManager;
 use crate::resume::ResumeStore;
 
 /// A request failure that is not attributable to the backend adapter.
@@ -69,6 +70,7 @@ struct ActiveWatchSubscription {
 enum ActiveSubscriptionKind {
     BootstrapStatus,
     Resource,
+    PortForward,
 }
 
 impl WatchRecovery {
@@ -119,6 +121,7 @@ pub(crate) async fn serve_socket(
     socket: WebSocket,
     config: Arc<ServerConfig>,
     kernel: Arc<BackendKernel>,
+    port_forward: Option<std::sync::Arc<PortForwardManager>>,
     unauthenticated: OwnedSemaphorePermit,
     authenticated_slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<MutationGate>,
@@ -126,6 +129,7 @@ pub(crate) async fn serve_socket(
     tasks: Arc<crate::lifecycle::ConnectionTasks>,
     resume: ResumeStore,
 ) {
+    let state_port_forward = port_forward.clone();
     let DrainSignals { drain, force } = signals;
     let (mut sink, mut stream) = socket.split();
     let outbound = Scheduler::new(
@@ -580,11 +584,13 @@ pub(crate) async fn serve_socket(
                     }
                 }
                 let task_kernel = kernel.clone();
+                let task_state = port_forward.clone();
                 let task_outbound = outbound.clone();
                 let task_requests = requests.clone();
                 let task_correlations = operation_correlations.clone();
                 let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
+                let task_port_forward = task_state;
                 let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
                 let request_span = tracing::info_span!(
@@ -604,11 +610,25 @@ pub(crate) async fn serve_socket(
                         let result: Result<RequestOutcome, RequestFailure> = match parsed {
                             Ok(Some(ParsedRequest::Query(query))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
-                                tokio::select! {
-                                    () = request_cancel.cancelled() =>
-                                        Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                    result = task_kernel.query_with_deadline(query, deadline) =>
-                                        result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                if let Query::ContextSwitch { to } = &query
+                                    && let Some(manager) = task_port_forward.clone()
+                                {
+                                    let to = to.clone();
+                                    manager.transition_context(to, async {
+                                        tokio::select! {
+                                            () = request_cancel.cancelled() =>
+                                                Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                            result = task_kernel.query_with_deadline(query, deadline) =>
+                                                result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                        }
+                                    }).await
+                                } else {
+                                    tokio::select! {
+                                        () = request_cancel.cancelled() =>
+                                            Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                        result = task_kernel.query_with_deadline(query, deadline) =>
+                                            result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                    }
                                 }
                             }
                             Ok(Some(ParsedRequest::Execute(command))) => {
@@ -629,6 +649,24 @@ pub(crate) async fn serve_socket(
                                             })
                                         })
                                         .map_err(RequestFailure::Backend)
+                                    }
+                                }
+                            }
+                            Ok(Some(ParsedRequest::PortForward(op))) => {
+                                // Capability absence is enforced here and at
+                                // advertisement time; never through panics.
+                                match task_port_forward.clone() {
+                                    None => Err(RequestFailure::Backend(
+                                        BackendError::unsupported("service.portForward"),
+                                    )),
+                                    Some(manager) =>
+                                    // Cancellation-aware like every other request.
+                                    {
+                                        tokio::select! {
+                                            () = request_cancel.cancelled() =>
+                                                Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                            outcome = dispatch_port_forward(&manager, op) => outcome,
+                                        }
                                     }
                                 }
                             }
@@ -704,6 +742,11 @@ pub(crate) async fn serve_socket(
                             ))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(RequestOutcome::PortForward(value)) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value),
                                 Priority::P1,
                             ),
                             Ok(RequestOutcome::Applied(value)) => send_frame(
@@ -844,6 +887,123 @@ pub(crate) async fn serve_socket(
                             }
                         }
                     }
+                    Ok(SubscriptionSelector::PortForwardSessions) => {
+                        match &state_port_forward {
+                            Some(manager) => {
+                                // Same bounded budget and replacement
+                                // semantics as resource watches: a reused
+                                // subscription id cancels the old forwarder
+                                // instead of leaking it.
+                                let admitted = watch_subscriptions.contains_key(&subscription_id)
+                                    || watch_subscriptions.len()
+                                        < config.max_resource_subscriptions_per_session;
+                                if !admitted {
+                                    overload_close(&outbound);
+                                    break;
+                                }
+                                if let Some(previous) = watch_subscriptions.remove(&subscription_id)
+                                {
+                                    previous.cancel.cancel();
+                                }
+                                let cancel = subscription_cancel.child_token();
+                                let task_id = {
+                                    let id = next_forwarder_id;
+                                    next_forwarder_id = next_forwarder_id.wrapping_add(1);
+                                    id
+                                };
+                                watch_subscriptions.insert(
+                                    subscription_id.clone(),
+                                    ActiveWatchSubscription {
+                                        task_id,
+                                        cancel: cancel.clone(),
+                                        kind: ActiveSubscriptionKind::PortForward,
+                                    },
+                                );
+                                if send_sequenced(
+                                    &outbound,
+                                    &subscription_id,
+                                    ServerKind::Subscribed,
+                                    serde_json::to_value(Subscribed)
+                                        .expect("subscribed payload serializes"),
+                                    &last_sent_sequence,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    overload_close(&outbound);
+                                    break;
+                                }
+                                let task_outbound = outbound.clone();
+                                let task_counter = Arc::clone(&last_sent_sequence);
+                                let task_subscription = subscription_id.clone();
+                                let task_done = forwarder_done_tx.clone();
+                                let forwarder_task_id = task_id;
+                                let mut events = manager.subscribe().await;
+                                request_tasks.spawn(async move {
+                                    loop {
+                                        // Coalescible P2 like every other
+                                        // session telemetry; snapshots are
+                                        // complete so drops self-heal via the
+                                        // next revision.
+                                        let event = tokio::select! {
+                                            () = cancel.cancelled() => break,
+                                            event = events.recv() => event,
+                                        };
+                                        let event = match event {
+                                            Ok(event) => event,
+                                            Err(
+                                                tokio::sync::broadcast::error::RecvError::Lagged(_),
+                                            ) => {
+                                                // Missed snapshots can never be
+                                                // replayed from a coalescible
+                                                // stream; tell the client to
+                                                // reconstruct via portForward.list
+                                                // instead of continuing silently
+                                                // from a gap.
+                                                let _ = send_error(
+                                                    &task_outbound,
+                                                    ErrorTarget::Subscription(
+                                                        task_subscription.clone(),
+                                                    ),
+                                                    ErrorCode::Internal,
+                                                    "session stream lagged; refresh sessions"
+                                                        .to_owned(),
+                                                );
+                                                break;
+                                            }
+                                            Err(
+                                                tokio::sync::broadcast::error::RecvError::Closed,
+                                            ) => {
+                                                break;
+                                            }
+                                        };
+                                        if enqueue_delta(
+                                            &task_outbound,
+                                            &task_subscription,
+                                            event.session.id.as_str(),
+                                            k10s_protocol::PORT_FORWARD_EVENT_SESSION,
+                                            event.revision,
+                                            &event,
+                                            &task_counter,
+                                        )
+                                        .is_err()
+                                        {
+                                            // Deltas coalesce; only overload
+                                            // tears the session down.
+                                            overload_close(&task_outbound);
+                                            break;
+                                        }
+                                    }
+                                    task_done.send((task_subscription, forwarder_task_id)).ok();
+                                });
+                                continue;
+                            }
+                            None => Err((
+                                ErrorCode::UnsupportedMessage,
+                                "unsupported subscription".into(),
+                            )),
+                        }
+                    }
                     Err(_) if selector_kind.is_none() => Err((
                         ErrorCode::InvalidRequest,
                         "invalid subscription payload".into(),
@@ -851,7 +1011,12 @@ pub(crate) async fn serve_socket(
                     Err(_)
                         if matches!(
                             selector_kind.as_deref(),
-                            Some("bootstrapStatus" | "resource" | "infrastructure")
+                            Some(
+                                "bootstrapStatus"
+                                    | "resource"
+                                    | "infrastructure"
+                                    | "portForwardSessions"
+                            )
                         ) =>
                     {
                         Err((
@@ -1084,6 +1249,24 @@ enum ParsedRequest {
     /// A behavior-level mutation routed through the command port. The
     /// envelope-level idempotency key travels inside every command.
     Execute(Command),
+    /// A server-owned port-forward lifecycle operation; it never routes
+    /// through the backend kernel.
+    PortForward(PortForwardOp),
+}
+
+/// Server-owned port-forward operations dispatched against the manager.
+#[derive(Debug, Clone)]
+enum PortForwardOp {
+    Start {
+        identity: k10s_protocol::ResourceIdentity,
+        selection: k10s_backend::PortForwardPortSelection,
+        local_port: u16,
+        context: String,
+    },
+    Stop {
+        session_id: String,
+    },
+    List,
 }
 
 /// Outcome of one dispatched control request.
@@ -1093,6 +1276,8 @@ enum RequestOutcome {
     Kernel(KernelQueryResult),
     /// An accepted background operation.
     Applied(OperationAccepted),
+    /// A port-forward session snapshot response.
+    PortForward(serde_json::Value),
 }
 
 /// Map a request kind and payload onto a backend behavior.
@@ -1354,6 +1539,54 @@ fn parse_request(
                     )
                 })
         }
+        k10s_protocol::REQUEST_PORT_FORWARD_START => {
+            serde_json::from_value::<k10s_protocol::PortForwardStartRequest>(payload.clone())
+                .map_err(|error| {
+                    format!(
+                        "invalid {} payload: {error}",
+                        k10s_protocol::REQUEST_PORT_FORWARD_START
+                    )
+                })
+                .and_then(|parsed| {
+                    parsed
+                        .validate()
+                        .map_err(|reason| reason.to_owned())
+                        .map(|_| {
+                            let context = parsed.service.context.clone();
+                            let selection = match parsed.port {
+                                k10s_protocol::PortForwardPortSelector::Name { name } => {
+                                    k10s_backend::PortForwardPortSelection::Name(name)
+                                }
+                                k10s_protocol::PortForwardPortSelector::Number { number } => {
+                                    k10s_backend::PortForwardPortSelection::Number(number)
+                                }
+                            };
+                            Some(ParsedRequest::PortForward(PortForwardOp::Start {
+                                context,
+                                identity: parsed.service,
+                                selection,
+                                local_port: parsed.local_port,
+                            }))
+                        })
+                })
+        }
+        k10s_protocol::REQUEST_PORT_FORWARD_STOP => {
+            serde_json::from_value::<k10s_protocol::PortForwardStopRequest>(payload.clone())
+                .map(|parsed| {
+                    Some(ParsedRequest::PortForward(PortForwardOp::Stop {
+                        session_id: parsed.session_id.as_str().to_owned(),
+                    }))
+                })
+                .map_err(|error| {
+                    format!(
+                        "invalid {} payload: {error}",
+                        k10s_protocol::REQUEST_PORT_FORWARD_STOP
+                    )
+                })
+        }
+        k10s_protocol::REQUEST_PORT_FORWARD_LIST => {
+            Ok(Some(ParsedRequest::PortForward(PortForwardOp::List)))
+        }
         _ => Ok(None),
     }
 }
@@ -1384,6 +1617,86 @@ fn allocate_sequence(counter: &AtomicU64) -> Option<u64> {
     }
 }
 
+/// Run one server-owned port-forward operation against the manager.
+async fn dispatch_port_forward(
+    manager: &PortForwardManager,
+    op: PortForwardOp,
+) -> Result<RequestOutcome, RequestFailure> {
+    match op {
+        PortForwardOp::Start {
+            identity,
+            selection,
+            local_port,
+            context,
+        } => {
+            let outcome = manager
+                .start(identity, selection, local_port, context)
+                .await;
+            match outcome {
+                Ok(session) => Ok(RequestOutcome::PortForward(
+                    serde_json::to_value(k10s_protocol::PortForwardStartResponse { session })
+                        .expect("start response serializes"),
+                )),
+                Err(rejected) => Err(RequestFailure::Backend(BackendError::PortForward {
+                    category: rejection_from_failure(rejected.category),
+                    message: rejected.message,
+                })),
+            }
+        }
+        PortForwardOp::Stop { session_id } => Ok(match manager.stop(&session_id).await {
+            crate::port_forward::StopOutcome::Stopped(session) => RequestOutcome::PortForward(
+                serde_json::to_value(k10s_protocol::PortForwardStopResponse {
+                    session: Some(session),
+                })
+                .expect("stop response serializes"),
+            ),
+            crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
+                serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
+                    .expect("stop response serializes"),
+            ),
+        }),
+        PortForwardOp::List => {
+            let (revision, sessions) = manager.list_snapshot().await;
+            Ok(RequestOutcome::PortForward(
+                serde_json::to_value(k10s_protocol::PortForwardListResponse { revision, sessions })
+                    .expect("list response serializes"),
+            ))
+        }
+    }
+}
+
+/// Map a protocol-facing start failure back onto the backend rejection
+/// space used by the safe error envelope.
+fn rejection_from_failure(
+    category: k10s_protocol::PortForwardFailureCategory,
+) -> BackendErrorPortForwardCategory {
+    use k10s_protocol::PortForwardFailureCategory as F;
+    match category {
+        F::UnavailableEndpoint => k10s_backend::RejectionCategory::UnavailableEndpoint,
+        F::Forbidden => k10s_backend::RejectionCategory::Forbidden,
+        F::LocalPortInUse => k10s_backend::RejectionCategory::LocalPortInUse,
+        F::VanishedResource => k10s_backend::RejectionCategory::VanishedResource,
+        F::UnsupportedService => k10s_backend::RejectionCategory::UnsupportedService,
+        F::ContextTransition => k10s_backend::RejectionCategory::ContextTransition,
+        F::TransportClosed => k10s_backend::RejectionCategory::TransportClosed,
+    }
+}
+
+/// Alias keeping the helper signature readable.
+type BackendErrorPortForwardCategory = k10s_backend::RejectionCategory;
+
+/// Map a typed port-forward rejection onto the protocol error code space.
+fn port_forward_error_code(category: k10s_backend::RejectionCategory) -> ErrorCode {
+    use k10s_backend::RejectionCategory as C;
+    match category {
+        C::UnavailableEndpoint | C::VanishedResource => ErrorCode::NotFound,
+        C::Forbidden => ErrorCode::Unauthorized,
+        C::LocalPortInUse | C::UnsupportedService | C::ContextTransition | C::TransportClosed => {
+            ErrorCode::Conflict
+        }
+    }
+}
+
 /// Map a backend failure onto a safe subscription-scoped error.
 fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
     match error {
@@ -1407,6 +1720,9 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Internal(_) => (ErrorCode::Internal, "internal server error".to_owned()),
+        BackendError::PortForward { category, message } => {
+            (port_forward_error_code(*category), message.clone())
+        }
     }
 }
 
@@ -2011,6 +2327,12 @@ fn send_backend_error(
             Retryability::Never,
             None,
         ),
+        BackendError::PortForward { category, message } => (
+            port_forward_error_code(category),
+            message,
+            Retryability::Never,
+            None,
+        ),
         BackendError::Internal(_) => {
             let correlation = target.correlation();
             let request = match &target {
@@ -2106,6 +2428,7 @@ mod tests {
             owner_references: Vec::new(),
             events: Vec::new(),
             manifest: String::new(),
+            projection: None,
         }
     }
 
@@ -2676,6 +2999,7 @@ mod tests {
                 owner_references: Vec::new(),
                 events: Vec::new(),
                 manifest: String::new(),
+                projection: None,
             }],
         );
         recovery.push(ServerFrame {

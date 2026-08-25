@@ -55,10 +55,14 @@ pub struct WatchRow {
     pub created_at: String,
     /// Owner chain as reported by the cluster, in report order.
     pub owner_references: Vec<crate::port::OwnerRef>,
+    /// Kind-specific structured projection; absent for kinds without a
+    /// designed projection.
+    pub projection: Option<crate::port::ResourceProjection>,
 }
 
 /// One normalized observation flowing from a live watch source into the
 /// runtime.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum WatchUpdate {
     /// An object was added or changed; the full row replaces prior state.

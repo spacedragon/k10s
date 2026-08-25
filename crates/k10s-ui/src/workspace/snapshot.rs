@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::resource::{ResourceWindowState, SortSpec};
+use super::service::ServiceWindowState;
 use super::window::{WindowGeom, WindowKind, WorkloadKind};
 use super::{Window, WindowContent, WindowId, WorkspaceState};
 
@@ -33,6 +34,7 @@ pub enum PersistedWindowKind {
     Overview,
     Nodes,
     Storage,
+    Services,
     Workload(WorkloadKind),
 }
 
@@ -63,6 +65,17 @@ fn default_true() -> bool {
     true
 }
 
+/// Sanitize one persisted split ratio; non-finite or out-of-unit-interval
+/// values mean the file was tampered with (or came from a different app):
+/// fall back to the default instead of rendering a degenerate split.
+fn sanitized_split_ratio(ratio: f32) -> f32 {
+    if ratio.is_finite() && (0.0..=1.0).contains(&ratio) {
+        ratio
+    } else {
+        0.5
+    }
+}
+
 impl PersistedListView {
     /// View settings extracted from a live list window; selection and detail
     /// state are dropped on purpose.
@@ -78,18 +91,25 @@ impl PersistedListView {
         }
     }
 
+    /// View settings extracted from a live Services window; selection,
+    /// detail, and port drafts are dropped on purpose.
+    fn from_service<I>(service: &ServiceWindowState<I>) -> Self {
+        Self {
+            namespace: service.namespace.clone(),
+            search: service.search.clone(),
+            // The Services window has no key/value filters or GVK picker.
+            filters: BTreeMap::new(),
+            sort: service.sort.clone(),
+            split_ratio: service.split_ratio,
+            detail_visible: service.detail_visible,
+            custom_kind: None,
+        }
+    }
+
     /// Rebuild a fresh list state from persisted view settings. Selection and
     /// detail start empty; the row re-resolves against live data on connect.
     fn into_resource<I>(self) -> ResourceWindowState<I> {
-        // A ratio outside the unit interval or non-finite means the file was
-        // tampered with (or came from a different app): fall back to the
-        // default instead of rendering a degenerate split.
-        let split_ratio = if self.split_ratio.is_finite() && (0.0..=1.0).contains(&self.split_ratio)
-        {
-            self.split_ratio
-        } else {
-            0.5
-        };
+        let split_ratio = sanitized_split_ratio(self.split_ratio);
         ResourceWindowState {
             namespace: self.namespace,
             search: self.search,
@@ -98,6 +118,20 @@ impl PersistedListView {
             split_ratio,
             detail_visible: self.detail_visible,
             custom_kind: self.custom_kind,
+            ..Default::default()
+        }
+    }
+
+    /// Rebuild fresh Services state from persisted view settings; selection,
+    /// detail, and port drafts start empty.
+    fn into_service<I>(self) -> ServiceWindowState<I> {
+        let split_ratio = sanitized_split_ratio(self.split_ratio);
+        ServiceWindowState {
+            namespace: self.namespace,
+            search: self.search,
+            sort: self.sort,
+            split_ratio,
+            detail_visible: self.detail_visible,
             ..Default::default()
         }
     }
@@ -149,6 +183,7 @@ impl PersistedWindow {
             PersistedWindowKind::Overview => Some(WindowKind::Overview),
             PersistedWindowKind::Nodes => Some(WindowKind::Nodes),
             PersistedWindowKind::Storage => Some(WindowKind::Storage),
+            PersistedWindowKind::Services => Some(WindowKind::Services),
             PersistedWindowKind::Workload(kind) => Some(WindowKind::Workload(kind)),
         }
     }
@@ -170,7 +205,9 @@ impl PersistedWindow {
 /// degrades to this normal first-launch layout instead of rendering empty.
 fn default_size_for(kind: WindowKind) -> [f32; 2] {
     match kind {
-        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => [840.0, 560.0],
+        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage | WindowKind::Services => {
+            [840.0, 560.0]
+        }
         _ => [700.0, 480.0],
     }
 }
@@ -200,6 +237,10 @@ where
                 (WindowKind::Storage, WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Storage,
                     Some(PersistedListView::from_resource(resource)),
+                ),
+                (WindowKind::Services, WindowContent::Services(service)) => (
+                    PersistedWindowKind::Services,
+                    Some(PersistedListView::from_service(service)),
                 ),
                 (WindowKind::Workload(w), WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Workload(*w),
@@ -277,11 +318,18 @@ where
 
             let id = WindowId(state.next_id);
             state.next_id += 1;
-            let resource = match &window.view {
-                Some(view) => view.clone().into_resource(),
-                None => ResourceWindowState::default(),
+            // Each kind gets the body shape it was opened with; view settings
+            // rehydrate only what that body can hold.
+            let content = match kind {
+                WindowKind::Services => match &window.view {
+                    Some(view) => WindowContent::Services(view.clone().into_service()),
+                    None => WindowContent::Services(ServiceWindowState::default()),
+                },
+                _ => match &window.view {
+                    Some(view) => WindowContent::Resource(view.clone().into_resource()),
+                    None => WindowContent::Resource(ResourceWindowState::default()),
+                },
             };
-            let content = WindowContent::Resource(resource);
             state.windows.push(Window {
                 id,
                 kind,

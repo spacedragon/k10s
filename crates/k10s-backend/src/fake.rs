@@ -20,11 +20,16 @@ use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
     KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
-    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
+    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
+    SubscriptionHandle, TargetPort, TransportProtocol,
+};
+use crate::port_forward::{
+    PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
 };
 use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
+use std::future::Future;
 
 /// Unix seconds for the fixed fake epoch `2026-08-21T00:00:00Z`.
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
@@ -835,6 +840,7 @@ impl FakeKubernetes {
                     owner_references: Vec::new(),
                     events: Vec::new(),
                     manifest: String::new(),
+                    projection: None,
                 };
                 let changed = ResourceRecord {
                     reference: ticket.target.clone(),
@@ -845,6 +851,7 @@ impl FakeKubernetes {
                     owner_references: Vec::new(),
                     events: Vec::new(),
                     manifest: String::new(),
+                    projection: None,
                 };
                 let reference = ticket.target.clone();
                 state.records.push(record);
@@ -1053,6 +1060,7 @@ impl FakeKubernetes {
             owner_references: Vec::new(),
             events: Vec::new(),
             manifest: String::new(),
+            projection: None,
         };
         state.records.push(created.clone());
         state.notify_matching(&reference, crate::port::BackendEvent::Changed(created));
@@ -1153,6 +1161,12 @@ impl Default for FakeKubernetes {
 }
 
 impl KubernetesAccess for FakeKubernetes {
+    fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        Some(crate::port_forward::PortForwardConnector::new(
+            std::sync::Arc::new(FakePortForwardSeam::new()),
+        ))
+    }
+
     fn query<'a>(
         &'a self,
         req: Query,
@@ -1726,6 +1740,7 @@ fn build_capacity_records(context: &str, objects: usize, nodes: usize) -> Vec<Re
             name: &format!("capacity-node-{index:05}"),
             labels: &[("role", "worker")],
             owner_references: Vec::new(),
+            projection: None,
         }));
     }
     for index in 0..objects {
@@ -1740,6 +1755,7 @@ fn build_capacity_records(context: &str, objects: usize, nodes: usize) -> Vec<Re
             name: &format!("scale-{}-{index:06}", kind.to_lowercase()),
             labels: &[("tier", "capacity")],
             owner_references: Vec::new(),
+            projection: None,
         }));
     }
     records
@@ -1763,6 +1779,8 @@ struct RecordSeed<'a> {
     labels: &'a [(&'a str, &'a str)],
     /// Owner chain references resolved up front.
     owner_references: Vec<OwnerRef>,
+    /// Kind-specific structured projection.
+    projection: Option<ResourceProjection>,
 }
 
 /// Build one deterministic record with a derived stable UID.
@@ -1787,6 +1805,7 @@ fn record(seed: RecordSeed<'_>) -> ResourceRecord {
         owner_references: seed.owner_references,
         events,
         manifest: String::new(),
+        projection: seed.projection,
     }
 }
 
@@ -1896,6 +1915,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             name,
             labels,
             owner_references: Vec::new(),
+            projection: None,
         }
     }
 
@@ -1990,6 +2010,73 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         )),
     ];
 
+    // Services carry structured projections so the panel and port-forward
+    // controls render from normalized columns in dev mode.
+    records.push(record(RecordSeed {
+        projection: Some(ResourceProjection::Service(ServiceProjection {
+            service_type: "ClusterIP".into(),
+            cluster_ips: vec!["10.96.0.10".into()],
+            selector: BTreeMap::from([("app".to_owned(), "web".to_owned())]),
+            external_name: None,
+            session_affinity: None,
+            external_traffic_policy: None,
+            internal_traffic_policy: None,
+            ports: vec![ServicePort {
+                name: Some("http".into()),
+                service_port: 80,
+                target_port: TargetPort::Number(8080),
+                node_port: None,
+                protocol: TransportProtocol::Tcp,
+                app_protocol: None,
+            }],
+        })),
+        ..seed(
+            3_600,
+            "ClusterIP",
+            Gvk::core("v1", "Service"),
+            Some("default"),
+            "web-frontend",
+            &[("app", "web")],
+        )
+    }));
+    records.push(record(RecordSeed {
+        projection: Some(ResourceProjection::Service(ServiceProjection {
+            service_type: "ClusterIP".into(),
+            cluster_ips: vec!["10.96.0.20".into()],
+            selector: BTreeMap::from([("app".to_owned(), "api".to_owned())]),
+            external_name: None,
+            session_affinity: Some("ClientIP".into()),
+            external_traffic_policy: None,
+            internal_traffic_policy: None,
+            ports: vec![
+                ServicePort {
+                    name: Some("https".into()),
+                    service_port: 443,
+                    target_port: TargetPort::Name("https".into()),
+                    node_port: None,
+                    protocol: TransportProtocol::Tcp,
+                    app_protocol: Some("https".into()),
+                },
+                ServicePort {
+                    name: Some("metrics".into()),
+                    service_port: 9100,
+                    target_port: TargetPort::Number(9100),
+                    node_port: None,
+                    protocol: TransportProtocol::Udp,
+                    app_protocol: None,
+                },
+            ],
+        })),
+        ..seed(
+            3_900,
+            "ClusterIP",
+            Gvk::core("v1", "Service"),
+            Some("default"),
+            "api-server",
+            &[("app", "api")],
+        )
+    }));
+
     // The web-frontend replica wave: twenty pods owned by its replicaset.
     for index in 1..=20_u32 {
         records.push(record(RecordSeed {
@@ -2065,6 +2152,7 @@ fn build_prod_records() -> Vec<ResourceRecord> {
         name: "edge-gateway",
         labels: &[("app", "edge")],
         owner_references: Vec::new(),
+        projection: None,
     })]
 }
 
@@ -2411,5 +2499,99 @@ mod tests {
             matches!(first, BackendEvent::Snapshot(_)),
             "a mutation delta preceded the snapshot"
         );
+    }
+}
+
+/// Deterministic fake port-forward seam over the seeded dataset.
+///
+/// Resolution validates the Service record and UID, then pins the first
+/// Running Pod in the same namespace (sorted by name). Connections return a
+/// fresh duplex stream so server tests can pump bytes without a cluster.
+#[derive(Debug, Clone, Default)]
+pub struct FakePortForwardSeam;
+
+impl FakePortForwardSeam {
+    /// Build the seam; it reads no shared state so clones are free.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PortForwardSeam for FakePortForwardSeam {
+    fn resolve<'a>(
+        &'a self,
+        request: PortForwardRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedPortForward, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Reuse the deterministic dataset through a throwaway adapter
+            // only when callers did not inject one; the standard dataset is
+            // process-constant, so this stays stable across calls.
+            let adapter = FakeKubernetes::standard();
+            let state = adapter.state.lock().unwrap();
+            let service_ref = state.find_record(&ResourceRef {
+                context: request.context.clone(),
+                gvk: Gvk::core("v1", "Service"),
+                namespace: Some(request.namespace.clone()),
+                name: request.service_name.clone(),
+                uid: request.service_uid.clone(),
+            });
+            if service_ref.is_none() {
+                return Err(BackendError::PortForward {
+                    category: crate::port_forward::RejectionCategory::VanishedResource,
+                    message: "the service does not exist".into(),
+                });
+            }
+            drop(state);
+            let mut pods: Vec<String> = {
+                let state = adapter.state.lock().unwrap();
+                state
+                    .records
+                    .iter()
+                    .filter(|record| {
+                        record.reference.gvk == Gvk::core("v1", "Pod")
+                            && record.reference.context == request.context
+                            && record.reference.namespace.as_deref()
+                                == Some(request.namespace.as_str())
+                            && record.summary == "Running"
+                    })
+                    .map(|record| record.reference.name.clone())
+                    .collect()
+            };
+            pods.sort();
+            let Some(pod_name) = pods.into_iter().next() else {
+                return Err(BackendError::PortForward {
+                    category: crate::port_forward::RejectionCategory::UnavailableEndpoint,
+                    message: "no ready endpoint backs this service port".into(),
+                });
+            };
+            // The fake dataset forwards the declared Service port to the
+            // same numeric container port.
+            let service_port = match request.port {
+                crate::port_forward::PortForwardPortSelection::Number(number) => number,
+                crate::port_forward::PortForwardPortSelection::Name(name) => {
+                    name.parse().unwrap_or(80)
+                }
+            };
+            Ok(ResolvedPortForward {
+                context: request.context,
+                namespace: request.namespace,
+                service_uid: request.service_uid,
+                service_port,
+                pod_name,
+                pod_uid: "uid-fake-pod".to_owned(),
+                pod_port: service_port.max(8_080.min(service_port)),
+            })
+        })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        _resolved: &'a ResolvedPortForward,
+    ) -> Pin<Box<dyn Future<Output = Result<PortForwardStream, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (_client, server) = tokio::io::duplex(4096);
+            Ok(PortForwardStream::new(Box::new(server)))
+        })
     }
 }

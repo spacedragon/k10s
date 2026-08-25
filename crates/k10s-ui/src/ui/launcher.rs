@@ -18,6 +18,13 @@ pub(super) fn show<I>(
     singleton(ui, workspace, queued, LauncherItem::Overview, "Overview");
     singleton(ui, workspace, queued, LauncherItem::Nodes, "Nodes");
     singleton(ui, workspace, queued, LauncherItem::Storage, "Storage");
+
+    CollapsingHeader::new("Network")
+        .id_salt("k10s.launcher.network")
+        .default_open(true)
+        .show(ui, |ui| {
+            singleton(ui, workspace, queued, LauncherItem::Services, "Services");
+        });
     ui.separator();
 
     CollapsingHeader::new("Workloads")

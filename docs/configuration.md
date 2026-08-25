@@ -64,3 +64,11 @@ contradictory hard bounds.
 The standalone release intentionally fixes its startup readiness delay to one
 second and externally observable drain grace to 250 ms. Changing library
 bounds requires tests and an operator-facing release note.
+# Desktop Service port forwarding
+
+Service port forwarding is enabled only by the native desktop application's
+embedded server. The standalone server and browser deployment do not expose a
+flag or environment variable to enable it. Every listener binds to
+`127.0.0.1`; blank or `0` selects an available local port. Limits are 16 active
+sessions, 32 accepted connections globally, and 8 per session. Context changes
+stop and join all active forwards before committing the switch.

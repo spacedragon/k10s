@@ -10,6 +10,7 @@
 mod events;
 mod overview;
 mod related;
+mod service;
 
 use egui::{RichText, Spinner};
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
@@ -21,9 +22,18 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 use crate::ui::resource_window::RowIdentity;
 
 /// Exact tab set per kind. Pods expose runtime tools, controllers expose
-/// their resolved related workloads, everything else keeps the common core.
+/// their resolved related workloads, Services expose their structured
+/// ports, everything else keeps the common core.
 #[must_use]
 pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
+    if is_service_gvk(gvk) {
+        return &[
+            DetailTab::Overview,
+            DetailTab::Ports,
+            DetailTab::Events,
+            DetailTab::Yaml,
+        ];
+    }
     match WorkloadKind::from_gvk(gvk) {
         Some(WorkloadKind::Pod) => &[
             DetailTab::Overview,
@@ -51,12 +61,18 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
 fn tab_label(tab: DetailTab) -> &'static str {
     match tab {
         DetailTab::Overview => "Overview",
+        DetailTab::Ports => "Ports",
         DetailTab::Pods => "Pods",
         DetailTab::Yaml => "YAML",
         DetailTab::Events => "Events",
         DetailTab::Logs => "Logs",
         DetailTab::Shell => "Shell",
     }
+}
+
+/// Whether this GVK is exactly core/v1 `Service`.
+pub(super) fn is_service_gvk(gvk: &GroupVersionKind) -> bool {
+    gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Service"
 }
 
 /// Render one detail view bound to the stable identity inside `detail`.
@@ -75,10 +91,29 @@ pub(super) fn show<I>(
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
     dialogs: &mut dialogs::OperationDialogs,
+    feed: &crate::ui::ResourceFeed,
+    service_port_drafts: Option<&std::collections::BTreeMap<String, String>>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
 {
+    // Services render through their dedicated read-only body; the generic
+    // workload path stays untouched for every other kind.
+    if is_service_gvk(&detail_identity_gvk(detail)) {
+        service::show(
+            ui,
+            window_id,
+            detail,
+            view,
+            gone,
+            yaml,
+            feed,
+            service_port_drafts,
+            queued,
+        );
+        return;
+    }
+
     // A gone resource renders only its pinned identity header plus the
     // gone message: no cached response may resurrect Scale/Delete/YAML or
     // stream controls for an object the authoritative rows dropped.
@@ -180,6 +215,9 @@ pub(super) fn show<I>(
         DetailTab::Overview => overview::show(ui, window_id, &view.sections),
         DetailTab::Pods => related::show(ui, window_id, &view.related, queued),
         DetailTab::Events => events::show(ui, window_id, &view.events),
+        // Only Service details expose Ports; the generic body renders
+        // nothing for it rather than falling back to another tab.
+        DetailTab::Ports => {}
         DetailTab::Yaml => {
             if !view.capabilities.can_edit_yaml {
                 ui.label("This kind cannot be edited");
@@ -261,7 +299,7 @@ where
 }
 
 /// Identity header: the pinned identity exactly as the backend asserts it.
-fn show_header(
+pub(super) fn show_header(
     ui: &mut egui::Ui,
     identity: &k10s_protocol::ResourceIdentity,
     view: Option<&ResourceDetailResponse>,

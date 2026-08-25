@@ -101,16 +101,19 @@ where
     );
     let min_size = match state.kind {
         WindowKind::Workload(_) | WindowKind::Detail => Vec2::new(640.0, 420.0),
-        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => Vec2::new(480.0, 320.0),
+        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage | WindowKind::Services => {
+            Vec2::new(480.0, 320.0)
+        }
     };
     let id = layer_id(state.id).id;
 
     // Workload windows render from a mutable clone of their list state and
     // queue the resulting commands; the workspace stays immutable during
     // rendering.
-    let (mut resource_state, detail_state) = match &state.content {
-        WindowContent::Resource(resource) => (Some(resource.clone()), None),
-        WindowContent::Detail(detail) => (None, Some(detail.clone())),
+    let (mut resource_state, mut service_state, detail_state) = match &state.content {
+        WindowContent::Resource(resource) => (Some(resource.clone()), None, None),
+        WindowContent::Services(service) => (None, Some(service.clone()), None),
+        WindowContent::Detail(detail) => (None, None, Some(detail.clone())),
     };
 
     let response = egui::Window::new(state.title.as_str())
@@ -150,6 +153,16 @@ where
                         );
                         false
                     }
+                    WindowKind::Services => {
+                        if let Some(service) = service_state.as_mut() {
+                            super::service_window::show(
+                                ui, state.id, service, feed, connection, yaml, streams, dialogs,
+                                queued,
+                            )
+                        } else {
+                            false
+                        }
+                    }
                     WindowKind::Workload(_) => {
                         unreachable!("workload windows render through resource_window")
                     }
@@ -163,7 +176,8 @@ where
                                 .as_row_identity()
                                 .and_then(|identity| feed.details.get(identity));
                             super::detail::show(
-                                ui, state.id, detail, view, false, yaml, streams, dialogs, queued,
+                                ui, state.id, detail, view, false, yaml, streams, dialogs, feed,
+                                None, queued,
                             );
                         }
                         false
