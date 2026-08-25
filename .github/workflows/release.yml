@@ -97,6 +97,21 @@ jobs:
           for attempt in $(seq 1 100); do curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null && break; sleep 0.1; done
           curl -fsS "http://127.0.0.1:${port}/healthz"
           curl -fsS "http://127.0.0.1:${port}/" | grep -F 'k10s-web-'
+          # Preserve the exact image that passed the runtime smoke. An OCI
+          # archive is registry-neutral and can be loaded by podman, skopeo,
+          # or converted into a registry push by downstream release tooling.
+          mkdir -p target/distrib
+          image_tag="${GITHUB_REF_NAME//\//-}"
+          docker_archive="$RUNNER_TEMP/k10s-${GITHUB_RUN_ID}-smoked-image.tar"
+          oci_archive="target/distrib/k10s-${image_tag}-linux-amd64.oci.tar"
+          # The runner's distro skopeo may predate the Docker daemon API. Use
+          # the daemon-matched Docker CLI for export, then perform an entirely
+          # local archive-to-archive OCI conversion.
+          sudo docker save --output "$docker_archive" k10s:test
+          sudo chown "$(id -u):$(id -g)" "$docker_archive"
+          skopeo copy "docker-archive:${docker_archive}" "oci-archive:${oci_archive}:k10s:${image_tag}"
+          test -s "$oci_archive"
+          skopeo inspect --config "oci-archive:${oci_archive}" | grep -Fq '10001:10001'
       - name: Upload Linux release artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
@@ -239,6 +254,7 @@ jobs:
           channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           rustup toolchain install "$channel" --profile minimal --no-self-update
           rustup target add wasm32-unknown-unknown --toolchain "$channel"
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin --toolchain "$channel"
           rustup default "$channel"
           cargo install trunk --version "$TRUNK_VERSION" --locked
           cargo install cargo-packager --version "$CARGO_PACKAGER_VERSION" --locked
@@ -247,6 +263,8 @@ jobs:
           cargo build --locked --release --workspace
           cargo packager --release
           dist build --artifacts=local --target x86_64-apple-darwin --allow-dirty
+          cargo build --locked --release -p k10s-server-app --bin k10s-server --target aarch64-apple-darwin
+          dist build --artifacts=local --target aarch64-apple-darwin --allow-dirty
           K10S_PACKAGE_DIR="${GITHUB_WORKSPACE}/target/release/packages" K10S_SERVER_BINARY="${GITHUB_WORKSPACE}/target/release/k10s-server" cargo test --locked -p k10s-desktop --test packaging_desktop
           K10S_PACKAGING_SMOKE=1 K10S_SERVER_BINARY="${GITHUB_WORKSPACE}/target/release/k10s-server" cargo test --locked -p k10s-server-app --test packaging_server
           test -x target/release/packages/*.app/Contents/MacOS/k10s-desktop
@@ -255,7 +273,10 @@ jobs:
           device="$(hdiutil attach -nobrowse -mountpoint "$mount" target/release/packages/*.dmg | tail -1 | awk '{print $1}')"
           trap 'hdiutil detach "$device" >/dev/null' EXIT
           test -x "$mount"/*.app/Contents/MacOS/k10s-desktop
-          tar -tJf "$(find target/distrib -name '*.tar.xz' -print -quit)" | grep -F 'k10s-server'
+          x86_archive="$(find target/distrib -name '*x86_64-apple-darwin*.tar.xz' -print -quit)"
+          arm_archive="$(find target/distrib -name '*aarch64-apple-darwin*.tar.xz' -print -quit)"
+          test -n "$x86_archive" && tar -tJf "$x86_archive" | grep -F 'k10s-server'
+          test -n "$arm_archive" && tar -tJf "$arm_archive" | grep -F 'k10s-server'
       - name: Upload macOS release artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
@@ -269,8 +290,16 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, windows]
+    # A tag is publishable only when every documented platform output exists.
+    # If the opt-in macOS runner is disabled, the macOS job is skipped and the
+    # release intentionally remains unpublished instead of being incomplete.
+    if: >-
+      ${{ startsWith(github.ref, 'refs/tags/') &&
+          always() &&
+          needs.linux.result == 'success' &&
+          needs.windows.result == 'success' &&
+          needs.macos.result == 'success' }}
+    needs: [linux, windows, macos]
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/download-artifact@v4
