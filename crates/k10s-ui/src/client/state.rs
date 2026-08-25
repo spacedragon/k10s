@@ -1964,18 +1964,23 @@ impl ClientState {
             }
         }
         for (target, keys) in targets {
-            if let Some(refresh) = self
+            let covered: HashSet<&str> = self
                 .target_refreshes
-                .values_mut()
-                .find(|refresh| refresh.target == target)
-            {
-                for key in keys {
-                    if !refresh.keys.contains(&key) {
-                        refresh.keys.push(key);
-                    }
-                }
+                .values()
+                .filter(|refresh| refresh.target == target)
+                .flat_map(|refresh| refresh.keys.iter().map(String::as_str))
+                .collect();
+            let keys: Vec<String> = keys
+                .into_iter()
+                .filter(|key| !covered.contains(key.as_str()))
+                .collect();
+            if keys.is_empty() {
                 continue;
             }
+            // Never attach a newly unknown operation to a read already in
+            // flight: concurrent server dispatch means that read may predate
+            // the missing-operation answer. This fresh request is ordered
+            // after these keys became unknown.
             let request = self.begin(Query::ResourceDetail(target.clone()))?;
             self.target_refreshes
                 .insert(request.id().clone(), TargetRefresh { target, keys });

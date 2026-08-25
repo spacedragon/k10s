@@ -572,7 +572,7 @@ fn yaml_apply_recovery_refreshes_the_ticket_bound_target() {
 }
 
 #[test]
-fn staggered_unknown_operations_share_the_pending_exact_target_refresh() {
+fn staggered_unknown_operations_get_causally_ordered_target_refreshes() {
     let mut client = ready_client();
     let target = deployment("shared-target");
     for (key, operation) in [
@@ -635,6 +635,9 @@ fn staggered_unknown_operations_share_the_pending_exact_target_refresh() {
             },
         ))
         .unwrap();
+    let (second_target_refresh_id, second_kind, second_payload, _) = encoded_request(&mut client);
+    assert_eq!(second_kind, "resource.detail");
+    assert_eq!(second_payload["identity"], serde_json::json!(target));
     assert!(matches!(
         client.retry_eligibility("idem-shared-2"),
         k10s_ui::client::RetryEligibility::RefreshPending
@@ -656,12 +659,34 @@ fn staggered_unknown_operations_share_the_pending_exact_target_refresh() {
             },
         ))
         .unwrap();
-    for key in ["idem-shared-1", "idem-shared-2"] {
-        assert!(matches!(
-            client.retry_eligibility(key),
-            k10s_ui::client::RetryEligibility::Eligible
-        ));
-    }
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-1"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+    client
+        .apply(ServerFrame::response(
+            second_target_refresh_id,
+            ResourceDetailResponse {
+                identity: deployment("shared-target"),
+                revision: BackendRevision::new(4),
+                created_at: "2026-08-25T00:00:01Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
 }
 
 #[test]
