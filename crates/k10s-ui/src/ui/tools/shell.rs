@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 
 use k10s_protocol::StreamTarget;
 
+const SCROLLBACK_LINE_CAPACITY: usize = 64 * 1024;
+
 /// Lifecycle of one connected terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellPhase {
@@ -40,6 +42,8 @@ pub struct ShellTool {
     target: StreamTarget,
     phase: ShellPhase,
     buffer: VecDeque<String>,
+    continuation: bool,
+    pending_cr: bool,
     actions: Vec<ShellAction>,
     scrollback_capacity: usize,
 }
@@ -52,6 +56,8 @@ impl ShellTool {
             target,
             phase: ShellPhase::Disconnected,
             buffer: VecDeque::new(),
+            continuation: false,
+            pending_cr: false,
             actions: Vec::new(),
             scrollback_capacity: 4_096,
         }
@@ -98,6 +104,8 @@ impl ShellTool {
     pub fn attach(&mut self) {
         if self.can_attach() {
             self.phase = ShellPhase::Attached;
+            self.continuation = false;
+            self.pending_cr = false;
         }
     }
 
@@ -106,15 +114,38 @@ impl ShellTool {
         if self.phase != ShellPhase::Attached {
             return;
         }
-        let normalized = text.replace("\r\n", "\n");
-        let mut lines: Vec<&str> = normalized.split('\n').collect();
-        // A trailing newline terminates the last line; it does not open a
-        // new blank one.
-        if normalized.ends_with('\n') {
-            lines.pop();
+        let mut joined = String::with_capacity(text.len() + usize::from(self.pending_cr));
+        let mut text = text;
+        if self.pending_cr {
+            if let Some(remainder) = text.strip_prefix('\n') {
+                joined.push('\n');
+                text = remainder;
+            } else {
+                joined.push('\r');
+            }
+            self.pending_cr = false;
         }
-        for line in lines {
-            self.buffer.push_back(line.to_owned());
+        joined.push_str(text);
+        if joined.ends_with('\r') {
+            joined.pop();
+            self.pending_cr = true;
+        }
+        let normalized = joined.replace("\r\n", "\n");
+        for segment in normalized.split_inclusive('\n') {
+            let complete = segment.ends_with('\n');
+            let text = segment.strip_suffix('\n').unwrap_or(segment);
+            if self.continuation {
+                if let Some(line) = self.buffer.back_mut() {
+                    line.push_str(text);
+                    truncate_line_start(line);
+                }
+            } else {
+                self.buffer.push_back(text.to_owned());
+                if let Some(line) = self.buffer.back_mut() {
+                    truncate_line_start(line);
+                }
+            }
+            self.continuation = !complete;
         }
         while self.buffer.len() > self.scrollback_capacity {
             self.buffer.pop_front();
@@ -180,6 +211,17 @@ impl ShellTool {
             self.actions.clear();
         }
     }
+}
+
+fn truncate_line_start(line: &mut String) {
+    if line.len() <= SCROLLBACK_LINE_CAPACITY {
+        return;
+    }
+    let mut start = line.len() - SCROLLBACK_LINE_CAPACITY;
+    while !line.is_char_boundary(start) {
+        start += 1;
+    }
+    line.drain(..start);
 }
 
 use std::collections::HashMap;
