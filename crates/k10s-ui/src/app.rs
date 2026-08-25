@@ -548,12 +548,15 @@ impl K10sApp {
                             .and_then(|state| state.revision())
                             .is_some()
                     });
+                let server_rebuild_requested =
+                    frame.kind == k10s_protocol::ServerKind::ResyncRequired;
                 let stream_request_id = frame.request_id.clone();
                 let apply_result = self.client.apply_at(frame, now_ms, entropy);
                 let applied = apply_result.is_ok();
                 if let Err(error) = apply_result {
                     match error {
                         ClientError::SequenceGap { .. } => {
+                            self.shell.yaml_editors_mut().connection_lost();
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
                         }
@@ -665,7 +668,7 @@ impl K10sApp {
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
                 }
-                if applied && replacement_snapshot_started {
+                if applied && (server_rebuild_requested || replacement_snapshot_started) {
                     // A replacement is assembled across chunks, so neither
                     // the identities in an early page nor identities removed
                     // from the new view can be projected safely page by page.
@@ -1941,15 +1944,28 @@ mod tests {
             "stale watch deltas are ignored"
         );
 
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(6),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
         for (kind, sequence, payload) in [
             (
                 ServerKind::SnapshotBegin,
-                6,
+                7,
                 serde_json::to_value(SnapshotBegin { total_chunks: 2 }).unwrap(),
             ),
             (
                 ServerKind::SnapshotChunk,
-                7,
+                8,
                 serde_json::to_value(SnapshotChunk {
                     chunk_index: 0,
                     data: serde_json::to_value(ResourceSnapshotPage {
@@ -1962,7 +1978,7 @@ mod tests {
             ),
             (
                 ServerKind::SnapshotChunk,
-                8,
+                9,
                 serde_json::to_value(SnapshotChunk {
                     chunk_index: 1,
                     data: serde_json::to_value(ResourceSnapshotPage {
@@ -1975,7 +1991,7 @@ mod tests {
             ),
             (
                 ServerKind::SnapshotEnd,
-                9,
+                10,
                 serde_json::to_value(SnapshotEnd {
                     checksum: "resync".into(),
                 })
