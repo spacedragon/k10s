@@ -174,10 +174,13 @@ jobs:
             git push --force origin "HEAD:refs/heads/${branch}"
             pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
             if [ -z "$pr" ]; then
-              pr="$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+              # gh < 2.36 (hosted runner images) does not support --json on
+              # `pr create`; create without it and re-view the branch to
+              # resolve the PR number.
+              gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
                 --title "chore(release): v${{ steps.bump.outputs.version }}" \
-                --body "Automated version bump for the v${{ steps.bump.outputs.version }} release." \
-                --json number --jq .number)"
+                --body "Automated version bump for the v${{ steps.bump.outputs.version }} release."
+              pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number)"
             fi
             merged=0
             for attempt in $(seq 1 90); do
