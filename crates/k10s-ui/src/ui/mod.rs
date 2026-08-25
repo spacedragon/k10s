@@ -7,6 +7,7 @@ mod launcher;
 mod overview;
 mod resource_table;
 mod resource_window;
+mod service_window;
 mod split;
 mod theme;
 pub mod tools;
@@ -14,6 +15,9 @@ mod top_bar;
 mod window;
 
 pub use resource_window::{ResourceFeed, RowIdentity};
+pub use service_window::{
+    cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
+};
 
 use std::fmt::Debug;
 

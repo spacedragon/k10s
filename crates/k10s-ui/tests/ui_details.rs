@@ -227,7 +227,9 @@ fn detail_window(
 fn pinned_identity(workspace: &WorkspaceState<ResourceIdentity>) -> &ResourceIdentity {
     match &detail_window(workspace).content {
         WindowContent::Detail(detail) => &detail.identity,
-        WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+        WindowContent::Resource(_) | WindowContent::Services(_) => {
+            panic!("detail windows pin a single identity")
+        }
     }
 }
 
@@ -404,7 +406,9 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         .filter(|window| window.kind == WindowKind::Detail)
         .map(|window| match &window.content {
             WindowContent::Detail(detail) => detail.identity.clone(),
-            WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+            WindowContent::Resource(_) | WindowContent::Services(_) => {
+                panic!("detail windows pin a single identity")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -534,7 +538,9 @@ fn tabs_stay_independent_between_integrated_and_pinned_views() {
                 "the pinned view must not inherit the integrated tab"
             );
         }
-        WindowContent::Resource(_) => panic!("detail windows pin a single identity"),
+        WindowContent::Resource(_) | WindowContent::Services(_) => {
+            panic!("detail windows pin a single identity")
+        }
     }
 
     assert_eq!(

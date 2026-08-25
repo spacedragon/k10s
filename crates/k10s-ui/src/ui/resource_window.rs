@@ -25,6 +25,9 @@ use super::{ConnectionState, theme};
 pub struct ResourceFeed {
     /// Rows per workload kind for the selected context.
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
+    /// Core/v1 Service rows for the selected context, carrying structured
+    /// projections; `None` while the Services watch is still loading.
+    pub services: Option<Vec<ResourceListRow>>,
     /// Types offered by the searchable GVK picker.
     pub types: Vec<ResourceTypeEntry>,
     /// Backend-resolved detail responses keyed by stable identity. Both the

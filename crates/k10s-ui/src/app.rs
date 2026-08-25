@@ -108,6 +108,10 @@ pub struct K10sApp {
     /// were created against; rebuilt automatically on reconnect by the
     /// shared client's desired-subscription recovery.
     resource_subscriptions: BTreeMap<WorkloadKind, (String, LiveSubscription)>,
+    /// The singleton core/v1 Service watch for the Services panel and the
+    /// context it was created against; same lifecycle as the workload
+    /// watches.
+    services_subscription: Option<(String, LiveSubscription)>,
     /// Selectable resource types of the subscribed context (GVK picker).
     resource_types: Vec<ResourceTypeEntry>,
     /// The context whose types are cached or being fetched.
@@ -154,6 +158,16 @@ struct PendingMutation {
 struct PendingSwitch {
     request: PendingRequest,
     to: String,
+}
+
+/// Semantic Service detail projection for the web host.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebServiceDetail {
+    /// `(label, value)` rows of the Overview panel, policies only when
+    /// present.
+    pub overview: Vec<(String, String)>,
+    /// One structured read-only line per declared Service port.
+    pub ports: Vec<String>,
 }
 
 impl std::fmt::Debug for K10sApp {
@@ -216,6 +230,7 @@ impl K10sApp {
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
+            services_subscription: None,
             resource_types: Vec::new(),
             types_context: None,
             types_request: None,
@@ -408,6 +423,55 @@ impl K10sApp {
             .map(|window| window.id)
     }
 
+    /// Open/focus the singleton Services window through the shared
+    /// command-driven workspace.
+    pub fn web_activate_services(&mut self) -> Option<WindowId> {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                crate::workspace::LauncherItem::Services,
+            ))
+        {
+            self.handle_workspace_event(event);
+        }
+        self.shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| window.kind == crate::workspace::WindowKind::Services)
+            .max_by_key(|window| window.z)
+            .map(|window| window.id)
+    }
+
+    /// Service rows exposed to the semantic web host as
+    /// `(uid, name, namespace, type label, ports label)` tuples, computed
+    /// from the same normalized projections the native table renders. The
+    /// uid lets row clicks pin the exact identity.
+    #[must_use]
+    pub fn web_service_rows(&self) -> Vec<(String, String, String, String, String)> {
+        self.build_resource_feed()
+            .services
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                let (type_label, ports_label) = match &row.projection {
+                    Some(k10s_protocol::ResourceProjection::Service(projection)) => (
+                        projection.service_type.clone(),
+                        crate::ui::ports_column_label(projection),
+                    ),
+                    _ => ("—".to_owned(), "—".to_owned()),
+                };
+                (
+                    row.identity.uid,
+                    row.identity.name,
+                    row.identity.namespace.unwrap_or_else(|| "—".to_owned()),
+                    type_label,
+                    ports_label,
+                )
+            })
+            .collect()
+    }
+
     /// Pin an exact projected row in a web-hosted workload window.
     pub fn web_select_resource(&mut self, window: WindowId, identity: ResourceIdentity) {
         for event in self
@@ -417,6 +481,79 @@ impl K10sApp {
             self.handle_workspace_event(event);
         }
         self.refresh_details();
+    }
+
+    /// Select a Service row of the singleton Services window by its uid,
+    /// mirroring [`Self::web_select_resource`] for the web host, which has
+    /// no protocol types of its own.
+    pub fn web_select_service(&mut self, window: WindowId, uid: &str) {
+        let Some(identity) = self
+            .build_resource_feed()
+            .services
+            .unwrap_or_default()
+            .into_iter()
+            .find(|row| row.identity.uid == uid)
+            .map(|row| row.identity)
+        else {
+            return;
+        };
+        self.web_select_resource(window, identity);
+    }
+
+    /// Semantic Service detail for the web host: `(label, value)` Overview
+    /// rows plus one structured line per declared port, computed only from
+    /// the normalized projection once the backend response arrived. `None`
+    /// while unresolved or when no projection is carried. No Start/Stop
+    /// controls exist anywhere in this surface.
+    #[must_use]
+    pub fn web_service_detail(&self, window: WindowId) -> Option<WebServiceDetail> {
+        let (_, view) = self.web_selected_detail(window)?;
+        let view = view?;
+        let Some(k10s_protocol::ResourceProjection::Service(projection)) = &view.projection else {
+            return None;
+        };
+        let mut overview = vec![
+            ("Type".to_owned(), projection.service_type.clone()),
+            (
+                "Cluster IPs".to_owned(),
+                if projection.cluster_ips.is_empty() {
+                    "—".to_owned()
+                } else {
+                    projection.cluster_ips.join(", ")
+                },
+            ),
+        ];
+        if !projection.selector.is_empty() {
+            let selector = projection
+                .selector
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            overview.push(("Selector".to_owned(), selector));
+        }
+        for (label, value) in [
+            ("External name", &projection.external_name),
+            ("Session affinity", &projection.session_affinity),
+            (
+                "External traffic policy",
+                &projection.external_traffic_policy,
+            ),
+            (
+                "Internal traffic policy",
+                &projection.internal_traffic_policy,
+            ),
+        ] {
+            if let Some(value) = value {
+                overview.push((label.to_owned(), value.clone()));
+            }
+        }
+        let ports = projection
+            .ports
+            .iter()
+            .map(crate::ui::port_detail_label)
+            .collect();
+        Some(WebServiceDetail { overview, ports })
     }
 
     /// Select a detail tab through the same workspace state as native egui.
@@ -443,6 +580,9 @@ impl K10sApp {
                     crate::workspace::WindowContent::Detail(detail) => Some(&detail.identity),
                     crate::workspace::WindowContent::Resource(resource) => {
                         resource.detail.as_ref().map(|detail| &detail.identity)
+                    }
+                    crate::workspace::WindowContent::Services(service) => {
+                        service.detail.as_ref().map(|detail| &detail.identity)
                     }
                 })?;
         Some((identity, self.details.get(identity)))
@@ -984,7 +1124,8 @@ impl K10sApp {
     }
 
     /// Assemble the connected resource projection for one rendered frame:
-    /// applied per-kind list views, selectable types, and resolved details.
+    /// applied per-kind list views, Service rows, selectable types, and
+    /// resolved details.
     fn build_resource_feed(&self) -> ResourceFeed {
         let mut lists = std::collections::HashMap::new();
         for (kind, (_, subscription)) in &self.resource_subscriptions {
@@ -992,8 +1133,14 @@ impl K10sApp {
                 lists.insert(*kind, state.rows().cloned().collect());
             }
         }
+        let services = self
+            .services_subscription
+            .as_ref()
+            .and_then(|(_, subscription)| self.client.resource_list(subscription.id()))
+            .map(|state| state.rows().cloned().collect());
         ResourceFeed {
             lists,
+            services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
         }
@@ -1026,6 +1173,21 @@ impl K10sApp {
                         .insert(kind, (context.to_owned(), subscription));
                 }
             }
+        }
+        // The Services panel watches core/v1 Service through the same
+        // bounded machinery; resubscribe only when the context changed.
+        if !self
+            .services_subscription
+            .as_ref()
+            .is_some_and(|(subscribed, _)| subscribed == context)
+        {
+            if let Some((_, subscription)) = self.services_subscription.take() {
+                self.client.unsubscribe(&subscription)?;
+            }
+            let subscription = self
+                .client
+                .subscribe_resource(context, "", "v1", "Service", None)?;
+            self.services_subscription = Some((context.to_owned(), subscription));
         }
         match &self.types_request {
             Some((requested, _)) if requested == context => {}
@@ -1155,6 +1317,10 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|d| d.identity.as_row_identity()),
+                crate::workspace::WindowContent::Services(service) => service
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.identity.as_row_identity()),
             };
             if let Some(identity) = identity
                 && !self.details.contains_key(identity)
@@ -1232,6 +1398,7 @@ impl K10sApp {
             .and_then(|w| match &w.content {
                 crate::workspace::WindowContent::Detail(detail) => Some(detail),
                 crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
+                crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
             })?;
         let identity = k10s_ui_row_identity(&detail.identity)?;
         Some(StreamTarget {
@@ -1257,6 +1424,9 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .map(|detail| detail.shell.connected),
+                crate::workspace::WindowContent::Services(service) => {
+                    service.detail.as_ref().map(|detail| detail.shell.connected)
+                }
             })
             .unwrap_or(false)
     }
