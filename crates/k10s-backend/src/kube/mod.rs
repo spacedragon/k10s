@@ -7,6 +7,7 @@
 //! production, cached per context behind bounded, refreshable state.
 
 mod auth;
+mod auth_observer;
 mod config;
 mod create;
 mod discovery;
@@ -30,8 +31,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
 use crate::port::{
-    AdapterError, BackendError, BootstrapInfo, Command, ContextPermissionsData, ContextSwitchData,
-    ContextInfo, Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData,
+    AdapterError, BackendError, BootstrapInfo, Command, ContextInfo, ContextPermissionsData,
+    ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData,
     ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
@@ -69,11 +70,11 @@ pub struct KubeAdapter {
     /// Committed bootstrap state behind a lock so context switches can swap
     /// the current-context marker atomically; readers always see one
     /// consistent registry snapshot.
-    registry: StdMutex<ContextRegistry>,
+    registry: Arc<StdMutex<ContextRegistry>>,
     /// Shared cluster client per context name: pre-injected in tests through
     /// [`Self::with_cluster_clients`], otherwise built on first use from the
     /// stored kubeconfig and cached here for reuse.
-    clients: tokio::sync::Mutex<HashMap<String, kube::Client>>,
+    clients: Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>,
     /// Coalesces lazy client construction so concurrent first use executes a
     /// credential plugin at most once.
     client_build_lock: tokio::sync::Mutex<()>,
@@ -137,8 +138,8 @@ impl KubeAdapter {
         let (prepared, kubeconfig) = config::load_with_source(path)?;
         // Commit: install the complete registry and shared runtime state.
         Ok(Self {
-            registry: StdMutex::new(ContextRegistry::prepare(prepared)?),
-            clients: tokio::sync::Mutex::new(HashMap::new()),
+            registry: Arc::new(StdMutex::new(ContextRegistry::prepare(prepared)?)),
+            clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             client_build_lock: tokio::sync::Mutex::new(()),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -190,8 +191,8 @@ impl KubeAdapter {
         }
 
         Ok(Self {
-            registry: StdMutex::new(registry),
-            clients: tokio::sync::Mutex::new(client_map),
+            registry: Arc::new(StdMutex::new(registry)),
+            clients: Arc::new(tokio::sync::Mutex::new(client_map)),
             client_build_lock: tokio::sync::Mutex::new(()),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -796,6 +797,27 @@ impl KubeAdapter {
 
     /// Resolve the shared cluster client for one context, building it lazily.
     async fn cluster_client(&self, context: &str) -> Result<kube::Client, BackendError> {
+        if let Some(entry) = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .find(context)
+            .filter(|entry| entry.availability == crate::port::ContextAvailability::Unavailable)
+        {
+            return Err(BackendError::ContextUnavailable {
+                context: entry.name.clone(),
+                reason: entry
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "credential plugin is unavailable".into()),
+            });
+        }
+        self.cluster_client_for_probe(context).await
+    }
+
+    /// Build a client during an explicit probe, including retrying a disabled
+    /// context from Bootstrap/Refresh.
+    async fn cluster_client_for_probe(&self, context: &str) -> Result<kube::Client, BackendError> {
         // Fast path under the shared per-context client map.
         {
             let clients = self.clients.lock().await;
@@ -854,7 +876,11 @@ impl KubeAdapter {
                     ))
                 })?;
         let builder = match builder {
-            Ok(builder) => builder,
+            Ok(builder) => builder.with_layer(&auth_observer::AuthObserverLayer::new(
+                context,
+                Arc::clone(&self.registry),
+                Arc::clone(&self.clients),
+            )),
             Err(error) => {
                 if let Some(reason) = auth::classify_kube_error(&error) {
                     self.mark_context_unavailable(context, reason.clone());
@@ -921,7 +947,7 @@ impl KubeAdapter {
             .collect::<Vec<_>>();
         for context in unavailable {
             self.clients.lock().await.remove(&context);
-            if self.cluster_client(&context).await.is_ok() {
+            if self.cluster_client_for_probe(&context).await.is_ok() {
                 self.mark_context_available(&context);
             }
         }

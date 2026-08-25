@@ -2,6 +2,8 @@
 
 use kube::client::AuthError;
 
+use crate::port::BackendError;
+
 const MAX_DIAGNOSTIC_BYTES: usize = 2 * 1024;
 
 pub(super) fn classify_kube_error(error: &kube::Error) -> Option<String> {
@@ -9,6 +11,17 @@ pub(super) fn classify_kube_error(error: &kube::Error) -> Option<String> {
         kube::Error::Auth(error) => classify_exec_auth_error(error),
         _ => None,
     }
+}
+
+pub(super) fn context_unavailable(error: &kube::Error) -> Option<BackendError> {
+    let kube::Error::Service(error) = error else {
+        return None;
+    };
+    let marker = error.downcast_ref::<super::auth_observer::ContextUnavailableMarker>()?;
+    Some(BackendError::ContextUnavailable {
+        context: marker.context.clone(),
+        reason: marker.reason.clone(),
+    })
 }
 
 pub(super) fn classify_exec_auth_error(error: &AuthError) -> Option<String> {

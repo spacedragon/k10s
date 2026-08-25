@@ -83,6 +83,9 @@ async fn list_events(api: &Api<DynamicObject>) -> Result<Vec<RawEvent>, BackendE
 /// Sanitized event-list failure detail; raw Kubernetes Status text never
 /// crosses the seam.
 fn sanitize_list_error(error: kube::Error) -> BackendError {
+    if let Some(unavailable) = super::auth::context_unavailable(&error) {
+        return unavailable;
+    }
     match error {
         kube::Error::Api(status) => BackendError::Internal(format!(
             "event list rejected by the api server with HTTP {}",
