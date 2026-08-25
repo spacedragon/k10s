@@ -207,7 +207,10 @@ jobs:
               exit 1
             fi
             git fetch origin main
-            merge_sha="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json mergeCommit --jq -r '.mergeCommit.oid')"
+            # --template (not --jq -r): the runner's gh takes the dash-leading
+            # `-r` as the --jq value and then rejects the trailing expression
+            # as a stray positional arg; --template outputs raw text directly.
+            merge_sha="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --template '{{.mergeCommit.oid}}')"
             git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}" "$merge_sha"
             git push origin "v${{ steps.bump.outputs.version }}"
           fi
