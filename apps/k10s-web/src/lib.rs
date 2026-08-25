@@ -70,20 +70,19 @@ impl eframe::App for WebApp {
             ui.label("Access token");
             ui.add(eframe::egui::TextEdit::singleline(&mut runtime.egui_token).password(true));
             if ui.button("Connect").clicked() {
-                let token = runtime.egui_token.clone();
-                runtime.gate.set_token_input(token);
-                runtime.begin_connection();
+                let token = std::mem::take(&mut runtime.egui_token);
+                runtime.begin_connection(token);
             }
         });
     }
 }
 
 impl Runtime {
-    fn begin_connection(&mut self) {
+    fn begin_connection(&mut self, token: String) {
         if matches!(self.stage, Stage::Ready | Stage::Connecting) {
             return;
         }
-        self.gate.set_token_input(self.token_input_value());
+        self.gate.set_token_input(token);
         match K10sApp::connect(self.gate.begin_connection()) {
             Ok(app) => {
                 self.app = Some(app);
@@ -127,7 +126,7 @@ impl Runtime {
 
     fn perform_action(&mut self, action: &str) {
         if action == "connect" {
-            self.begin_connection();
+            self.begin_connection(self.token_input_value());
             return;
         }
         let Some(app) = self.app.as_mut() else {
