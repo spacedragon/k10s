@@ -331,7 +331,15 @@ async fn bootstrap_runs_only_current_exec_plugin() {
     let contexts = bootstrap_contexts(&adapter).await;
 
     let current_invocations = invocation_count(&current_counter);
-    assert!(current_invocations > 0);
+    if current_invocations == 0 {
+        let error = adapter
+            .query(Query::ResourceTypes {
+                context: "current".into(),
+            })
+            .await
+            .expect_err("an unvalidated fixture context cannot complete discovery");
+        panic!("exec fixture did not run; bootstrap={contexts:?}; discovery={error:?}");
+    }
     assert_eq!(invocation_count(&fallback_counter), 0);
     assert_eq!(contexts[0].availability, ContextAvailability::Available);
     assert!(contexts[0].is_current);
