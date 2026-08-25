@@ -109,7 +109,8 @@ async fn fake_scale_and_delete_execute_through_the_kernel() {
         .expect("supported commands return an operation ID");
     assert!(!operation_id.as_str().is_empty());
 
-    // Replaying the same idempotency key returns the original operation.
+    // Replaying the same idempotency key and exact payload returns the
+    // original operation.
     let replay = kernel
         .execute(Command::Scale {
             context: "dev-local".into(),
@@ -117,12 +118,29 @@ async fn fake_scale_and_delete_execute_through_the_kernel() {
             namespace: Some("default".into()),
             name: "api-server".into(),
             uid: "uid-dev-local-deployment-default-api-server".into(),
-            replicas: 9,
+            replicas: 5,
             idempotency_key: "idem-kernel-scale".into(),
         })
         .await
         .unwrap();
     assert_eq!(replay, operation_id);
+
+    // Reusing the key for a different payload is ambiguous and must never
+    // masquerade as an exact replay.
+    assert!(matches!(
+        kernel
+            .execute(Command::Scale {
+                context: "dev-local".into(),
+                gvk: Gvk::new("apps", "v1", "Deployment"),
+                namespace: Some("default".into()),
+                name: "api-server".into(),
+                uid: "uid-dev-local-deployment-default-api-server".into(),
+                replicas: 9,
+                idempotency_key: "idem-kernel-scale".into(),
+            })
+            .await,
+        Err(BackendError::Conflict(_))
+    ));
 
     // A stale UID is a typed conflict even when the name still resolves.
     let err = kernel

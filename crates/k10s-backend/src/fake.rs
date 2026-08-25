@@ -107,12 +107,18 @@ struct FakeState {
     armed_failures: HashMap<String, String>,
     /// Live background-operation watchers.
     operation_watchers: Vec<OperationWatcher>,
-    /// Bounded idempotency records: key → accepted operation ID. Replays
-    /// of a key return the original operation instead of executing again.
-    idempotency: HashMap<String, String>,
+    /// Bounded idempotency records: key → exact request fingerprint and
+    /// accepted operation ID. Only an identical request may replay a key.
+    idempotency: HashMap<String, FakeIdempotency>,
     idempotency_order: std::collections::VecDeque<String>,
     /// Kernel-owned stream hub: single-use stream tickets and fake sessions.
     streams: StreamHub,
+}
+
+#[derive(Debug, Clone)]
+struct FakeIdempotency {
+    operation_id: String,
+    fingerprint: String,
 }
 
 #[cfg(test)]
@@ -488,7 +494,32 @@ impl FakeKubernetes {
     /// Record a freshly accepted mutation as an operation: allocates its
     /// deterministic ID, stores the bounded record in `Pending`, remembers
     /// the idempotency key, and notifies watchers. Returns the ID.
-    fn begin_operation(state: &mut FakeState, idempotency_key: &str) -> OperationId {
+    fn replay_operation(
+        state: &FakeState,
+        idempotency_key: &str,
+        fingerprint: &str,
+    ) -> Result<Option<OperationId>, BackendError> {
+        if idempotency_key.is_empty() {
+            return Err(BackendError::Conflict(
+                "an idempotency key is required".into(),
+            ));
+        }
+        if let Some(existing) = state.idempotency.get(idempotency_key) {
+            if existing.fingerprint != fingerprint {
+                return Err(BackendError::Conflict(
+                    "the idempotency key was already used for a different submission".into(),
+                ));
+            }
+            return Ok(Some(OperationId::new(existing.operation_id.clone())));
+        }
+        Ok(None)
+    }
+
+    fn begin_operation(
+        state: &mut FakeState,
+        idempotency_key: &str,
+        fingerprint: &str,
+    ) -> OperationId {
         let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
         state.next_operation += 1;
         let record = crate::operation::OperationRecord {
@@ -504,17 +535,19 @@ impl FakeKubernetes {
                 state.operations.remove(&oldest);
             }
         }
-        if !idempotency_key.is_empty() && !state.idempotency.contains_key(idempotency_key) {
-            state
-                .idempotency
-                .insert(idempotency_key.to_owned(), operation_id.as_str().to_owned());
-            state
-                .idempotency_order
-                .push_back(idempotency_key.to_owned());
-            while state.idempotency.len() > IDEMPOTENCY_CAPACITY {
-                if let Some(oldest) = state.idempotency_order.pop_front() {
-                    state.idempotency.remove(&oldest);
-                }
+        state.idempotency.insert(
+            idempotency_key.to_owned(),
+            FakeIdempotency {
+                operation_id: operation_id.as_str().to_owned(),
+                fingerprint: fingerprint.to_owned(),
+            },
+        );
+        state
+            .idempotency_order
+            .push_back(idempotency_key.to_owned());
+        while state.idempotency.len() > IDEMPOTENCY_CAPACITY {
+            if let Some(oldest) = state.idempotency_order.pop_front() {
+                state.idempotency.remove(&oldest);
             }
         }
         Self::emit_operation(
@@ -632,7 +665,7 @@ impl FakeKubernetes {
                 let released: Vec<String> = state
                     .idempotency
                     .iter()
-                    .filter(|(_, operation_id)| **operation_id == id)
+                    .filter(|(_, entry)| entry.operation_id == id)
                     .map(|(key, _)| key.clone())
                     .collect();
                 for key in released {
@@ -691,12 +724,16 @@ impl FakeKubernetes {
                 "the edited buffer no longer matches the validated ticket".into(),
             ));
         }
-        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
-        if let Some(existing) = replay {
-            return Ok(OperationId::new(existing));
+        let fingerprint = format!(
+            "apply/{}/{}",
+            declared_target.exact_identity_key(),
+            buffer_hash
+        );
+        let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
         }
-        let (ticket, operation_id) = {
-            let mut state = self.lock();
+        let ticket = {
             // Verify every binding before consuming: a rejected envelope
             // must leave the ticket intact.
             let Some(ticket) = state.tickets.get(&ticket_id).cloned() else {
@@ -725,21 +762,46 @@ impl FakeKubernetes {
                     "the validation ticket has expired".into(),
                 ));
             }
-            state.tickets.remove(&ticket_id);
-            state.ticket_order.retain(|id| *id != ticket_id);
-
-            // Open the operation record before the mutation lands.
-            let operation_id = Self::begin_operation(&mut state, &idempotency_key);
-            (ticket, operation_id)
+            ticket
         };
-
-        let mut state = self.lock();
-        match state.find_index(
+        let target_index = state.find_index(
             &ticket.target.context,
             &ticket.target.gvk,
             ticket.target.namespace.as_deref(),
             &ticket.target.name,
-        ) {
+        );
+        match target_index {
+            Some(index) => {
+                if state.records[index].reference.uid != ticket.target.uid {
+                    return Err(BackendError::Conflict(
+                        "the target was recreated since validation".into(),
+                    ));
+                }
+                if state.records[index].revision != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the target changed since validation".into(),
+                    ));
+                }
+            }
+            None => {
+                if state.current_revision() != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the cluster changed since validation".into(),
+                    ));
+                }
+                if state
+                    .contexts
+                    .iter()
+                    .all(|candidate| candidate.name != ticket.target.context)
+                {
+                    return Err(BackendError::NotFound);
+                }
+            }
+        }
+        state.tickets.remove(&ticket_id);
+        state.ticket_order.retain(|id| *id != ticket_id);
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
+        match target_index {
             // Update: the object must still be the same instance at exactly
             // the validated revision.
             Some(index) => {
@@ -818,11 +880,18 @@ impl FakeKubernetes {
         replicas: u32,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
-        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
-        if let Some(existing) = replay {
-            return Ok(OperationId::new(existing));
-        }
+        let target = ResourceRef {
+            context: context.clone(),
+            gvk: gvk.clone(),
+            namespace: namespace.clone(),
+            name: name.clone(),
+            uid: uid.clone(),
+        };
+        let fingerprint = format!("scale/{}/{replicas}", target.exact_identity_key());
         let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !state.contexts.iter().any(|c| c.name == context) {
             return Err(BackendError::NotFound);
         }
@@ -841,7 +910,7 @@ impl FakeKubernetes {
         let index = state
             .find_index(&context, &gvk, namespace.as_deref(), &name)
             .expect("the record was just resolved");
-        let operation_id = Self::begin_operation(&mut state, &idempotency_key);
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         // The desired count becomes observable backend state wherever the
@@ -864,11 +933,11 @@ impl FakeKubernetes {
         propagation: crate::operation::Propagation,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
-        let replay = self.lock().idempotency.get(&idempotency_key).cloned();
-        if let Some(existing) = replay {
-            return Ok(OperationId::new(existing));
-        }
+        let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
         let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !state
             .contexts
             .iter()
@@ -893,7 +962,7 @@ impl FakeKubernetes {
                     .into(),
             ));
         }
-        let operation_id = Self::begin_operation(&mut state, &idempotency_key);
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let _ = propagation;
         let index = state
             .find_index(
@@ -922,10 +991,11 @@ impl FakeKubernetes {
         target: ResourceRef,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
-        if let Some(existing) = self.lock().idempotency.get(&idempotency_key).cloned() {
-            return Ok(OperationId::new(existing));
-        }
+        let fingerprint = format!("restart/{}", target.exact_identity_key());
         let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if target.context == READONLY_CONTEXT {
             return Err(BackendError::Forbidden);
         }
@@ -943,7 +1013,8 @@ impl FakeKubernetes {
                     .into(),
             ));
         }
-        Ok(Self::begin_operation(&mut state, &idempotency_key))
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
+        Ok(operation_id)
     }
 
     async fn create_job(
@@ -951,13 +1022,14 @@ impl FakeKubernetes {
         source: ResourceRef,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
+        let fingerprint = format!("create-job/{}", source.exact_identity_key());
+        let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !matches!(source.gvk.kind.as_str(), "Job" | "CronJob") {
             return Err(BackendError::unsupported("job.create"));
         }
-        if let Some(existing) = self.lock().idempotency.get(&idempotency_key).cloned() {
-            return Ok(OperationId::new(existing));
-        }
-        let mut state = self.lock();
         if source.context == READONLY_CONTEXT {
             return Err(BackendError::Forbidden);
         }
@@ -972,7 +1044,7 @@ impl FakeKubernetes {
         if record.reference.uid != source.uid {
             return Err(BackendError::Conflict("the source was recreated".into()));
         }
-        let operation = Self::begin_operation(&mut state, &idempotency_key);
+        let operation = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let revision = state.advance_revision();
         let name = format!("{}-run-{}", source.name, revision);
         let reference = ResourceRef {
@@ -1003,13 +1075,18 @@ impl FakeKubernetes {
         suspended: bool,
         key: String,
     ) -> Result<OperationId, BackendError> {
+        let fingerprint = format!(
+            "cronjob-suspend/{}/{}",
+            target.exact_identity_key(),
+            suspended
+        );
+        let mut state = self.lock();
+        if let Some(existing) = Self::replay_operation(&state, &key, &fingerprint)? {
+            return Ok(existing);
+        }
         if target.gvk != Gvk::new("batch", "v1", "CronJob") {
             return Err(BackendError::unsupported("cronjob.suspend"));
         }
-        if let Some(existing) = self.lock().idempotency.get(&key).cloned() {
-            return Ok(OperationId::new(existing));
-        }
-        let mut state = self.lock();
         if target.context == READONLY_CONTEXT {
             return Err(BackendError::Forbidden);
         }
@@ -1024,7 +1101,7 @@ impl FakeKubernetes {
         if state.records[index].reference.uid != target.uid {
             return Err(BackendError::Conflict("the target was recreated".into()));
         }
-        let operation = Self::begin_operation(&mut state, &key);
+        let operation = Self::begin_operation(&mut state, &key, &fingerprint);
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         state.records[index].summary = if suspended { "Suspended" } else { "Running" }.into();
@@ -2041,6 +2118,142 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::port::BackendEvent;
+
+    #[tokio::test]
+    async fn specialized_idempotency_keys_bind_the_exact_source_uid() {
+        let fake = FakeKubernetes::default();
+        let cronjob = {
+            let state = fake.lock();
+            state
+                .records
+                .iter()
+                .find(|record| record.reference.gvk == Gvk::new("batch", "v1", "CronJob"))
+                .expect("the deterministic fixture has a CronJob")
+                .reference
+                .clone()
+        };
+
+        fake.create_job(cronjob.clone(), "create-key".into())
+            .await
+            .unwrap();
+        fake.set_cronjob_suspended(cronjob.clone(), true, "suspend-key".into())
+            .await
+            .unwrap();
+
+        let recreated = {
+            let mut state = fake.lock();
+            let index = state
+                .find_index(
+                    &cronjob.context,
+                    &cronjob.gvk,
+                    cronjob.namespace.as_deref(),
+                    &cronjob.name,
+                )
+                .unwrap();
+            state.records[index].reference.uid = "recreated-cronjob-uid".into();
+            state.records[index].reference.clone()
+        };
+
+        assert!(matches!(
+            fake.create_job(recreated.clone(), "create-key".into())
+                .await,
+            Err(BackendError::Conflict(_))
+        ));
+        assert!(matches!(
+            fake.set_cronjob_suspended(recreated, true, "suspend-key".into())
+                .await,
+            Err(BackendError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_job_submissions_are_accepted_once() {
+        let fake = FakeKubernetes::default();
+        let cronjob = {
+            let state = fake.lock();
+            state
+                .records
+                .iter()
+                .find(|record| record.reference.gvk == Gvk::new("batch", "v1", "CronJob"))
+                .expect("the deterministic fixture has a CronJob")
+                .reference
+                .clone()
+        };
+        let jobs_before = fake
+            .lock()
+            .records
+            .iter()
+            .filter(|record| record.reference.gvk == Gvk::new("batch", "v1", "Job"))
+            .count();
+        let gate = Arc::new(tokio::sync::Barrier::new(3));
+        let submit = |fake: FakeKubernetes, gate: Arc<tokio::sync::Barrier>| {
+            let source = cronjob.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                fake.create_job(source, "concurrent-create-key".into())
+                    .await
+            })
+        };
+        let first = submit(fake.clone(), gate.clone());
+        let second = submit(fake.clone(), gate.clone());
+        gate.wait().await;
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+
+        assert_eq!(first, second, "both callers replay one accepted operation");
+        let jobs_after = fake
+            .lock()
+            .records
+            .iter()
+            .filter(|record| record.reference.gvk == Gvk::new("batch", "v1", "Job"))
+            .count();
+        assert_eq!(jobs_after, jobs_before + 1, "the Job is created once");
+    }
+
+    #[tokio::test]
+    async fn rejected_submission_does_not_reserve_its_operation_or_key() {
+        let fake = FakeKubernetes::default();
+        let mut source = {
+            let state = fake.lock();
+            state
+                .records
+                .iter()
+                .find(|record| record.reference.gvk == Gvk::new("batch", "v1", "CronJob"))
+                .expect("the deterministic fixture has a CronJob")
+                .reference
+                .clone()
+        };
+        source.uid = "corrected-source-uid".into();
+
+        assert!(matches!(
+            fake.create_job(source.clone(), "retryable-create-key".into())
+                .await,
+            Err(BackendError::Conflict(_))
+        ));
+        {
+            let state = fake.lock();
+            assert!(state.operations.is_empty());
+            assert!(!state.idempotency.contains_key("retryable-create-key"));
+        }
+
+        {
+            let mut state = fake.lock();
+            let index = state
+                .find_index(
+                    &source.context,
+                    &source.gvk,
+                    source.namespace.as_deref(),
+                    &source.name,
+                )
+                .unwrap();
+            state.records[index].reference.uid = source.uid.clone();
+        }
+        let operation = fake
+            .create_job(source, "retryable-create-key".into())
+            .await
+            .unwrap();
+        assert_eq!(operation.as_str(), "op-000001");
+    }
 
     /// Regression: capacity eviction must follow issuance order even across
     /// the `ticket-{:04}` digit-width transition (ids 9999 → 10000), where
