@@ -29,13 +29,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
-#[cfg(feature = "testkit")]
-use crate::port::ContextInfo;
-
 use crate::port::{
     AdapterError, BackendError, BootstrapInfo, Command, ContextPermissionsData, ContextSwitchData,
-    Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData, ResourceTypesData,
-    StreamInput, Subscribe, SubscriptionHandle,
+    ContextInfo, Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData,
+    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
@@ -882,6 +879,11 @@ impl KubeAdapter {
     }
 
     fn mark_context_unavailable(&self, context: &str, reason: String) {
+        tracing::warn!(
+            context,
+            reason = %reason,
+            "Kubernetes context credential plugin is unavailable"
+        );
         let mut registry = self
             .registry
             .lock()

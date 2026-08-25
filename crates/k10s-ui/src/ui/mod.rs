@@ -213,15 +213,58 @@ where
         response: Option<&k10s_protocol::InfrastructureResponse>,
         feed: &resource_window::ResourceFeed,
     ) -> bool {
+        let contexts = contexts
+            .iter()
+            .map(|name| k10s_protocol::Context {
+                name: name.clone(),
+                cluster: String::new(),
+                namespace: None,
+                is_current: selected_context.as_deref() == Some(name.as_str()),
+                availability: k10s_protocol::ContextAvailability::Available,
+                unavailable_reason: None,
+            })
+            .collect::<Vec<_>>();
+        self.show_with_contexts_and_resources(
+            ui,
+            connection,
+            &contexts,
+            selected_context,
+            response,
+            feed,
+        )
+    }
+
+    /// Render with authoritative context availability from Bootstrap.
+    pub fn show_with_contexts_and_resources(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[k10s_protocol::Context],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+        feed: &resource_window::ResourceFeed,
+    ) -> bool {
         theme::apply(ui.ctx());
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
         let selected = selected_context
             .as_deref()
             .filter(|selected| {
-                contexts.is_empty() || contexts.iter().any(|context| context == selected)
+                contexts.is_empty()
+                    || contexts.iter().any(|context| {
+                        context.name == *selected
+                            && context.availability
+                                != k10s_protocol::ContextAvailability::Unavailable
+                    })
             })
-            .or_else(|| contexts.first().map(String::as_str))
+            .or_else(|| {
+                contexts
+                    .iter()
+                    .find(|context| {
+                        context.availability != k10s_protocol::ContextAvailability::Unavailable
+                    })
+                    .map(|context| context.name.as_str())
+            })
             .map(str::to_owned);
 
         let mut context_change = None;

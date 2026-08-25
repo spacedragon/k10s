@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
-    ClientFrame, InfrastructureRequest, RequestId, ResourceDetailResponse, ResourceIdentity,
-    ResourceTypeEntry, ResourceTypesRequest, ServerFrame, StreamTarget,
+    ClientFrame, Context, ContextAvailability, InfrastructureRequest, RequestId,
+    ResourceDetailResponse, ResourceIdentity, ResourceTypeEntry, ResourceTypesRequest, ServerFrame,
+    StreamTarget,
 };
 
 use crate::client::{
@@ -78,6 +79,8 @@ pub enum AppView {
         server_instance_id: String,
         /// Safe Kubernetes context names.
         context_names: Vec<String>,
+        /// Safe context status used by the selector.
+        contexts: Vec<Context>,
     },
     /// A safe connection or protocol failure.
     Failed {
@@ -289,10 +292,10 @@ impl K10sApp {
 
     /// Render the approved default-egui shell for the current connection view.
     pub fn render_ui(&mut self, ui: &mut egui::Ui) {
-        let (connection, contexts): (ShellConnectionState, &[String]) = match &self.view {
+        let (connection, contexts): (ShellConnectionState, &[Context]) = match &self.view {
             AppView::Connecting => (ShellConnectionState::Connecting, &[]),
-            AppView::Ready { context_names, .. } => {
-                (ShellConnectionState::Connected, context_names.as_slice())
+            AppView::Ready { contexts, .. } => {
+                (ShellConnectionState::Connected, contexts.as_slice())
             }
             AppView::Failed { .. } => (ShellConnectionState::Failed, &[]),
         };
@@ -302,7 +305,7 @@ impl K10sApp {
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
         let feed = self.build_resource_feed();
-        let refresh = self.shell.show_with_resources(
+        let refresh = self.shell.show_with_contexts_and_resources(
             ui,
             connection,
             contexts,
@@ -324,9 +327,18 @@ impl K10sApp {
             // happen only when the response confirms the destination.
             self.stage_context_switch(&to, origin.is_explicit())
         } else if refresh {
-            selected_after
-                .as_deref()
-                .map_or(Ok(()), |context| self.refresh_infrastructure(context))
+            let bootstrap = if self.bootstrap.is_none() {
+                self.client.begin(Query::Bootstrap).map(|request| {
+                    self.bootstrap = Some(request);
+                })
+            } else {
+                Ok(())
+            };
+            bootstrap.and_then(|()| {
+                selected_after
+                    .as_deref()
+                    .map_or(Ok(()), |context| self.refresh_infrastructure(context))
+            })
         } else {
             Ok(())
         };
@@ -371,6 +383,7 @@ impl K10sApp {
             AppView::Ready {
                 server_instance_id,
                 context_names,
+                ..
             } => format!(
                 "Server {server_instance_id}\nContexts: {}",
                 context_names.join(", ")
@@ -580,7 +593,7 @@ impl K10sApp {
                         // A vanished object's detail query is dropped
                         // quietly: the pinned window keeps rendering its
                         // loading state until a newer selection arrives.
-                        ClientError::Server(_)
+                        ClientError::Server(ref server_error)
                             if stream_request_id.as_ref().is_some_and(|id| {
                                 self.detail_requests
                                     .values()
@@ -639,7 +652,7 @@ impl K10sApp {
                         // destination is recorded so passive reconciliation
                         // cannot retry-spam it, and selection, workspace, and
                         // the control connection all stay alive.
-                        ClientError::Server(_)
+                        ClientError::Server(ref server_error)
                             if stream_request_id.as_ref().is_some_and(|id| {
                                 self.pending_switch
                                     .as_ref()
@@ -647,7 +660,39 @@ impl K10sApp {
                             }) =>
                         {
                             if let Some(pending) = self.pending_switch.take() {
-                                self.failed_switch = Some(pending.to);
+                                let failed = pending.to;
+                                self.failed_switch = Some(failed.clone());
+                                if server_error
+                                    .details
+                                    .as_ref()
+                                    .and_then(|details| {
+                                        (details.get("kind")?.as_str()? == "contextUnavailable")
+                                            .then_some(details)
+                                    })
+                                    .is_some()
+                                {
+                                    let reason = server_error
+                                        .details
+                                        .as_ref()
+                                        .and_then(|details| details.get("reason"))
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("credential plugin is unavailable")
+                                        .to_owned();
+                                    if let AppView::Ready { contexts, .. } = &mut self.view
+                                        && let Some(context) = contexts
+                                            .iter_mut()
+                                            .find(|context| context.name == failed)
+                                    {
+                                        context.availability = ContextAvailability::Unavailable;
+                                        context.unavailable_reason = Some(reason);
+                                    }
+                                    if self.bootstrap.is_none() {
+                                        self.bootstrap =
+                                            Some(self.client.begin(Query::Bootstrap).map_err(
+                                                |error| AppEventError::Terminal(error.to_string()),
+                                            )?);
+                                    }
+                                }
                             }
                         }
                         _ if self.client.phase() == ClientPhase::Disconnected => {
@@ -707,27 +752,44 @@ impl K10sApp {
                         .iter()
                         .map(|context| context.name.clone())
                         .collect();
+                    let contexts = response.contexts;
                     // The server's `is_current` marker is the reconnect
                     // authority: a stale local selection must never outrank
                     // what the backend just reported as current. The local
                     // preference only breaks ties when no marker is carried.
-                    let selected = response
-                        .contexts
+                    let selected = contexts
                         .iter()
-                        .find(|context| context.is_current)
+                        .find(|context| {
+                            context.is_current
+                                && context.availability != ContextAvailability::Unavailable
+                        })
                         .map(|context| context.name.clone())
                         .or_else(|| {
                             self.client
                                 .local_ui()
                                 .selected_context
                                 .clone()
-                                .filter(|selected| context_names.contains(selected))
+                                .filter(|selected| {
+                                    contexts.iter().any(|context| {
+                                        context.name == *selected
+                                            && context.availability
+                                                != ContextAvailability::Unavailable
+                                    })
+                                })
                         })
-                        .or_else(|| context_names.first().cloned());
+                        .or_else(|| {
+                            contexts
+                                .iter()
+                                .find(|context| {
+                                    context.availability != ContextAvailability::Unavailable
+                                })
+                                .map(|context| context.name.clone())
+                        });
                     self.client.local_ui_mut().selected_context = selected.clone();
                     self.view = AppView::Ready {
                         server_instance_id,
                         context_names,
+                        contexts,
                     };
                     self.recovering = false;
                     if let Some(context) = selected {
@@ -2519,6 +2581,8 @@ mod tests {
             cluster: "staging-cluster".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         });
         let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap_payload);
         let rejection = ServerFrame {
@@ -2526,13 +2590,20 @@ mod tests {
             request_id: Some(RequestId::from_u128(4)),
             subscription_id: None,
             sequence: None,
-            payload: serde_json::to_value(ErrorFrame::new(
-                ErrorCode::Internal,
-                "destination refused the read path",
-                Retryability::Never,
-                ErrorScope::Request,
-                "context-switch",
-            ))
+            payload: serde_json::to_value(
+                ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "context 'prod-readonly' is unavailable: plugin denied",
+                    Retryability::AfterRefresh,
+                    ErrorScope::Request,
+                    "context-switch",
+                )
+                .with_details(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": "prod-readonly",
+                    "reason": "plugin denied",
+                })),
+            )
             .unwrap(),
         };
         let (mut app, state) = test_app(vec![ConnectionScript {
@@ -2573,6 +2644,22 @@ mod tests {
             app.failed_switch.as_deref(),
             Some("prod-readonly"),
             "the failed destination is recorded so reconciliation cannot retry-spam it"
+        );
+        let AppView::Ready { contexts, .. } = app.view() else {
+            panic!("the session must stay ready")
+        };
+        let failed = contexts
+            .iter()
+            .find(|context| context.name == "prod-readonly")
+            .expect("failed context remains visible");
+        assert_eq!(
+            failed.availability,
+            k10s_protocol::ContextAvailability::Unavailable
+        );
+        assert_eq!(failed.unavailable_reason.as_deref(), Some("plugin denied"));
+        assert!(
+            app.bootstrap.is_some(),
+            "failure queues authoritative Bootstrap"
         );
 
         // A NEW staged switch toward another destination still works.
@@ -2747,6 +2834,8 @@ mod tests {
             cluster: "staging-cluster".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         });
         let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap_payload);
         let rejection = ServerFrame {

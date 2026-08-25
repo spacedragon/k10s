@@ -67,6 +67,7 @@ fn app_bootstraps_over_the_exact_control_websocket() {
     let AppView::Ready {
         server_instance_id,
         context_names,
+        ..
     } = app.view()
     else {
         panic!("app did not bootstrap: {:?}", app.view());

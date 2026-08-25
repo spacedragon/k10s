@@ -1362,6 +1362,10 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
             "context or resource not found".to_owned(),
         ),
         BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::ContextUnavailable { context, reason } => (
+            ErrorCode::Conflict,
+            format!("context '{context}' is unavailable: {reason}"),
+        ),
         BackendError::Forbidden => (
             ErrorCode::Unauthorized,
             "access denied by policy".to_owned(),
@@ -1867,13 +1871,25 @@ fn send_error(
     code: ErrorCode,
     message: String,
 ) -> Result<(), EnqueueError> {
+    send_error_with(outbound, target, code, message, Retryability::Never, None)
+}
+
+fn send_error_with(
+    outbound: &Scheduler,
+    target: ErrorTarget,
+    code: ErrorCode,
+    message: String,
+    retryability: Retryability,
+    details: Option<serde_json::Value>,
+) -> Result<(), EnqueueError> {
     let correlation = target.correlation().to_owned();
     let (request_id, subscription_id, scope) = match target {
         ErrorTarget::Session => (None, None, ErrorScope::Session),
         ErrorTarget::Request(id) => (Some(id), None, ErrorScope::Request),
         ErrorTarget::Subscription(id) => (None, Some(id), ErrorScope::Subscription),
     };
-    let error = ErrorFrame::new(code, message, Retryability::Never, scope, correlation);
+    let mut error = ErrorFrame::new(code, message, retryability, scope, correlation);
+    error.details = details;
     send_frame(
         outbound,
         ServerFrame {
@@ -1893,21 +1909,52 @@ fn send_backend_error(
     session_id: &SessionId,
     error: BackendError,
 ) -> Result<(), EnqueueError> {
-    let (code, safe_message) = match error {
+    let (code, safe_message, retryability, details) = match error {
         BackendError::NotFound => (
             ErrorCode::NotFound,
             "context or resource not found".to_owned(),
+            Retryability::Never,
+            None,
         ),
-        BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::Conflict(reason) => (
+            ErrorCode::Conflict,
+            format!("conflict: {reason}"),
+            Retryability::Never,
+            None,
+        ),
+        BackendError::ContextUnavailable { context, reason } => (
+            ErrorCode::Conflict,
+            format!("context '{context}' is unavailable: {reason}"),
+            Retryability::AfterRefresh,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": context,
+                "reason": reason,
+            })),
+        ),
         BackendError::Forbidden => (
             ErrorCode::Unauthorized,
             "access denied by policy".to_owned(),
+            Retryability::Never,
+            None,
         ),
-        BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
-        BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
+        BackendError::Timeout => (
+            ErrorCode::Timeout,
+            "request timed out".to_owned(),
+            Retryability::Never,
+            None,
+        ),
+        BackendError::Cancelled => (
+            ErrorCode::Cancelled,
+            "request was cancelled".to_owned(),
+            Retryability::Never,
+            None,
+        ),
         BackendError::Unsupported { capability } => (
             ErrorCode::UnsupportedMessage,
             format!("unsupported capability: {capability}"),
+            Retryability::Never,
+            None,
         ),
         BackendError::Internal(_) => {
             let correlation = target.correlation();
@@ -1927,10 +1974,15 @@ fn send_backend_error(
                 diagnostic = "backend adapter returned an internal error",
                 "control backend failure"
             );
-            (ErrorCode::Internal, "internal server error".to_owned())
+            (
+                ErrorCode::Internal,
+                "internal server error".to_owned(),
+                Retryability::Never,
+                None,
+            )
         }
     };
-    send_error(outbound, target, code, safe_message)
+    send_error_with(outbound, target, code, safe_message, retryability, details)
 }
 
 async fn close_and_join(
@@ -2551,5 +2603,35 @@ mod tests {
             .expect("snapshot reassembled after resync");
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(client.last_acked_sequence(), Some(11));
+    }
+
+    #[tokio::test]
+    async fn unavailable_context_error_is_machine_readable_and_retryable() {
+        let scheduler = Scheduler::new(8, 2);
+        send_backend_error(
+            &scheduler,
+            ErrorTarget::Request(RequestId::from_u128(42)),
+            &SessionId::new("session-availability"),
+            BackendError::ContextUnavailable {
+                context: "broken".into(),
+                reason: "credential plugin exited with status 17: denied".into(),
+            },
+        )
+        .expect("error enqueues");
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1);
+        let error: ErrorFrame =
+            serde_json::from_value(frames[0].payload.clone()).expect("error frame decodes");
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.retryability, Retryability::AfterRefresh);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": "broken",
+                "reason": "credential plugin exited with status 17: denied",
+            }))
+        );
     }
 }
