@@ -72,7 +72,16 @@ Starting -> Active -> Stopping -> Stopped
     +-------> Failed
 ```
 
-`Failed` retains a short safe reason and permits Retry. A session moves to `Failed` when its listener fails, the pinned Pod disappears, Kubernetes closes the port-forward stream, or a data pump terminates unexpectedly. It does not automatically select a different Pod because that could move a connection to a different workload instance without operator intent.
+Connection lifetime is separate from session lifetime. Each accepted local TCP connection owns its own Kubernetes port-forward stream, and that stream normally ends when either side closes: an upstream application finishing a response, or the local client disconnecting. Clean EOF on a forwarded connection is a successful connection completion, never a session failure. The listener keeps accepting, and a second connection started immediately after an upstream close must succeed.
+
+`Failed` retains a short safe reason and permits Retry. It is reserved for faults that make the pinned target unusable, not ordinary connection turnover. A session moves to `Failed` only when:
+
+- Its listening socket fails.
+- The pinned Pod disappears.
+- Three consecutive new port-forward streams fail with a transport or protocol error before transferring any byte, indicating the pinned target is gone or unreachable rather than a peer hanging up.
+- A data pump terminates with an error other than clean EOF.
+
+A single abnormal stream error fails only that one connection. The session does not automatically select a different Pod because that could move a connection to a different workload instance without operator intent.
 
 ### Desktop-only presentation
 
@@ -86,7 +95,7 @@ Add a `port_forward` protocol module. All payloads use existing request/response
 
 ### Normalized Service projection
 
-Service data must not be extracted from manifest text in the UI. Extend resource detail with an optional kind-specific projection:
+Service data must not be extracted from manifest text in the UI. Add an optional kind-specific projection shared by resource lists and detail responses:
 
 ```rust
 pub enum ResourceProjection {
@@ -112,7 +121,12 @@ pub struct ServicePort {
 }
 ```
 
-`ResourceDetailResponse.projection: Option<ResourceProjection>` is optional and defaults to `None`, preserving decoding of older v1 payloads. The protocol minor version increases; the major version remains unchanged.
+The same normalized projection feeds both surfaces:
+
+- `ResourceListRow.projection: Option<ResourceProjection>` — added to the existing normalized list-row struct with `#[serde(default)]`. Snapshot pages and upsert deltas embed `ResourceListRow` (`ResourceSnapshotPage.rows`, `ResourceChanged.row`), so the Services table renders Type, Cluster IP, Ports, and Age for every row straight from snapshots and live deltas, before anything is selected. The UI never parses `summary`; `summary` stays untouched for existing generic windows.
+- `ResourceDetailResponse.projection: Option<ResourceProjection>` — the same enum on detail responses.
+
+Both fields are optional and default to `None`: older payloads without the field decode unchanged on new clients, and older clients ignore the unknown field on newer payloads. Servers populate the projection for core/v1 Service rows and details wherever the projection ships. The protocol minor version increases; the major version remains unchanged.
 
 ### Lifecycle requests
 
@@ -170,10 +184,11 @@ For every start request, the backend:
 2. Verifies the live Service UID equals the request identity.
 3. Rejects non-TCP ports, ExternalName Services, absent ports, and ambiguous unnamed port selection.
 4. Lists `discovery.k8s.io/v1` EndpointSlices with label `kubernetes.io/service-name=<service-name>`.
-5. Keeps endpoints whose `conditions.ready` is not false and whose `targetRef` is a Pod in the same namespace.
-6. Matches the requested Service port to the EndpointSlice port and obtains a numeric target port.
-7. Sorts candidates by Pod name then UID and chooses the first, making selection deterministic and testable.
-8. Fetches that Pod and verifies its UID before opening `pods/portforward`.
+5. Discards every slice whose `metadata.ownerReferences` contains no entry whose UID equals the fetched Service UID. The name label alone is not authoritative: after a Service is deleted and recreated, stale slices can coexist with current ones until asynchronous cleanup, and their Pods would pass the later Pod UID check. Controller-created slices carry an owner reference to their Service, so comparing that UID binds each slice to the exact fetched object. Ownerless or hand-crafted slices without a matching Service owner reference are skipped in this first version; accepting them requires a separately reviewed resolution policy.
+6. Keeps endpoints whose `conditions.ready` is not false and whose `targetRef` is a Pod in the same namespace.
+7. Matches the requested Service port to the EndpointSlice port and obtains a numeric target port.
+8. Sorts candidates by Pod name then UID and chooses the first, making selection deterministic and testable.
+9. Fetches that Pod and verifies its UID before opening `pods/portforward`.
 
 The session pins the selected Pod UID and numeric remote port. Endpoint changes after startup do not retarget it. If no eligible endpoint exists, Start fails without binding a local socket.
 
@@ -189,6 +204,19 @@ The first version deliberately does not fall back to legacy Endpoints, Service s
 - Stop cancels the accept loop, closes active pumps, releases the local port, emits `Stopped`, and succeeds if repeated.
 - Embedded server shutdown cancels and joins every session before its runtime exits.
 
+### Context-switch atomicity
+
+Stopping all sessions and committing the context switch must be atomic with respect to `portForward.start`. A UI confirmation alone cannot close this race: a Start already resolving through the backend, or another authenticated Start arriving concurrently, can bind a listener after the stop-all snapshot and leave exactly the invisible old-context forward this design forbids.
+
+The `PortForwardManager` therefore owns a transition gate:
+
+- The manager keeps a monotonic epoch counter. Session publication happens under the manager lock and stamps the epoch observed at Start time.
+- A context switch takes the manager write side under that same lock, increments the epoch, stops and joins every active session, and only then lets the backend commit the switch. Additional `portForward.start` requests serialize behind the gate instead of interleaving with the drain.
+- A Start whose resolution raced the switch detects the epoch mismatch at publication time, aborts without binding any socket, and returns a typed retryable context-transition error.
+- The sessions subscription emits the resulting terminal snapshots, so every connected panel converges on zero old-context sessions.
+
+The client-side **Stop all and switch** blocker remains as presentation: it confirms intent and lets the UI drain sessions early when possible. The server-side gate is the enforcement point, including for clients that bypass the prompt.
+
 ## Safety and resource limits
 
 - Loopback binding is hard-coded server-side and is not a request field.
@@ -197,7 +225,7 @@ The first version deliberately does not fall back to legacy Endpoints, Service s
 - Requests validate Service identity and context; no kubeconfig paths, credentials, raw Kubernetes errors, or arbitrary socket targets cross the protocol.
 - Error text uses stable categories: unavailable endpoint, forbidden, conflict/local port in use, vanished/recreated resource, unsupported Service, and transport closed.
 - Kubernetes authorization remains authoritative. Expected access is `get` on Services and Pods, `list` on EndpointSlices, and `create` on `pods/portforward`. Advisory SelfSubjectAccessReview results may disable the button but never replace the real API check.
-- Context switching stops all active sessions after the existing navigation guard asks for confirmation. Keeping invisible forwards alive across contexts is unsafe and confusing.
+- Context switching drains all sessions through the manager's transition gate (see “Context-switch atomicity”); the navigation confirmation is presentation only. Keeping invisible forwards alive across contexts is unsafe and confusing.
 - Closing the Services window does not implicitly stop sessions; active sessions remain visible via a count badge and are recoverable by reopening the panel.
 
 ## Workspace changes
@@ -209,7 +237,7 @@ Add `WindowKind::Services`, `LauncherItem::Services`, and `WindowContent::Servic
 Dirty YAML and active port forwards are different guards:
 
 - Existing dirty-YAML rules continue unchanged.
-- Context switch with active forwards adds a blocker listing the number of sessions and offers **Stop all and switch** or **Cancel**.
+- Context switch with active forwards adds a blocker listing the number of sessions and offers **Stop all and switch** or **Cancel**. This prompt is presentation only; the server-side transition gate enforces atomicity even if it is bypassed.
 - Window close is not blocked because it does not end sessions.
 - Application shutdown stops sessions automatically; it does not prompt.
 
@@ -223,6 +251,8 @@ Dirty YAML and active port forwards are different guards:
 | Missing RBAC | Safe forbidden error naming the required resource/verb |
 | Local port occupied | Conflict error; preserve the input for correction |
 | Pod disappears after Start | Session becomes Failed and listener closes |
+| Upstream closes one forwarded connection | That connection completes; session stays Active |
+| Start races a context switch | Typed retryable context-transition error; no listener bound |
 | Control WebSocket reconnects | `portForward.list` plus subscription rebuilds state; data forwarding continues |
 | Embedded server shuts down | All listeners and pumps are cancelled and joined |
 
@@ -230,10 +260,10 @@ Dirty YAML and active port forwards are different guards:
 
 Implementation follows TDD in these slices:
 
-1. **Protocol contracts:** JSON round trips, older payload defaults, invalid ports/protocols, golden minor-version negotiation.
-2. **Workspace/UI:** launcher singleton behavior, namespace/search/sort, structured port rendering, capability gating, duplicate Start prevention, context-switch guard, accessibility labels.
-3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, deterministic ready-Pod selection, named target ports, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
-4. **Server manager:** loopback-only binding, OS-assigned port, occupied port, multiple local connections, limits, idempotent stop, reconnect/list reconstruction, and cancellation on shutdown.
+1. **Protocol contracts:** JSON round trips, older payload defaults, invalid ports/protocols, list-row projection defaults on legacy payloads and populated Service projections on snapshot pages and `resource.changed` deltas, golden minor-version negotiation.
+2. **Workspace/UI:** launcher singleton behavior, namespace/search/sort, structured port rendering from row projections without parsing `summary`, capability gating, duplicate Start prevention, context-switch guard, accessibility labels.
+3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, owner-reference slice binding including a mixed stale/current-slice set after Service delete/recreate, deterministic ready-Pod selection, named target ports, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
+4. **Server manager:** loopback-only binding, OS-assigned port, occupied port, multiple local connections, a second connection succeeding after upstream EOF, limits, idempotent stop, reconnect/list reconstruction, in-flight Start aborted by a concurrent context switch with no listener left behind, concurrent Start/switch interleavings yielding no old-context session, and cancellation on shutdown.
 5. **Desktop integration:** embedded config advertises and accepts `service.portForward`; standalone config neither advertises nor accepts it.
 6. **Real kind E2E:** create a Deployment and Service, start an automatic local port, issue HTTP through it, stop it, prove the port is released, then repeat with an explicit local port.
 
