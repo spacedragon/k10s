@@ -64,7 +64,13 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
     kernel
         .query(Query::Bootstrap)
         .await
-        .expect("bootstrap initializes the context client used by the desktop");
+        .expect("desktop bootstrap succeeds");
+    kernel
+        .query(Query::ResourceTypes {
+            context: ADMIN_CONTEXT.into(),
+        })
+        .await
+        .expect("context-scoped discovery initializes the selected client");
     let connector = kernel.port_forward_connector().expect("kube connector");
     let cancel = CancellationToken::new();
     let (events, _) = tokio::sync::broadcast::channel(64);
