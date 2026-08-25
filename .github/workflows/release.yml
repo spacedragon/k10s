@@ -1,8 +1,6 @@
 name: Release packaging
 
 on:
-  pull_request:
-    paths: ["Packager.toml", "dist-workspace.toml", "packaging/**", "apps/k10s-server/**", ".github/workflows/release.yml"]
   push:
     tags: ["v*"]
   workflow_dispatch:

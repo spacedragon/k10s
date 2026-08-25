@@ -32,6 +32,13 @@ jobs:
       - name: Rust version
         run: rustc --version && cargo --version
 
+      - name: Release metadata consistency
+        run: |
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          packager_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Packager.toml)"
+          test -n "$cargo_version"
+          test "$cargo_version" = "$packager_version"
+
       - name: Format check
         run: cargo fmt --all -- --check
 

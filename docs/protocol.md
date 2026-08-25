@@ -1,8 +1,8 @@
 # Protocol operations
 
-k10s uses JSON control frames on `/control` and versioned binary payloads on
-ticket-authenticated `/logs` and `/exec` sockets. The access token is carried
-only in the first `hello` frame.
+k10s uses JSON control frames on `/api/v1/control` and versioned binary payloads
+on ticket-authenticated `/api/v1/logs` and `/api/v1/exec` sockets. The access
+token is carried only in the first `hello` frame.
 
 ## Compatibility
 

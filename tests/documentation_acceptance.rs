@@ -3,6 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use k10s_protocol::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
+use k10s_server::ServerConfig;
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -10,6 +13,10 @@ fn root() -> PathBuf {
 fn read(relative: &str) -> String {
     fs::read_to_string(root().join(relative))
         .unwrap_or_else(|error| panic!("cannot read {relative}: {error}"))
+}
+
+fn normalized(document: &str) -> String {
+    document.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn assert_documented(document: &str, values: impl IntoIterator<Item = String>) {
@@ -73,6 +80,118 @@ fn every_embeddable_server_config_field_is_documented() {
 }
 
 #[test]
+fn embeddable_server_defaults_match_documentation() {
+    let defaults = ServerConfig::default();
+    let docs = read("docs/configuration.md");
+    let expected = [
+        (
+            "access_token",
+            if defaults.access_token.is_empty() {
+                "empty".to_owned()
+            } else {
+                defaults.access_token.clone()
+            },
+        ),
+        (
+            "startup_readiness_delay",
+            defaults.startup_readiness_delay.as_millis().to_string(),
+        ),
+        (
+            "probe_drain_grace",
+            defaults.probe_drain_grace.as_millis().to_string(),
+        ),
+        (
+            "hello_timeout",
+            format!("{} s", defaults.hello_timeout.as_secs()),
+        ),
+        (
+            "graceful_flush_timeout",
+            format!("{} ms", defaults.graceful_flush_timeout.as_millis()),
+        ),
+        (
+            "max_frame_size",
+            format!("{} MiB", defaults.max_frame_size >> 20),
+        ),
+        (
+            "max_message_size",
+            format!("{} MiB", defaults.max_message_size >> 20),
+        ),
+        (
+            "max_unauthenticated_connections",
+            defaults.max_unauthenticated_connections.to_string(),
+        ),
+        (
+            "max_authenticated_connections",
+            defaults.max_authenticated_connections.to_string(),
+        ),
+        (
+            "outbound_queue_capacity",
+            defaults.outbound_queue_capacity.to_string(),
+        ),
+        (
+            "max_resource_subscriptions_per_session",
+            defaults.max_resource_subscriptions_per_session.to_string(),
+        ),
+        (
+            "snapshot_rows_per_chunk",
+            defaults.snapshot_rows_per_chunk.to_string(),
+        ),
+        (
+            "drain_grace_timeout",
+            format!("{} ms", defaults.drain_grace_timeout.as_millis()),
+        ),
+        (
+            "drain_timeout",
+            format!("{} s", defaults.drain_timeout.as_secs()),
+        ),
+        ("capabilities", defaults.capabilities.join(", ")),
+        (
+            "max_stream_frame_size",
+            format!("{} KiB", defaults.max_stream_frame_size >> 10),
+        ),
+        (
+            "max_stream_message_size",
+            format!("{} KiB", defaults.max_stream_message_size >> 10),
+        ),
+        (
+            "stream_hello_timeout",
+            format!("{} s", defaults.stream_hello_timeout.as_secs()),
+        ),
+        (
+            "stream_rate_budget_bytes_per_sec",
+            format!("{} KiB/s", defaults.stream_rate_budget_bytes_per_sec >> 10),
+        ),
+        (
+            "max_stream_connections",
+            defaults.max_stream_connections.to_string(),
+        ),
+        (
+            "resume_max_journal_entries",
+            format!(
+                "{},{:03}",
+                defaults.resume_max_journal_entries / 1_000,
+                defaults.resume_max_journal_entries % 1_000
+            ),
+        ),
+        (
+            "resume_max_sessions",
+            defaults.resume_max_sessions.to_string(),
+        ),
+        (
+            "resume_entry_max_age",
+            format!("{} s", defaults.resume_entry_max_age.as_secs()),
+        ),
+    ];
+    for (field, value) in expected {
+        let row = format!("| `{field}` | {value} |");
+        assert!(
+            docs.contains(&row),
+            "documented default does not match implementation: {row}"
+        );
+    }
+}
+
+#[test]
 fn operational_contracts_have_acceptance_coverage() {
     let configuration = read("docs/configuration.md");
     let deployment = read("docs/deployment.md");
@@ -97,7 +216,7 @@ fn operational_contracts_have_acceptance_coverage() {
         "`503 initialization failed\\n`",
         "`503 draining\\n`",
         "`200 ready\\n`",
-        "proxy_set_header Host $host",
+        "proxy_set_header Host $http_host",
         "proxy_set_header Origin $http_origin",
     ] {
         assert!(
@@ -111,5 +230,22 @@ fn operational_contracts_have_acceptance_coverage() {
     assert!(troubleshooting.contains("correlation ID"));
     for required in ["major `1`", "minor `0..=1`", "`resyncRequired`"] {
         assert!(protocol.contains(required), "missing contract: {required}");
+    }
+
+    for route in [CONTROL_PATH, LOGS_PATH, EXEC_PATH] {
+        assert!(
+            protocol.contains(&format!("`{route}`")),
+            "protocol guide is missing canonical route `{route}`"
+        );
+    }
+
+    let kubeconfig_loader = read("crates/k10s-backend/src/kube/config.rs");
+    assert!(
+        kubeconfig_loader.contains("return Err(AdapterError::ExecPluginRejected"),
+        "backend no longer rejects exec credential plugins; update operator docs"
+    );
+    for document in [&deployment, &security] {
+        assert!(document.contains("exec credential plugin"));
+        assert!(normalized(document).contains("never executes external credential binaries"));
     }
 }

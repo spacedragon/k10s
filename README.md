@@ -186,6 +186,8 @@ error payloads or probe bodies.
 - **WASM check** — `cargo check --locked -p k10s-web --target wasm32-unknown-unknown`
 - **Web foundation** — pinned Trunk 0.21.14 release build plus the Chromium
   Playwright smoke against the standalone server
+- **Native platform smoke** — release-mode server/desktop builds and loopback
+  launch probes on registered Windows/macOS self-hosted runners
 
 ## Releasing
 
@@ -212,8 +214,9 @@ Signing remains opt-in and secrets are never stored in the repository. Windows
 signing supplies the certificate to the runner and configures the packager
 thumbprint/timestamp inputs at release time. macOS signing/notarization supplies
 an Apple signing identity, App Store Connect issuer/key ID, and private key via
-the runner keychain/environment. Unsigned pull-request builds exercise the same
-packaging and smoke checks.
+the runner keychain/environment. Pull requests exercise source, web, native
+build, and loopback launch gates; installer/archive creation and OCI packaging
+run only for a release tag or an explicit manual release-pipeline smoke test.
 
 To cut a release:
 
@@ -228,4 +231,6 @@ To cut a release:
 
 3. Monitor the Release workflow; the release is created automatically with generated release notes.
 
-A manual `workflow_dispatch` run of the same workflow builds all platform artifacts without publishing, which is useful to smoke-test the pipeline before tagging.
+A manual `workflow_dispatch` run of the same workflow builds all platform
+artifacts without publishing. Run it before tagging whenever packaging metadata,
+the container definition, release tooling, or release workflow changes.
