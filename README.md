@@ -1,11 +1,5 @@
 # k10s
 
-The native desktop application includes bounded, TCP-only Service port
-forwarding from the Services panel. It binds only `127.0.0.1`, validates exact
-Service and Pod identities through EndpointSlices, and drains all sessions on
-context switch or shutdown. The standalone browser/server deployment does not
-enable this capability.
-
 A local Kubernetes control-plane client with a Rust workspace foundation: a
 protocol crate shared by native and web frontends, a fake-backed backend
 kernel, and an embeddable Axum control server. The release candidate includes
@@ -205,19 +199,22 @@ Desktop outputs are `.deb` + `.AppImage`, `.msi` + NSIS `.exe`, and
 the same web bundle embedded, plus a non-root OCI image.
 
 Every push to `main` cuts a patch release automatically: the workflow bumps the
-matching `version` in `Cargo.toml`, `Packager.toml`, and `Cargo.lock`, commits
-it as `chore(release): vX.Y.Z`, pushes the commit and a `vX.Y.Z` tag, and then
-re-dispatches the Release workflow at that tag (GitHub suppresses workflow runs
-triggered by `GITHUB_TOKEN` pushes, so the tag push cannot start the packaging
-phase by itself). The packaging run builds every platform and publishes the
-GitHub release with generated release notes. The release commit is recognized
-by its `chore(release):` subject and never triggers another bump, so the
-pipeline cannot re-trigger itself.
+matching `version` in `Cargo.toml`, `Packager.toml`, and `Cargo.lock`, lands
+the change as `chore(release): vX.Y.Z` through a release PR that is merged
+automatically (main requires changes to come through pull requests), tags the
+merged commit `vX.Y.Z`, and re-dispatches the Release workflow at that tag
+(GitHub suppresses workflow runs triggered by `GITHUB_TOKEN` pushes, so the tag
+push cannot start the packaging phase by itself). The packaging run builds
+every platform and publishes the GitHub release with generated release notes.
+The merge-commit-based flow keeps main's tip free of a `chore(release):`
+subject, so every push cuts exactly one release and the pipeline cannot
+re-trigger itself.
 
 To cut a release manually — e.g. a minor or major bump — run the Release
 workflow from the Actions tab with `bump` set to `patch`, `minor`, or `major`
-on branch `main`. The first run bumps and tags, then re-dispatches the workflow
-at the new tag; the packaging run builds and publishes.
+on branch `main`. The first run lands the bump via an auto-merged release PR,
+tags the merged commit, and re-dispatches the workflow at the new tag; the
+packaging run builds and publishes.
 
 Local release verification uses the same order:
 
