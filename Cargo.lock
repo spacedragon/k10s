@@ -1648,6 +1648,7 @@ name = "k10s-server-app"
 version = "0.1.0"
 dependencies = [
  "k10s-backend",
+ "k10s-protocol",
  "k10s-server",
  "tokio",
  "tokio-util",
