@@ -6,8 +6,8 @@ only in the first `hello` frame.
 
 ## Compatibility
 
-The current protocol is major `1`, minor `1`. Supported negotiation is major
-`1` with peer minor `0..=1`; the negotiated minor is the lower value. A major
+The current protocol is major `1`, minor `2`. Supported negotiation is major
+`1` with peer minor `0..=2`; the negotiated minor is the lower value. A major
 mismatch is rejected. Unknown message kinds return a structured
 `unsupportedMessage` error instead of being ignored or crashing a peer.
 
@@ -39,3 +39,20 @@ unknown until refreshed; clients must not guess success or blindly retry.
 Dedicated logs/exec sockets require a single-use ticket obtained on the
 control channel. Their binary header version is independent and currently `1`;
 unknown header versions or payload kinds are rejected explicitly.
+
+## Resource projections and port forwarding
+
+Added in minor `2`: list rows and detail responses carry an optional
+kind-specific `projection` (currently `service`) with normalized structured
+columns. The field defaults to absent; legacy payloads decode unchanged and
+`summary` remains authoritative for existing generic windows.
+
+Port-forward sessions use three request kinds — `portForward.start`,
+`portForward.stop`, and `portForward.list` — plus a bounded
+`portForwardSessions` subscription whose events carry complete session
+snapshots with monotonic revisions. Start requires the exact core/v1 Service
+identity including UID, a port selector by name or number, and a local port of
+`0..=65535` where `0` lets the OS assign one. Stop is idempotent by session ID.
+Servers advertise `service.portForward` only when the feature is enabled;
+disabled servers reject every port-forward request regardless of advertised
+capabilities.

@@ -1,0 +1,32 @@
+{
+  "kind": "response",
+  "requestId": "1",
+  "payload": {
+    "protocol": {
+      "major": 1,
+      "minor": 2
+    },
+    "capabilities": [
+      "logs.tail",
+      "exec.attach"
+    ],
+    "server": {
+      "instanceId": "instance-1",
+      "version": "0.1.0"
+    },
+    "contexts": [
+      {
+        "name": "dev-local",
+        "cluster": "dev-cluster",
+        "namespace": "default",
+        "isCurrent": true
+      },
+      {
+        "name": "prod-readonly",
+        "cluster": "prod-cluster",
+        "namespace": "default",
+        "isCurrent": false
+      }
+    ]
+  }
+}

@@ -811,6 +811,15 @@ pub(crate) async fn serve_socket(
                             }
                         }
                     }
+                    Ok(SubscriptionSelector::PortForwardSessions) => {
+                        // The bounded session stream activates with the
+                        // port-forward manager; servers without it never
+                        // accept this selector.
+                        Err((
+                            ErrorCode::UnsupportedMessage,
+                            "unsupported subscription".into(),
+                        ))
+                    }
                     Err(_) if selector_kind.is_none() => Err((
                         ErrorCode::InvalidRequest,
                         "invalid subscription payload".into(),
@@ -818,7 +827,12 @@ pub(crate) async fn serve_socket(
                     Err(_)
                         if matches!(
                             selector_kind.as_deref(),
-                            Some("bootstrapStatus" | "resource" | "infrastructure")
+                            Some(
+                                "bootstrapStatus"
+                                    | "resource"
+                                    | "infrastructure"
+                                    | "portForwardSessions"
+                            )
                         ) =>
                     {
                         Err((

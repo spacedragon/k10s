@@ -548,6 +548,7 @@ impl ResourceDetailResult {
                 capabilities,
                 manifest,
                 identity,
+                projection: None,
             },
         }
     }
@@ -797,6 +798,7 @@ fn map_row(record: &ResourceRecord) -> ResourceListRow {
             .collect::<BTreeMap<_, _>>(),
         summary: record.summary.clone(),
         created_at: record.created_at.clone(),
+        projection: None,
     }
 }
 

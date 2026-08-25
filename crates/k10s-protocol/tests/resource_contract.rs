@@ -156,6 +156,7 @@ fn snapshot_frames_stream_with_subscription_metadata() {
             labels: BTreeMap::from([("app".to_owned(), "web".to_owned())]),
             summary: "Running".into(),
             created_at: "2026-08-21T00:00:00Z".into(),
+            projection: None,
         }],
     };
 
@@ -311,6 +312,7 @@ fn list_rows_carry_normalized_identity_labels_summary_and_timestamp() {
         labels: BTreeMap::from([("app".to_owned(), "api".to_owned())]),
         summary: "2/2 ready".into(),
         created_at: "2026-08-21T00:05:00Z".into(),
+        projection: None,
     };
     let encoded = round_trip(&row);
     assert_eq!(encoded["summary"], json!("2/2 ready"));
@@ -373,6 +375,7 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
         },
         manifest: "apiVersion: apps/v1\nkind: ReplicaSet\nmetadata:\n  name: web-frontend-7d9f8\n"
             .into(),
+        projection: None,
     };
     let encoded = round_trip(&response);
     assert_eq!(encoded["ownerReferences"][0]["controller"], json!(true));

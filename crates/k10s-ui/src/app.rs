@@ -1812,6 +1812,7 @@ mod tests {
             labels: Default::default(),
             summary: "Ready".into(),
             created_at: "2026-08-25T00:00:00Z".into(),
+            projection: None,
         };
         let window = crate::workspace::WindowId(99);
         let manifest = "apiVersion: apps/v1\nkind: Deployment\n";

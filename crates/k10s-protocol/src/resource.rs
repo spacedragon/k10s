@@ -166,7 +166,8 @@ impl std::fmt::Display for BackendRevision {
 /// One normalized row of a resource list.
 ///
 /// Kind-specific columns are projected into `summary` so that every list
-/// window renders from the same shape.
+/// window renders from the same shape. Structured kind-specific projections
+/// are additionally exposed through the optional [`Self::projection`] field.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceListRow {
@@ -180,6 +181,105 @@ pub struct ResourceListRow {
     pub summary: String,
     /// Creation time formatted as RFC 3339.
     pub created_at: String,
+    /// Kind-specific structured projection, added in protocol v1.2.
+    ///
+    /// Populated only for kinds with a designed projection; other kinds and
+    /// legacy payloads decode as [`None`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ResourceProjection>,
+}
+
+/// A kind-specific normalized projection shared by list rows and detail
+/// responses.
+///
+/// Projections carry structured columns so windows never parse manifest
+/// text or `summary`; they contain no raw Kubernetes objects and no
+/// credential-bearing fields.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ResourceProjection {
+    /// Normalized core/v1 Service view model.
+    Service(ServiceProjection),
+}
+
+/// Normalized core/v1 Service projection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceProjection {
+    /// Kubernetes Service type, such as `ClusterIP` or `NodePort`.
+    pub service_type: String,
+    /// Primary cluster IPs; empty for ExternalName Services.
+    pub cluster_ips: Vec<String>,
+    /// Selector labels, sorted by key for deterministic wire order.
+    pub selector: BTreeMap<String, String>,
+    /// External name of an ExternalName Service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_name: Option<String>,
+    /// Session affinity policy when explicitly set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_affinity: Option<String>,
+    /// External traffic policy when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_traffic_policy: Option<String>,
+    /// Internal traffic policy when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_traffic_policy: Option<String>,
+    /// Every declared Service port, including non-forwardable ones.
+    pub ports: Vec<ServicePort>,
+}
+
+/// One declared Service port.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePort {
+    /// Declared port name, absent for unnamed ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Declared Service port number.
+    pub service_port: u16,
+    /// Resolved target port on backing Pods.
+    pub target_port: TargetPort,
+    /// Node port declared by NodePort or LoadBalancer Services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_port: Option<u16>,
+    /// Wire protocol of the port.
+    pub protocol: TransportProtocol,
+    /// Optional application protocol label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_protocol: Option<String>,
+}
+
+/// The target port of a Service port declaration.
+///
+/// An omitted Kubernetes `targetPort` normalizes to
+/// [`TargetPort::Number`] carrying the Service port number, making the
+/// defaulted case explicit on the wire instead of being reconstructed by
+/// the UI.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TargetPort {
+    /// A named target port.
+    Name {
+        /// Target port name as declared on backing Pods.
+        name: String,
+    },
+    /// A numeric target port.
+    Number {
+        /// Target port number on backing Pods.
+        number: u16,
+    },
+}
+
+/// Wire transport protocol of a Service port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransportProtocol {
+    /// TCP ports may be forwarded by the desktop application.
+    Tcp,
+    /// UDP ports render read-only and are never forwarded.
+    Udp,
+    /// SCTP ports render read-only and are never forwarded.
+    Sctp,
 }
 
 /// A reference from a child object to its owner.
@@ -343,6 +443,12 @@ pub struct ResourceDetailResponse {
     /// read-only and used as the base of guarded edits. Authored entirely by
     /// the backend; clients never synthesize it.
     pub manifest: String,
+    /// Kind-specific structured projection, added in protocol v1.2.
+    ///
+    /// Populated only for kinds with a designed projection; other kinds and
+    /// legacy payloads decode as [`None`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ResourceProjection>,
 }
 
 /// Whether a workload-health bucket is healthy, warning, or failing.
