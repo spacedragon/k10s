@@ -10,6 +10,8 @@ use k10s_server::port_forward::{PortForwardManager, StopOutcome};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
+const ADMIN_CONTEXT: &str = "kind-k10s-read-path";
+
 fn kubeconfig() -> PathBuf {
     std::env::var_os("K10S_KIND_KUBECONFIG")
         .map(PathBuf::from)
@@ -22,6 +24,8 @@ fn kubectl(args: &[&str]) -> String {
     let output = Command::new("kubectl")
         .arg("--kubeconfig")
         .arg(kubeconfig())
+        .arg("--context")
+        .arg(ADMIN_CONTEXT)
         .args(args)
         .output()
         .expect("kubectl is installed");
@@ -52,7 +56,7 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
         "-o",
         "jsonpath={.metadata.uid}",
     ]);
-    let context = kubectl(&["config", "current-context"]).trim().to_owned();
+    let context = ADMIN_CONTEXT.to_owned();
     let kernel = build_kernel(&BackendMode::Kube {
         kubeconfig: Some(kubeconfig()),
     })
