@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-backend"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "eframe",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "futures-util",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-server-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "k10s-backend",
  "k10s-protocol",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-ui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "k10s-web"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "console_error_panic_hook",
  "eframe",
