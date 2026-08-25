@@ -15,8 +15,8 @@ k10s-protocol = { path = "../k10s-protocol" }
 k8s-openapi = { version = "0.28", features = ["v1_36"] }
 # Stream combinators for the kube-rs watch source.
 futures-util = "0.3.34"
-# config (kubeconfig loading) plus client/discovery so the real adapter can run kube-rs API discovery; rustls/ring match kube's default TLS backend for production connectors.
-kube = { version = "4.2", default-features = false, features = ["config", "client", "rustls-tls", "ring", "ws"] }
+# config (kubeconfig loading) plus client/discovery so the real adapter can run kube-rs API discovery; rustls/ring match kube's default TLS backend, and http-proxy honors proxy URLs supplied by kubeconfig or the environment.
+kube = { version = "4.2", default-features = false, features = ["config", "client", "http-proxy", "rustls-tls", "ring", "ws"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # YAML rendering of fetched objects for detail manifests.
