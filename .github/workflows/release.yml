@@ -87,7 +87,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == push ]]; then
+          # Recovery applies to push events and to re-runs of a manual bump:
+          # a rerun must complete the interrupted release, while a brand-new
+          # dispatch (run_attempt 1) may intentionally cut the next release.
+          recovery=0
+          if [[ "${{ github.event_name }}" == push ]]; then recovery=1; fi
+          if [[ "${{ github.event_name }}" == workflow_dispatch && "${{ github.run_attempt }}" -gt 1 ]]; then recovery=1; fi
+          if [ "$recovery" -eq 1 ]; then
             subject="$(git log -1 --format=%s)"
             if [[ "$subject" == "chore(release):"* ]]; then
               tag="v${subject#chore(release): v}"
