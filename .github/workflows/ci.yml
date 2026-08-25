@@ -182,6 +182,7 @@ jobs:
           cargo test --locked -p k10s-backend --test kind_operations -- --ignored --nocapture
           cargo build --locked -p k10s-server-app --bin k10s-server
           cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture
+          cargo test --locked -p k10s-server --test kind_port_forward -- --ignored --nocapture
           cargo test --locked -p k10s-desktop --test kube_factory
 
   # Browser release gate: full Chromium coverage and compatibility bootstrap /
@@ -292,6 +293,10 @@ jobs:
           cargo build --locked --release -p k10s-server-app --bin k10s-server
           cargo build --locked --release -p k10s-desktop --bin k10s-desktop
           cargo check --locked -p k10s-web --target wasm32-unknown-unknown
+
+      - name: Windows desktop loopback lifecycle tests
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: cargo test --locked -p k10s-desktop --test embedded_lifecycle
 
       - name: Launch the native Windows UI
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}

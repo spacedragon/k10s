@@ -91,6 +91,8 @@ pub(super) fn show<I>(
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
     dialogs: &mut dialogs::OperationDialogs,
+    feed: &crate::ui::ResourceFeed,
+    service_port_drafts: Option<&std::collections::BTreeMap<String, String>>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -98,7 +100,17 @@ pub(super) fn show<I>(
     // Services render through their dedicated read-only body; the generic
     // workload path stays untouched for every other kind.
     if is_service_gvk(&detail_identity_gvk(detail)) {
-        service::show(ui, window_id, detail, view, gone, yaml, queued);
+        service::show(
+            ui,
+            window_id,
+            detail,
+            view,
+            gone,
+            yaml,
+            feed,
+            service_port_drafts,
+            queued,
+        );
         return;
     }
 

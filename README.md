@@ -1,5 +1,11 @@
 # k10s
 
+The native desktop application includes bounded, TCP-only Service port
+forwarding from the Services panel. It binds only `127.0.0.1`, validates exact
+Service and Pod identities through EndpointSlices, and drains all sessions on
+context switch or shutdown. The standalone browser/server deployment does not
+enable this capability.
+
 A local Kubernetes control-plane client with a Rust workspace foundation: a
 protocol crate shared by native and web frontends, a fake-backed backend
 kernel, and an embeddable Axum control server. The release candidate includes

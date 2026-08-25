@@ -602,21 +602,25 @@ pub(crate) async fn serve_socket(
                         let result: Result<RequestOutcome, RequestFailure> = match parsed {
                             Ok(Some(ParsedRequest::Query(query))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
-                                // The port-forward transition gate wraps the
-                                // backend switch: sessions drain and the
-                                // epoch advances before the kernel may
-                                // commit, so a Start racing the switch can
-                                // never bind a stale-context listener.
                                 if let Query::ContextSwitch { to } = &query
                                     && let Some(manager) = task_port_forward.clone()
                                 {
-                                    manager.begin_context_transition(to.clone()).await;
-                                }
-                                tokio::select! {
-                                    () = request_cancel.cancelled() =>
-                                        Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                    result = task_kernel.query_with_deadline(query, deadline) =>
-                                        result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                    let to = to.clone();
+                                    manager.transition_context(to, async {
+                                        tokio::select! {
+                                            () = request_cancel.cancelled() =>
+                                                Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                            result = task_kernel.query_with_deadline(query, deadline) =>
+                                                result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                        }
+                                    }).await
+                                } else {
+                                    tokio::select! {
+                                        () = request_cancel.cancelled() =>
+                                            Err(RequestFailure::Backend(BackendError::Cancelled)),
+                                        result = task_kernel.query_with_deadline(query, deadline) =>
+                                            result.map(RequestOutcome::Kernel).map_err(RequestFailure::Backend),
+                                    }
                                 }
                             }
                             Ok(Some(ParsedRequest::Execute(command))) => {

@@ -31,3 +31,12 @@ kubeconfig. See [Troubleshooting](troubleshooting.md) for the correlation flow.
 Browser WebSocket origins are checked against the observed host. The server
 ignores `X-Forwarded-*` and `X-Real-IP` as trust signals. Preserve Host/Origin
 at the proxy and do not expose an unprotected upstream.
+# Desktop Service port forwarding
+
+The `service.portForward` capability is desktop-only and is not the security
+boundary: disabled standalone servers reject the requests as well. Listeners
+are hard-coded to `127.0.0.1`. Kubernetes remains authoritative and requires
+`get` on `services`, `list` on `endpointslices`, `get` on `pods`, and `create`
+on `pods/portforward`. Service and Pod UIDs are revalidated; ExternalName,
+UDP, SCTP, ownerless EndpointSlices, arbitrary IPs, and non-Pod endpoints are
+not supported.

@@ -187,3 +187,44 @@ fn list_reconstruction_replaces_state_without_duplicates() {
     assert_eq!(sessions.len(), 1, "no duplicate sessions after reconnect");
     assert_eq!(sessions[0].revision, 5);
 }
+
+#[test]
+fn convenience_start_requests_are_correlated_through_normal_apply() {
+    let mut client = ready_client_with_capability(true);
+    let request = k10s_protocol::PortForwardStartRequest {
+        service: k10s_protocol::ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Service"),
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-svc".into(),
+        },
+        port: k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+        local_port: 0,
+    };
+    client
+        .request_port_forward_start(request, "legacy-id")
+        .unwrap();
+    let id = std::iter::from_fn(|| client.take_outbound())
+        .find(|frame| {
+            frame
+                .payload
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                == Some(k10s_protocol::REQUEST_PORT_FORWARD_START)
+        })
+        .and_then(|frame| frame.request_id)
+        .expect("request id");
+    client
+        .apply(k10s_protocol::ServerFrame::response(
+            id,
+            k10s_protocol::PortForwardStartResponse {
+                session: session("pf-correlated", PortForwardSessionState::Active, 1),
+            },
+        ))
+        .expect("response is correlated, not unknown");
+    assert_eq!(
+        client.port_forward_sessions()[0].id.as_str(),
+        "pf-correlated"
+    );
+}

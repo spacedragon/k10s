@@ -7,6 +7,7 @@
 //! monotonic revision and the manager's context-transition epoch.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -174,12 +175,13 @@ impl PortForwardManager {
         local_port: u16,
         requested_context: String,
     ) -> Result<PortForwardSession, StartRejected> {
-        if let Some(existing) = {
+        let observed_epoch = {
             let state = self.state.lock().await;
-            Self::find_in_state(&state, &identity, &selection).await
-        } {
-            return Ok(existing);
-        }
+            if let Some(existing) = Self::find_in_state(&state, &identity, &selection, None).await {
+                return Ok(existing);
+            }
+            state.epoch
+        };
         if self.cancel.is_cancelled() {
             return Err(StartRejected::new(
                 PortForwardFailureCategory::TransportClosed,
@@ -219,12 +221,15 @@ impl PortForwardManager {
         };
 
         let mut state = self.state.lock().await;
+        Self::prune_expired(&mut state).await;
         // Context-switch atomicity: validate the request identity against
         // the authoritative committed context under the same lock used by
         // the gate. Either dimension mismatching aborts without binding.
         // An empty committed context means no switch ever happened yet;
         // the first accepted start commits its own context.
-        if !state.current_context.is_empty() && state.current_context != requested_context {
+        if state.epoch != observed_epoch
+            || (!state.current_context.is_empty() && state.current_context != requested_context)
+        {
             drop(state);
             return Err(StartRejected::new(
                 PortForwardFailureCategory::ContextTransition,
@@ -248,7 +253,9 @@ impl PortForwardManager {
                 "the maximum number of port-forward sessions is active",
             ));
         }
-        if let Some(existing) = Self::find_in_state(&state, &identity, &selection).await {
+        if let Some(existing) =
+            Self::find_in_state(&state, &identity, &selection, Some(resolved.service_port)).await
+        {
             return Ok(existing);
         }
 
@@ -336,7 +343,6 @@ impl PortForwardManager {
             guard.state = PortForwardSessionState::Stopped;
             guard.failure = None;
             guard.terminal_at = Some(std::time::Instant::now());
-            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
             // Cancelling stops new accepts and tears down live pumps; their
             // tasks are joined below WITHOUT any lock held so a pump that is
             // mid-copy can always finish its release bookkeeping.
@@ -346,11 +352,17 @@ impl PortForwardManager {
         };
         Self::join_session_tasks(accept_handle, &inner).await;
         let snapshot = {
-            let guard = inner.lock().await;
-            snapshot_of(&guard)
+            let mut state = self.state.lock().await;
+            let mut guard = inner.lock().await;
+            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
+            let snapshot = snapshot_of(&guard);
+            let _ = state.events_tx.send(PortForwardSessionEvent {
+                revision: snapshot.revision,
+                session: snapshot.clone(),
+            });
+            state.sessions.remove(session_id);
+            snapshot
         };
-        self.publish_terminal(session_id.to_owned(), snapshot.clone())
-            .await;
         StopOutcome::Stopped(snapshot)
     }
 
@@ -378,24 +390,7 @@ impl PortForwardManager {
     /// diagnostics, then pruned here under the manager lock.
     pub async fn list(&self) -> Vec<PortForwardSession> {
         let mut state = self.state.lock().await;
-        let mut expired = Vec::new();
-        for (id, inner) in &state.sessions {
-            let guard = inner.lock().await;
-            let terminal = matches!(
-                guard.state,
-                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-            );
-            if terminal
-                && guard
-                    .terminal_at
-                    .is_some_and(|at| at.elapsed() > Self::TERMINAL_RETENTION)
-            {
-                expired.push(id.clone());
-            }
-        }
-        for id in expired {
-            state.sessions.remove(&id);
-        }
+        Self::prune_expired(&mut state).await;
         let mut snapshots = Vec::new();
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
@@ -408,56 +403,64 @@ impl PortForwardManager {
     /// Transition gate for context switches: holds the write side, stops
     /// and joins every session, advances the epoch once, records the new
     /// committed context, then lets the backend commit the switch.
-    pub async fn begin_context_transition(&self, to: String) {
+    pub async fn transition_context<T, E, F>(&self, to: String, commit: F) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
         type JoinableSession = (
             Arc<Mutex<SessionInner>>,
             Option<tokio::task::JoinHandle<()>>,
         );
         let mut joins: Vec<JoinableSession> = Vec::new();
-        {
-            let mut state = self.state.lock().await;
-            state.epoch += 1;
-            let ids: Vec<String> = state.sessions.keys().cloned().collect();
-            for id in ids {
-                let Some(inner) = state.sessions.get(&id).cloned() else {
-                    continue;
-                };
-                let mut guard = inner.lock().await;
-                if matches!(
-                    guard.state,
-                    PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-                ) {
-                    continue;
-                }
-                guard.state = PortForwardSessionState::Stopped;
-                guard.failure = Some(PortForwardFailure {
-                    category: PortForwardFailureCategory::ContextTransition,
-                    message: "the context switched while the forward was active".into(),
-                });
-                guard.terminal_at = Some(std::time::Instant::now());
-                guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
-                guard.cancel.cancel();
-                guard.pumps.close();
-                let handle = guard.accept_task.take();
-                let snapshot = snapshot_of(&guard);
-                let _ = state.events_tx.send(PortForwardSessionEvent {
-                    revision: snapshot.revision,
-                    session: snapshot,
-                });
-                let inner = state.sessions.remove(&id).expect("checked above");
-                joins.push((inner, handle));
+        let mut state = self.state.lock().await;
+        state.epoch += 1;
+        let ids: Vec<String> = state.sessions.keys().cloned().collect();
+        for id in ids {
+            let Some(inner) = state.sessions.get(&id).cloned() else {
+                continue;
+            };
+            let mut guard = inner.lock().await;
+            if matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) {
+                continue;
             }
-            // Commit only after every drain finished; queued starts observe
-            // the advanced epoch plus this committed context under the same
-            // gate they serialize behind.
-            state.current_context = to;
+            guard.state = PortForwardSessionState::Stopped;
+            guard.failure = Some(PortForwardFailure {
+                category: PortForwardFailureCategory::ContextTransition,
+                message: "the context switched while the forward was active".into(),
+            });
+            guard.terminal_at = Some(std::time::Instant::now());
+            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
+            guard.cancel.cancel();
+            guard.pumps.close();
+            let handle = guard.accept_task.take();
+            let snapshot = snapshot_of(&guard);
+            let _ = state.events_tx.send(PortForwardSessionEvent {
+                revision: snapshot.revision,
+                session: snapshot,
+            });
+            drop(guard);
+            state.sessions.remove(&id);
+            joins.push((inner, handle));
         }
-        // Joins run while no manager or session lock is held: accept loops
-        // and pumps exit purely on cancellation plus lock-free atomics, so
-        // they can never wait on the gate that waits on them.
+        // Keep the manager gate held across drains and the backend commit:
+        // no Start can publish in the gap between the two operations.
         for (inner, handle) in joins {
             Self::join_session_tasks(handle, &inner).await;
         }
+        let result = commit.await;
+        if result.is_ok() {
+            state.current_context = to;
+        }
+        result
+    }
+
+    /// Test/helper transition whose commit cannot fail.
+    pub async fn begin_context_transition(&self, to: String) {
+        let _: Result<(), std::convert::Infallible> =
+            self.transition_context(to, async { Ok(()) }).await;
     }
 
     /// Shut down: stop and join every listener and pump before returning.
@@ -504,6 +507,7 @@ impl PortForwardManager {
         state: &ManagerState,
         identity: &ResourceIdentity,
         selection: &PortForwardPortSelection,
+        resolved_service_port: Option<u16>,
     ) -> Option<PortForwardSession> {
         let wanted_number = match selection {
             PortForwardPortSelection::Name(name) => name.parse::<u16>().ok(),
@@ -520,7 +524,8 @@ impl PortForwardManager {
                 continue;
             }
             let same_selector = &guard.selector == selection
-                || wanted_number.is_some_and(|n| n == guard.service_port);
+                || wanted_number.is_some_and(|n| n == guard.service_port)
+                || resolved_service_port == Some(guard.service_port);
             if &guard.identity == identity && same_selector {
                 return Some(snapshot_of(&guard));
             }
@@ -528,19 +533,40 @@ impl PortForwardManager {
         None
     }
 
-    async fn publish_terminal(&self, id: String, snapshot: PortForwardSession) {
-        let events_tx = {
-            let mut state = self.state.lock().await;
-            let _ = state.events_tx.send(PortForwardSessionEvent {
-                revision: snapshot.revision,
-                session: snapshot.clone(),
-            });
+    async fn prune_expired(state: &mut ManagerState) {
+        let mut expired = Vec::new();
+        for (id, inner) in &state.sessions {
+            let guard = inner.lock().await;
+            if matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) && guard
+                .terminal_at
+                .is_some_and(|at| at.elapsed() > Self::TERMINAL_RETENTION)
+            {
+                expired.push(id.clone());
+            }
+        }
+        for id in expired {
             state.sessions.remove(&id);
-            state.events_tx.clone()
-        };
-        // Terminal snapshots stay observable through their event; retention
-        // beyond delivery lives in clients' bounded stores.
-        drop(events_tx);
+        }
+        // Retention is time-bounded and count-bounded. A rapid sequence of
+        // Fail -> Retry operations must not grow the map for the entire TTL.
+        let mut terminal = Vec::new();
+        for (id, inner) in &state.sessions {
+            let guard = inner.lock().await;
+            if matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) {
+                terminal.push((guard.terminal_at, id.clone()));
+            }
+        }
+        terminal.sort_by_key(|(at, _)| *at);
+        let excess = terminal.len().saturating_sub(MAX_SESSIONS);
+        for (_, id) in terminal.into_iter().take(excess) {
+            state.sessions.remove(&id);
+        }
     }
 
     fn map_backend_error(error: BackendError) -> StartRejected {

@@ -9,6 +9,9 @@ kubeconfig into tickets.
 | --- | --- |
 | Startup says no kubeconfig | Set `KUBECONFIG`, create `~/.kube/config`, or pass `--kubeconfig`; verify current-context and referenced entries. There is no fake fallback. |
 | Startup rejects token | Non-loopback binds require one; check file readability and non-empty trimmed content. CLI file overrides env file, which overrides inline env. |
+| Port forward says local port is in use | Clear the local-port field or enter `0` to let the desktop choose an available loopback port. |
+| Port forward reports no ready endpoint | Verify the Service has a ready Pod-backed EndpointSlice, that the Service UID has not changed, and that the required RBAC is granted. |
+| Port forwarding controls are absent | Port forwarding is available only in the native desktop application; standalone web deployments intentionally do not advertise it. |
 | `403` WebSocket upgrade | Browser Origin and upstream Host differ. Preserve both through the proxy; do not bypass the same-origin check. |
 | `/readyz` says starting | Wait for initialization. Persistent failure should be correlated with startup logs. |
 | `/readyz` says initialization failed | Fix the kubeconfig/backend error and restart; do not route traffic. |

@@ -112,6 +112,13 @@ pub struct K10sApp {
     /// context it was created against; same lifecycle as the workload
     /// watches.
     services_subscription: Option<(String, LiveSubscription)>,
+    /// Authoritative session reconstruction requested after bootstrap or
+    /// reconnect; events are subscribed before this list is issued.
+    port_forward_list: Option<PendingRequest>,
+    pending_port_forwards: Vec<PendingRequest>,
+    port_forward_error: Option<String>,
+    port_forward_switch_prompt: Option<String>,
+    port_forward_switch_after_stop: Option<String>,
     /// Selectable resource types of the subscribed context (GVK picker).
     resource_types: Vec<ResourceTypeEntry>,
     /// The context whose types are cached or being fetched.
@@ -231,6 +238,11 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             services_subscription: None,
+            port_forward_list: None,
+            pending_port_forwards: Vec::new(),
+            port_forward_error: None,
+            port_forward_switch_prompt: None,
+            port_forward_switch_after_stop: None,
             resource_types: Vec::new(),
             types_context: None,
             types_request: None,
@@ -302,8 +314,21 @@ impl K10sApp {
         self.shell.workspace()
     }
 
+    /// Whether the authenticated server negotiated desktop Service port forwarding.
+    #[must_use]
+    pub fn port_forward_available(&self) -> bool {
+        self.client.port_forward_available()
+    }
+
+    /// Current authoritative session snapshots used by native hosts/tests.
+    #[must_use]
+    pub fn port_forward_sessions(&self) -> Vec<&k10s_protocol::PortForwardSession> {
+        self.client.port_forward_sessions()
+    }
+
     /// Render the approved default-egui shell for the current connection view.
     pub fn render_ui(&mut self, ui: &mut egui::Ui) {
+        self.finish_port_forward_list();
         let (connection, contexts): (ShellConnectionState, &[String]) = match &self.view {
             AppView::Connecting => (ShellConnectionState::Connecting, &[]),
             AppView::Ready { context_names, .. } => {
@@ -325,7 +350,108 @@ impl K10sApp {
             response.as_ref(),
             &feed,
         );
+        for action in self.shell.drain_port_forward_actions() {
+            self.port_forward_error = None;
+            let query = match action {
+                crate::ui::PortForwardAction::Start {
+                    service,
+                    port,
+                    local_port,
+                } => Query::PortForwardStart(k10s_protocol::PortForwardStartRequest {
+                    service,
+                    port,
+                    local_port,
+                }),
+                crate::ui::PortForwardAction::Stop(id) => {
+                    match k10s_protocol::PortForwardSessionId::try_new(id) {
+                        Ok(id) => Query::PortForwardStop(id),
+                        Err(_) => continue,
+                    }
+                }
+            };
+            if let Ok(request) = self.client.begin(query) {
+                self.pending_port_forwards.push(request);
+            }
+        }
+        self.pending_port_forwards.retain(|request| {
+            if self.client.is_pending(request) {
+                true
+            } else {
+                let _ = self.client.take(request.clone());
+                false
+            }
+        });
         let selected_after = self.client.local_ui().selected_context.clone();
+        let mut confirm_switch = false;
+        let mut cancel_switch = false;
+        if let Some(to) = self.port_forward_switch_prompt.as_deref() {
+            egui::Window::new("Active port forwards")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!(
+                        "{} active port-forward session(s) must stop before switching to {to}",
+                        self.client
+                            .port_forward_sessions()
+                            .into_iter()
+                            .filter(|session| matches!(
+                                session.state,
+                                k10s_protocol::PortForwardSessionState::Starting
+                                    | k10s_protocol::PortForwardSessionState::Active
+                                    | k10s_protocol::PortForwardSessionState::Stopping
+                            ))
+                            .count()
+                    ));
+                    if ui.button("Stop all and switch").clicked() {
+                        confirm_switch = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel_switch = true;
+                    }
+                });
+        }
+        if cancel_switch {
+            self.port_forward_switch_prompt = None;
+        } else if confirm_switch && let Some(to) = self.port_forward_switch_prompt.take() {
+            let session_ids: Vec<_> = self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .filter(|session| {
+                    matches!(
+                        session.state,
+                        k10s_protocol::PortForwardSessionState::Starting
+                            | k10s_protocol::PortForwardSessionState::Active
+                    )
+                })
+                .map(|session| session.id.clone())
+                .collect();
+            for session_id in session_ids {
+                if let Ok(request) = self.client.begin(Query::PortForwardStop(session_id)) {
+                    self.pending_port_forwards.push(request);
+                }
+            }
+            self.port_forward_switch_after_stop = Some(to);
+        }
+        if self.port_forward_switch_after_stop.is_some()
+            && !self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .any(|session| {
+                    matches!(
+                        session.state,
+                        k10s_protocol::PortForwardSessionState::Starting
+                            | k10s_protocol::PortForwardSessionState::Active
+                            | k10s_protocol::PortForwardSessionState::Stopping
+                    )
+                })
+            && let Some(to) = self.port_forward_switch_after_stop.take()
+            && let Err(error) = self.stage_context_switch(&to, true)
+        {
+            self.terminal_failure(error.to_string());
+            return;
+        }
         let retry_requested = refresh && connection != ShellConnectionState::Connected;
         let request_result = if retry_requested {
             let now_ms =
@@ -337,7 +463,24 @@ impl K10sApp {
             // A requested switch never moves local state here: it is sent to
             // the backend, and the workspace transition plus resubscriptions
             // happen only when the response confirms the destination.
-            self.stage_context_switch(&to, origin.is_explicit())
+            let active = self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .any(|session| {
+                    matches!(
+                        session.state,
+                        k10s_protocol::PortForwardSessionState::Starting
+                            | k10s_protocol::PortForwardSessionState::Active
+                            | k10s_protocol::PortForwardSessionState::Stopping
+                    )
+                });
+            if active {
+                self.port_forward_switch_prompt = Some(to);
+                Ok(())
+            } else {
+                self.stage_context_switch(&to, origin.is_explicit())
+            }
         } else if refresh {
             selected_after
                 .as_deref()
@@ -717,6 +860,19 @@ impl K10sApp {
                                 dialog.operation_failed(server_error.safe_message.clone());
                             }
                         }
+                        ClientError::Server(ref server_error)
+                            if stream_request_id.as_ref().is_some_and(|id| {
+                                self.pending_port_forwards
+                                    .iter()
+                                    .any(|request| request.id() == id)
+                            }) =>
+                        {
+                            if let Some(id) = stream_request_id.as_ref() {
+                                self.pending_port_forwards
+                                    .retain(|request| request.id() != id);
+                            }
+                            self.port_forward_error = Some(server_error.safe_message.clone());
+                        }
                         // A vanished object's detail query is dropped
                         // quietly: the pinned window keeps rendering its
                         // loading state until a newer selection arrives.
@@ -870,6 +1026,17 @@ impl K10sApp {
                         context_names,
                     };
                     self.recovering = false;
+                    if self.client.port_forward_available() {
+                        let _ = self
+                            .client
+                            .subscribe_port_forward_sessions()
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                        self.port_forward_list = Some(
+                            self.client
+                                .begin(Query::PortForwardList)
+                                .map_err(|error| AppEventError::Terminal(error.to_string()))?,
+                        );
+                    }
                     if let Some(context) = selected {
                         // A switch left awaiting its answer from an older
                         // generation cannot outrank this fresh authority
@@ -1037,6 +1204,15 @@ impl K10sApp {
         }
     }
 
+    fn finish_port_forward_list(&mut self) {
+        if let Some(request) = self.port_forward_list.clone()
+            && !self.client.is_pending(&request)
+        {
+            let _ = self.client.take(request);
+            self.port_forward_list = None;
+        }
+    }
+
     fn select_infrastructure_context(&mut self, context: &str) -> Result<(), ClientError> {
         if self.infrastructure_context.as_deref() != Some(context) {
             if let Some(subscription) = self.infrastructure_subscription.take() {
@@ -1143,6 +1319,14 @@ impl K10sApp {
             services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
+            port_forward_available: self.client.port_forward_available(),
+            port_forward_sessions: self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .cloned()
+                .collect(),
+            port_forward_error: self.port_forward_error.clone(),
         }
     }
 

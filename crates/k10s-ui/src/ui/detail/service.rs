@@ -16,6 +16,7 @@ use crate::ui::resource_window::RowIdentity;
 
 use super::{show_header, tab_label, tabs_for_kind};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
@@ -23,6 +24,8 @@ pub(super) fn show<I>(
     view: Option<&ResourceDetailResponse>,
     gone: bool,
     yaml: &mut tools::YamlEditors,
+    feed: &crate::ui::ResourceFeed,
+    port_drafts: Option<&std::collections::BTreeMap<String, String>>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -99,7 +102,15 @@ pub(super) fn show<I>(
     let projection = projection_of(view);
     match detail.active_tab {
         DetailTab::Overview => overview_tab(ui, window_id, projection),
-        DetailTab::Ports => ports_tab(ui, window_id, projection),
+        DetailTab::Ports => ports_tab(
+            ui,
+            window_id,
+            &detail.identity,
+            projection,
+            feed,
+            port_drafts,
+            queued,
+        ),
         DetailTab::Events => super::events::show(ui, window_id, &view.events),
         DetailTab::Yaml => {
             if !view.capabilities.can_edit_yaml {
@@ -191,7 +202,15 @@ fn overview_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 /// Ports tab: one structured read-only line per declared port. UDP/SCTP
 /// entries are labelled read-only; TCP entries expose no controls yet.
-fn ports_tab(ui: &mut egui::Ui, window_id: WindowId, projection: Option<&ServiceProjection>) {
+fn ports_tab<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    identity: &I,
+    projection: Option<&ServiceProjection>,
+    feed: &crate::ui::ResourceFeed,
+    port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
     let Some(projection) = projection else {
         ui.label("No structured projection available");
         return;
@@ -199,6 +218,9 @@ fn ports_tab(ui: &mut egui::Ui, window_id: WindowId, projection: Option<&Service
     if projection.ports.is_empty() {
         ui.label("No declared ports");
         return;
+    }
+    if let Some(error) = &feed.port_forward_error {
+        ui.label(RichText::new(error).color(crate::ui::theme::WARNING));
     }
     ScrollArea::vertical()
         .id_salt(("k10s.detail.service.ports.scroll", window_id.0))
@@ -209,6 +231,84 @@ fn ports_tab(ui: &mut egui::Ui, window_id: WindowId, projection: Option<&Service
                 label.widget_info(|| {
                     egui::WidgetInfo::labeled(WidgetType::Label, true, format!("Port {line}"))
                 });
+                if port.protocol != k10s_protocol::TransportProtocol::Tcp {
+                    continue;
+                }
+                let Some(service) = identity.as_row_identity() else {
+                    continue;
+                };
+                let session = feed.port_forward_sessions.iter().find(|session| {
+                    session.service.uid == service.uid && session.service_port == port.service_port
+                });
+                if let Some(session) = session {
+                    ui.label(format!(
+                        "{} · {}:{} · {:?}",
+                        session.local_addr, session.pod.name, session.pod_port, session.state
+                    ));
+                    if ui.button("Copy address").clicked() {
+                        ui.ctx().copy_text(session.local_addr.clone());
+                    }
+                    if ui.button("Stop").clicked() {
+                        queued.push(WorkspaceCommand::StopPortForward(
+                            session.id.as_str().to_owned(),
+                        ));
+                    }
+                } else if feed.port_forward_available {
+                    let draft_key = crate::workspace::ServiceWindowState::<I>::port_draft_key(
+                        &service.uid,
+                        port.service_port,
+                    );
+                    let mut draft = port_drafts
+                        .and_then(|drafts| drafts.get(&draft_key))
+                        .cloned()
+                        .unwrap_or_default();
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut draft)
+                            .hint_text("Local port (blank = automatic)")
+                            .desired_width(180.0),
+                    );
+                    if edit.changed() {
+                        queued.push(WorkspaceCommand::SetServicePortDraft(
+                            window_id,
+                            draft_key,
+                            draft.clone(),
+                        ));
+                    }
+                    let local_port = if draft.trim().is_empty() || draft.trim() == "0" {
+                        Ok(0)
+                    } else {
+                        draft
+                            .trim()
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|port| *port != 0)
+                            .ok_or(())
+                    };
+                    if local_port.is_err() {
+                        ui.label(
+                            RichText::new("Enter a port from 1 to 65535")
+                                .color(crate::ui::theme::WARNING),
+                        );
+                    }
+                    if ui
+                        .add_enabled(local_port.is_ok(), egui::Button::new("Start"))
+                        .clicked()
+                    {
+                        let selector = port.name.clone().map_or(
+                            k10s_protocol::PortForwardPortSelector::Number {
+                                number: port.service_port,
+                            },
+                            |name| k10s_protocol::PortForwardPortSelector::Name { name },
+                        );
+                        queued.push(WorkspaceCommand::StartPortForward {
+                            service: identity.clone(),
+                            port: selector,
+                            local_port: local_port.unwrap_or(0),
+                        });
+                    }
+                } else {
+                    ui.label("Port forwarding is available in the desktop application");
+                }
             }
         });
 }

@@ -76,6 +76,17 @@ pub struct UiShell<I> {
     /// only after the response succeeds. The origin distinguishes a fresh
     /// user action from passive mismatch reconciliation.
     requested_context: Option<(String, ContextRequestOrigin)>,
+    port_forward_actions: Vec<PortForwardAction<I>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PortForwardAction<I> {
+    Start {
+        service: I,
+        port: k10s_protocol::PortForwardPortSelector,
+        local_port: u16,
+    },
+    Stop(String),
 }
 
 impl<I> Default for UiShell<I>
@@ -101,6 +112,7 @@ where
             streams: tools::StreamStores::default(),
             dialogs: dialogs::OperationDialogs::default(),
             requested_context: None,
+            port_forward_actions: Vec::new(),
         }
     }
 
@@ -124,6 +136,10 @@ where
     /// after success.
     pub fn take_requested_context(&mut self) -> Option<(String, ContextRequestOrigin)> {
         self.requested_context.take()
+    }
+
+    pub fn drain_port_forward_actions(&mut self) -> Vec<PortForwardAction<I>> {
+        std::mem::take(&mut self.port_forward_actions)
     }
 
     /// Drain the protocol actions queued by YAML editors during rendering.
@@ -304,6 +320,18 @@ where
                         // explicit.
                         WorkspaceEvent::ContextSwitchRequested { to } => {
                             self.requested_context = Some((to, ContextRequestOrigin::Explicit));
+                        }
+                        WorkspaceEvent::PortForwardStartRequested {
+                            service,
+                            port,
+                            local_port,
+                        } => self.port_forward_actions.push(PortForwardAction::Start {
+                            service,
+                            port,
+                            local_port,
+                        }),
+                        WorkspaceEvent::PortForwardStopRequested(id) => {
+                            self.port_forward_actions.push(PortForwardAction::Stop(id));
                         }
                         WorkspaceEvent::Closed(_)
                         | WorkspaceEvent::Blocked(_)

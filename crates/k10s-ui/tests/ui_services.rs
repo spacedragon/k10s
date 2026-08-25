@@ -1,7 +1,7 @@
 //! The singleton Services window: the Network launcher group, list columns
 //! rendered strictly from normalized `ResourceListRow` projections (never
 //! from `summary`), loading/empty/filtered/stale/gone states, structured
-//! read-only ports without any Start control, and accessibility names.
+//! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
@@ -351,6 +351,38 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     // Accessible names exist for every port row.
     window.get_by_role_and_label(Role::Label, "Port http · 80 → 8080 · TCP");
+}
+
+#[test]
+fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(Role::Button, "Start").click();
+    harness.run_steps(2);
+    let actions = harness.state_mut().shell.drain_port_forward_actions();
+    assert!(matches!(
+        actions.as_slice(),
+        [k10s_ui::ui::PortForwardAction::Start {
+            local_port: 0,
+            port: k10s_protocol::PortForwardPortSelector::Name { name },
+            ..
+        }] if name == "http"
+    ));
 }
 
 #[test]

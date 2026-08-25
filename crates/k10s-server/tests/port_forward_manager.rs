@@ -199,6 +199,16 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
         .await
         .expect("focus start");
     assert_eq!(focused.id, first.id);
+    let focused_by_name = manager
+        .start(
+            identity("web"),
+            k10s_backend::PortForwardPortSelection::Name("http".into()),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .expect("number then name focuses the resolved Service port");
+    assert_eq!(focused_by_name.id, first.id);
     assert_eq!(manager.list().await.len(), 1);
     let _ = manager.stop(first.id.as_str()).await;
 }
@@ -287,6 +297,35 @@ async fn context_transition_stops_every_session_and_advances_the_epoch_once() {
         matches!(&error, Err(rejected) if rejected.category == k10s_protocol::PortForwardFailureCategory::ContextTransition),
         "stale contexts fail retryable"
     );
+}
+
+#[tokio::test]
+async fn failed_context_commit_keeps_the_authoritative_context() {
+    let seam = ScriptedSeam::new(&["web"]);
+    let (manager, _) = manager_for(seam).await;
+    let first = manager
+        .start(
+            identity("web"),
+            k10s_backend::PortForwardPortSelection::Number(80),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    let result: Result<(), &str> = manager
+        .transition_context("missing".into(), async { Err("backend rejected") })
+        .await;
+    assert_eq!(result, Err("backend rejected"));
+    let retried = manager
+        .start(
+            identity("web"),
+            k10s_backend::PortForwardPortSelection::Number(80),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .expect("failed backend commit must not retire the current context");
+    assert_ne!(retried.id, first.id);
 }
 
 #[tokio::test]

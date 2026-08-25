@@ -332,6 +332,8 @@ where
                     yaml,
                     streams,
                     dialogs,
+                    feed,
+                    Some(&state.port_drafts),
                     queued,
                 );
             }

@@ -52,6 +52,7 @@ pub enum WorkspaceCommand<I> {
     SetGeometry(WindowId, WindowGeom),
     SetNamespace(WindowId, Option<String>),
     SetSearch(WindowId, String),
+    SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
     SetSort(WindowId, Option<SortSpec>),
     SetSplitRatio(WindowId, f32),
@@ -69,6 +70,12 @@ pub enum WorkspaceCommand<I> {
     DiscardYaml(WindowId),
     ConnectShell(WindowId),
     DisconnectShell(WindowId),
+    StartPortForward {
+        service: I,
+        port: k10s_protocol::PortForwardPortSelector,
+        local_port: u16,
+    },
+    StopPortForward(String),
     /// Global context switch. Preserves window kinds, geometry, filters,
     /// and splits; clears selections and closes pinned detail windows.
     ///
@@ -112,6 +119,12 @@ pub enum WorkspaceEvent<I> {
     ContextSwitched {
         to: String,
     },
+    PortForwardStartRequested {
+        service: I,
+        port: k10s_protocol::PortForwardPortSelector,
+        local_port: u16,
+    },
+    PortForwardStopRequested(String),
 }
 
 /// The complete workspace state.
@@ -269,6 +282,12 @@ where
                 self.with_service_mut(id, |service| service.search = search);
                 Vec::new()
             }
+            WorkspaceCommand::SetServicePortDraft(id, key, value) => {
+                self.with_service_mut(id, |service| {
+                    service.port_drafts.insert(key, value);
+                });
+                Vec::new()
+            }
             WorkspaceCommand::SetFilter(id, key, value) => {
                 self.with_resource_mut(id, |resource| {
                     resource.filters.insert(key, value);
@@ -323,6 +342,18 @@ where
             WorkspaceCommand::DisconnectShell(id) => {
                 self.disconnect_shell(id);
                 Vec::new()
+            }
+            WorkspaceCommand::StartPortForward {
+                service,
+                port,
+                local_port,
+            } => vec![WorkspaceEvent::PortForwardStartRequested {
+                service,
+                port,
+                local_port,
+            }],
+            WorkspaceCommand::StopPortForward(id) => {
+                vec![WorkspaceEvent::PortForwardStopRequested(id)]
             }
             WorkspaceCommand::ContextSwitch { to } => self.context_switch(to),
             WorkspaceCommand::CommitContextSwitch { to } => self.commit_context_switch(to),
