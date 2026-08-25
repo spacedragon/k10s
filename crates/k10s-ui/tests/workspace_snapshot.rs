@@ -153,6 +153,20 @@ fn restore_rejects_a_mismatched_version() {
 }
 
 #[test]
+fn restore_rejects_overflowing_counters_from_tampered_files() {
+    // A user-writable file claiming ids/z already exhausted must be rejected
+    // wholesale: accepting it would panic (checked) or wrap (release) on the
+    // very next open/focus.
+    let mut snap = state().snapshot();
+    snap.next_id = u64::MAX;
+    assert!(WorkspaceState::<TestIdentity>::from_snapshot(&snap).is_none());
+
+    let mut snap = state().snapshot();
+    snap.next_z = k10s_ui::workspace::COUNTER_LIMIT + 1;
+    assert!(WorkspaceState::<TestIdentity>::from_snapshot(&snap).is_none());
+}
+
+#[test]
 fn restore_skips_unhealthy_entries_but_keeps_the_rest() {
     let mut snap = state().snapshot();
     // Corrupt one entry: NaN geometry.

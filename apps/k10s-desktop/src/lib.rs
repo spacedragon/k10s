@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -186,12 +186,14 @@ impl DesktopApp {
         // defaults and never blocks startup.
         let mut state_store = state_store;
         if let Some(store) = state_store.as_mut()
-            && let Some(snapshot) = store.load()
+            && let Some(on_disk) = store.load()
         {
-            app.restore_workspace_snapshot(snapshot);
-            // Prime the change detector with what actually landed so the
-            // restore itself does not immediately rewrite the file.
-            store.mark_saved(&app.workspace_snapshot());
+            // Record what the file actually holds. A restored workspace that
+            // differs from it (mismatched version, normalized counters...)
+            // is written back through the debounced save; an exact match
+            // means relaunching never touches the file.
+            store.mark_loaded(&on_disk);
+            app.restore_workspace_snapshot(on_disk);
         }
         Ok(Self {
             app: Some(app),
@@ -210,16 +212,28 @@ impl DesktopApp {
     }
 }
 
+/// How long a changed layout must stay stable before it is written. This
+/// coalesces the continuous geometry updates of a window drag or resize into
+/// one final write instead of touching the config file every frame.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
+
 /// File-backed workspace-state persistence.
 ///
 /// Stores one [`WorkspaceSnapshot`] as JSON in the platform config
-/// directory. Saves are best-effort: a failure here must never take down the
-/// desktop app, only the next restore falls back to first-launch defaults.
+/// directory. Saves are debounced and best-effort: a failure here must never
+/// take down the desktop app, only the next restore falls back to
+/// first-launch defaults.
 pub struct StateStore {
     path: PathBuf,
-    /// Last snapshot written (or restored); saves skip unchanged layouts so
-    /// dragging windows does not hammer the disk every frame.
+    /// How long one layout must stay stable before being written; production
+    /// uses [`SAVE_DEBOUNCE`], tests use a short interval.
+    debounce: Duration,
+    /// What we believe the file holds right now (last write, or what launch
+    /// read back). Steady-state frames compare against this and stop there.
     last_saved: Option<WorkspaceSnapshot>,
+    /// The layout waiting to be written, plus when that exact layout first
+    /// appeared; `None` means nothing is queued behind the debounce timer.
+    pending: Option<(Instant, WorkspaceSnapshot)>,
 }
 
 impl std::fmt::Debug for StateStore {
@@ -235,17 +249,21 @@ impl StateStore {
     /// The state file location on this host, or `None` when no config
     /// directory is resolvable (persistence stays disabled).
     pub fn default_location() -> Option<Self> {
-        Some(Self {
-            path: app_state_path()?,
-            last_saved: None,
-        })
+        Some(Self::new(app_state_path()?, SAVE_DEBOUNCE))
     }
 
     #[cfg(test)]
     fn at(path: PathBuf) -> Self {
+        // Short but real interval keeps timing tests fast and honest.
+        Self::new(path, Duration::from_millis(16))
+    }
+
+    const fn new(path: PathBuf, debounce: Duration) -> Self {
         Self {
             path,
+            debounce,
             last_saved: None,
+            pending: None,
         }
     }
 
@@ -267,30 +285,68 @@ impl StateStore {
         }
     }
 
-    /// Record the snapshot as persisted without writing (used after a restore).
-    fn mark_saved(&mut self, snapshot: &WorkspaceSnapshot) {
-        self.last_saved = Some(snapshot.clone());
+    /// Record what launch-time restore read from disk without writing. A
+    /// restored workspace that differs from it (mismatched version, normalized
+    /// counters...) is written back through the debounced save; an exact match
+    /// means relaunching never touches the file.
+    fn mark_loaded(&mut self, on_disk: &WorkspaceSnapshot) {
+        self.last_saved = Some(on_disk.clone());
+        self.pending = None;
     }
 
-    /// Write the current layout when it changed since the last save.
-    /// Best-effort; errors are logged, never propagated. A failed write does
-    /// not update `last_saved`, so the same layout is retried on the next
-    /// change instead of being lost silently.
-    fn save_if_changed(&mut self, snapshot: &WorkspaceSnapshot) {
+    /// Advance the debounced save with one frame's layout. A changed layout is
+    /// written only once it has stayed stable for the whole debounce interval,
+    /// so dragging or resizing windows coalesces into a single write; steady
+    /// state costs one structural comparison and no I/O.
+    fn tick(&mut self, snapshot: &WorkspaceSnapshot, now: Instant) {
+        if let Some((since, queued)) = &self.pending {
+            // Same layout already waiting: only the clock advances until it is stable.
+            if *queued == *snapshot && now.duration_since(*since) >= self.debounce {
+                self.write(snapshot);
+                return;
+            }
+            // A newer layout supersedes whatever was waiting behind it.
+            if *queued != *snapshot {
+                self.pending = Some((now, snapshot.clone()));
+            }
+        } else if self.last_saved.as_ref() != Some(snapshot) {
+            // Nothing queued yet: layouts already on disk cost nothing more.
+            self.pending = Some((now, snapshot.clone()));
+        }
+    }
+
+    /// Persist immediately regardless of the debounce timer; called at clean
+    /// exit so the final layout is never lost behind a settling window.
+    fn flush(&mut self, snapshot: &WorkspaceSnapshot) {
         if self.last_saved.as_ref() == Some(snapshot) {
+            // The disk already holds it; drop any stale queued copy.
+            self.pending = None;
             return;
         }
+        self.write(snapshot);
+    }
+
+    /// Commit one layout through the atomic write. On failure the pending
+    /// timer restarts so a broken disk rate-limits retries (one attempt per
+    /// interval) instead of spamming; errors never propagate to the UI loop.
+    fn write(&mut self, snapshot: &WorkspaceSnapshot) {
         let json = match serde_json::to_string(snapshot) {
             Ok(json) => json,
             Err(error) => {
-                tracing::warn!("state snapshot serialization failed: {error}");
+                tracing::warn!("workspace state serialization failed; dropping save: {error}");
                 return;
             }
         };
         match write_state_file(&self.path, &json) {
-            Ok(()) => self.last_saved = Some(snapshot.clone()),
+            Ok(()) => {
+                self.last_saved = Some(snapshot.clone());
+                self.pending = None;
+            }
             Err(error) => {
-                tracing::warn!("workspace state save will retry on next change: {error}");
+                tracing::warn!("workspace state save failed; retrying next interval: {error}");
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.0 = Instant::now();
+                }
             }
         }
     }
@@ -340,11 +396,12 @@ impl eframe::App for DesktopApp {
         let Some(app) = self.app.as_mut() else {
             return;
         };
-        // Persist the window layout whenever it changes; geometry updates
-        // land through queued commands during rendering, so a changed layout
-        // is caught by the very next frame at most one repaint late.
+        // Persist the window layout through the debounced save; geometry
+        // updates land through queued commands during rendering, so a changed
+        // layout is seen by this frame at most one repaint late and written
+        // only once it stays stable for the debounce interval.
         if let Some(store) = self.state_store.as_mut() {
-            store.save_if_changed(&app.workspace_snapshot());
+            store.tick(&app.workspace_snapshot(), Instant::now());
         }
         app.poll();
         context.request_repaint_after(Duration::from_millis(16));
@@ -361,11 +418,11 @@ impl eframe::App for DesktopApp {
 impl Drop for DesktopApp {
     fn drop(&mut self) {
         // Final save so a clean exit persists the last rendered layout even
-        // if the per-frame check ran before its geometry command applied.
+        // while it was still settling behind the debounce timer.
         if let Some(app) = self.app.as_ref()
             && let Some(store) = self.state_store.as_mut()
         {
-            store.save_if_changed(&app.workspace_snapshot());
+            store.flush(&app.workspace_snapshot());
         }
         drop(self.app.take());
         if let Some(mut server) = self.server.take() {
@@ -520,6 +577,7 @@ fn launch_embedded_server_on(
 mod tests {
     use std::net::{Ipv4Addr, TcpListener};
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use k10s_backend::BackendMode;
     use k10s_ui::workspace::{
@@ -577,12 +635,11 @@ mod tests {
     fn state_store_round_trips_a_snapshot() {
         let path = tmp_state_file("roundtrip");
         let mut store = StateStore::at(path.clone());
-        let json = sample_state_json();
 
-        // First change writes the file.
+        // The flush path (clean exit) writes the file immediately.
         let snapshot: k10s_ui::workspace::WorkspaceSnapshot =
-            serde_json::from_str(&json).expect("parse sample");
-        store.save_if_changed(&snapshot);
+            serde_json::from_str(&sample_state_json()).expect("parse sample");
+        store.flush(&snapshot);
         assert!(path.exists(), "state file must exist after save");
 
         // A fresh store at the same path reads it back unchanged.
@@ -603,24 +660,85 @@ mod tests {
     }
 
     #[test]
-    fn save_skips_unchanged_layouts() {
-        let path = tmp_state_file("skip-unchanged");
+    fn steady_state_ticks_rewrite_nothing() {
+        // Launch reads a file; every following frame sees an identical layout.
+        // The debounced save must never touch the disk again (no mtime move).
+        let path = tmp_state_file("steady-state");
+        std::fs::write(&path, sample_state_json()).unwrap();
+
         let mut store = StateStore::at(path.clone());
-        let snapshot: k10s_ui::workspace::WorkspaceSnapshot =
-            serde_json::from_str(&sample_state_json()).expect("parse sample");
+        let on_disk: k10s_ui::workspace::WorkspaceSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("state file"))
+                .expect("parse");
+        store.mark_loaded(&on_disk);
 
-        store.save_if_changed(&snapshot);
         let first_write = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-
-        // Same layout again: must not rewrite the file.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        store.save_if_changed(&snapshot);
+        for _ in 0..10 {
+            // Frames arrive faster than the debounce interval.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            store.tick(&on_disk, Instant::now());
+        }
         let second_write = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
         assert_eq!(
             first_write, second_write,
-            "unchanged layout must not rewrite the file"
+            "steady state must not rewrite the file"
         );
+    }
+
+    #[test]
+    fn debounced_save_coalesces_an_active_drag_into_one_final_write() {
+        // Simulate an active drag: the layout changes on consecutive frames.
+        // Nothing may hit disk until it has been stable for the debounce.
+        let path = tmp_state_file("debounce-drag");
+        let mut store = StateStore::at(path.clone());
+
+        let final_geometry = WindowGeom {
+            position: [64.0 + 12f32, 48.0],
+            size: [840.0 + 12f32, 560.0],
+            collapsed: false,
+        };
+        for frame in 0..12u32 {
+            // A different layout every ~4ms, faster than the debounce.
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            let mut ws: WorkspaceState<Dummy> = WorkspaceState::new();
+            let geometry = WindowGeom {
+                position: [64.0 + frame as f32, 48.0],
+                size: [840.0 + frame as f32, 560.0],
+                collapsed: false,
+            };
+            ws.apply(WorkspaceCommand::SetGeometry(ws.windows()[0].id, geometry));
+            store.tick(&ws.snapshot(), Instant::now());
+        }
+
+        assert!(
+            !path.exists(),
+            "an unsettled layout must not be written yet"
+        );
+
+        // The drag ends on the final layout; once it stays stable past the
+        // debounce interval, exactly one write lands.
+        let mut settled_ws: WorkspaceState<Dummy> = WorkspaceState::new();
+        settled_ws.apply(WorkspaceCommand::SetGeometry(
+            settled_ws.windows()[0].id,
+            final_geometry,
+        ));
+        let settled = settled_ws.snapshot();
+        // First tick of the new layout restarts its stability window; once it
+        // has stayed put past the debounce interval, exactly one write lands.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        store.tick(&settled, Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        store.tick(&settled, Instant::now());
+
+        assert!(
+            path.exists(),
+            "a stable layout must be written after the debounce"
+        );
+        let on_disk: k10s_ui::workspace::WorkspaceSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("state file written"))
+                .expect("parse persisted state");
+        assert_eq!(on_disk, settled, "the final layout is what got written");
     }
 
     #[test]

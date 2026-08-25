@@ -18,6 +18,12 @@ use super::{Window, WindowContent, WindowId, WorkspaceState};
 /// Snapshot format version written to and read from the desktop state file.
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+/// Upper bound for persisted allocation counters. Real workspaces hand out
+/// a handful of ids per session; values near this ceiling are corruption,
+/// not history, and accepting them would overflow on the next open/focus
+/// increment in any build.
+pub const COUNTER_LIMIT: u64 = u32::MAX as u64;
+
 /// Persisted window kind. `WindowKind::Detail` has no representation on
 /// purpose: dedicated windows pin a live resource identity and are never
 /// restored (see [`WorkspaceState::snapshot`]).
@@ -221,24 +227,29 @@ where
     /// snapshot is not on the current format version; individual malformed or
     /// unrestoreable entries are skipped defensively while healthy ones land.
     ///
-    /// Restored windows receive fresh ids in z-order (ids are local handles,
-    /// never referenced across sessions) and contiguous z values that
-    /// preserve the persisted stacking order. `next_id`/`next_z` continue
-    /// strictly above everything restored so no id or z is ever reused.
+    /// Restored windows receive fresh ids (ids are local handles, never
+    /// referenced across sessions) and keep their persisted z-order verbatim,
+    /// so a healthy file round-trips unchanged on relaunch. `next_id`/`next_z`
+    /// continue strictly above everything restored so no id or z is reused.
     #[must_use]
     pub fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Option<Self> {
-        if !snapshot.is_current_version() {
+        if !snapshot.is_current_version() || Self::counters_overflow(snapshot) {
             return None;
         }
 
-        // Restore in raised order so the last one built is the top window,
-        // matching how z grows on every open/focus.
-        let mut restorable: Vec<&PersistedWindow> = snapshot
+        // Keep the file's entry order verbatim (rendering and stacking read
+        // z, not vec position) so a healthy file round-trips unchanged on
+        // relaunch. Entries with out-of-range or unrestorable fields are
+        // dropped: they would overflow future increments or misrender.
+        let restorable: Vec<&PersistedWindow> = snapshot
             .windows
             .iter()
-            .filter(|window| window.restorable_kind().is_some() && window.has_sane_geometry())
+            .filter(|window| {
+                window.restorable_kind().is_some()
+                    && window.has_sane_geometry()
+                    && window.z <= COUNTER_LIMIT
+            })
             .collect();
-        restorable.sort_by_key(|window| window.z);
 
         let mut state = Self {
             windows: Vec::new(),
@@ -249,7 +260,7 @@ where
             pending: None,
         };
 
-        for window in restorable {
+        for window in &restorable {
             let kind = window.restorable_kind().expect("filtered above");
             // Below any rendered minimum; egui would expand it anyway, so
             // keep the restored layout self-consistent with what renders.
@@ -270,25 +281,32 @@ where
                 Some(view) => view.clone().into_resource(),
                 None => ResourceWindowState::default(),
             };
-            // Z grows with every open/focus, so assign it in the same pass.
-            state.next_z += 1;
-            let z = state.next_z;
             let content = WindowContent::Resource(resource);
             state.windows.push(Window {
                 id,
                 kind,
                 title: window.title.clone(),
                 geometry,
-                z,
+                z: window.z,
                 content,
             });
         }
 
-        // The persisted counters are the authoritative continuation point so
+        // Continue allocation strictly above everything the file claims, so
         // ids and z never collide with what an older session handed out.
         state.next_id = state.next_id.max(snapshot.next_id);
-        state.next_z = state.next_z.max(snapshot.next_z);
+        let highest_restored_z = restorable.iter().map(|window| window.z).max().unwrap_or(0);
+        state.next_z = state
+            .next_z
+            .max(snapshot.next_z)
+            .max(highest_restored_z + 1);
 
         Some(state)
+    }
+
+    /// Whether either persisted allocation counter is close enough to the
+    /// u64 ceiling that a normal open/focus increment would overflow.
+    fn counters_overflow(snapshot: &WorkspaceSnapshot) -> bool {
+        snapshot.next_id > COUNTER_LIMIT || snapshot.next_z > COUNTER_LIMIT
     }
 }

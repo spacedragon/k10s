@@ -20,7 +20,8 @@ pub use detail::{DetailState, DetailTab, ShellState, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
 pub use resource::{ResourceWindowState, SortSpec};
 pub use snapshot::{
-    PersistedListView, PersistedWindow, PersistedWindowKind, SNAPSHOT_VERSION, WorkspaceSnapshot,
+    COUNTER_LIMIT, PersistedListView, PersistedWindow, PersistedWindowKind, SNAPSHOT_VERSION,
+    WorkspaceSnapshot,
 };
 pub use window::{Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkloadKind};
 
