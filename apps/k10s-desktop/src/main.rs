@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use k10s_backend::BackendMode;
 use k10s_desktop::DesktopApp;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -7,7 +8,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
         .with_writer(std::io::stderr)
         .init();
-    let app = DesktopApp::launch()?;
+    let fake = std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--fake");
+    let app = if fake {
+        DesktopApp::launch_with_mode(&BackendMode::Fake)?
+    } else {
+        DesktopApp::launch()?
+    };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([640.0, 420.0]),
         ..eframe::NativeOptions::default()

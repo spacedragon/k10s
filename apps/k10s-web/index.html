@@ -12,7 +12,18 @@
         background: #101418;
         color: #e6e6e6;
       }
+      #k10s-canvas {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
       #app {
+        /* The semantic companion exposes the canvas actions to browser
+           accessibility/automation without replacing the rendered UI. */
+        position: fixed;
+        left: -10000px;
+        width: 640px;
         max-width: 30rem;
         margin: 4rem auto;
         padding: 0 1rem;
@@ -44,6 +55,7 @@
     </style>
   </head>
   <body>
-    <main id="app"></main>
+    <canvas id="k10s-canvas" aria-label="k10s application canvas"></canvas>
+    <main id="app" aria-label="k10s semantic controls"></main>
   </body>
 </html>
