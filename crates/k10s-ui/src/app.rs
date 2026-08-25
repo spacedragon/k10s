@@ -540,6 +540,7 @@ impl K10sApp {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
                 let resource_delta = resource_delta_projection(&frame);
+                let resource_snapshot = resource_snapshot_projection(&frame);
                 let stream_request_id = frame.request_id.clone();
                 let apply_result = self.client.apply_at(frame, now_ms, entropy);
                 let applied = apply_result.is_ok();
@@ -656,6 +657,20 @@ impl K10sApp {
                     self.shell
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
+                }
+                if applied
+                    && let Some((subscription, revision, rows)) = resource_snapshot
+                    && self
+                        .client
+                        .resource_list(&subscription)
+                        .and_then(|state| state.revision())
+                        == Some(revision)
+                {
+                    for (identity, row_revision) in rows {
+                        self.shell
+                            .yaml_editors_mut()
+                            .target_changed(&identity, row_revision);
+                    }
                 }
                 self.finish_infrastructure_request();
                 self.finish_context_switch()?;
@@ -945,6 +960,7 @@ impl K10sApp {
         self.pending_switch = None;
         self.failed_switch = None;
         self.teardown_stream_sessions();
+        self.shell.yaml_editors_mut().connection_lost();
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
         // retry (the backend deduplicates by idempotency key).
@@ -1596,6 +1612,26 @@ fn resource_delta_projection(
     }
 }
 
+type ResourceSnapshotProjection = (
+    k10s_protocol::SubscriptionId,
+    k10s_protocol::BackendRevision,
+    Vec<(ResourceIdentity, k10s_protocol::BackendRevision)>,
+);
+
+fn resource_snapshot_projection(frame: &ServerFrame) -> Option<ResourceSnapshotProjection> {
+    let subscription = frame.subscription_id.clone()?;
+    let k10s_protocol::ServerPayload::SnapshotChunk(chunk) = frame.decode_payload().ok()? else {
+        return None;
+    };
+    let page: k10s_protocol::ResourceSnapshotPage = serde_json::from_value(chunk.data).ok()?;
+    let rows = page
+        .rows
+        .into_iter()
+        .map(|row| (row.identity, row.revision))
+        .collect();
+    Some((subscription, page.revision, rows))
+}
+
 /// The wire identity of each built-in workload kind. Custom resources are
 /// picker-driven and have no single GVK.
 fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
@@ -1872,40 +1908,68 @@ mod tests {
         )
         .unwrap();
 
-        for (sequence, revision) in [(5, 9), (6, 11)] {
-            app.handle_event(
-                server_message(&frame(
-                    ServerKind::Event,
-                    sequence,
-                    serde_json::to_value(Event {
-                        event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
-                        revision: Some(revision.to_string()),
-                        payload: serde_json::to_value(ResourceChanged {
-                            identity: identity.clone(),
-                            row: row(revision),
-                        })
-                        .unwrap(),
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::Event,
+                5,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("9".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: identity.clone(),
+                        row: row(9),
                     })
                     .unwrap(),
-                )),
-                0,
-                0,
-            )
-            .unwrap();
-            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
-            if revision == 9 {
-                assert!(editor.can_apply(), "stale watch deltas are ignored");
-            } else {
-                assert!(
-                    !editor.can_apply(),
-                    "accepted target drift revokes authority"
-                );
-                assert!(
-                    editor.is_dirty(),
-                    "local edits survive authority invalidation"
-                );
-            }
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(
+            app.shell
+                .yaml_editors_mut()
+                .get(window)
+                .unwrap()
+                .can_apply(),
+            "stale watch deltas are ignored"
+        );
+
+        for (kind, sequence, payload) in [
+            (
+                ServerKind::SnapshotBegin,
+                6,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            (
+                ServerKind::SnapshotChunk,
+                7,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(11),
+                        rows: vec![row(11)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+            (
+                ServerKind::SnapshotEnd,
+                8,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "resync".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.handle_event(server_message(&frame(kind, sequence, payload)), 0, 0)
+                .unwrap();
         }
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.can_apply(), "resync target drift revokes authority");
+        assert!(editor.is_dirty(), "local edits survive resync invalidation");
     }
 
     fn welcome() -> ServerFrame {
@@ -1929,7 +1993,7 @@ mod tests {
     fn transient_loss_schedules_a_fresh_transport_and_preserves_local_state() {
         let (mut app, state) = test_app(vec![
             ConnectionScript {
-                events: VecDeque::from([WsEvent::Error("connection reset".to_owned())]),
+                events: VecDeque::from([WsEvent::Closed]),
                 overflowed: false,
             },
             ConnectionScript {
@@ -1938,11 +2002,43 @@ mod tests {
             },
         ]);
         app.client.local_ui_mut().selected_context = Some("dev-local".to_owned());
+        let window = crate::workspace::WindowId(77);
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        };
+        let editor = app
+            .shell
+            .yaml_editors_mut()
+            .open(window, identity.clone(), "original\n");
+        editor.begin_edit();
+        editor.set_buffer("dirty\n");
+        editor.review();
+        editor.apply_outcome(&YamlOutcome::Valid {
+            ticket: ValidationTicket {
+                id: "lost-ticket".into(),
+                target: identity,
+                resource_revision: BackendRevision::new(1),
+                buffer_hash: buffer_hash(editor.buffer()),
+                disruptive: false,
+            },
+        });
+        assert!(editor.can_apply());
 
         app.poll_at(100, 10);
         assert_eq!(app.client.phase(), ClientPhase::Disconnected);
         assert_eq!(app.view(), &AppView::Connecting);
         assert_eq!(state.borrow().connect_count, 1);
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.can_apply(), "socket loss revokes Apply authority");
+        assert!(editor.is_dirty(), "socket loss preserves the dirty buffer");
 
         app.poll_at(120, 0);
         app.poll_at(120, 0);
