@@ -9,8 +9,10 @@
 //! and re-verify the chosen Pod's UID before any stream opens. No selector,
 //! legacy Endpoints, or raw-IP fallbacks exist in this version.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use kube::ResourceExt;
 use kube::api::{Api, ListParams};
@@ -41,30 +43,31 @@ pub(crate) fn sanitize_api_error(error: &kube::Error) -> BackendError {
     BackendError::Internal("kubernetes api call failed".into())
 }
 
-/// One client-backed seam over the real cluster APIs.
+/// One client-backed seam sharing the adapter's live per-context clients.
+///
+/// Holding the adapter's own client map keeps construction synchronous and
+/// lets late-created contexts participate without rebuilding the seam.
 #[derive(Clone)]
 pub struct KubePortForwardSeam {
-    clients: std::collections::BTreeMap<String, kube::Client>,
+    clients: Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>,
 }
 
 impl std::fmt::Debug for KubePortForwardSeam {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Clients own transport state; only their count is reported.
-        formatter
-            .debug_struct("KubePortForwardSeam")
-            .field("contexts", &self.clients.len())
-            .finish()
+        formatter.write_str("KubePortForwardSeam")
     }
 }
 
 impl KubePortForwardSeam {
-    /// Build the seam from per-context clients.
-    pub(crate) fn new(clients: std::collections::BTreeMap<String, kube::Client>) -> Self {
+    /// Build the seam over the adapter's shared client map.
+    pub(crate) fn shared(clients: Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>) -> Self {
         Self { clients }
     }
 
-    fn client(&self, context: &str) -> Result<kube::Client, BackendError> {
+    async fn client(&self, context: &str) -> Result<kube::Client, BackendError> {
         self.clients
+            .lock()
+            .await
             .get(context)
             .cloned()
             .ok_or(BackendError::NotFound)
@@ -99,7 +102,7 @@ impl PortForwardSeam for KubePortForwardSeam {
         request: PortForwardRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedPortForward, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            let client = self.client(&request.context)?;
+            let client = self.client(&request.context).await?;
 
             // 1+2. Fetch the exact Service and verify its live UID.
             let service = service_api(client.clone(), &request.namespace)
@@ -336,7 +339,7 @@ impl PortForwardSeam for KubePortForwardSeam {
         resolved: &'a ResolvedPortForward,
     ) -> Pin<Box<dyn Future<Output = Result<PortForwardStream, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            let client = self.client(&resolved.context)?;
+            let client = self.client(&resolved.context).await?;
             let pods: Api<k8s_openapi::api::core::v1::Pod> = pod_api(client, &resolved.namespace);
             let mut forwarder = pods
                 .portforward(&resolved.pod_name, &[resolved.pod_port])

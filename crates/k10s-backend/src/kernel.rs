@@ -34,6 +34,13 @@ pub struct BackendKernel {
 }
 
 impl BackendKernel {
+    /// Expose the backend-owned port-forward seam when the adapter supports
+    /// forwarding; servers gate the capability separately.
+    #[must_use]
+    pub fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        self.adapter.port_forward_connector()
+    }
+
     /// Create a new backend kernel with the given adapter.
     #[must_use]
     pub fn new(adapter: impl KubernetesAccess + 'static) -> Self {

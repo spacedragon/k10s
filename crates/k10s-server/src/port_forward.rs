@@ -68,6 +68,8 @@ pub enum StopOutcome {
 struct SessionInner {
     id: String,
     identity: ResourceIdentity,
+    /// Original port selection so named and numeric duplicates both focus.
+    selector: PortForwardPortSelection,
     service_port: u16,
     local_addr: std::net::SocketAddr,
     resolved: ResolvedPortForward,
@@ -214,7 +216,9 @@ impl PortForwardManager {
         // Context-switch atomicity: validate the request identity against
         // the authoritative committed context under the same lock used by
         // the gate. Either dimension mismatching aborts without binding.
-        if state.current_context != requested_context {
+        // An empty committed context means no switch ever happened yet;
+        // the first accepted start commits its own context.
+        if !state.current_context.is_empty() && state.current_context != requested_context {
             drop(state);
             return Err(StartRejected::new(
                 PortForwardFailureCategory::ContextTransition,
@@ -248,6 +252,7 @@ impl PortForwardManager {
         let inner = Arc::new(Mutex::new(SessionInner {
             id: id.clone(),
             identity,
+            selector: selection.clone(),
             service_port,
             local_addr,
             resolved,
@@ -271,8 +276,22 @@ impl PortForwardManager {
             live,
             counters,
         ));
-        inner.lock().await.accept_task = Some(accept_task);
+        let mut guard = inner.lock().await;
+        guard.accept_task = Some(accept_task);
+        drop(guard);
         state.sessions.insert(id.clone(), inner.clone());
+        if state.current_context.is_empty() {
+            state.current_context = requested_context;
+        }
+        // Publish the authoritative Active snapshot so every subscribed
+        // panel converges without polling.
+        {
+            let guard = inner.lock().await;
+            let _ = state.events_tx.send(PortForwardSessionEvent {
+                revision: guard.revision,
+                session: snapshot_of(&guard),
+            });
+        }
         drop(state);
 
         let guard = inner.lock().await;
@@ -430,18 +449,23 @@ impl PortForwardManager {
     }
 
     /// Lock-free variant for callers already holding the manager lock.
+    ///
+    /// Duplicates are exact-selector matches or the same declared Service
+    /// port reached through either selection form.
     async fn find_in_state(
         state: &ManagerState,
         identity: &ResourceIdentity,
         selection: &PortForwardPortSelection,
     ) -> Option<PortForwardSession> {
-        let wanted = match selection {
+        let wanted_number = match selection {
             PortForwardPortSelection::Name(name) => name.parse::<u16>().ok(),
             PortForwardPortSelection::Number(number) => Some(*number),
         };
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
-            if &guard.identity == identity && Some(guard.service_port) == wanted {
+            let same_selector = &guard.selector == selection
+                || wanted_number.is_some_and(|n| n == guard.service_port);
+            if &guard.identity == identity && same_selector {
                 return Some(snapshot_of(&guard));
             }
         }
@@ -479,6 +503,10 @@ impl PortForwardManager {
                     }
                     RejectionCategory::TransportClosed => {
                         PortForwardFailureCategory::TransportClosed
+                    }
+                    RejectionCategory::LocalPortInUse => PortForwardFailureCategory::LocalPortInUse,
+                    RejectionCategory::ContextTransition => {
+                        PortForwardFailureCategory::ContextTransition
                     }
                 },
                 message,

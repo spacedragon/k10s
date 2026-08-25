@@ -76,7 +76,7 @@ pub struct KubeAdapter {
     /// Shared cluster client per context name: pre-injected in tests through
     /// [`Self::with_cluster_clients`], otherwise built on first use from the
     /// stored kubeconfig and cached here for reuse.
-    clients: tokio::sync::Mutex<HashMap<String, kube::Client>>,
+    clients: std::sync::Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>,
     /// Parsed kubeconfig seeding per-context client construction; absent when
     /// testkit pre-injected every context's client instead.
     kubeconfig_source: Option<kube::config::Kubeconfig>,
@@ -136,7 +136,7 @@ impl KubeAdapter {
         // Commit: install the complete registry and shared runtime state.
         Ok(Self {
             registry: StdMutex::new(ContextRegistry::prepare(prepared)?),
-            clients: tokio::sync::Mutex::new(HashMap::new()),
+            clients: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
@@ -187,7 +187,7 @@ impl KubeAdapter {
 
         Ok(Self {
             registry: StdMutex::new(registry),
-            clients: tokio::sync::Mutex::new(client_map),
+            clients: std::sync::Arc::new(tokio::sync::Mutex::new(client_map)),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
@@ -264,6 +264,10 @@ impl KubeAdapter {
 }
 
 impl KubernetesAccess for KubeAdapter {
+    fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        Some(self.port_forward_connector())
+    }
+
     fn query<'a>(
         &'a self,
         req: Query,
@@ -919,21 +923,12 @@ impl CatalogCache {
 }
 
 impl KubeAdapter {
-    /// Expose the backend-owned port-forward seam over this adapter's
+    /// Expose the backend-owned port-forward seam sharing this adapter's
     /// per-context clients.
-    ///
-    /// Clones share transport state cheaply; the kernel and server hold the
-    /// connector without owning Kubernetes types themselves.
-    pub async fn port_forward_connector(&self) -> crate::port_forward::PortForwardConnector {
-        let clients: std::collections::BTreeMap<String, kube::Client> = self
-            .clients
-            .lock()
-            .await
-            .iter()
-            .map(|(name, client)| (name.clone(), client.clone()))
-            .collect();
+    #[must_use]
+    pub fn port_forward_connector(&self) -> crate::port_forward::PortForwardConnector {
         crate::port_forward::PortForwardConnector::new(std::sync::Arc::new(
-            port_forward::KubePortForwardSeam::new(clients),
+            port_forward::KubePortForwardSeam::shared(self.clients.clone()),
         ))
     }
 }

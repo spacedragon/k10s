@@ -931,6 +931,12 @@ pub trait KubernetesAccess: Send + Sync + std::fmt::Debug {
         req: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>>;
 
+    /// Expose the adapter's port-forward seam when it supports forwarding;
+    /// adapters without the capability return `None`.
+    fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        None
+    }
+
     /// Forward inbound user input into a redeemed stream session.
     ///
     /// Sessions are keyed by their (consumed) ticket ID; unknown sessions

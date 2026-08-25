@@ -26,7 +26,7 @@ fn request(port: PortForwardPortSelection) -> PortForwardRequest {
     }
 }
 
-async fn connector_for(server: &RecordedApiServer) -> PortForwardConnector {
+fn connector_for(server: &RecordedApiServer) -> PortForwardConnector {
     let client = server.clone().into_client(NS);
     let adapter = KubeAdapter::with_cluster_clients(
         vec![ContextInfo {
@@ -38,7 +38,7 @@ async fn connector_for(server: &RecordedApiServer) -> PortForwardConnector {
         [(CONTEXT, client)],
     )
     .expect("adapter builds around the recorded server");
-    adapter.port_forward_connector().await
+    adapter.port_forward_connector()
 }
 
 fn category_of(error: &BackendError) -> Option<RejectionCategory> {
@@ -133,7 +133,7 @@ fn install_happy_path(server: &RecordedApiServer) {
 async fn exact_service_identity_resolves_to_the_deterministic_ready_pod() {
     let server = RecordedApiServer::standard();
     install_happy_path(&server);
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
 
     let resolved = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
@@ -176,7 +176,7 @@ async fn exact_service_identity_resolves_to_the_deterministic_ready_pod() {
 async fn named_selection_keeps_declared_service_port_identity() {
     let server = RecordedApiServer::standard();
     install_happy_path(&server);
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
 
     let resolved = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
@@ -237,7 +237,7 @@ async fn named_target_ports_resolve_through_pod_container_ports() {
         })
         .to_string(),
     );
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
     let resolved = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
         .await
@@ -329,7 +329,7 @@ async fn recreated_services_and_stale_slices_are_rejected_or_skipped() {
         })
         .to_string(),
     );
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
 
     let resolved = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
@@ -396,7 +396,7 @@ async fn candidates_sort_deterministically_and_pods_revalidate_by_uid() {
         })
         .to_string(),
     );
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
 
     // Not-ready, cross-namespace, and non-Pod targets are skipped; the first
     // sorted candidate is web-b — whose live UID no longer matches.
@@ -482,7 +482,7 @@ async fn unsupported_and_unavailable_targets_reject_with_typed_categories() {
             200,
             &body.to_string(),
         );
-        let connector = connector_for(&server).await;
+        let connector = connector_for(&server);
         let selection = match case.label {
             "missing-port" => PortForwardPortSelection::Number(9_000),
             _ => PortForwardPortSelection::Name("dns".into()),
@@ -512,7 +512,7 @@ async fn unsupported_and_unavailable_targets_reject_with_typed_categories() {
         &serde_json::json!({"kind": "EndpointSliceList", "apiVersion": "discovery.k8s.io/v1", "items": []})
             .to_string(),
     );
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
     let error = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
         .await
@@ -544,7 +544,7 @@ async fn unsupported_and_unavailable_targets_reject_with_typed_categories() {
         })
         .to_string(),
     );
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
     let error = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
         .await
@@ -570,7 +570,7 @@ async fn forbidden_api_calls_surface_sanitized_failures() {
             403,
             r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"forbidden: pods/portforward","reason":"Forbidden","code":403}"#,
         );
-        let connector = connector_for(&server).await;
+        let connector = connector_for(&server);
         let error = connector
             .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
             .await
@@ -589,7 +589,7 @@ async fn connect_opens_a_stream_through_the_backend_only() {
     // upgrade; connect must fail safely without leaking internals.
     let server = RecordedApiServer::standard();
     install_happy_path(&server);
-    let connector = connector_for(&server).await;
+    let connector = connector_for(&server);
     let resolved = connector
         .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
         .await

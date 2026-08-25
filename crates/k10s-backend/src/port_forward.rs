@@ -80,6 +80,10 @@ pub enum RejectionCategory {
     VanishedResource,
     /// The Service type or port cannot be forwarded.
     UnsupportedService,
+    /// The requested local port is already occupied.
+    LocalPortInUse,
+    /// A context switch invalidated an in-flight request; retry after it.
+    ContextTransition,
     /// The upstream stream failed before or during transfer.
     TransportClosed,
 }

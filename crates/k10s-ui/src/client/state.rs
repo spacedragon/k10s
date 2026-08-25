@@ -1,15 +1,21 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use serde_json::json;
+
 use k10s_protocol::{
-    Ack, BackendRevision, BootstrapResponse, CancelRequest, ClientFrame, ClientKind,
-    DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, Hello,
-    INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest, InfrastructureResponse,
+    Ack, BackendRevision, BootstrapResponse, CAPABILITY_SERVICE_PORT_FORWARD, CancelRequest,
+    ClientFrame, ClientKind, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
+    Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest, InfrastructureResponse,
     InfrastructureWatchSpec, OperationAccepted, OperationId, OperationProgress, OperationStatus,
-    OperationStatusRequest, OperationStatusResponse, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
-    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
-    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
-    ScaleRequest, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
+    OperationStatusRequest, OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR, PortForwardListResponse, PortForwardSession,
+    PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState,
+    PortForwardStartRequest, PortForwardStartResponse, PortForwardStopRequest,
+    PortForwardStopResponse, REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START,
+    REQUEST_PORT_FORWARD_STOP, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
+    ResourceListRow, ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus,
+    Retryability, ScaleRequest, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
     StreamTicketRequest, StreamTicketResponse, StreamType, Subscribe, SubscriptionId,
     SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
@@ -681,6 +687,14 @@ pub struct ClientState {
     operation_refresh: Option<RequestId>,
     infrastructure: HashMap<String, InfrastructureResponse>,
     server_bootstrap: Option<BootstrapResponse>,
+    /// Authoritative port-forward sessions keyed by session ID, applied from
+    /// complete snapshots on the bounded `portForwardSessions` stream and
+    /// reconstructed via `portForward.list` after reconnects.
+    port_forward_sessions: BTreeMap<String, PortForwardSession>,
+    /// Highest applied session-snapshot revision; older events are stale.
+    port_forward_revision: u64,
+    /// Desired subscription presence for the bounded session stream.
+    port_forward_subscribed: Option<SubscriptionId>,
     server_state_invalid: bool,
     local_ui: LocalUiState,
     session_id: Option<SessionId>,
@@ -751,6 +765,9 @@ impl ClientState {
             operation_refresh: None,
             infrastructure: HashMap::new(),
             server_bootstrap: None,
+            port_forward_sessions: BTreeMap::new(),
+            port_forward_revision: 0,
+            port_forward_subscribed: None,
             server_state_invalid: true,
             local_ui: LocalUiState::default(),
             session_id: None,
@@ -892,6 +909,170 @@ impl ClientState {
         self.resource_specs.insert(id.clone(), spec);
         self.refresh_server_validity();
         Ok(LiveSubscription { id })
+    }
+
+    /// Whether the negotiated bootstrap advertises desktop port forwarding.
+    #[must_use]
+    pub fn port_forward_available(&self) -> bool {
+        self.server_bootstrap.as_ref().is_some_and(|bootstrap| {
+            bootstrap
+                .capabilities
+                .iter()
+                .any(|capability| capability == CAPABILITY_SERVICE_PORT_FORWARD)
+        })
+    }
+
+    /// Subscribe to the bounded `portForwardSessions` snapshot stream.
+    pub fn subscribe_port_forward_sessions(
+        &mut self,
+    ) -> Result<Option<LiveSubscription>, ClientError> {
+        if !self.port_forward_available() {
+            return Ok(None);
+        }
+        if let Some(id) = self.port_forward_subscribed.clone() {
+            return Ok(Some(LiveSubscription { id }));
+        }
+        let id = SubscriptionId::new(format!("pf-{}", self.next_subscription_id));
+        self.next_subscription_id = self.next_subscription_id.saturating_add(1);
+        let selector = serde_json::to_value(SubscriptionSelector::PortForwardSessions)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.queue_subscribe(id.clone(), selector.clone())?;
+        // Registering as a live subscription makes reconnect resubscribe
+        // automatically and lets delta ownership checks recognize frames.
+        self.live_subscriptions.insert(id.clone(), selector);
+        self.refresh_server_validity();
+        self.port_forward_subscribed = Some(id.clone());
+        Ok(Some(LiveSubscription { id }))
+    }
+
+    /// Request one bounded loopback forward; the response carries the full
+    /// authoritative session snapshot.
+    pub fn request_port_forward_start(
+        &mut self,
+        request: PortForwardStartRequest,
+        request_id: impl Into<String>,
+    ) -> Result<(), ClientError> {
+        if !self.port_forward_available() {
+            return Err(ClientError::InvalidState(
+                "port forwarding is not available on this server",
+            ));
+        }
+        let payload = serde_json::to_value(&request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.enqueue_reliable(ClientFrame {
+            kind: ClientKind::Request,
+            request_id: Some(RequestId::from(request_id.into())),
+            subscription_id: None,
+            sequence: None,
+            payload: json!({
+                "kind": REQUEST_PORT_FORWARD_START,
+                "payload": payload,
+            }),
+        })?;
+        Ok(())
+    }
+
+    /// Stop one session by ID; idempotent on the server.
+    pub fn request_port_forward_stop(
+        &mut self,
+        session_id: &str,
+        request_id: impl Into<String>,
+    ) -> Result<(), ClientError> {
+        let session_id = PortForwardSessionId::try_new(session_id)
+            .map_err(|_| ClientError::InvalidState("session id must not be empty"))?;
+        let payload = serde_json::to_value(PortForwardStopRequest { session_id })
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.enqueue_reliable(ClientFrame {
+            kind: ClientKind::Request,
+            request_id: Some(RequestId::from(request_id.into())),
+            subscription_id: None,
+            sequence: None,
+            payload: json!({
+                "kind": REQUEST_PORT_FORWARD_STOP,
+                "payload": payload,
+            }),
+        })?;
+        Ok(())
+    }
+
+    /// List every retained session (reconnect reconstruction).
+    pub fn request_port_forward_list(
+        &mut self,
+        request_id: impl Into<String>,
+    ) -> Result<(), ClientError> {
+        self.enqueue_reliable(ClientFrame {
+            kind: ClientKind::Request,
+            request_id: Some(RequestId::from(request_id.into())),
+            subscription_id: None,
+            sequence: None,
+            payload: json!({"kind": REQUEST_PORT_FORWARD_LIST, "payload": {}}),
+        })?;
+        Ok(())
+    }
+
+    /// Current authoritative session snapshots, sorted by session ID.
+    #[must_use]
+    pub fn port_forward_sessions(&self) -> Vec<&PortForwardSession> {
+        self.port_forward_sessions.values().collect()
+    }
+
+    /// Apply a completed start/list/stop response payload.
+    pub fn apply_port_forward_response(
+        &mut self,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), ClientError> {
+        match kind {
+            REQUEST_PORT_FORWARD_START => {
+                let response: PortForwardStartResponse = serde_json::from_value(payload.clone())
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                self.apply_session(response.session);
+                Ok(())
+            }
+            REQUEST_PORT_FORWARD_LIST => {
+                let response: PortForwardListResponse = serde_json::from_value(payload.clone())
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                // Reconstruction replaces state wholesale so vanished
+                // terminal sessions disappear together.
+                self.port_forward_sessions.clear();
+                for session in response.sessions {
+                    self.apply_session(session);
+                }
+                Ok(())
+            }
+            REQUEST_PORT_FORWARD_STOP => {
+                let response: PortForwardStopResponse = serde_json::from_value(payload.clone())
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                if let Some(session) = response.session {
+                    self.apply_session(session);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Apply one session snapshot under its monotonic revision.
+    fn apply_session(&mut self, session: PortForwardSession) {
+        if session.revision < self.port_forward_revision {
+            return; // stale, reordered, or duplicated delivery
+        }
+        self.port_forward_revision = session.revision;
+        let terminal = matches!(
+            session.state,
+            PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+        );
+        // Terminal retention: keep the latest snapshot briefly visible but
+        // bounded by dropping any earlier terminal entries of other ids is
+        // unnecessary; the manager expires them by revision. We keep only
+        // this session's newest truth here.
+        if terminal {
+            self.port_forward_sessions.retain(|id, existing| {
+                existing.state != session.state || *id == session.id.as_str()
+            });
+        }
+        self.port_forward_sessions
+            .insert(session.id.as_str().to_owned(), session);
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -1551,6 +1732,16 @@ impl ClientState {
                         // baseline and the delta is dropped: the snapshot
                         // supersedes it.
                         state.apply_changed(delta.identity, delta.row);
+                    }
+                    Ok(())
+                }
+                PORT_FORWARD_EVENT_SESSION => {
+                    let event: PortForwardSessionEvent = serde_json::from_value(event.payload)
+                        .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    let owned = self.port_forward_subscribed.as_ref()
+                        == self.owned_subscription(&frame).as_ref();
+                    if owned {
+                        self.apply_session(event.session);
                     }
                     Ok(())
                 }

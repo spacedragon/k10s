@@ -1171,6 +1171,12 @@ impl Default for FakeKubernetes {
 }
 
 impl KubernetesAccess for FakeKubernetes {
+    fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        Some(crate::port_forward::PortForwardConnector::new(
+            std::sync::Arc::new(FakePortForwardSeam::new()),
+        ))
+    }
+
     fn query<'a>(
         &'a self,
         req: Query,
