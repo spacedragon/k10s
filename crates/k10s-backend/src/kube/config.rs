@@ -184,7 +184,13 @@ fn validate_and_map(
     // server URLs, and current-context resolution are validated here instead.
     // This is safe offline: the loader does not execute credential plugins at
     // this stage and no network calls happen.
-    Config::try_from(kubeconfig.clone()).map_err(|error| AdapterError::KubeconfigInvalid {
+    let mut structural = kubeconfig.clone();
+    for named in &mut structural.auth_infos {
+        if let Some(auth) = named.auth_info.as_mut() {
+            auth.exec = None;
+        }
+    }
+    Config::try_from(structural).map_err(|error| AdapterError::KubeconfigInvalid {
         source: source.to_owned(),
         detail: describe(error),
     })?;

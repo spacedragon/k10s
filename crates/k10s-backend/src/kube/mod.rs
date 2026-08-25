@@ -77,6 +77,9 @@ pub struct KubeAdapter {
     /// [`Self::with_cluster_clients`], otherwise built on first use from the
     /// stored kubeconfig and cached here for reuse.
     clients: tokio::sync::Mutex<HashMap<String, kube::Client>>,
+    /// Coalesces lazy client construction so concurrent first use executes a
+    /// credential plugin at most once.
+    client_build_lock: tokio::sync::Mutex<()>,
     /// Parsed kubeconfig seeding per-context client construction; absent when
     /// testkit pre-injected every context's client instead.
     kubeconfig_source: Option<kube::config::Kubeconfig>,
@@ -93,6 +96,8 @@ pub struct KubeAdapter {
     /// validation, commit, and retirement run under one guard so overlapping
     /// switches cannot interleave their phases or retire the wrong runtime.
     switch_lock: tokio::sync::Mutex<()>,
+    /// Serializes authoritative Bootstrap/Refresh probes.
+    refresh_lock: tokio::sync::Mutex<()>,
     /// Shared lifecycle/idempotency authority for every real mutation.
     operations: crate::operation::OperationEngine,
     /// Process-local validation authority. Restarting the adapter drops every
@@ -137,11 +142,13 @@ impl KubeAdapter {
         Ok(Self {
             registry: StdMutex::new(ContextRegistry::prepare(prepared)?),
             clients: tokio::sync::Mutex::new(HashMap::new()),
+            client_build_lock: tokio::sync::Mutex::new(()),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            refresh_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             stream_tickets: logs::StreamTickets::new(),
@@ -188,11 +195,13 @@ impl KubeAdapter {
         Ok(Self {
             registry: StdMutex::new(registry),
             clients: tokio::sync::Mutex::new(client_map),
+            client_build_lock: tokio::sync::Mutex::new(()),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             switch_lock: tokio::sync::Mutex::new(()),
+            refresh_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             stream_tickets: logs::StreamTickets::new(),
@@ -271,14 +280,8 @@ impl KubernetesAccess for KubeAdapter {
     {
         Box::pin(async move {
             match req {
-                // Bootstrap is fully supported in Task 1: safe summaries only.
                 Query::Bootstrap => Ok(QueryResult::Bootstrap(BootstrapInfo {
-                    contexts: self
-                        .registry
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contexts()
-                        .to_vec(),
+                    contexts: self.refresh_context_availability().await,
                 })),
                 // Discovery is live in this task through the cached catalog path.
                 Query::ResourceTypes { context } => self.resource_types(&context).await,
@@ -696,6 +699,7 @@ impl KubeAdapter {
         // Prepare (cluster): validate the destination read path with live
         // traffic — a fresh cached catalog proves nothing about right now.
         self.discover_catalog(&to).await?;
+        self.mark_context_available(&to);
         // Commit: install the new current marker as one atomic swap.
         let previous = {
             let mut registry = self
@@ -803,6 +807,16 @@ impl KubeAdapter {
             }
         }
 
+        let _build = self.client_build_lock.lock().await;
+        // Another request may have completed construction while this request
+        // waited for the coalescing guard.
+        {
+            let clients = self.clients.lock().await;
+            if let Some(client) = clients.get(context).cloned() {
+                return Ok(client);
+            }
+        }
+
         let Some(kubeconfig_source) = &self.kubeconfig_source else {
             // No kubeconfig source and no injected client: a wiring gap that
             // must fail closed instead of silently degrading.
@@ -876,6 +890,91 @@ impl KubeAdapter {
         if registry.mark_unavailable(generation, context, reason) {
             registry.choose_available_fallback();
         }
+    }
+
+    fn mark_context_available(&self, context: &str) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (generation, _) = registry.snapshot();
+        if registry.mark_available(generation, context) {
+            registry.choose_available_fallback();
+        }
+    }
+
+    async fn refresh_context_availability(&self) -> Vec<ContextInfo> {
+        let _refresh = self.refresh_lock.lock().await;
+
+        // Explicit Refresh retries disabled contexts in stable kubeconfig
+        // order. Eviction guarantees the credential helper actually reruns.
+        let unavailable = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contexts()
+            .iter()
+            .filter(|context| context.availability == crate::port::ContextAvailability::Unavailable)
+            .map(|context| context.name.clone())
+            .collect::<Vec<_>>();
+        for context in unavailable {
+            self.clients.lock().await.remove(&context);
+            if self.cluster_client(&context).await.is_ok() {
+                self.mark_context_available(&context);
+            }
+        }
+
+        // First bootstrap validates only the configured current context.
+        let current_unknown = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contexts()
+            .iter()
+            .find(|context| {
+                context.is_current
+                    && context.availability == crate::port::ContextAvailability::Unknown
+            })
+            .map(|context| context.name.clone());
+        if let Some(context) = current_unknown
+            && self.cluster_client(&context).await.is_ok()
+        {
+            self.mark_context_available(&context);
+        }
+
+        let has_available_current = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contexts()
+            .iter()
+            .any(|context| {
+                context.is_current
+                    && context.availability == crate::port::ContextAvailability::Available
+            });
+        if !has_available_current {
+            let unknown = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contexts()
+                .iter()
+                .filter(|context| context.availability == crate::port::ContextAvailability::Unknown)
+                .map(|context| context.name.clone())
+                .collect::<Vec<_>>();
+            for context in unknown {
+                if self.cluster_client(&context).await.is_ok() {
+                    self.mark_context_available(&context);
+                    break;
+                }
+            }
+        }
+
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.contexts().to_vec()
     }
 }
 

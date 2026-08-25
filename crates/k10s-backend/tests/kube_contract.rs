@@ -92,15 +92,22 @@ fn assert_bootstrap_shape(payload: &Value, label: &str) {
     // Every context shares the required keys (camelCase on the wire); namespace
     // is optional, and no credential-bearing key may ever appear.
     assert!(
-        ["cluster", "isCurrent", "name"]
+        ["availability", "cluster", "isCurrent", "name"]
             .iter()
             .all(|key| context_keys.contains(*key)),
         "{label}: contexts lost a required key: {context_keys:?}"
     );
-    let allowed: std::collections::BTreeSet<String> = ["cluster", "isCurrent", "name", "namespace"]
-        .map(str::to_owned)
-        .into_iter()
-        .collect();
+    let allowed: std::collections::BTreeSet<String> = [
+        "availability",
+        "cluster",
+        "isCurrent",
+        "name",
+        "namespace",
+        "unavailableReason",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect();
     assert!(
         context_keys.is_subset(&allowed),
         "{label}: contexts expose unexpected keys: {context_keys:?}"

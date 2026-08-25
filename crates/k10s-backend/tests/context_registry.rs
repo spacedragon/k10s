@@ -69,6 +69,95 @@ fn write_fixture(name: &str, yaml: &str) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
+fn exec_plugin_fixture(
+    current_succeeds: bool,
+    fallback_succeeds: bool,
+) -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let seed = write_fixture("seed", "");
+    let dir = seed.parent().expect("fixture has parent");
+    let current_counter = dir.join("current.count");
+    let fallback_counter = dir.join("fallback.count");
+
+    let write_plugin = |name: &str, counter: &Path, succeeds: bool| {
+        let path = dir.join(name);
+        let outcome = if succeeds {
+            r#"printf '%s\n' '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"fixture-token"}}'"#
+                .to_owned()
+        } else {
+            "echo 'fixture plugin denied' >&2\nexit 17".to_owned()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ncount=0\n[ ! -f '{counter}' ] || count=$(cat '{counter}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{counter}'\n{outcome}\n",
+                counter = counter.display()
+            ),
+        )
+        .expect("plugin fixture writes");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("plugin metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("plugin becomes executable");
+        path
+    };
+
+    let current_plugin = write_plugin("current-plugin.sh", &current_counter, current_succeeds);
+    let fallback_plugin = write_plugin("fallback-plugin.sh", &fallback_counter, fallback_succeeds);
+    let kubeconfig = dir.join("config");
+    std::fs::write(
+        &kubeconfig,
+        format!(
+            r#"apiVersion: v1
+kind: Config
+current-context: current
+clusters:
+- name: cluster
+  cluster:
+    server: https://127.0.0.1:9
+    insecure-skip-tls-verify: true
+contexts:
+- name: current
+  context:
+    cluster: cluster
+    user: current-user
+- name: fallback
+  context:
+    cluster: cluster
+    user: fallback-user
+users:
+- name: current-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: {current_plugin}
+      interactiveMode: Never
+- name: fallback-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: {fallback_plugin}
+      interactiveMode: Never
+"#,
+            current_plugin = current_plugin.display(),
+            fallback_plugin = fallback_plugin.display(),
+        ),
+    )
+    .expect("exec kubeconfig writes");
+    (kubeconfig, current_counter, fallback_counter)
+}
+
+#[cfg(unix)]
+fn invocation_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
 async fn bootstrap_contexts(adapter: &KubeAdapter) -> Vec<ContextInfo> {
     match adapter
         .query(Query::Bootstrap)
@@ -169,11 +258,107 @@ users:
     let path = write_fixture("kubeconfig", yaml);
     let adapter = KubeAdapter::from_kubeconfig(Some(&path))
         .expect("exec credential helpers are accepted and validated lazily");
-    let contexts = bootstrap_contexts(&adapter).await;
-    assert_eq!(contexts.len(), 1);
-    assert_eq!(contexts[0].name, "aks-cluster");
-    assert_eq!(contexts[0].availability, ContextAvailability::Unknown);
+    drop(adapter);
     std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bootstrap_runs_only_current_exec_plugin() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(true, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    assert_eq!(invocation_count(&current_counter), 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    let current_invocations = invocation_count(&current_counter);
+    assert!(current_invocations > 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    assert_eq!(contexts[0].availability, ContextAvailability::Available);
+    assert!(contexts[0].is_current);
+    assert_eq!(contexts[1].availability, ContextAvailability::Unknown);
+
+    let refreshed = bootstrap_contexts(&adapter).await;
+    assert_eq!(invocation_count(&current_counter), current_invocations);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    assert_eq!(refreshed, contexts);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn failed_current_exec_falls_back_without_failing_bootstrap() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(false, true);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    assert_eq!(invocation_count(&current_counter), 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(invocation_count(&current_counter), 1);
+    assert!(invocation_count(&fallback_counter) > 0);
+    assert_eq!(contexts[0].availability, ContextAvailability::Unavailable);
+    assert!(
+        contexts[0]
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("fixture plugin denied"))
+    );
+    assert!(!contexts[0].is_current);
+    assert_eq!(contexts[1].availability, ContextAvailability::Available);
+    assert!(contexts[1].is_current);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn all_exec_failures_remain_visible_without_current_context() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(false, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(invocation_count(&current_counter), 1);
+    assert_eq!(invocation_count(&fallback_counter), 1);
+    assert_eq!(contexts.len(), 2);
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.availability == ContextAvailability::Unavailable)
+    );
+    assert!(contexts.iter().all(|context| !context.is_current));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn non_current_exec_is_lazy_and_failed_selection_stays_disabled() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(true, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    let initial = bootstrap_contexts(&adapter).await;
+    assert!(initial[0].is_current);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    let current_invocations = invocation_count(&current_counter);
+
+    let error = adapter
+        .query(Query::ContextSwitch {
+            to: "fallback".into(),
+        })
+        .await
+        .expect_err("failed plugin prevents the switch without exiting");
+    assert!(matches!(
+        error,
+        BackendError::ContextUnavailable { context, reason }
+            if context == "fallback" && reason.contains("fixture plugin denied")
+    ));
+    assert_eq!(invocation_count(&fallback_counter), 1);
+
+    // Bootstrap is also Refresh: the disabled context is retried, remains
+    // visible, and cannot displace the still-available current context.
+    let refreshed = bootstrap_contexts(&adapter).await;
+    assert_eq!(invocation_count(&fallback_counter), 2);
+    assert_eq!(invocation_count(&current_counter), current_invocations);
+    assert!(refreshed[0].is_current);
+    assert_eq!(refreshed[1].availability, ContextAvailability::Unavailable);
+    assert!(!refreshed[1].is_current);
 }
 
 /// A parseable kubeconfig whose current context references an undefined
