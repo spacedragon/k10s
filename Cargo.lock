@@ -1617,8 +1617,10 @@ dependencies = [
  "k10s-protocol",
  "k10s-server",
  "k10s-ui",
+ "serde_json",
  "tokio",
  "tokio-util",
+ "tracing",
  "tracing-subscriber",
 ]
 

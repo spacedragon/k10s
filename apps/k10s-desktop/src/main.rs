@@ -16,8 +16,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         DesktopApp::launch()?
     };
+    // A canvas large enough for the default Overview window plus headroom
+    // for launcher and top bar so nothing is clipped on first launch.
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([640.0, 420.0]),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         ..eframe::NativeOptions::default()
     };
     eframe::run_native("k10s", options, Box::new(move |_| Ok(Box::new(app))))?;

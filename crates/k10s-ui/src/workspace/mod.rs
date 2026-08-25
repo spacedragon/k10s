@@ -13,12 +13,19 @@
 mod detail;
 mod guard;
 mod resource;
+mod snapshot;
+
 mod service;
 mod window;
 
 pub use detail::{DetailState, DetailTab, ShellState, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
 pub use resource::{ResourceWindowState, SortSpec};
+pub use snapshot::{
+    COUNTER_LIMIT, PersistedListView, PersistedWindow, PersistedWindowKind, SNAPSHOT_VERSION,
+    WorkspaceSnapshot,
+};
+
 pub use service::ServiceWindowState;
 pub use window::{Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkloadKind};
 
@@ -41,6 +48,9 @@ pub enum LauncherItem {
 /// after every blocker is resolved via [`WorkspaceCommand::ResolveBlock`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkspaceCommand<I> {
+    /// Replace the entire workspace with a restored snapshot. Used by native
+    /// desktop hosts at startup to reopen the user's previous session.
+    RestoreSnapshot(WorkspaceSnapshot),
     /// Launcher click: open the first instance or focus/raise the existing
     /// one (singleton) or the most recently used one (workload).
     ActivateLauncherItem(LauncherItem),
@@ -259,6 +269,15 @@ where
 
     fn dispatch(&mut self, command: WorkspaceCommand<I>) -> Vec<WorkspaceEvent<I>> {
         match command {
+            // A restore replaces the entire workspace. `apply` already holds
+            // it back while a navigation guard is pending; mismatched or
+            // malformed snapshots leave the current state untouched.
+            WorkspaceCommand::RestoreSnapshot(snapshot) => {
+                if let Some(restored) = Self::from_snapshot(&snapshot) {
+                    *self = restored;
+                }
+                Vec::new()
+            }
             WorkspaceCommand::ActivateLauncherItem(item) => self.activate(item),
             WorkspaceCommand::AddWorkloadInstance(kind) => {
                 let id = self.open_workload(kind);
