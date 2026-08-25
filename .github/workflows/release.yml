@@ -102,10 +102,16 @@ jobs:
           # or converted into a registry push by downstream release tooling.
           mkdir -p target/distrib
           image_tag="${GITHUB_REF_NAME//\//-}"
+          docker_archive="$RUNNER_TEMP/k10s-${GITHUB_RUN_ID}-smoked-image.tar"
           oci_archive="target/distrib/k10s-${image_tag}-linux-amd64.oci.tar"
-          sudo skopeo copy docker-daemon:k10s:test "oci-archive:${oci_archive}:k10s:${image_tag}"
+          # The runner's distro skopeo may predate the Docker daemon API. Use
+          # the daemon-matched Docker CLI for export, then perform an entirely
+          # local archive-to-archive OCI conversion.
+          sudo docker save --output "$docker_archive" k10s:test
+          sudo chown "$(id -u):$(id -g)" "$docker_archive"
+          skopeo copy "docker-archive:${docker_archive}" "oci-archive:${oci_archive}:k10s:${image_tag}"
           test -s "$oci_archive"
-          sudo skopeo inspect --config "oci-archive:${oci_archive}" | grep -Fq '10001:10001'
+          skopeo inspect --config "oci-archive:${oci_archive}" | grep -Fq '10001:10001'
       - name: Upload Linux release artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
