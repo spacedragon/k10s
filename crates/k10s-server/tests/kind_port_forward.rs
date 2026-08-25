@@ -83,14 +83,11 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
         uid,
     };
 
-    for requested in [
-        0_u16,
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port(),
-    ] {
+    let explicit_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    for requested in [0_u16, explicit_port] {
         let session = manager
             .start(
                 identity.clone(),
