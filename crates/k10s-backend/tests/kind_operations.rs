@@ -591,7 +591,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "jsonpath={.metadata.uid}",
     ]);
     let dependent_patch = format!(
-        r#"{{"metadata":{{"finalizers":["k10s.dev/hold"],"ownerReferences":[{{"apiVersion":"v1","kind":"ConfigMap","name":"delete-me","uid":"{owner_uid}"}}]}}}}"#
+        r#"{{"metadata":{{"finalizers":["k10s.dev/hold"],"ownerReferences":[{{"apiVersion":"v1","kind":"ConfigMap","name":"delete-me","uid":"{owner_uid}","blockOwnerDeletion":true}}]}}}}"#
     );
     kubectl(&[
         "-n",
