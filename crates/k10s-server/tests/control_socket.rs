@@ -42,6 +42,8 @@ impl KubernetesAccess for HugeKubernetes {
                     cluster: "large".into(),
                     namespace: None,
                     is_current: true,
+                    availability: k10s_protocol::ContextAvailability::Available,
+                    unavailable_reason: None,
                 }],
             }))
         })
@@ -122,6 +124,8 @@ impl KubernetesAccess for SlowKubernetes {
                     cluster: "slow".into(),
                     namespace: None,
                     is_current: true,
+                    availability: k10s_protocol::ContextAvailability::Available,
+                    unavailable_reason: None,
                 }],
             }))
         })

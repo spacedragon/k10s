@@ -284,12 +284,16 @@ async fn bootstrap_wire_payload_carries_contexts_through_server_frame_round_trip
                 cluster: "dev-cluster".into(),
                 namespace: Some("default".into()),
                 is_current: true,
+                availability: k10s_protocol::ContextAvailability::Available,
+                unavailable_reason: None,
             },
             k10s_protocol::Context {
                 name: "prod-readonly".into(),
                 cluster: "prod-cluster".into(),
                 namespace: Some("default".into()),
                 is_current: false,
+                availability: k10s_protocol::ContextAvailability::Available,
+                unavailable_reason: None,
             },
         ]
     );

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use kube::config::{Config, Kubeconfig, KubeconfigError};
 
-use crate::port::{AdapterError, ContextInfo};
+use crate::port::{AdapterError, ContextAvailability, ContextInfo};
 
 /// Load credential-free context summaries from an explicit kubeconfig path or
 /// standard discovery (`KUBECONFIG`, then `~/.kube/config`), along with the
@@ -173,6 +173,8 @@ fn validate_and_map(
             cluster: context.cluster.clone(),
             namespace: context.namespace.clone(),
             is_current: kubeconfig.current_context.as_deref() == Some(named.name.as_str()),
+            availability: ContextAvailability::Unknown,
+            unavailable_reason: None,
         });
     }
 

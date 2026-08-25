@@ -270,12 +270,16 @@ async fn prepare_commits_only_complete_registries() {
             cluster: "cluster-a".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "second".into(),
             cluster: "cluster-b".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
 
@@ -294,12 +298,16 @@ fn prepare_refuses_ambiguous_or_corrupt_registries() {
             cluster: "a".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "same".into(),
             cluster: "b".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
     assert!(matches!(
@@ -313,12 +321,16 @@ fn prepare_refuses_ambiguous_or_corrupt_registries() {
             cluster: "x".into(),
             namespace: None,
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "b".into(),
             cluster: "y".into(),
             namespace: None,
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
     assert!(matches!(

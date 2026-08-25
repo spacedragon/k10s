@@ -374,6 +374,8 @@ impl BootstrapResult {
                 cluster: c.cluster.clone(),
                 namespace: c.namespace.clone(),
                 is_current: c.is_current,
+                availability: c.availability,
+                unavailable_reason: c.unavailable_reason.clone(),
             })
             .collect();
         payload

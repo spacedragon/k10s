@@ -67,6 +67,8 @@ fn recorded_adapter(server: &RecordedApiServer) -> KubeAdapter {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [(CONTEXT, client)],
     )

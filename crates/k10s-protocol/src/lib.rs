@@ -23,7 +23,7 @@ pub mod route;
 pub mod stream;
 pub mod subscription;
 
-pub use bootstrap::{BootstrapResponse, Context, ProtocolVersion, ServerInfo};
+pub use bootstrap::{BootstrapResponse, Context, ContextAvailability, ProtocolVersion, ServerInfo};
 pub use context::{
     ContextPermissionsRequest, ContextPermissionsResponse, ContextSwitchRequest,
     ContextSwitchResponse, PermissionCheck, PermissionOutcome, PermissionProbe,

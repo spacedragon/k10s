@@ -13,6 +13,8 @@ use std::pin::Pin;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+pub use k10s_protocol::ContextAvailability;
+
 use crate::catalog::CatalogSnapshot;
 
 /// A behavior-level query to the Kubernetes adapter.
@@ -628,6 +630,30 @@ pub struct ContextInfo {
     pub namespace: Option<String>,
     /// Whether this is the current context.
     pub is_current: bool,
+    /// Current credential availability.
+    pub availability: ContextAvailability,
+    /// Safe, bounded reason when the credential plugin is unavailable.
+    pub unavailable_reason: Option<String>,
+}
+
+impl ContextInfo {
+    /// Build an available context summary.
+    #[must_use]
+    pub fn available(
+        name: impl Into<String>,
+        cluster: impl Into<String>,
+        namespace: Option<String>,
+        is_current: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            cluster: cluster.into(),
+            namespace,
+            is_current,
+            availability: ContextAvailability::Available,
+            unavailable_reason: None,
+        }
+    }
 }
 
 /// Typed errors from the Kubernetes adapter.

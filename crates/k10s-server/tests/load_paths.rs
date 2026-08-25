@@ -143,6 +143,8 @@ async fn dedicated_log_socket_bounds_a_slow_consumer_under_10_mib_source() {
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("recorded", recorded.into_client("default"))],
     )

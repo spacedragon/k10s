@@ -29,6 +29,8 @@ async fn real_exec_is_opened_only_after_authenticated_dedicated_socket_redeem() 
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("recorded", recorded.clone().into_client("default"))],
     )
