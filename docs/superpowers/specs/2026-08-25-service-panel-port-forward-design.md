@@ -54,6 +54,8 @@ Each TCP entry in the Ports tab shows:
 - A local port input. Blank or `0` means “choose an available port.” An explicit value must be in `1..=65535`.
 - A **Start** button.
 
+UDP and SCTP entries in the same tab render their structured labels read-only and offer no Start control.
+
 Starting is explicit. Opening the panel never creates a listener. On success, the row shows:
 
 - `127.0.0.1:<local-port>` with a copy button.
@@ -107,6 +109,8 @@ pub struct ServiceProjection {
     pub selector: BTreeMap<String, String>,
     pub external_name: Option<String>,
     pub session_affinity: Option<String>,
+    pub external_traffic_policy: Option<String>,
+    pub internal_traffic_policy: Option<String>,
     pub ports: Vec<ServicePort>,
 }
 
@@ -119,6 +123,8 @@ pub struct ServicePort {
     pub app_protocol: Option<String>,
 }
 ```
+
+The backend normalizes every declared Service port, not just forwardable ones. `TransportProtocol` covers TCP, UDP, and SCTP. An omitted `targetPort` normalizes to `TargetPort::Number(service_port)` so the very common defaulted case is explicit on the wire instead of being reconstructed by the UI. Traffic policies map verbatim into their optional string fields and render in the Overview tab only when present. UDP and SCTP ports stay fully visible in the panel as read-only entries without a **Start** button, and the server rejects any forward request that resolves to a non-TCP port.
 
 The same normalized projection feeds both surfaces:
 
@@ -261,9 +267,9 @@ Dirty YAML and active port forwards are different guards:
 
 Implementation follows TDD in these slices:
 
-1. **Protocol contracts:** JSON round trips, older payload defaults, invalid ports/protocols, list-row projection defaults on legacy payloads and populated Service projections on snapshot pages and `resource.changed` deltas, golden minor-version negotiation.
+1. **Protocol contracts:** JSON round trips, older payload defaults, invalid ports/protocols, TCP/UDP/SCTP values with omitted-`targetPort` defaulting to `TargetPort::Number(service_port)`, list-row projection defaults on legacy payloads and populated Service projections on snapshot pages and `resource.changed` deltas, golden minor-version negotiation.
 2. **Workspace/UI:** launcher singleton behavior, namespace/search/sort, structured port rendering from row projections without parsing `summary`, capability gating, duplicate Start prevention, context-switch guard, accessibility labels.
-3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, owner-reference slice binding including a mixed stale/current-slice set after Service delete/recreate and ownerless slices skipped, deterministic ready-Pod selection, named target ports, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
+3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, owner-reference slice binding including a mixed stale/current-slice set after Service delete/recreate and ownerless slices skipped, deterministic ready-Pod selection, named target ports, traffic-policy and defaulted-target-port mapping, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
 4. **Server manager:** loopback-only binding, OS-assigned port, occupied port, multiple local connections, a second connection succeeding after upstream EOF, per-connection pump/reset errors leaving the session Active, the consecutive pre-byte open-failure threshold and its reset on any byte transfer, limits, idempotent stop, reconnect/list reconstruction, in-flight and queued Starts aborted by a concurrent context switch — including stale old-context identities submitted after it — with no listener left behind, and cancellation on shutdown.
 5. **Desktop integration:** embedded config advertises and accepts `service.portForward`; standalone config neither advertises nor accepts it.
 6. **Real kind E2E:** create a Deployment and Service, start an automatic local port, issue HTTP through it, stop it, prove the port is released, then repeat with an explicit local port.

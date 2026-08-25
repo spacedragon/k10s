@@ -31,7 +31,7 @@
 - Create: `crates/k10s-protocol/tests/port_forward_contract.rs`
 - Modify: `docs/protocol.md`
 
-- [ ] Add failing serialization tests for `ServiceProjection`, `ServicePort`, `TargetPort`, TCP/UDP protocol values, optional `ResourceListRow.projection` and `ResourceDetailResponse.projection`, and stable ordering.
+- [ ] Add failing serialization tests for `ServiceProjection`, `ServicePort`, `TargetPort`, TCP/UDP/SCTP protocol values, omitted-`targetPort` normalization to `TargetPort::Number(service_port)`, optional traffic-policy strings, optional `ResourceListRow.projection` and `ResourceDetailResponse.projection`, and stable ordering.
 - [ ] Add failing request/response tests for `portForward.start`, `portForward.stop`, `portForward.list`, session snapshots, session revisions, and the `portForward.sessions` subscription selector.
 - [ ] Test validation rules: exact core/v1 Service identity, port selected by name or number, local port `0..=65535`, non-empty session IDs, and safe terminal failures.
 - [ ] Test backward decoding of legacy payloads without a projection on both list rows and details, and prove populated row projections serialize through snapshot pages and `resource.changed` deltas; bump protocol minor version without changing the major version.
@@ -50,7 +50,7 @@
 - Modify: `crates/k10s-backend/tests/{resource_normalization,resource_details,kube_contract}.rs`
 - Modify: `crates/k10s-server/tests/{resource_loopback,kube_detail_loopback}.rs`
 
-- [ ] Add failing fake and recorded-API tests for core/v1 Service lists, namespace filtering, stable sorting, Service type, cluster IP/headless state, selector, session affinity, traffic policy, named/unnamed ports, numeric/named target ports, node ports, protocol, and appProtocol.
+- [ ] Add failing fake and recorded-API tests for core/v1 Service lists, namespace filtering, stable sorting, Service type, cluster IP/headless state, selector, session affinity, external/internal traffic-policy mapping, named/unnamed ports, numeric/named target ports including omitted-`targetPort` defaulting with the default TCP case, preserved SCTP/UDP read-only rows, node ports, protocol, and appProtocol.
 - [ ] Add failing tests proving Service list rows carry the populated `ResourceListRow.projection` in snapshot pages and watch deltas, while rows for other kinds keep `None` and legacy payloads still decode.
 - [ ] Add failing tests proving the UI-facing projection contains no raw Kubernetes object and no credential-bearing fields.
 - [ ] Run the focused backend tests; expect Service normalization/projection failures.
@@ -75,7 +75,7 @@
 - Modify: `apps/k10s-web/src/lib.rs`
 
 - [ ] Add failing pure workspace tests for a singleton Services window, launcher highlight/focus, geometry, namespace/search/sort state, selection, integrated details, pop-out details, and context-switch reset.
-- [ ] Add failing egui tests for the Network launcher group, list columns rendered strictly from `ResourceListRow.projection` delivered in snapshot pages and `resource.changed` deltas without parsing `summary`, loading/empty/filtered-empty/stale/gone states, Ports tab, structured port labels, and accessibility names.
+- [ ] Add failing egui tests for the Network launcher group, list columns rendered strictly from `ResourceListRow.projection` delivered in snapshot pages and `resource.changed` deltas without parsing `summary`, loading/empty/filtered-empty/stale/gone states, Ports tab, structured port labels, Overview traffic-policy fields rendered only when present, UDP/SCTP ports visible with Start unavailable, and accessibility names.
 - [ ] Add a browser semantic-host test proving Services can be listed and inspected without exposing Start/Stop controls.
 - [ ] Run `cargo test --locked -p k10s-ui --test workspace_state --test ui_services`; expect missing window behavior.
 - [ ] Implement `WindowKind::Services`, `LauncherItem::Services`, `WindowContent::Services`, and rendering from normalized feeds only.
