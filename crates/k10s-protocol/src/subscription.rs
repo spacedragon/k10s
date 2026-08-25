@@ -25,6 +25,10 @@ pub enum SubscriptionSelector {
     Resource(ResourceWatchSpec),
     /// Watch Overview, Nodes, Storage, and metrics for one context.
     Infrastructure(InfrastructureWatchSpec),
+    /// Bounded session-status stream for port-forward sessions. Events carry
+    /// complete [`crate::PortForwardSession`] snapshots with monotonic
+    /// revisions so they can be coalesced and replayed safely.
+    PortForwardSessions,
 }
 
 /// The resource type a watch follows.

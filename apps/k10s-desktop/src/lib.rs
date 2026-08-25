@@ -311,6 +311,13 @@ fn launch_embedded_server_on(
                 }
                 let config = ServerConfig {
                     access_token: thread_token,
+                    capabilities: vec![
+                        "logs.tail".to_owned(),
+                        "exec.attach".to_owned(),
+                        // Desktop-only: the embedded server owns loopback
+                        // listeners; standalone and web never advertise this.
+                        k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+                    ],
                     ..ServerConfig::default()
                 };
                 k10s_server::run(listener, config, kernel, thread_cancel).await

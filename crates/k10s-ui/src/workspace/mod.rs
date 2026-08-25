@@ -13,11 +13,13 @@
 mod detail;
 mod guard;
 mod resource;
+mod service;
 mod window;
 
 pub use detail::{DetailState, DetailTab, ShellState, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
 pub use resource::{ResourceWindowState, SortSpec};
+pub use service::ServiceWindowState;
 pub use window::{Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkloadKind};
 
 use std::collections::HashMap;
@@ -28,6 +30,7 @@ pub enum LauncherItem {
     Overview,
     Nodes,
     Storage,
+    Services,
     Workload(WorkloadKind),
 }
 
@@ -49,6 +52,7 @@ pub enum WorkspaceCommand<I> {
     SetGeometry(WindowId, WindowGeom),
     SetNamespace(WindowId, Option<String>),
     SetSearch(WindowId, String),
+    SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
     SetSort(WindowId, Option<SortSpec>),
     SetSplitRatio(WindowId, f32),
@@ -66,6 +70,12 @@ pub enum WorkspaceCommand<I> {
     DiscardYaml(WindowId),
     ConnectShell(WindowId),
     DisconnectShell(WindowId),
+    StartPortForward {
+        service: I,
+        port: k10s_protocol::PortForwardPortSelector,
+        local_port: u16,
+    },
+    StopPortForward(String),
     /// Global context switch. Preserves window kinds, geometry, filters,
     /// and splits; clears selections and closes pinned detail windows.
     ///
@@ -109,6 +119,12 @@ pub enum WorkspaceEvent<I> {
     ContextSwitched {
         to: String,
     },
+    PortForwardStartRequested {
+        service: I,
+        port: k10s_protocol::PortForwardPortSelector,
+        local_port: u16,
+    },
+    PortForwardStopRequested(String),
 }
 
 /// The complete workspace state.
@@ -184,6 +200,23 @@ where
         }
     }
 
+    /// The window-local state of the singleton Services window.
+    pub fn service_state(&self, id: WindowId) -> Option<&ServiceWindowState<I>> {
+        match self.window(id).map(|window| &window.content) {
+            Some(WindowContent::Services(service)) => Some(service),
+            _ => None,
+        }
+    }
+
+    /// Mutable Services window state, for callers outside the command
+    /// vocabulary (port-forward drafts).
+    pub fn service_state_mut(&mut self, id: WindowId) -> Option<&mut ServiceWindowState<I>> {
+        match self.window_mut(id).map(|window| &mut window.content) {
+            Some(WindowContent::Services(service)) => Some(service),
+            _ => None,
+        }
+    }
+
     /// Number of open list-window instances for a workload kind.
     pub fn instance_count(&self, kind: WorkloadKind) -> usize {
         self.windows
@@ -199,6 +232,7 @@ where
             LauncherItem::Overview => self.has_kind(WindowKind::Overview),
             LauncherItem::Nodes => self.has_kind(WindowKind::Nodes),
             LauncherItem::Storage => self.has_kind(WindowKind::Storage),
+            LauncherItem::Services => self.has_kind(WindowKind::Services),
             LauncherItem::Workload(kind) => self.instance_count(kind) > 0,
         }
     }
@@ -239,11 +273,19 @@ where
                 Vec::new()
             }
             WorkspaceCommand::SetNamespace(id, namespace) => {
-                self.with_resource_mut(id, |resource| resource.namespace = namespace);
+                self.with_resource_mut(id, |resource| resource.namespace = namespace.clone());
+                self.with_service_mut(id, |service| service.namespace = namespace);
                 Vec::new()
             }
             WorkspaceCommand::SetSearch(id, search) => {
-                self.with_resource_mut(id, |resource| resource.search = search);
+                self.with_resource_mut(id, |resource| resource.search = search.clone());
+                self.with_service_mut(id, |service| service.search = search);
+                Vec::new()
+            }
+            WorkspaceCommand::SetServicePortDraft(id, key, value) => {
+                self.with_service_mut(id, |service| {
+                    service.port_drafts.insert(key, value);
+                });
                 Vec::new()
             }
             WorkspaceCommand::SetFilter(id, key, value) => {
@@ -253,18 +295,22 @@ where
                 Vec::new()
             }
             WorkspaceCommand::SetSort(id, sort) => {
-                self.with_resource_mut(id, |resource| resource.sort = sort);
+                self.with_resource_mut(id, |resource| resource.sort = sort.clone());
+                self.with_service_mut(id, |service| service.sort = sort);
                 Vec::new()
             }
             WorkspaceCommand::SetSplitRatio(id, ratio) => {
-                self.with_resource_mut(id, |resource| {
-                    resource.split_ratio = ratio.clamp(0.0, 1.0);
-                });
+                let clamped = ratio.clamp(0.0, 1.0);
+                self.with_resource_mut(id, move |resource| resource.split_ratio = clamped);
+                self.with_service_mut(id, move |service| service.split_ratio = clamped);
                 Vec::new()
             }
             WorkspaceCommand::ToggleDetailPane(id) => {
                 self.with_resource_mut(id, |resource| {
                     resource.detail_visible = !resource.detail_visible;
+                });
+                self.with_service_mut(id, |service| {
+                    service.detail_visible = !service.detail_visible;
                 });
                 Vec::new()
             }
@@ -297,6 +343,18 @@ where
                 self.disconnect_shell(id);
                 Vec::new()
             }
+            WorkspaceCommand::StartPortForward {
+                service,
+                port,
+                local_port,
+            } => vec![WorkspaceEvent::PortForwardStartRequested {
+                service,
+                port,
+                local_port,
+            }],
+            WorkspaceCommand::StopPortForward(id) => {
+                vec![WorkspaceEvent::PortForwardStopRequested(id)]
+            }
             WorkspaceCommand::ContextSwitch { to } => self.context_switch(to),
             WorkspaceCommand::CommitContextSwitch { to } => self.commit_context_switch(to),
             WorkspaceCommand::ResolveBlock(_) => Vec::new(), // handled in `apply`
@@ -310,6 +368,7 @@ where
             LauncherItem::Overview => self.activate_singleton(WindowKind::Overview),
             LauncherItem::Nodes => self.activate_singleton(WindowKind::Nodes),
             LauncherItem::Storage => self.activate_singleton(WindowKind::Storage),
+            LauncherItem::Services => self.activate_singleton(WindowKind::Services),
             LauncherItem::Workload(kind) => {
                 let mru = self
                     .windows
@@ -354,15 +413,19 @@ where
 
     fn open_singleton(&mut self, kind: WindowKind) -> WindowId {
         let size = match kind {
-            WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage => [840.0, 560.0],
+            WindowKind::Overview
+            | WindowKind::Nodes
+            | WindowKind::Storage
+            | WindowKind::Services => [840.0, 560.0],
             _ => [700.0, 480.0],
         };
-        self.push_window(
-            kind,
-            kind.title().to_owned(),
-            size,
-            WindowContent::Resource(ResourceWindowState::default()),
-        )
+        let content = match kind {
+            // Services is a singleton list window with its own state shape;
+            // every other singleton renders a generic resource list.
+            WindowKind::Services => WindowContent::Services(ServiceWindowState::default()),
+            _ => WindowContent::Resource(ResourceWindowState::default()),
+        };
+        self.push_window(kind, kind.title().to_owned(), size, content)
     }
 
     fn open_workload(&mut self, kind: WorkloadKind) -> WindowId {
@@ -456,6 +519,11 @@ where
                 .as_ref()
                 .map(|detail| detail.blockers(id))
                 .unwrap_or_default(),
+            WindowContent::Services(service) => service
+                .detail
+                .as_ref()
+                .map(|detail| detail.blockers(id))
+                .unwrap_or_default(),
             WindowContent::Detail(detail) => detail.blockers(id),
         }
     }
@@ -510,10 +578,12 @@ where
         let Some(window) = self.window(id) else {
             return Vec::new();
         };
-        let WindowContent::Resource(resource) = &window.content else {
-            return Vec::new();
+        let already_selected = match &window.content {
+            WindowContent::Resource(resource) => resource.selection.as_ref() == Some(&identity),
+            WindowContent::Services(service) => service.selection.as_ref() == Some(&identity),
+            WindowContent::Detail(_) => return Vec::new(),
         };
-        if resource.selection.as_ref() == Some(&identity) {
+        if already_selected {
             return Vec::new();
         }
         let blockers = self.blockers_for(id);
@@ -521,11 +591,17 @@ where
             return self.block(WorkspaceCommand::SelectRow(id, identity), blockers);
         }
         let window = self.window_mut(id).expect("window checked above");
-        let WindowContent::Resource(resource) = &mut window.content else {
-            return Vec::new();
-        };
-        resource.selection = Some(identity.clone());
-        resource.detail = Some(DetailState::new(identity));
+        match &mut window.content {
+            WindowContent::Resource(resource) => {
+                resource.selection = Some(identity.clone());
+                resource.detail = Some(DetailState::new(identity));
+            }
+            WindowContent::Services(service) => {
+                service.selection = Some(identity.clone());
+                service.detail = Some(DetailState::new(identity));
+            }
+            WindowContent::Detail(_) => {}
+        }
         Vec::new()
     }
 
@@ -533,7 +609,11 @@ where
         let Some(window) = self.window(id) else {
             return Vec::new();
         };
-        let has_selection = matches!(&window.content, WindowContent::Resource(resource) if resource.selection.is_some());
+        let has_selection = match &window.content {
+            WindowContent::Resource(resource) => resource.selection.is_some(),
+            WindowContent::Services(service) => service.selection.is_some(),
+            WindowContent::Detail(_) => false,
+        };
         if !has_selection {
             return Vec::new();
         }
@@ -542,11 +622,17 @@ where
             return self.block(WorkspaceCommand::ClearSelection(id), blockers);
         }
         let window = self.window_mut(id).expect("window checked above");
-        let WindowContent::Resource(resource) = &mut window.content else {
-            return Vec::new();
-        };
-        resource.selection = None;
-        resource.detail = None;
+        match &mut window.content {
+            WindowContent::Resource(resource) => {
+                resource.selection = None;
+                resource.detail = None;
+            }
+            WindowContent::Services(service) => {
+                service.selection = None;
+                service.detail = None;
+            }
+            WindowContent::Detail(_) => {}
+        }
         Vec::new()
     }
 
@@ -559,6 +645,11 @@ where
             .iter()
             .flat_map(|window| match &window.content {
                 WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.blockers(window.id))
+                    .unwrap_or_default(),
+                WindowContent::Services(service) => service
                     .detail
                     .as_ref()
                     .map(|detail| detail.blockers(window.id))
@@ -593,9 +684,16 @@ where
             events.push(WorkspaceEvent::Closed(id));
         }
         for window in &mut self.windows {
-            if let WindowContent::Resource(resource) = &mut window.content {
-                resource.selection = None;
-                resource.detail = None;
+            match &mut window.content {
+                WindowContent::Resource(resource) => {
+                    resource.selection = None;
+                    resource.detail = None;
+                }
+                WindowContent::Services(service) => {
+                    service.selection = None;
+                    service.detail = None;
+                }
+                WindowContent::Detail(_) => {}
             }
         }
         // Every dirty buffer was resolved before the commit could run.
@@ -614,6 +712,9 @@ where
             WindowContent::Resource(resource) => {
                 resource.detail.as_ref().map(|detail| &detail.identity)
             }
+            WindowContent::Services(service) => {
+                service.detail.as_ref().map(|detail| &detail.identity)
+            }
             WindowContent::Detail(detail) => Some(&detail.identity),
         }
     }
@@ -621,6 +722,10 @@ where
     fn detail_is_dirty(window: &Window<I>) -> bool {
         match &window.content {
             WindowContent::Resource(resource) => resource
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.yaml.dirty),
+            WindowContent::Services(service) => service
                 .detail
                 .as_ref()
                 .is_some_and(|detail| detail.yaml.dirty),
@@ -652,6 +757,11 @@ where
         let identity = match self.window(id) {
             Some(window) => match &window.content {
                 WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .filter(|detail| detail.yaml.dirty)
+                    .map(|detail| detail.identity.clone()),
+                WindowContent::Services(service) => service
                     .detail
                     .as_ref()
                     .filter(|detail| detail.yaml.dirty)
@@ -689,11 +799,24 @@ where
         }
     }
 
+    fn with_service_mut(&mut self, id: WindowId, mutate: impl FnOnce(&mut ServiceWindowState<I>)) {
+        if let Some(window) = self.window_mut(id)
+            && let WindowContent::Services(service) = &mut window.content
+        {
+            mutate(service);
+        }
+    }
+
     fn with_detail_mut(&mut self, id: WindowId, mutate: impl FnOnce(&mut DetailState<I>)) {
         if let Some(window) = self.window_mut(id) {
             match &mut window.content {
                 WindowContent::Resource(resource) => {
                     if let Some(detail) = &mut resource.detail {
+                        mutate(detail);
+                    }
+                }
+                WindowContent::Services(service) => {
+                    if let Some(detail) = &mut service.detail {
                         mutate(detail);
                     }
                 }

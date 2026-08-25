@@ -152,6 +152,7 @@ fn list_row(
         labels: Default::default(),
         summary: summary.to_owned(),
         created_at: created_at.to_owned(),
+        projection: None,
     }
 }
 

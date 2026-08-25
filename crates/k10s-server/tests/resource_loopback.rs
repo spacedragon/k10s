@@ -915,3 +915,107 @@ async fn ws_read_optional(ws: &mut Ws) -> Option<ServerFrame> {
         Some(Err(_)) | None => None,
     }
 }
+
+/// Service list rows and watch deltas carry the structured Service
+/// projection end-to-end while deployment rows keep it absent.
+#[tokio::test]
+async fn service_rows_stream_projections_through_snapshot_and_delta() {
+    let (server, fake) = spawn_server_with_fake().await;
+    let mut ws = connect_authenticated(&server).await;
+
+    send_request(
+        &mut ws,
+        "svc-list-1",
+        "resource.list",
+        serde_json::to_value(ResourceListRequest {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Service"),
+            namespace: Some("default".into()),
+        })
+        .unwrap(),
+    )
+    .await;
+    let response = receive_response(&mut ws, "svc-list-1").await;
+    let list: ResourceListResponse = response.decode_response_payload().unwrap();
+    assert_eq!(list.rows.len(), 2, "dev-local seeds two Services");
+    for row in &list.rows {
+        let Some(k10s_protocol::ResourceProjection::Service(projection)) = &row.projection else {
+            panic!("{} carries a Service projection", row.identity.name);
+        };
+        assert!(!projection.ports.is_empty());
+        // No raw Kubernetes object vocabulary reaches the wire.
+        let serialized = serde_json::to_string(row).unwrap();
+        assert!(!serialized.contains("\"spec\":"));
+        assert!(!serialized.contains("\"status\":"));
+    }
+
+    // Watch deltas embed the same populated projection.
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"svc-sub",
+            "payload":{
+                "kind":"resource",
+                "context":"dev-local",
+                "gvk":{"group":"","version":"v1","kind":"Service"},
+                "namespace":"default"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let subscribed = receive_frame(&mut ws).await;
+    assert_eq!(subscribed.kind, ServerKind::Subscribed);
+    let begin = receive_frame(&mut ws).await;
+    assert_eq!(begin.kind, ServerKind::SnapshotBegin);
+    let chunk = receive_frame(&mut ws).await;
+    assert_eq!(chunk.kind, ServerKind::SnapshotChunk);
+    let page: ResourceSnapshotPage = serde_json::from_value(
+        serde_json::from_value::<SnapshotChunk>(chunk.payload)
+            .unwrap()
+            .data,
+    )
+    .unwrap();
+    assert_eq!(page.rows.len(), 2, "snapshot rows carry projections too");
+    for row in &page.rows {
+        assert!(
+            matches!(
+                row.projection,
+                Some(k10s_protocol::ResourceProjection::Service(_))
+            ),
+            "{} snapshot row carries a Service projection",
+            row.identity.name
+        );
+    }
+    let end = receive_frame(&mut ws).await;
+    assert_eq!(end.kind, ServerKind::SnapshotEnd);
+
+    // Touch a watched Service -> resource.changed delta carrying the row
+    // with its projection.
+    let touched = fake.touch_resource(
+        "dev-local",
+        &backend_gvk(&GroupVersionKind::core("v1", "Service")),
+        Some("default"),
+        "web-frontend",
+    );
+    assert!(touched.is_some());
+    let changed = receive_frame(&mut ws).await;
+    assert_eq!(changed.kind, ServerKind::Event);
+    let event = match changed.decode_payload().unwrap() {
+        ServerPayload::Event(event) => event,
+        other => panic!("expected an event, got {other:?}"),
+    };
+    assert_eq!(event.event_kind, "resource.changed");
+    let changed_payload: ResourceChanged = serde_json::from_value(event.payload).unwrap();
+    assert_eq!(changed_payload.identity.name, "web-frontend");
+    let Some(k10s_protocol::ResourceProjection::Service(projection)) =
+        &changed_payload.row.projection
+    else {
+        panic!("watch delta carries the Service projection")
+    };
+    assert_eq!(projection.ports[0].service_port, 80);
+
+    server.shutdown().await.unwrap();
+}

@@ -37,6 +37,8 @@ struct Runtime {
     gate: ConnectionGate,
     app: Option<K10sApp>,
     active_kind: Option<WorkloadKind>,
+    /// Whether the semantic Services panel is the active surface.
+    active_services: bool,
     active_window: Option<WindowId>,
     render_key: String,
     action_status: String,
@@ -113,12 +115,14 @@ impl Runtime {
             AppView::Failed { .. } if app.requires_connection_gate() => {
                 self.app = None;
                 self.active_kind = None;
+                self.active_services = false;
                 self.active_window = None;
                 self.gate.authentication_rejected();
                 self.render_gate();
             }
             AppView::Failed { message } => {
                 self.app = None;
+                self.active_services = false;
                 self.render_failure(&message);
             }
         }
@@ -135,7 +139,18 @@ impl Runtime {
         if let Some(value) = action.strip_prefix("workload:") {
             if let Some(kind) = parse_kind(value) {
                 self.active_kind = Some(kind);
+                self.active_services = false;
                 self.active_window = app.web_activate_workload(kind);
+            }
+        } else if action == "services" {
+            self.active_kind = None;
+            self.active_services = true;
+            self.active_window = app.web_activate_services();
+        } else if let Some(uid) = action.strip_prefix("svcrow:") {
+            if self.active_services
+                && let Some(window) = self.active_window
+            {
+                app.web_select_service(window, uid);
             }
         } else if let Some(uid) = action.strip_prefix("row:") {
             if let (Some(kind), Some(window)) = (self.active_kind, self.active_window)
@@ -204,21 +219,40 @@ impl Runtime {
         let Some(app) = self.app.as_ref() else {
             return;
         };
-        let rows = self
-            .active_kind
-            .map(|kind| app.web_resource_rows(kind))
-            .unwrap_or_default();
+        let rows = if self.active_services {
+            Vec::new()
+        } else {
+            self.active_kind
+                .map(|kind| app.web_resource_rows(kind))
+                .unwrap_or_default()
+        };
+        let service_rows = if self.active_services {
+            app.web_service_rows()
+        } else {
+            Vec::new()
+        };
         let selected = self
             .active_window
             .and_then(|window| app.web_selected_detail(window))
             .map(|(identity, detail)| (identity.clone(), detail.cloned()));
+        // Service selections render their own projection-driven panel
+        // instead of the generic sections.
+        let service_detail = if self.active_services
+            && let Some(window) = self.active_window
+            && let Some((identity, _)) = app.web_selected_detail(window)
+        {
+            Some((identity.clone(), app.web_service_detail(window)))
+        } else {
+            None
+        };
+
         let stream = self.active_window.map(|window| app.web_stream_text(window));
         let dialog = self
             .active_window
             .and_then(|window| app.web_dialog_kind(window));
         let key = format!(
-            "{context_names:?}|{:?}|{rows:?}|{selected:?}|{stream:?}|{dialog:?}|{}",
-            self.active_kind, self.action_status
+            "{context_names:?}|{:?}|{rows:?}|{service_rows:?}|{selected:?}|{stream:?}|{dialog:?}|{}|{}",
+            self.active_kind, self.active_services, self.action_status
         );
         if self.stage == Stage::Ready && self.render_key == key {
             return;
@@ -242,6 +276,7 @@ impl Runtime {
 
         let navigation = self.create_element("nav");
         navigation.set_attribute("aria-label", "Resources").unwrap();
+        self.append_button_to(&navigation, "Services", "services");
         for kind in WorkloadKind::ALL {
             self.append_button_to(&navigation, kind.title(), &format!("workload:{kind:?}"));
         }
@@ -279,7 +314,55 @@ impl Runtime {
             }
         }
 
-        if let Some((identity, detail)) = selected {
+        if self.active_services {
+            self.append_heading(2, "Services");
+            if service_rows.is_empty() {
+                self.append_text_with_attr("p", "Loading resources", "role", "status");
+            } else {
+                let table = self.create_element("table");
+                table.set_attribute("aria-label", "Services").unwrap();
+                let body = self.create_element("tbody");
+                for (uid, name, namespace, type_label, ports_label) in service_rows {
+                    let tr = self.create_element("tr");
+                    let name_cell = self.create_element("td");
+                    self.append_button_to(&name_cell, &name, &format!("svcrow:{uid}"));
+                    let namespace_cell = self.create_element("td");
+                    namespace_cell.set_text_content(Some(&namespace));
+                    let type_cell = self.create_element("td");
+                    type_cell.set_text_content(Some(&type_label));
+                    let ports_cell = self.create_element("td");
+                    ports_cell.set_text_content(Some(&ports_label));
+                    tr.append_child(&name_cell).unwrap();
+                    tr.append_child(&namespace_cell).unwrap();
+                    tr.append_child(&type_cell).unwrap();
+                    tr.append_child(&ports_cell).unwrap();
+                    body.append_child(&tr).unwrap();
+                }
+                table.append_child(&body).unwrap();
+                self.root.append_child(&table).unwrap();
+            }
+        }
+
+        if let Some((identity, detail)) = service_detail {
+            self.append_heading(2, &format!("{} details", identity.name));
+            match detail {
+                Some(detail) => {
+                    self.append_heading(3, "Overview");
+                    for (label, value) in &detail.overview {
+                        self.append_text("p", &format!("{label}: {value}"));
+                    }
+                    self.append_heading(3, "Ports");
+                    for line in &detail.ports {
+                        self.append_text("p", line);
+                    }
+                    // Port forwarding is desktop-only and arrives in a
+                    // later task: deliberately no Start/Stop controls.
+                }
+                None => {
+                    self.append_text_with_attr("p", "Loading details", "role", "status");
+                }
+            }
+        } else if let Some((identity, detail)) = selected {
             self.append_heading(2, &format!("{} details", identity.name));
             let tabs = self.create_element("div");
             tabs.set_attribute("role", "tablist").unwrap();
@@ -445,6 +528,7 @@ async fn main() -> Result<(), JsValue> {
         gate: ConnectionGate::new(control_url),
         app: None,
         active_kind: None,
+        active_services: false,
         active_window: None,
         render_key: String::new(),
         action_status: String::new(),

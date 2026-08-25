@@ -31,6 +31,16 @@ impl TestIdentity {
             uid: name,
         }
     }
+
+    fn service(name: &'static str) -> Self {
+        Self {
+            context: "dev",
+            kind: "Service",
+            namespace: "default",
+            name,
+            uid: name,
+        }
+    }
 }
 
 fn events(
@@ -80,6 +90,246 @@ fn select(
     identity: TestIdentity,
 ) -> Vec<WorkspaceEvent<TestIdentity>> {
     events(state, WorkspaceCommand::SelectRow(window, identity))
+}
+
+// ---------------------------------------------------------------------------
+// Services singleton window
+// ---------------------------------------------------------------------------
+
+fn open_services(state: &mut WorkspaceState<TestIdentity>) -> k10s_ui::workspace::WindowId {
+    let out = events(
+        state,
+        WorkspaceCommand::ActivateLauncherItem(LauncherItem::Services),
+    );
+    opened(&out)
+}
+
+#[test]
+fn services_is_a_singleton_window_that_focuses_on_repeat_activation() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    assert!(matches!(
+        state.window(services).unwrap().kind,
+        WindowKind::Services
+    ));
+    assert_eq!(state.windows().len(), 2); // overview + services
+
+    // Activating the launcher item again focuses; it never duplicates.
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ActivateLauncherItem(LauncherItem::Services),
+    );
+    assert_eq!(out, vec![WorkspaceEvent::Focused(services)]);
+    assert_eq!(state.windows().len(), 2);
+    assert!(state.launcher_highlight(LauncherItem::Services));
+}
+
+#[test]
+fn services_launcher_highlight_follows_the_window_lifecycle() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    assert!(!state.launcher_highlight(LauncherItem::Services));
+
+    let services = open_services(&mut state);
+    assert!(state.launcher_highlight(LauncherItem::Services));
+
+    events(&mut state, WorkspaceCommand::CloseWindow(services));
+    assert!(!state.launcher_highlight(LauncherItem::Services));
+
+    // Reopening after a close starts a fresh singleton instance.
+    let reopened = open_services(&mut state);
+    assert_ne!(reopened, services);
+}
+
+#[test]
+fn services_window_opens_with_singleton_geometry_and_defaults() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    let window = state.window(services).unwrap();
+    assert_eq!(window.title, "Services");
+    assert_eq!(window.geometry.size, [840.0, 560.0]);
+    let service = match &window.content {
+        WindowContent::Services(service) => service,
+        other => panic!("expected a Services window, got {other:?}"),
+    };
+    assert_eq!(service.namespace, None);
+    assert_eq!(service.search, "");
+    assert_eq!(service.sort, None);
+    assert_eq!(service.selection, None);
+    assert_eq!(service.split_ratio, 0.5);
+    assert!(service.detail_visible);
+    assert!(service.detail.is_none());
+    assert!(service.port_drafts.is_empty());
+}
+
+#[test]
+fn list_window_commands_drive_the_services_window_independently() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let pods = open_pods(&mut state);
+    let services = open_services(&mut state);
+
+    events(
+        &mut state,
+        WorkspaceCommand::SetNamespace(services, Some("payments".into())),
+    );
+    events(
+        &mut state,
+        WorkspaceCommand::SetSearch(services, "api".into()),
+    );
+    events(
+        &mut state,
+        WorkspaceCommand::SetSort(
+            services,
+            Some(k10s_ui::workspace::SortSpec {
+                column: "ports".into(),
+                ascending: false,
+            }),
+        ),
+    );
+    events(&mut state, WorkspaceCommand::SetSplitRatio(services, 1.7));
+    events(&mut state, WorkspaceCommand::ToggleDetailPane(services));
+
+    let service = state.service_state(services).unwrap();
+    assert_eq!(service.namespace.as_deref(), Some("payments"));
+    assert_eq!(service.search, "api");
+    assert_eq!(
+        service.sort.as_ref().map(|sort| sort.column.as_str()),
+        Some("ports")
+    );
+    assert_eq!(
+        service.split_ratio, 1.0,
+        "ratios clamp to the unit interval"
+    );
+    assert!(!service.detail_visible);
+
+    // The workload window keeps fully independent state.
+    let resource = state.resource_state(pods).unwrap();
+    assert_eq!(resource.namespace, None);
+    assert_eq!(resource.search, "");
+    assert!(resource.sort.is_none());
+    assert_eq!(resource.split_ratio, 0.5);
+    assert!(resource.detail_visible);
+}
+
+#[test]
+fn selecting_a_service_row_sets_the_integrated_detail() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    let identity = TestIdentity::service("web-frontend");
+
+    let out = select(&mut state, services, identity.clone());
+    assert!(out.is_empty());
+
+    let service = state.service_state(services).unwrap();
+    assert_eq!(service.selection.as_ref(), Some(&identity));
+    let detail = service.detail.as_ref().unwrap();
+    assert_eq!(detail.identity, identity);
+    assert_eq!(detail.active_tab, DetailTab::Overview);
+
+    // Re-selecting the same row is a no-op and never blocked.
+    let out = select(&mut state, services, identity);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn service_rows_pop_out_dedicated_details() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    select(&mut state, services, TestIdentity::service("integrated"));
+
+    let pinned = TestIdentity::service("pinned-service");
+    let out = events(
+        &mut state,
+        WorkspaceCommand::OpenDedicatedDetail(pinned.clone()),
+    );
+    let dedicated = opened(&out);
+
+    // Later integrated selections never move the pinned window.
+    select(&mut state, services, TestIdentity::service("other-row"));
+    let detail = match &state.window(dedicated).unwrap().content {
+        WindowContent::Detail(detail) => detail,
+        other => panic!("expected a detail window, got {other:?}"),
+    };
+    assert_eq!(detail.identity, pinned);
+}
+
+#[test]
+fn dirty_yaml_in_a_services_window_blocks_and_resolves_a_context_switch() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    select(&mut state, services, TestIdentity::service("web-frontend"));
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(services));
+    assert!(
+        state
+            .service_state(services)
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .yaml
+            .dirty
+    );
+
+    // The dirty buffer engages the same context-switch guard.
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ContextSwitch { to: "prod".into() },
+    );
+    let pending = blocked(&out);
+    assert_eq!(
+        pending.blockers,
+        vec![k10s_ui::workspace::Blocker {
+            window: services,
+            reason: BlockReason::DirtyYaml,
+        }]
+    );
+
+    // Resolving the blocker requests the switch; nothing commits yet.
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window: services }),
+    );
+    assert!(
+        out.iter()
+            .any(|event| matches!(event, WorkspaceEvent::ContextSwitchRequested { .. }))
+    );
+    assert_eq!(state.context(), "");
+
+    // The confirmed commit clears the Services selection and its detail.
+    events(
+        &mut state,
+        WorkspaceCommand::CommitContextSwitch { to: "prod".into() },
+    );
+    assert_eq!(state.context(), "prod");
+    let service = state.service_state(services).unwrap();
+    assert_eq!(service.selection, None);
+    assert!(service.detail.is_none());
+    // Filters and split survive the commit.
+    assert_eq!(state.window(services).unwrap().title, "Services");
+}
+
+#[test]
+fn port_drafts_are_present_and_settable() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let services = open_services(&mut state);
+    assert!(
+        state
+            .service_state(services)
+            .unwrap()
+            .port_drafts
+            .is_empty()
+    );
+
+    state
+        .service_state_mut(services)
+        .unwrap()
+        .port_drafts
+        .insert("uid-web-frontend/80".to_owned(), "8443".to_owned());
+
+    let drafts = &state.service_state(services).unwrap().port_drafts;
+    assert_eq!(
+        drafts.get("uid-web-frontend/80").map(String::as_str),
+        Some("8443")
+    );
 }
 
 // ---------------------------------------------------------------------------

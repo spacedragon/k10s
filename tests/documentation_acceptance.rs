@@ -19,6 +19,38 @@ fn normalized(document: &str) -> String {
     document.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[test]
+fn desktop_port_forward_security_contract_is_documented() {
+    let docs = normalized(&format!(
+        "{} {} {} {}",
+        read("README.md"),
+        read("docs/configuration.md"),
+        read("docs/security.md"),
+        read("docs/troubleshooting.md")
+    ));
+    for required in [
+        "desktop",
+        "127.0.0.1",
+        "services",
+        "endpointslices",
+        "pods",
+        "pods/portforward",
+        "16",
+        "32",
+        "8",
+        "ExternalName",
+        "UDP",
+        "context switch",
+        "local port is in use",
+        "no ready endpoint",
+    ] {
+        assert!(
+            docs.contains(required),
+            "missing port-forward documentation: {required}"
+        );
+    }
+}
+
 fn assert_documented(document: &str, values: impl IntoIterator<Item = String>) {
     for value in values {
         assert!(
@@ -228,7 +260,7 @@ fn operational_contracts_have_acceptance_coverage() {
         assert!(security.contains(required), "missing contract: {required}");
     }
     assert!(troubleshooting.contains("correlation ID"));
-    for required in ["major `1`", "minor `0..=1`", "`resyncRequired`"] {
+    for required in ["major `1`", "minor `0..=2`", "`resyncRequired`"] {
         assert!(protocol.contains(required), "missing contract: {required}");
     }
 

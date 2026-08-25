@@ -182,6 +182,7 @@ mod tests {
                 owner_references: Vec::new(),
                 events: Vec::new(),
                 manifest: String::new(),
+                projection: None,
             }),
             |selector| selector.matches(&reference),
         );

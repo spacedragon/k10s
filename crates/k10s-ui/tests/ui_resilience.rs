@@ -88,6 +88,7 @@ fn pod_row(name: &str, summary: &str) -> ResourceListRow {
         labels: Default::default(),
         summary: summary.to_owned(),
         created_at: "2026-08-21T00:50:10Z".to_owned(),
+        projection: None,
     }
 }
 
@@ -108,6 +109,7 @@ fn deployment_row(name: &str, summary: &str) -> ResourceListRow {
         labels: Default::default(),
         summary: summary.to_owned(),
         created_at: "2026-08-21T00:00:00Z".to_owned(),
+        projection: None,
     }
 }
 
@@ -145,6 +147,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n"),
+        projection: None,
     }
 }
 
@@ -180,6 +183,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
+        projection: None,
     }
 }
 
@@ -598,6 +602,7 @@ fn a_custom_kind_missing_after_a_context_switch_falls_back_to_the_picker() {
             labels: Default::default(),
             summary: "1 panel".to_owned(),
             created_at: "2026-08-21T00:45:00Z".to_owned(),
+            projection: None,
         }],
     );
     open(

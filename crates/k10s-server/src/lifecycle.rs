@@ -36,6 +36,7 @@ use crate::{
 pub(crate) struct AppState {
     config: Arc<ServerConfig>,
     kernel: Arc<BackendKernel>,
+    port_forward: Option<Arc<crate::port_forward::PortForwardManager>>,
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
     streams: Arc<Semaphore>,
@@ -493,7 +494,25 @@ pub async fn run_with_assets(
         force: CancellationToken::new(),
     };
     let startup_readiness_delay = config.startup_readiness_delay;
-    let app = router(
+    // The bounded port-forward manager activates only for servers that
+    // advertise `service.portForward`; standalone and web never do.
+    let port_forward = if config
+        .capabilities
+        .iter()
+        .any(|capability| capability == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD)
+    {
+        kernel.port_forward_connector().map(|connector| {
+            let (events_tx, _) = tokio::sync::broadcast::channel(64);
+            Arc::new(crate::port_forward::PortForwardManager::new(
+                connector,
+                cancel.child_token(),
+                events_tx,
+            ))
+        })
+    } else {
+        None
+    };
+    let app = router_with_port_forward(
         config,
         kernel,
         Arc::clone(&readiness),
@@ -503,7 +522,9 @@ pub async fn run_with_assets(
         Arc::clone(&gate),
         signals.clone(),
         dist_dir,
+        port_forward.clone(),
     );
+    let port_forward_for_shutdown = port_forward;
     if startup_readiness_delay.is_zero() {
         readiness.set(ReadinessState::Ready);
     } else {
@@ -549,6 +570,11 @@ pub async fn run_with_assets(
                 coordinator.stop_accepting_application_connections();
                 coordinator.send_notice_and_close_mutation_gate(&signals.drain);
                 coordinator.cancel_watches_logs_and_exec();
+            }
+            if let Some(manager) = port_forward_for_shutdown {
+                // Listeners and pumps are cancelled and joined inside the
+                // same absolute deadline as every other tracked task.
+                manager.shutdown().await;
             }
             if !probe_drain_grace.is_zero() {
                 tokio::time::sleep(probe_drain_grace).await;
@@ -612,6 +638,35 @@ pub fn router(
     signals: DrainSignals,
     dist_dir: Option<PathBuf>,
 ) -> Router {
+    router_with_port_forward(
+        config,
+        kernel,
+        readiness,
+        connections,
+        tasks,
+        admission,
+        gate,
+        signals,
+        dist_dir,
+        None,
+    )
+}
+
+/// [`router`] with an explicit port-forward manager; production wiring
+/// builds one when the capability is enabled and the adapter supports it.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_port_forward(
+    config: ServerConfig,
+    kernel: BackendKernel,
+    readiness: Arc<Readiness>,
+    connections: Arc<TaskTracker>,
+    tasks: Arc<ConnectionTasks>,
+    admission: Arc<Admission>,
+    gate: Arc<MutationGate>,
+    signals: DrainSignals,
+    dist_dir: Option<PathBuf>,
+    port_forward: Option<Arc<crate::port_forward::PortForwardManager>>,
+) -> Router {
     let resume = Arc::new(Mutex::new(ResumeState::new(
         config.resume_max_journal_entries,
         config.resume_max_sessions,
@@ -621,8 +676,9 @@ pub fn router(
         unauthenticated: Arc::new(Semaphore::new(config.max_unauthenticated_connections)),
         authenticated: Arc::new(Semaphore::new(config.max_authenticated_connections)),
         streams: Arc::new(Semaphore::new(config.max_stream_connections)),
-        config: Arc::new(config),
+        config: Arc::new(config.clone()),
         kernel: Arc::new(kernel),
+        port_forward: port_forward.clone(),
         signals,
         connections,
         tasks,
@@ -764,6 +820,7 @@ async fn control_upgrade(
     };
     let config = state.config.clone();
     let kernel = state.kernel.clone();
+    let port_forward_for_session = state.port_forward.clone();
     let auth = state.authenticated.clone();
     let signals = state.signals.clone();
     let gate = state.gate.clone();
@@ -785,6 +842,7 @@ async fn control_upgrade(
                     socket,
                     config,
                     kernel,
+                    port_forward_for_session,
                     permit,
                     auth,
                     gate,

@@ -18,6 +18,7 @@ pub mod error;
 pub mod ids;
 pub mod metrics;
 pub mod operation;
+pub mod port_forward;
 pub mod resource;
 pub mod route;
 pub mod stream;
@@ -51,12 +52,21 @@ pub use operation::{
     RestartRequest, ScaleRequest, ValidationTicket, YamlApplyRequest, YamlDiagnostic, YamlOutcome,
     YamlValidateRequest, buffer_hash,
 };
+pub use port_forward::{
+    CAPABILITY_SERVICE_PORT_FORWARD, PORT_FORWARD_EVENT_SESSION, PortForwardFailure,
+    PortForwardFailureCategory, PortForwardListRequest, PortForwardListResponse,
+    PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent,
+    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
+    PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse,
+    REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
+};
 pub use resource::{
     AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind,
     HealthLevel, NodeRow, OwnerReference, PersistentVolumeClaimRow, PersistentVolumeRow,
     RelatedGroup, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
-    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceRefRequest, ResourceScope,
-    StorageClassRow, StorageInventory, WorkloadHealth, WorkloadKind,
+    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceProjection,
+    ResourceRefRequest, ResourceScope, ServicePort, ServiceProjection, StorageClassRow,
+    StorageInventory, TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use stream::{
@@ -74,4 +84,7 @@ pub use subscription::{
 /// Major protocol version.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Minor protocol version.
-pub const PROTOCOL_MINOR: u16 = 1;
+///
+/// v1.2 added kind-specific resource projections and the port-forward
+/// session lifecycle payloads.
+pub const PROTOCOL_MINOR: u16 = 2;

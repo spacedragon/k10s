@@ -272,3 +272,81 @@ async fn kube_detail_rejects_stale_uid_as_not_found() {
 
     server.shutdown().await.unwrap();
 }
+
+/// A Service detail served by the real adapter over the socket carries the
+/// structured projection with defaulted target ports and traffic policies.
+#[tokio::test]
+async fn kube_service_detail_carries_projection_over_the_socket() {
+    let (handle, recorded) = spawn_server().await;
+    recorded.set_response(
+        "/api/v1/namespaces/default/services/web",
+        200,
+        &json!({
+            "kind": "Service",
+            "apiVersion": "v1",
+            "metadata": {
+                "name": "web",
+                "namespace": "default",
+                "uid": "uid-kube-svc-web",
+                "resourceVersion": "44",
+                "creationTimestamp": "2026-08-21T00:00:00Z",
+            },
+            "spec": {
+                "type": "ClusterIP",
+                "clusterIP": "10.96.0.10",
+                "clusterIPs": ["10.96.0.10"],
+                "selector": {"app": "web"},
+                "ports": [
+                    {"name": "http", "port": 80, "protocol": "TCP"},
+                    {"name": "metrics", "port": 9100, "targetPort": 9100, "protocol": "UDP"},
+                ],
+            },
+        })
+        .to_string(),
+    );
+    let mut ws = connect_authenticated(&handle).await;
+    ws.send(Message::Text(
+        json!({
+            "kind": "request",
+            "requestId": "svc-detail-1",
+            "payload": {"kind": "resource.detail", "payload": {
+                "identity": {
+                    "context": CONTEXT,
+                    "gvk": {"group": "", "version": "v1", "kind": "Service"},
+                    "namespace": "default",
+                    "name": "web",
+                    "uid": "uid-kube-svc-web",
+                }
+            }}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let frame = receive_frame(&mut ws).await;
+    assert_eq!(frame.kind, ServerKind::Response);
+    let detail: ResourceDetailResponse = frame.decode_response_payload().unwrap();
+    assert_eq!(detail.identity.name, "web");
+    let Some(k10s_protocol::ResourceProjection::Service(projection)) = &detail.projection else {
+        panic!("service detail carries a Service projection")
+    };
+    assert_eq!(projection.service_type, "ClusterIP");
+    assert_eq!(projection.cluster_ips, ["10.96.0.10"]);
+    assert_eq!(
+        projection.selector.get("app").map(String::as_str),
+        Some("web")
+    );
+    assert_eq!(projection.ports.len(), 2);
+    assert_eq!(
+        projection.ports[0].target_port,
+        k10s_protocol::TargetPort::Number { number: 80 },
+        "omitted targetPort normalizes to the Service port over the wire"
+    );
+    assert_eq!(
+        projection.ports[1].protocol,
+        k10s_protocol::TransportProtocol::Udp
+    );
+
+    handle.shutdown().await.unwrap();
+}

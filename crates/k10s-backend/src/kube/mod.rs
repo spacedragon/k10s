@@ -19,6 +19,7 @@ mod mutate;
 mod normalize;
 mod owners;
 mod permissions;
+mod port_forward;
 mod read;
 mod validation;
 mod watch;
@@ -300,6 +301,10 @@ impl KubeAdapter {
 }
 
 impl KubernetesAccess for KubeAdapter {
+    fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
+        Some(self.port_forward_connector())
+    }
+
     fn query<'a>(
         &'a self,
         req: Query,
@@ -1152,6 +1157,17 @@ impl CatalogCache {
             let moved = self.order.remove(position);
             self.order.push(moved);
         }
+    }
+}
+
+impl KubeAdapter {
+    /// Expose the backend-owned port-forward seam sharing this adapter's
+    /// per-context clients.
+    #[must_use]
+    pub fn port_forward_connector(&self) -> crate::port_forward::PortForwardConnector {
+        crate::port_forward::PortForwardConnector::new(Arc::new(
+            port_forward::KubePortForwardSeam::shared(self.clients.clone()),
+        ))
     }
 }
 

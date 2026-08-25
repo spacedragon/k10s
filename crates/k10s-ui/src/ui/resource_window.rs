@@ -25,11 +25,17 @@ use super::{ConnectionState, theme};
 pub struct ResourceFeed {
     /// Rows per workload kind for the selected context.
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
+    /// Core/v1 Service rows for the selected context, carrying structured
+    /// projections; `None` while the Services watch is still loading.
+    pub services: Option<Vec<ResourceListRow>>,
     /// Types offered by the searchable GVK picker.
     pub types: Vec<ResourceTypeEntry>,
     /// Backend-resolved detail responses keyed by stable identity. Both the
     /// integrated pane and dedicated windows look their view up here.
     pub details: HashMap<ResourceIdentity, ResourceDetailResponse>,
+    pub port_forward_available: bool,
+    pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
+    pub port_forward_error: Option<String>,
 }
 
 /// Maps a protocol row identity onto the shell's workspace identity type.
@@ -291,6 +297,8 @@ pub(super) fn show<I>(
                     yaml,
                     streams,
                     dialogs,
+                    feed,
+                    None,
                     queued,
                 );
             }

@@ -16,7 +16,7 @@ fn bootstrap_response_matches_v1_fixture() {
     let frame = ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
     assert_eq!(
         serde_json::to_value(&frame).unwrap(),
-        fixture("bootstrap-v1.1.json")
+        fixture("bootstrap-v1.2.json")
     );
 }
 
@@ -60,6 +60,14 @@ fn current_client_decodes_previous_minor_and_ignores_optional_fields() {
     assert_eq!(bootstrap.protocol, ProtocolVersion { major: 1, minor: 0 });
     assert_eq!(bootstrap.capabilities, ["logs.tail"]);
     assert_eq!(bootstrap.server, None);
+}
+
+#[test]
+fn current_client_decodes_the_previous_v1_1_minor() {
+    let frame = decode_server_frame(fixture("bootstrap-v1.1.json")).unwrap();
+    let bootstrap = validate_bootstrap_response(&frame.payload).unwrap();
+
+    assert_eq!(bootstrap.protocol, ProtocolVersion { major: 1, minor: 1 });
 }
 
 #[test]

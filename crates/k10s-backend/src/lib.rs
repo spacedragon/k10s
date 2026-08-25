@@ -9,6 +9,7 @@ pub mod fake;
 pub mod kernel;
 pub mod operation;
 pub mod port;
+pub mod port_forward;
 pub mod stream;
 mod validation;
 pub mod watch;
@@ -19,7 +20,7 @@ pub mod runtime;
 pub mod testkit;
 
 pub use catalog::CatalogSnapshot;
-pub use fake::{FakeKubernetes, FakeMetricsScenario};
+pub use fake::{FakeKubernetes, FakeMetricsScenario, FakePortForwardSeam};
 pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
 pub use kube::{DISCOVERY_TTL, KubeAdapter, MAX_CACHED_CONTEXTS};
 pub use operation::{
@@ -30,9 +31,14 @@ pub use port::{
     AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextAvailability,
     ContextInfo, ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample,
     OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult,
-    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
-    ResourceTypesData, StreamGrant, StreamInput, StreamKind, StreamRouteKind, Subscribe,
-    SubscriptionHandle,
+    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection,
+    ResourceRecord, ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamGrant,
+    StreamInput, StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort,
+    TransportProtocol,
+};
+pub use port_forward::{
+    PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,
+    PortForwardStream, RejectionCategory, ResolvedPortForward,
 };
 pub use runtime::{BackendMode, ContextRegistry, build_kernel};
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

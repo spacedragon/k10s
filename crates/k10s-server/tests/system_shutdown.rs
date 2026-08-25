@@ -223,6 +223,7 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),
                 manifest: String::new(),
+                projection: None,
             },
         ))
         .unwrap();
