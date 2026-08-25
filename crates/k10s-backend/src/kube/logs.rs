@@ -230,20 +230,80 @@ async fn pump<R: futures_util::AsyncBufRead + Unpin>(
     sender: broadcast::Sender<BackendEvent>,
 ) {
     let mut bytes = Vec::new();
+    let mut undecoded = Vec::new();
     loop {
         bytes.clear();
         let mut limited = (&mut *reader).take(MAX_LOG_CHUNK_BYTES as u64);
         tokio::select! {
             _ = sender.closed() => break,
             read = limited.read_until(b'\n', &mut bytes) => match read {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    if let Some(text) = decode_utf8(&mut undecoded, true) {
+                        let _ = send_with_backpressure(&sender, text).await;
+                    }
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
-                    if sender.send(BackendEvent::Stream(StreamChunk { origin: StreamOrigin::Stdout, text, exit_code: None })).is_err() { break; }
+                    undecoded.extend_from_slice(&bytes);
+                    if let Some(text) = decode_utf8(&mut undecoded, false)
+                        && !send_with_backpressure(&sender, text).await
+                    {
+                        break;
+                    }
                 }
             }
         }
     }
+}
+
+async fn send_with_backpressure(sender: &broadcast::Sender<BackendEvent>, text: String) -> bool {
+    while sender.len() >= STREAM_QUEUE_CAPACITY {
+        tokio::select! {
+            _ = sender.closed() => return false,
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+    }
+    sender
+        .send(BackendEvent::Stream(StreamChunk {
+            origin: StreamOrigin::Stdout,
+            text,
+            exit_code: None,
+        }))
+        .is_ok()
+}
+
+fn decode_utf8(bytes: &mut Vec<u8>, eof: bool) -> Option<String> {
+    let mut output = String::new();
+    loop {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                output.push_str(text);
+                bytes.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(std::str::from_utf8(&bytes[..valid]).expect("validated prefix"));
+                match error.error_len() {
+                    Some(invalid) => {
+                        output.push('\u{fffd}');
+                        bytes.drain(..valid + invalid);
+                    }
+                    None if eof => {
+                        output.push('\u{fffd}');
+                        bytes.clear();
+                        break;
+                    }
+                    None => {
+                        bytes.drain(..valid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (!output.is_empty()).then_some(output)
 }
 
 pub(super) fn has_container(pod: &Pod, name: &str) -> bool {
@@ -377,5 +437,49 @@ mod tests {
         };
         assert_eq!(first.text.len(), MAX_LOG_CHUNK_BYTES);
         assert_eq!(second.text.len(), 17);
+    }
+
+    #[tokio::test]
+    async fn utf8_code_points_survive_the_hard_byte_boundary() {
+        let mut input = vec![b'x'; MAX_LOG_CHUNK_BYTES - 1];
+        input.extend_from_slice("🦀\n".as_bytes());
+        let mut reader = futures_util::io::BufReader::new(futures_util::io::Cursor::new(input));
+        let (sender, mut receiver) = broadcast::channel(4);
+        pump(&mut reader, sender).await;
+
+        let mut output = String::new();
+        while let Ok(BackendEvent::Stream(chunk)) = receiver.try_recv() {
+            output.push_str(&chunk.text);
+        }
+        assert_eq!(
+            output,
+            format!("{}🦀\n", "x".repeat(MAX_LOG_CHUNK_BYTES - 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_tail_is_backpressured_instead_of_lagging_receiver() {
+        let input = (0..200)
+            .map(|index| format!("line-{index}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let reader = futures_util::io::BufReader::new(futures_util::io::Cursor::new(input));
+        let (sender, mut receiver) = broadcast::channel(STREAM_QUEUE_CAPACITY);
+        let producer = tokio::spawn(async move {
+            let mut reader = reader;
+            pump(&mut reader, sender).await;
+        });
+        tokio::task::yield_now().await;
+
+        let mut lines = Vec::new();
+        while lines.len() < 200 {
+            let BackendEvent::Stream(chunk) = receiver.recv().await.unwrap() else {
+                panic!("stream")
+            };
+            lines.push(chunk.text);
+        }
+        producer.await.unwrap();
+        assert_eq!(lines.first().map(String::as_str), Some("line-0\n"));
+        assert_eq!(lines.last().map(String::as_str), Some("line-199\n"));
     }
 }
