@@ -12,8 +12,9 @@
 use std::collections::VecDeque;
 
 use k10s_protocol::{
-    DeletePropagation, GroupVersionKind, OperationId, OperationProgress, OperationStatus,
-    OperationUpdate, ResourceIdentity, ResumeStatus, ServerFrame, ServerKind, SessionId, Welcome,
+    BackendRevision, DeletePropagation, GroupVersionKind, OperationId, OperationProgress,
+    OperationStatus, OperationUpdate, ResourceCapabilities, ResourceDetailResponse,
+    ResourceIdentity, ResumeStatus, ServerFrame, ServerKind, SessionId, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, Query, QueryResult,
@@ -517,6 +518,224 @@ fn outcome_unknown_stays_nonterminal_and_blocks_blind_retry() {
     ));
 }
 
+#[test]
+fn yaml_apply_recovery_refreshes_the_ticket_bound_target() {
+    let mut client = ready_client();
+    let target = deployment("yaml-target");
+    client
+        .begin_command(Command::YamlApply {
+            request: k10s_protocol::YamlApplyRequest {
+                context: CONTEXT.into(),
+                ticket_id: "ticket-yaml-target".into(),
+                target: target.clone(),
+                buffer_hash: "sha256:test".into(),
+                yaml: "kind: Deployment".into(),
+            },
+            idempotency_key: "idem-yaml-target".into(),
+        })
+        .unwrap();
+    let (accepted_id, _, _, _) = encoded_request(&mut client);
+    client
+        .apply(ServerFrame::response(
+            accepted_id,
+            k10s_protocol::OperationAccepted {
+                operation_id: OperationId::new("op-yaml-target"),
+            },
+        ))
+        .unwrap();
+
+    client.transport_lost(1_000, 9);
+    assert!(client.retry_if_due(u64::MAX).unwrap());
+    let _hello = client.take_outbound().unwrap();
+    client.apply(welcome(ResumeStatus::ResyncRequired)).unwrap();
+    let refresh_id = loop {
+        let (id, kind, _, _) = encoded_request(&mut client);
+        if kind == "operation.status" {
+            break id;
+        }
+    };
+    client
+        .apply(ServerFrame::response(
+            refresh_id,
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
+            },
+        ))
+        .unwrap();
+    let (_, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(payload["identity"], serde_json::json!(target));
+    assert!(matches!(
+        client.retry_eligibility("idem-yaml-target"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+}
+
+#[test]
+fn staggered_unknown_operations_get_causally_ordered_target_refreshes() {
+    let mut client = ready_client();
+    let target = deployment("shared-target");
+    for (key, operation) in [
+        ("idem-shared-1", "op-shared-1"),
+        ("idem-shared-2", "op-shared-2"),
+    ] {
+        let pending = client
+            .begin_command(Command::Scale {
+                target: target.clone(),
+                replicas: 3,
+                idempotency_key: key.into(),
+            })
+            .unwrap();
+        let (request_id, _, _, _) = encoded_request(&mut client);
+        client
+            .apply(ServerFrame::response(
+                request_id,
+                k10s_protocol::OperationAccepted {
+                    operation_id: OperationId::new(operation),
+                },
+            ))
+            .unwrap();
+        let _ = client.take(pending);
+    }
+
+    let first_status = client
+        .begin(Query::OperationStatus(vec![
+            OperationId::new("op-shared-1"),
+            OperationId::new("op-shared-2"),
+        ]))
+        .unwrap();
+    let _first_status_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            first_status.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: vec![k10s_protocol::OperationSnapshotEntry {
+                    operation_id: OperationId::new("op-shared-2"),
+                    status: OperationStatus::Running,
+                    progress: None,
+                }],
+            },
+        ))
+        .unwrap();
+    let (target_refresh_id, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(payload["identity"], serde_json::json!(target));
+
+    let second_status = client
+        .begin(Query::OperationStatus(vec![OperationId::new(
+            "op-shared-2",
+        )]))
+        .unwrap();
+    let _second_status_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            second_status.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
+            },
+        ))
+        .unwrap();
+    let (second_target_refresh_id, second_kind, second_payload, _) = encoded_request(&mut client);
+    assert_eq!(second_kind, "resource.detail");
+    assert_eq!(second_payload["identity"], serde_json::json!(target));
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+
+    client
+        .apply(ServerFrame::response(
+            target_refresh_id,
+            ResourceDetailResponse {
+                identity: target,
+                revision: BackendRevision::new(3),
+                created_at: "2026-08-25T00:00:00Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-1"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+    client
+        .apply(ServerFrame::response(
+            second_target_refresh_id,
+            ResourceDetailResponse {
+                identity: deployment("shared-target"),
+                revision: BackendRevision::new(4),
+                created_at: "2026-08-25T00:00:01Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
+}
+
+#[test]
+fn recovery_preflight_counts_the_future_target_refresh_at_exact_capacity() {
+    let mut client = ClientState::new(ClientConfig {
+        outbound_capacity: 3,
+        request_capacity: 3,
+        ..ClientConfig::default()
+    });
+    client
+        .connect(ConnectTarget::new(
+            "ws://127.0.0.1/api/v1/control",
+            "secret",
+        ))
+        .unwrap();
+    let _hello = client.take_outbound().unwrap();
+    client.apply(welcome(ResumeStatus::Fresh)).unwrap();
+    let accepted = client
+        .begin_command(Command::Scale {
+            target: deployment("capacity-target"),
+            replicas: 4,
+            idempotency_key: "idem-capacity".into(),
+        })
+        .unwrap();
+    let (accepted_id, _, _, _) = encoded_request(&mut client);
+    client
+        .apply(ServerFrame::response(
+            accepted_id,
+            k10s_protocol::OperationAccepted {
+                operation_id: OperationId::new("op-capacity"),
+            },
+        ))
+        .unwrap();
+    let _ = client.take(accepted);
+
+    client.transport_lost(1_000, 31);
+    assert!(client.retry_if_due(u64::MAX).unwrap());
+    let _reconnect_hello = client.take_outbound().unwrap();
+    client
+        .apply(welcome(ResumeStatus::ResyncRequired))
+        .expect("bootstrap + status + future target read fit the exact capacity");
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert_eq!(
+        client.outbound_len(),
+        2,
+        "future detail is preflighted, not sent early"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Client state: forced reconnect, resync queries, retry eligibility
 // ---------------------------------------------------------------------------
@@ -609,8 +828,9 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
         "retry stays blocked until the refresh answers"
     );
 
-    // The server no longer knows the operation: it becomes unknown, which
-    // finally unlocks a guarded retry of the idempotency key.
+    // The replacement server no longer knows the operation. That proves the
+    // outcome is unknown, but it cannot deduplicate the old key, so retry
+    // authority still waits for an exact target read.
     client
         .apply(ServerFrame::response(
             refresh_id,
@@ -621,6 +841,53 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
         .unwrap();
     let view = client.operation(&OperationId::new("op-000002")).unwrap();
     assert_eq!(view.status(), OperationStatus::Unknown);
+    assert!(matches!(
+        client.retry_eligibility("idem-live"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+    let (target_refresh_id, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(
+        payload["identity"],
+        serde_json::json!(deployment("web-frontend"))
+    );
+    client
+        .apply(ServerFrame::response(
+            target_refresh_id,
+            ResourceDetailResponse {
+                identity: deployment("web-frontend"),
+                revision: BackendRevision::new(2),
+                created_at: "2026-08-25T00:00:00Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-live"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
+
+    // A later, unrelated status response must not revoke completed target
+    // verification merely because the retained operation remains Unknown.
+    let unrelated = client
+        .begin(Query::OperationStatus(vec![OperationId::new(
+            "op-unrelated",
+        )]))
+        .unwrap();
+    let _unrelated_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            unrelated.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
+            },
+        ))
+        .unwrap();
     assert!(matches!(
         client.retry_eligibility("idem-live"),
         k10s_ui::client::RetryEligibility::Eligible

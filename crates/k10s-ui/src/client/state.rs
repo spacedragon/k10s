@@ -281,11 +281,12 @@ pub enum Command {
 pub enum RetryEligibility {
     /// No accepted operation carries this key yet.
     Eligible,
-    /// The key's operation has not reached a terminal state (or been
-    /// refreshed to unknown) since the last submission.
+    /// The key's operation has not reached a safely retryable terminal state.
+    /// A missing operation remains blocked until its exact mutation target
+    /// has also been refreshed against the replacement backend.
     Blocked,
     /// A resync refresh of the key's operation state is in flight; the
-    /// retry decision waits for its answer.
+    /// retry decision waits for its operation or exact-target answer.
     RefreshPending,
 }
 
@@ -635,6 +636,12 @@ struct PendingEntry {
     cancelled: bool,
 }
 
+#[derive(Debug)]
+struct TargetRefresh {
+    target: ResourceIdentity,
+    keys: Vec<String>,
+}
+
 /// In-progress reassembly of one chunked resource snapshot.
 #[derive(Debug)]
 struct SnapshotAssembly {
@@ -674,6 +681,12 @@ pub struct ClientState {
     operation_order: VecDeque<OperationId>,
     /// Accepted idempotency records: key → accepted operation ID.
     submitted_keys: HashMap<String, OperationId>,
+    /// Exact mutation target retained for crash-recovery reconciliation.
+    submitted_targets: HashMap<String, ResourceIdentity>,
+    /// Keys whose operation disappeared before their target was refreshed.
+    unverified_unknown_keys: HashSet<String>,
+    /// Automatically queued target refresh request → guarded keys.
+    target_refreshes: HashMap<RequestId, TargetRefresh>,
     /// Insertion order of retained idempotency records.
     key_order: VecDeque<String>,
     /// The in-flight resync refresh of nonterminal operations, if any.
@@ -709,6 +722,12 @@ impl std::fmt::Debug for ClientState {
             .field("resource_lists_len", &self.resource_lists.len())
             .field("operations_len", &self.operations.len())
             .field("submitted_keys_len", &self.submitted_keys.len())
+            .field("submitted_targets_len", &self.submitted_targets.len())
+            .field(
+                "unverified_unknown_keys_len",
+                &self.unverified_unknown_keys.len(),
+            )
+            .field("target_refreshes_len", &self.target_refreshes.len())
             .field("operation_refresh", &self.operation_refresh)
             .field("infrastructure_len", &self.infrastructure.len())
             .field("server_state_invalid", &self.server_state_invalid)
@@ -747,6 +766,9 @@ impl ClientState {
             operations: BTreeMap::new(),
             operation_order: VecDeque::new(),
             submitted_keys: HashMap::new(),
+            submitted_targets: HashMap::new(),
+            unverified_unknown_keys: HashSet::new(),
+            target_refreshes: HashMap::new(),
             key_order: VecDeque::new(),
             operation_refresh: None,
             infrastructure: HashMap::new(),
@@ -1000,8 +1022,9 @@ impl ClientState {
     /// Whether `key` may be reused for a new submission. A key whose
     /// operation is still nonterminal stays blocked; while a resync refresh
     /// of that operation's state is in flight the decision waits for its
-    /// answer (refresh-before-retry); terminal or unknown states unlock a
-    /// guarded retry because the backend deduplicates by key anyway.
+    /// answer (refresh-before-retry). A missing operation stays gated until
+    /// an authoritative detail read of its exact mutation target succeeds;
+    /// the replacement backend cannot deduplicate a key it never observed.
     #[must_use]
     pub fn retry_eligibility(&self, key: &str) -> RetryEligibility {
         let Some(operation_id) = self.submitted_keys.get(key) else {
@@ -1010,6 +1033,17 @@ impl ClientState {
         let Some(view) = self.operations.get(operation_id) else {
             return RetryEligibility::Eligible;
         };
+        if view.status == OperationStatus::Unknown && self.unverified_unknown_keys.contains(key) {
+            return if self
+                .target_refreshes
+                .values()
+                .any(|refresh| refresh.keys.iter().any(|pending| pending == key))
+            {
+                RetryEligibility::RefreshPending
+            } else {
+                RetryEligibility::Blocked
+            };
+        }
         if view.is_terminal() {
             return RetryEligibility::Eligible;
         }
@@ -1172,6 +1206,9 @@ impl ClientState {
         self.operations.clear();
         self.operation_order.clear();
         self.submitted_keys.clear();
+        self.submitted_targets.clear();
+        self.unverified_unknown_keys.clear();
+        self.target_refreshes.clear();
         self.key_order.clear();
         self.operation_refresh = None;
     }
@@ -1361,6 +1398,11 @@ impl ClientState {
                     let detail: ResourceDetailResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
+                    if let Some(refresh) = self.target_refreshes.remove(&id) {
+                        for key in refresh.keys {
+                            self.unverified_unknown_keys.remove(&key);
+                        }
+                    }
                     QueryResult::ResourceDetail(Box::new(detail))
                 }
                 PendingAction::Query(Query::ResourceTypes(_)) => {
@@ -1401,32 +1443,53 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     // Remember the idempotency record so a retry of the same
                     // key can be gated on this operation's terminal state.
-                    let key = match &action {
+                    let key_and_target = match &action {
                         PendingAction::Command(Command::YamlApply {
-                            idempotency_key, ..
-                        })
-                        | PendingAction::Command(Command::Scale {
-                            idempotency_key, ..
+                            request,
+                            idempotency_key,
+                        }) => Some((idempotency_key.clone(), Some(request.target.clone()))),
+                        PendingAction::Command(Command::Scale {
+                            target,
+                            idempotency_key,
+                            ..
                         })
                         | PendingAction::Command(Command::Restart {
-                            idempotency_key, ..
+                            target,
+                            idempotency_key,
+                        })
+                        | PendingAction::Command(Command::SetCronJobSuspended {
+                            target,
+                            idempotency_key,
+                            ..
                         })
                         | PendingAction::Command(Command::Delete {
-                            idempotency_key, ..
-                        }) => Some(idempotency_key.clone()),
+                            target,
+                            idempotency_key,
+                            ..
+                        }) => Some((idempotency_key.clone(), Some(target.clone()))),
+                        PendingAction::Command(Command::CreateJob {
+                            source,
+                            idempotency_key,
+                        }) => Some((idempotency_key.clone(), Some(source.clone()))),
                         _ => None,
                     };
-                    if let Some(key) = key {
+                    if let Some((key, target)) = key_and_target {
                         if !self.submitted_keys.contains_key(&key) {
                             self.submitted_keys
                                 .insert(key.clone(), accepted.operation_id.clone());
-                            self.key_order.push_back(key);
+                            self.key_order.push_back(key.clone());
                             while self.submitted_keys.len() > KEY_RETENTION {
                                 if let Some(oldest) = self.key_order.pop_front() {
                                     self.submitted_keys.remove(&oldest);
+                                    self.submitted_targets.remove(&oldest);
+                                    self.unverified_unknown_keys.remove(&oldest);
                                 }
                             }
                         }
+                        if let Some(target) = target {
+                            self.submitted_targets.insert(key.clone(), target);
+                        }
+                        self.unverified_unknown_keys.remove(&key);
                         // Record through the shared path so creation-order
                         // retention stays consistent; an earlier refresh had
                         // marked this operation unknown, and the accepted
@@ -1449,7 +1512,7 @@ impl ClientState {
                     let response: OperationStatusResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    self.merge_operation_status(&response);
+                    self.merge_operation_status(&response)?;
                     QueryResult::OperationStatus(Box::new(response))
                 }
                 PendingAction::Query(Query::ContextSwitch { .. }) => {
@@ -1689,6 +1752,10 @@ impl ClientState {
                     let id = frame.request_id.clone().ok_or_else(|| {
                         ClientError::Protocol("request error missing request ID".to_owned())
                     })?;
+                    // A failed authoritative target read does not grant retry
+                    // authority. Remove its in-flight marker while retaining
+                    // the guarded key as blocked.
+                    self.target_refreshes.remove(&id);
                     self.pending
                         .remove(&id)
                         .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?
@@ -1753,6 +1820,10 @@ impl ClientState {
         self.pending.clear();
         self.completed.clear();
         self.rebuilt_bootstrap = None;
+        // Request IDs belong to the lost transport generation. The guarded
+        // keys remain unverified and rebuild_server_state schedules fresh
+        // exact-target reads on the replacement transport.
+        self.target_refreshes.clear();
     }
 
     /// Whether the watch behind `id` selected `identity`.
@@ -1778,11 +1849,33 @@ impl ClientState {
             self.phase = ClientPhase::Closed;
             return Err(ClientError::RequestRetentionLimit { limit: 0 });
         }
-        let required = 1_usize
+        let nonterminal = self.nonterminal_operation_ids();
+        let nonterminal_ids: HashSet<&OperationId> = nonterminal.iter().collect();
+        let target_refresh_count = self
+            .submitted_keys
+            .iter()
+            .filter(|(key, operation_id)| {
+                self.unverified_unknown_keys.contains(*key)
+                    || nonterminal_ids.contains(operation_id)
+            })
+            .filter_map(|(key, _)| self.submitted_targets.get(key))
+            .collect::<HashSet<_>>()
+            .len();
+        let request_required = 1_usize
+            .saturating_add(usize::from(!nonterminal.is_empty()))
+            .saturating_add(target_refresh_count);
+        let required = request_required
             .saturating_add(self.live_subscriptions.len())
             .saturating_add(reserved_outbound);
         if required > self.config.outbound_capacity {
             return self.fail_outbound_overload();
+        }
+        if request_required > self.config.request_capacity {
+            self.phase = ClientPhase::Closed;
+            self.outbound.clear();
+            return Err(ClientError::RequestRetentionLimit {
+                limit: self.config.request_capacity,
+            });
         }
         self.outbound.clear();
         self.invalidate_server_state();
@@ -1805,17 +1898,20 @@ impl ClientState {
         }
         // Refresh every nonterminal operation by ID before any retry of its
         // idempotency key may be allowed.
-        let nonterminal = self.nonterminal_operation_ids();
         if !nonterminal.is_empty() {
             let refresh = self.begin(Query::OperationStatus(nonterminal))?;
             self.operation_refresh = Some(refresh.id().clone());
         }
+        self.queue_unverified_target_refreshes()?;
         Ok(())
     }
 
     /// Merge a status answer into the retained registry. Requested IDs that
     /// the backend no longer knows become [`OperationStatus::Unknown`].
-    fn merge_operation_status(&mut self, response: &OperationStatusResponse) {
+    fn merge_operation_status(
+        &mut self,
+        response: &OperationStatusResponse,
+    ) -> Result<(), ClientError> {
         for entry in &response.operations {
             self.record_view(entry.operation_id.clone(), entry.status, entry.progress);
         }
@@ -1840,9 +1936,56 @@ impl ClientState {
             })
             .cloned()
             .collect();
-        for id in unknown {
-            self.record_view(id, OperationStatus::Unknown, None);
+        for id in &unknown {
+            self.record_view(id.clone(), OperationStatus::Unknown, None);
         }
+        let unknown_ids: HashSet<OperationId> = unknown.into_iter().collect();
+        for (key, operation_id) in &self.submitted_keys {
+            if unknown_ids.contains(operation_id) {
+                self.unverified_unknown_keys.insert(key.clone());
+            }
+        }
+        self.queue_unverified_target_refreshes()
+    }
+
+    fn queue_unverified_target_refreshes(&mut self) -> Result<(), ClientError> {
+        let mut targets: HashMap<ResourceIdentity, Vec<String>> = HashMap::new();
+        for (key, operation_id) in &self.submitted_keys {
+            if !self.unverified_unknown_keys.contains(key)
+                || self
+                    .operations
+                    .get(operation_id)
+                    .is_none_or(|view| view.status != OperationStatus::Unknown)
+            {
+                continue;
+            }
+            if let Some(target) = self.submitted_targets.get(key) {
+                targets.entry(target.clone()).or_default().push(key.clone());
+            }
+        }
+        for (target, keys) in targets {
+            let covered: HashSet<&str> = self
+                .target_refreshes
+                .values()
+                .filter(|refresh| refresh.target == target)
+                .flat_map(|refresh| refresh.keys.iter().map(String::as_str))
+                .collect();
+            let keys: Vec<String> = keys
+                .into_iter()
+                .filter(|key| !covered.contains(key.as_str()))
+                .collect();
+            if keys.is_empty() {
+                continue;
+            }
+            // Never attach a newly unknown operation to a read already in
+            // flight: concurrent server dispatch means that read may predate
+            // the missing-operation answer. This fresh request is ordered
+            // after these keys became unknown.
+            let request = self.begin(Query::ResourceDetail(target.clone()))?;
+            self.target_refreshes
+                .insert(request.id().clone(), TargetRefresh { target, keys });
+        }
+        Ok(())
     }
 
     /// Insert or update one retained operation view with bounded eviction:
