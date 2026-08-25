@@ -213,22 +213,15 @@ impl PortForwardSeam for KubePortForwardSeam {
                 let Some(ports) = data.get("ports").and_then(serde_json::Value::as_array) else {
                     continue;
                 };
+                // discovery/v1 EndpointPort mirrors the Service port NAME;
+                // its `port` value is the ENDPOINT (container) port, which
+                // routinely differs from the declared Service port (Service
+                // 80 forwarding to pod port 8080). Matching therefore uses
+                // the name alone, with absent names matching an unnamed
+                // single-port Service.
                 let matches_declared = ports.iter().any(|entry| {
-                    let name_matches = entry.get("name").and_then(serde_json::Value::as_str)
-                        == declared.name.as_deref();
-                    // discovery/v1 slices carry the Service port number in
-                    // `port`; tolerate its absence on hand-crafted data.
-                    let number_ok = entry
-                        .get("port")
-                        .and_then(serde_json::Value::as_i64)
-                        .map(|p| u16::try_from(p).ok())
-                        != Some(None)
-                        && entry
-                            .get("port")
-                            .and_then(serde_json::Value::as_i64)
-                            .map(|p| u16::try_from(p).ok() == Some(service_port_number))
-                            .unwrap_or(true);
-                    name_matches && number_ok
+                    entry.get("name").and_then(serde_json::Value::as_str)
+                        == declared.name.as_deref()
                 });
                 if !matches_declared {
                     continue;

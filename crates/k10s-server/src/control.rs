@@ -602,6 +602,16 @@ pub(crate) async fn serve_socket(
                         let result: Result<RequestOutcome, RequestFailure> = match parsed {
                             Ok(Some(ParsedRequest::Query(query))) => {
                                 let deadline = request.deadline.map(Duration::from_millis);
+                                // The port-forward transition gate wraps the
+                                // backend switch: sessions drain and the
+                                // epoch advances before the kernel may
+                                // commit, so a Start racing the switch can
+                                // never bind a stale-context listener.
+                                if let Query::ContextSwitch { to } = &query
+                                    && let Some(manager) = task_port_forward.clone()
+                                {
+                                    manager.begin_context_transition(to.clone()).await;
+                                }
                                 tokio::select! {
                                     () = request_cancel.cancelled() =>
                                         Err(RequestFailure::Backend(BackendError::Cancelled)),
@@ -842,6 +852,21 @@ pub(crate) async fn serve_socket(
                     Ok(SubscriptionSelector::PortForwardSessions) => {
                         match &state_port_forward {
                             Some(manager) => {
+                                // Same bounded budget and replacement
+                                // semantics as resource watches: a reused
+                                // subscription id cancels the old forwarder
+                                // instead of leaking it.
+                                let admitted = watch_subscriptions.contains_key(&subscription_id)
+                                    || watch_subscriptions.len()
+                                        < config.max_resource_subscriptions_per_session;
+                                if !admitted {
+                                    overload_close(&outbound);
+                                    break;
+                                }
+                                if let Some(previous) = watch_subscriptions.remove(&subscription_id)
+                                {
+                                    previous.cancel.cancel();
+                                }
                                 let cancel = subscription_cancel.child_token();
                                 let task_id = {
                                     let id = next_forwarder_id;
@@ -885,7 +910,34 @@ pub(crate) async fn serve_socket(
                                             () = cancel.cancelled() => break,
                                             event = events.recv() => event,
                                         };
-                                        let Ok(event) = event else { break };
+                                        let event = match event {
+                                            Ok(event) => event,
+                                            Err(
+                                                tokio::sync::broadcast::error::RecvError::Lagged(_),
+                                            ) => {
+                                                // Missed snapshots can never be
+                                                // replayed from a coalescible
+                                                // stream; tell the client to
+                                                // reconstruct via portForward.list
+                                                // instead of continuing silently
+                                                // from a gap.
+                                                let _ = send_error(
+                                                    &task_outbound,
+                                                    ErrorTarget::Subscription(
+                                                        task_subscription.clone(),
+                                                    ),
+                                                    ErrorCode::Internal,
+                                                    "session stream lagged; refresh sessions"
+                                                        .to_owned(),
+                                                );
+                                                break;
+                                            }
+                                            Err(
+                                                tokio::sync::broadcast::error::RecvError::Closed,
+                                            ) => {
+                                                break;
+                                            }
+                                        };
                                         if enqueue_delta(
                                             &task_outbound,
                                             &task_subscription,

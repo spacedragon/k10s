@@ -78,6 +78,8 @@ struct SessionInner {
     revision: u64,
     /// Consecutive stream failures before any byte moved.
     open_failures: u32,
+    /// When the session reached a terminal state; drives bounded retention.
+    terminal_at: Option<std::time::Instant>,
     /// Per-connection pump tasks; joined on teardown.
     pumps: TaskTracker,
     cancel: CancellationToken,
@@ -94,11 +96,14 @@ struct SessionCounters {
     active: AtomicUsize,
 }
 
+/// Globally monotonic snapshot-revision source shared by every session so
+/// the wire order matches the client's single monotonic expectation.
+type RevisionCounter = Arc<AtomicU64>;
+
 /// Shared mutable manager state guarded by one lock so epochs and revisions
 /// are linearizable with respect to publication and the transition gate.
 struct ManagerState {
     sessions: HashMap<String, Arc<Mutex<SessionInner>>>,
-    next_revision: u64,
     epoch: u64,
     current_context: String,
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
@@ -110,6 +115,7 @@ pub struct PortForwardManager {
     state: Arc<Mutex<ManagerState>>,
     connector: PortForwardConnector,
     cancel: CancellationToken,
+    revisions: RevisionCounter,
     /// Global accepted-connection budget, lock-free so data paths never
     /// serialize behind session publication.
     live_connections: LiveConnections,
@@ -132,13 +138,13 @@ impl PortForwardManager {
         Self {
             state: Arc::new(Mutex::new(ManagerState {
                 sessions: HashMap::new(),
-                next_revision: 1,
                 epoch: 0,
                 current_context: String::new(),
                 events_tx,
             })),
             connector,
             cancel,
+            revisions: Arc::new(AtomicU64::new(1)),
             live_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -225,7 +231,17 @@ impl PortForwardManager {
                 "the context switched; retry after it completes",
             ));
         }
-        if state.sessions.len() >= MAX_SESSIONS {
+        let mut active_sessions = 0;
+        for inner in state.sessions.values() {
+            let guard = inner.lock().await;
+            if !matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) {
+                active_sessions += 1;
+            }
+        }
+        if active_sessions >= MAX_SESSIONS {
             drop(state);
             return Err(StartRejected::new(
                 PortForwardFailureCategory::UnavailableEndpoint,
@@ -236,8 +252,7 @@ impl PortForwardManager {
             return Ok(existing);
         }
 
-        state.next_revision += 1;
-        let revision = state.next_revision;
+        let revision = self.revisions.fetch_add(1, Ordering::AcqRel);
         let id = random_id();
         let local_addr = listener.local_addr().map_err(|_| {
             StartRejected::new(
@@ -260,6 +275,7 @@ impl PortForwardManager {
             failure: None,
             revision,
             open_failures: 0,
+            terminal_at: None,
             pumps: TaskTracker::new(),
             cancel: session_cancel,
             accept_task: None,
@@ -275,6 +291,7 @@ impl PortForwardManager {
             events_tx,
             live,
             counters,
+            self.revisions.clone(),
         ));
         let mut guard = inner.lock().await;
         guard.accept_task = Some(accept_task);
@@ -318,7 +335,8 @@ impl PortForwardManager {
             }
             guard.state = PortForwardSessionState::Stopped;
             guard.failure = None;
-            guard.revision += 1;
+            guard.terminal_at = Some(std::time::Instant::now());
+            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
             // Cancelling stops new accepts and tears down live pumps; their
             // tasks are joined below WITHOUT any lock held so a pump that is
             // mid-copy can always finish its release bookkeeping.
@@ -344,12 +362,40 @@ impl PortForwardManager {
         if let Some(handle) = accept_handle {
             let _ = handle.await;
         }
-        inner.lock().await.pumps.wait().await;
+        // Clone the tracker out under a short lock: waiting while holding
+        // the session mutex would deadlock against a pump that is finishing
+        // its release bookkeeping.
+        let tracker = inner.lock().await.pumps.clone();
+        tracker.wait().await;
     }
 
+    /// How long terminal snapshots stay observable before removal.
+    pub const TERMINAL_RETENTION: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// List every retained session of this server instance.
+    ///
+    /// Terminal snapshots are retained for a bounded interval for
+    /// diagnostics, then pruned here under the manager lock.
     pub async fn list(&self) -> Vec<PortForwardSession> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        let mut expired = Vec::new();
+        for (id, inner) in &state.sessions {
+            let guard = inner.lock().await;
+            let terminal = matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            );
+            if terminal
+                && guard
+                    .terminal_at
+                    .is_some_and(|at| at.elapsed() > Self::TERMINAL_RETENTION)
+            {
+                expired.push(id.clone());
+            }
+        }
+        for id in expired {
+            state.sessions.remove(&id);
+        }
         let mut snapshots = Vec::new();
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
@@ -388,7 +434,8 @@ impl PortForwardManager {
                     category: PortForwardFailureCategory::ContextTransition,
                     message: "the context switched while the forward was active".into(),
                 });
-                guard.revision += 1;
+                guard.terminal_at = Some(std::time::Instant::now());
+                guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
                 guard.cancel.cancel();
                 guard.pumps.close();
                 let handle = guard.accept_task.take();
@@ -433,7 +480,8 @@ impl PortForwardManager {
                     PortForwardSessionState::Stopped | PortForwardSessionState::Failed
                 ) {
                     guard.state = PortForwardSessionState::Stopped;
-                    guard.revision += 1;
+                    guard.terminal_at = Some(std::time::Instant::now());
+                    guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
                 }
                 guard.cancel.cancel();
                 guard.pumps.close();
@@ -463,6 +511,14 @@ impl PortForwardManager {
         };
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
+            if matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) {
+                // Terminal sessions never satisfy a new start; Retry must
+                // create a fresh session instead of focusing a dead one.
+                continue;
+            }
             let same_selector = &guard.selector == selection
                 || wanted_number.is_some_and(|n| n == guard.service_port);
             if &guard.identity == identity && same_selector {
@@ -571,6 +627,7 @@ async fn accept_loop(
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
     live: LiveConnections,
     counters: Arc<SessionCounters>,
+    revisions: RevisionCounter,
 ) {
     let cancel = session.lock().await.cancel.clone();
     loop {
@@ -581,15 +638,17 @@ async fn accept_loop(
         let Ok((socket, _peer)) = accepted else {
             break;
         };
-        // Enforce per-session and global connection budgets before spawning.
-        let admit_global = live.load(Ordering::Acquire) < MAX_TOTAL_CONNECTIONS;
-        let admit_session = counters.active.load(Ordering::Acquire) < MAX_SESSION_CONNECTIONS;
-        if !(admit_global && admit_session) {
-            // Overload: close immediately without an upstream stream.
+        // Reserve first, then bound-check: a plain load-then-add lets two
+        // concurrent accept loops exceed the hard total.
+        if live.fetch_add(1, Ordering::AcqRel) >= MAX_TOTAL_CONNECTIONS {
+            live.fetch_sub(1, Ordering::AcqRel);
             continue;
         }
-        live.fetch_add(1, Ordering::AcqRel);
-        counters.active.fetch_add(1, Ordering::AcqRel);
+        if counters.active.fetch_add(1, Ordering::AcqRel) >= MAX_SESSION_CONNECTIONS {
+            counters.active.fetch_sub(1, Ordering::AcqRel);
+            live.fetch_sub(1, Ordering::AcqRel);
+            continue;
+        }
         let tracker = session.lock().await.pumps.clone();
         tracker.spawn(pump_connection(
             socket,
@@ -598,6 +657,7 @@ async fn accept_loop(
             events_tx.clone(),
             live.clone(),
             counters.clone(),
+            revisions.clone(),
         ));
     }
 }
@@ -615,6 +675,7 @@ async fn pump_connection(
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
     live: LiveConnections,
     counters: Arc<SessionCounters>,
+    revisions: RevisionCounter,
 ) {
     let release = {
         let counters = counters.clone();
@@ -639,7 +700,7 @@ async fn pump_connection(
         Ok(upstream) => upstream,
         Err(_) => {
             release();
-            record_open_failure(&session, &events_tx).await;
+            record_open_failure(&session, &events_tx, revisions).await;
             return;
         }
     };
@@ -663,7 +724,7 @@ async fn pump_connection(
             session.lock().await.open_failures = 0;
         }
         Some(Err(_)) if moved == 0 => {
-            record_open_failure(&session, &events_tx).await;
+            record_open_failure(&session, &events_tx, revisions).await;
         }
         Some(Err(_)) => {
             // Connection-terminal only; never changes session state.
@@ -734,6 +795,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for CountingIo<T> {
 async fn record_open_failure(
     session: &Arc<Mutex<SessionInner>>,
     events_tx: &broadcast::Sender<PortForwardSessionEvent>,
+    revisions: RevisionCounter,
 ) {
     let mut guard = session.lock().await;
     if guard.state != PortForwardSessionState::Active {
@@ -748,7 +810,8 @@ async fn record_open_failure(
         category: PortForwardFailureCategory::UnavailableEndpoint,
         message: "the pinned endpoint stopped accepting streams".into(),
     });
-    guard.revision += 1;
+    guard.terminal_at = Some(std::time::Instant::now());
+    guard.revision = revisions.fetch_add(1, Ordering::AcqRel);
     guard.cancel.cancel();
     guard.pumps.close();
     if let Some(handle) = guard.accept_task.take() {

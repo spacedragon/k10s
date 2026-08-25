@@ -187,6 +187,12 @@ impl std::error::Error for ClientError {}
 pub enum Query {
     /// Retrieve server identity and safe Kubernetes contexts.
     Bootstrap,
+    /// Start one bounded loopback port-forward session.
+    PortForwardStart(PortForwardStartRequest),
+    /// Stop one session by ID; idempotent on the server.
+    PortForwardStop(PortForwardSessionId),
+    /// Reconstruct session state after (re)connect.
+    PortForwardList,
     /// Retrieve a normalized resource list for one type on one context.
     ResourceList(ResourceListQuery),
     /// Retrieve normalized details for one resource identity.
@@ -356,6 +362,12 @@ pub struct ResourceListQuery {
 pub enum QueryResult {
     /// Bootstrap query result.
     Bootstrap(BootstrapResponse),
+    /// Authoritative snapshot returned after starting a forward.
+    PortForwardStarted(Box<PortForwardStartResponse>),
+    /// Authoritative optional snapshot returned after stopping a forward.
+    PortForwardStopped(Box<PortForwardStopResponse>),
+    /// Authoritative reconstruction of every retained session.
+    PortForwardList(Box<PortForwardListResponse>),
     /// Normalized resource list result.
     ResourceList(ResourceListResponse),
     /// Normalized single-resource detail result with backend-resolved
@@ -501,6 +513,9 @@ impl PendingAction {
     fn request_kind(&self) -> &'static str {
         match self {
             Self::Query(Query::Bootstrap) => "bootstrap",
+            Self::Query(Query::PortForwardStart(_)) => REQUEST_PORT_FORWARD_START,
+            Self::Query(Query::PortForwardStop(_)) => REQUEST_PORT_FORWARD_STOP,
+            Self::Query(Query::PortForwardList) => REQUEST_PORT_FORWARD_LIST,
             Self::Query(Query::ResourceList(_)) => "resource.list",
             Self::Query(Query::ResourceDetail(_)) => "resource.detail",
             Self::Query(Query::ResourceTypes(_)) => "resource.types",
@@ -529,6 +544,11 @@ impl PendingAction {
         }
         match self {
             Self::Query(Query::Bootstrap) => Ok(serde_json::Value::Null),
+            Self::Query(Query::PortForwardStart(request)) => encode(request),
+            Self::Query(Query::PortForwardStop(session_id)) => encode(PortForwardStopRequest {
+                session_id: session_id.clone(),
+            }),
+            Self::Query(Query::PortForwardList) => encode(serde_json::json!({})),
             Self::Query(Query::ResourceList(selector)) => encode(ResourceListRequest {
                 context: selector.context.clone(),
                 gvk: k10s_protocol::GroupVersionKind {
@@ -1055,11 +1075,18 @@ impl ClientState {
                 let response: PortForwardListResponse = serde_json::from_value(payload.clone())
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
                 // Reconstruction replaces state wholesale so vanished
-                // terminal sessions disappear together.
+                // terminal sessions disappear together. A list is one
+                // authoritative snapshot, so retain every entry regardless
+                // of iteration order and advance the global event watermark
+                // only after rebuilding it.
                 self.port_forward_sessions.clear();
+                let mut max_revision = self.port_forward_revision;
                 for session in response.sessions {
-                    self.apply_session(session);
+                    max_revision = max_revision.max(session.revision);
+                    self.port_forward_sessions
+                        .insert(session.id.as_str().to_owned(), session);
                 }
+                self.port_forward_revision = max_revision;
                 Ok(())
             }
             REQUEST_PORT_FORWARD_STOP => {
@@ -1568,6 +1595,36 @@ impl ClientState {
                     self.server_bootstrap = Some(bootstrap.clone());
                     self.refresh_server_validity();
                     QueryResult::Bootstrap(bootstrap)
+                }
+                PendingAction::Query(Query::PortForwardStart(_)) => {
+                    let response: PortForwardStartResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    self.apply_session(response.session.clone());
+                    QueryResult::PortForwardStarted(Box::new(response))
+                }
+                PendingAction::Query(Query::PortForwardStop(_)) => {
+                    let response: PortForwardStopResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    if let Some(session) = response.session.clone() {
+                        self.apply_session(session);
+                    }
+                    QueryResult::PortForwardStopped(Box::new(response))
+                }
+                PendingAction::Query(Query::PortForwardList) => {
+                    let response: PortForwardListResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    self.port_forward_sessions.clear();
+                    let mut max_revision = self.port_forward_revision;
+                    for session in &response.sessions {
+                        max_revision = max_revision.max(session.revision);
+                        self.port_forward_sessions
+                            .insert(session.id.as_str().to_owned(), session.clone());
+                    }
+                    self.port_forward_revision = max_revision;
+                    QueryResult::PortForwardList(Box::new(response))
                 }
                 PendingAction::Query(Query::ResourceList(_)) => {
                     let list: ResourceListResponse = frame
