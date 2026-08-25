@@ -86,7 +86,8 @@ pub enum RejectionCategory {
 pub struct PortForwardStream(Box<dyn PortForwardIo>);
 
 impl PortForwardStream {
-    pub(crate) fn new(io: Box<dyn PortForwardIo>) -> Self {
+    /// Wrap one concrete transport into the opaque handle.
+    pub fn new(io: Box<dyn PortForwardIo>) -> Self {
         Self(io)
     }
 }
@@ -132,7 +133,7 @@ impl AsyncWrite for PortForwardStream {
 }
 
 /// Object-safe supertrait bounding the boxed transport.
-pub(crate) trait PortForwardIo: AsyncRead + AsyncWrite + Send + Unpin {}
+pub trait PortForwardIo: AsyncRead + AsyncWrite + Send + Unpin {}
 
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> PortForwardIo for T {}
 
