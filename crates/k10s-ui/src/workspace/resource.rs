@@ -3,10 +3,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use super::detail::DetailState;
 
 /// List sorting specification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortSpec {
     pub column: String,
     pub ascending: bool,

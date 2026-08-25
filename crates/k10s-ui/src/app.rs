@@ -21,7 +21,9 @@ use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
-use crate::workspace::{WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState};
+use crate::workspace::{
+    WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
+};
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -291,6 +293,26 @@ impl K10sApp {
     #[must_use]
     pub fn workspace(&self) -> &WorkspaceState<ResourceIdentity> {
         self.shell.workspace()
+    }
+
+    /// The persistable snapshot of the current workspace, for native hosts
+    /// that restore sessions across restarts (see desktop state persistence).
+    #[must_use]
+    pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
+        self.shell.workspace().snapshot()
+    }
+
+    /// Restore a persisted workspace snapshot through the normal command
+    /// path. Intended for native hosts reopening a session before rendering
+    /// begins (desktop launch); mismatched or malformed snapshots leave the
+    /// current workspace untouched.
+    pub fn restore_workspace_snapshot(&mut self, snapshot: WorkspaceSnapshot) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot))
+        {
+            self.handle_workspace_event(event);
+        }
     }
 
     /// Render the approved default-egui shell for the current connection view.

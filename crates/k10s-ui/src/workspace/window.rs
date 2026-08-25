@@ -1,6 +1,8 @@
 //! Window bookkeeping: stable identity, kind, geometry, z-order, and the
 //! window-local content (a resource list or a pinned detail).
 
+use serde::{Deserialize, Serialize};
+
 use super::detail::DetailState;
 use super::resource::ResourceWindowState;
 
@@ -10,7 +12,8 @@ use super::resource::ResourceWindowState;
 pub struct WindowId(pub u64);
 
 /// Workload list kinds shown under the launcher's collapsible group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
     Deployments,
     Pods,
@@ -69,8 +72,10 @@ impl WindowKind {
     }
 }
 
-/// Position and size in egui points, plus the collapse flag.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Position and size in egui points, plus the collapse flag. Positions are
+/// relative to the workspace canvas origin so a restored layout stays
+/// correct across different outer window sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeom {
     /// Top-left corner, `[x, y]`.
     pub position: [f32; 2],
