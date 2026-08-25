@@ -240,7 +240,7 @@ async fn run_exec<In, Out, ErrOut, Resize, StatusFuture>(
     let stderr_task = stderr
         .map(|reader| tokio::spawn(pump_output(reader, sender.clone(), StreamOrigin::Stderr)));
     tokio::pin!(status);
-    let status = loop {
+    let status = 'session: loop {
         tokio::select! {
             biased;
             _ = sender.closed() => {
@@ -253,20 +253,30 @@ async fn run_exec<In, Out, ErrOut, Resize, StatusFuture>(
             status = &mut status => break status,
             Some(input) = inputs.recv() => match input {
                 ExecInput::Stdin(text) => {
-                    if !forward_stdin(&mut stdin, text.as_bytes(), &sender).await {
-                        attached.abort();
-                        stdout_task.abort();
-                        if let Some(task) = &stderr_task { task.abort(); }
-                        return;
+                    tokio::select! {
+                        status = &mut status => break 'session status,
+                        forwarded = forward_stdin(&mut stdin, text.as_bytes(), &sender) => {
+                            if !forwarded {
+                                attached.abort();
+                                stdout_task.abort();
+                                if let Some(task) = &stderr_task { task.abort(); }
+                                return;
+                            }
+                        }
                     }
                 }
                 ExecInput::Resize { cols, rows } => {
                     let Some(channel) = resize.as_mut() else { continue };
-                    if !forward_resize(channel, TerminalSize { width: cols, height: rows }, &sender).await {
-                        attached.abort();
-                        stdout_task.abort();
-                        if let Some(task) = &stderr_task { task.abort(); }
-                        return;
+                    tokio::select! {
+                        status = &mut status => break 'session status,
+                        forwarded = forward_resize(channel, TerminalSize { width: cols, height: rows }, &sender) => {
+                            if !forwarded {
+                                attached.abort();
+                                stdout_task.abort();
+                                if let Some(task) = &stderr_task { task.abort(); }
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -324,25 +334,33 @@ async fn pump_output<R: AsyncRead + Unpin>(
 ) {
     let mut buffer = vec![0_u8; OUTPUT_CHUNK_BYTES];
     let mut undecoded = Vec::new();
+    let mut pending_text = String::new();
     loop {
         tokio::select! {
             _ = sender.closed() => break,
             read = reader.read(&mut buffer) => match read {
                 Ok(0) => {
-                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, true)
-                        && sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err()
-                    {
-                        break;
+                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, true) {
+                        pending_text.push_str(&text);
+                    }
+                    if !pending_text.is_empty() {
+                        let text = std::mem::take(&mut pending_text);
+                        let _ = sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None }));
                     }
                     break;
                 }
                 Err(_) => break,
                 Ok(count) => {
                     undecoded.extend_from_slice(&buffer[..count]);
-                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, false)
-                        && sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err()
-                    {
-                        break;
+                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, false) {
+                        pending_text.push_str(&text);
+                    }
+                    if let Some(last_newline) = pending_text.rfind('\n') {
+                        let remainder = pending_text.split_off(last_newline + 1);
+                        let text = std::mem::replace(&mut pending_text, remainder);
+                        if sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -515,18 +533,22 @@ mod tests {
     #[tokio::test]
     async fn output_preserves_utf8_across_arbitrary_reads() {
         let mut input = vec![b'x'; OUTPUT_CHUNK_BYTES - 1];
-        input.extend_from_slice("🦀done".as_bytes());
+        input.extend_from_slice("🦀\nlast".as_bytes());
         let reader = &input[..];
         let (sender, mut receiver) = broadcast::channel(4);
         pump_output(reader, sender, StreamOrigin::Stdout).await;
 
-        let mut output = String::new();
+        let mut events = Vec::new();
         while let Ok(BackendEvent::Stream(chunk)) = receiver.try_recv() {
-            output.push_str(&chunk.text);
+            events.push(chunk.text);
         }
         assert_eq!(
-            output,
-            format!("{}🦀done", "x".repeat(OUTPUT_CHUNK_BYTES - 1))
+            events,
+            vec![
+                format!("{}🦀\n", "x".repeat(OUTPUT_CHUNK_BYTES - 1)),
+                "last".into(),
+            ],
+            "arbitrary reads neither corrupt UTF-8 nor fabricate line boundaries"
         );
     }
 }
