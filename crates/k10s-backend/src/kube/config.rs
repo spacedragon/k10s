@@ -227,11 +227,11 @@ pub(crate) fn noninteractive_for_context(
         Some(ExecInteractiveMode::Always) => {
             Err("credential plugin requires interactive input, which is unavailable in k10s".into())
         }
-        Some(ExecInteractiveMode::IfAvailable) => {
+        Some(ExecInteractiveMode::IfAvailable) | None => {
             exec.interactive_mode = Some(ExecInteractiveMode::Never);
             Ok(normalized)
         }
-        Some(ExecInteractiveMode::Never) | None => Ok(normalized),
+        Some(ExecInteractiveMode::Never) => Ok(normalized),
     }
 }
 
@@ -304,5 +304,21 @@ users:
                 .expect("exec config remains present");
             assert_eq!(exec.interactive_mode, Some(ExecInteractiveMode::Never));
         }
+
+        let mut omitted = kubeconfig("Never");
+        omitted.auth_infos[0]
+            .auth_info
+            .as_mut()
+            .and_then(|auth| auth.exec.as_mut())
+            .expect("exec config exists")
+            .interactive_mode = None;
+        let normalized = noninteractive_for_context(&omitted, "exec-context")
+            .expect("an omitted policy is forced non-interactive");
+        let exec = normalized.auth_infos[0]
+            .auth_info
+            .as_ref()
+            .and_then(|auth| auth.exec.as_ref())
+            .expect("exec config remains present");
+        assert_eq!(exec.interactive_mode, Some(ExecInteractiveMode::Never));
     }
 }
