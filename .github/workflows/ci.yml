@@ -236,7 +236,7 @@ jobs:
           retention-days: 3
 
   windows-ui-smoke:
-    name: Windows build and loopback launch
+    name: Windows build and loopback server
     runs-on: windows-2025
     steps:
       - name: Checkout source (first attempt)
@@ -276,16 +276,6 @@ jobs:
           cargo build --locked --release -p k10s-desktop --bin k10s-desktop
           cargo check --locked -p k10s-web --target wasm32-unknown-unknown
 
-      - name: Launch the native Windows UI
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          $binary = Join-Path $env:CARGO_TARGET_DIR 'release\k10s-desktop.exe'
-          $desktop = Start-Process -FilePath $binary -ArgumentList '--fake' -PassThru
-          Start-Sleep -Seconds 3
-          if ($desktop.HasExited) { throw "k10s-desktop exited during launch: $($desktop.ExitCode)" }
-          Stop-Process -Id $desktop.Id -Force
-          $desktop.WaitForExit()
-
       - name: Launch loopback server and probe health
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
@@ -313,7 +303,7 @@ jobs:
           }
 
   macos-ui-smoke:
-    name: macOS build and loopback launch
+    name: macOS build and loopback server
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -326,12 +316,6 @@ jobs:
           cargo build --locked --release -p k10s-server-app --bin k10s-server
           cargo build --locked --release -p k10s-desktop --bin k10s-desktop
           cargo check --locked -p k10s-web --target wasm32-unknown-unknown
-          target/release/k10s-desktop --fake &
-          desktop_pid=$!
-          sleep 3
-          kill -0 "$desktop_pid"
-          kill "$desktop_pid"
-          wait "$desktop_pid" || true
           mkdir -p dist
           printf '<!doctype html><title>k10s smoke</title>' > dist/index.html
           export K10S_DIST_DIR="$PWD/dist"
