@@ -50,16 +50,31 @@ fn main() {
     assert!(matches!(snapshot, BackendEvent::Snapshot(_)));
 
     let burst_started = Instant::now();
+    let mut last_revision = 0;
     for (namespace, name) in &names {
-        assert!(
-            fake.touch_resource("dev-local", &gvk, namespace.as_deref(), name)
-                .is_some()
-        );
-        let event = runtime.block_on(events.recv()).unwrap();
-        assert!(matches!(event, BackendEvent::Changed(_)));
+        last_revision = fake
+            .touch_resource("dev-local", &gvk, namespace.as_deref(), name)
+            .expect("burst target exists");
+    }
+    // Publish the real burst before consuming anything. The backend watch is
+    // intentionally bounded, so a slow consumer must receive an explicit lag
+    // signal and can then rebuild from a fresh authoritative snapshot.
+    let skipped = match runtime.block_on(events.recv()) {
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => skipped as usize,
+        other => panic!("10k burst must trip bounded watch recovery, got {other:?}"),
+    };
+    let mut delivered = 0_usize;
+    let mut newest_revision = 0_u64;
+    while delivered < BURST - skipped {
+        let BackendEvent::Changed(record) = runtime.block_on(events.recv()).unwrap() else {
+            panic!("post-lag watch tail contains only changed events")
+        };
+        newest_revision = newest_revision.max(record.revision);
+        delivered += 1;
     }
     let burst_elapsed = burst_started.elapsed();
-    assert_eq!(names.len(), BURST);
+    assert_eq!(skipped + delivered, BURST);
+    assert_eq!(newest_revision, last_revision);
     assert!(
         burst_elapsed < BURST_CEILING,
         "10k watch burst took {burst_elapsed:?}"
@@ -88,7 +103,7 @@ fn main() {
         "20 relists took {relist_elapsed:?}"
     );
     println!(
-        "cache_load OK: records={} burst={BURST} burst={burst_elapsed:?} relists=20 relist={relist_elapsed:?}",
+        "cache_load OK: records={} burst={BURST} skipped={skipped} retained={delivered} burst={burst_elapsed:?} relists=20 relist={relist_elapsed:?}",
         fake.total_records()
     );
 }
