@@ -188,6 +188,36 @@ fn tty_chunks_continue_one_visible_bounded_line() {
 }
 
 #[test]
+fn tty_continuation_resets_across_sessions_and_normalizes_split_crlf() {
+    let target = StreamTarget {
+        context: "dev-local".into(),
+        namespace: "default".into(),
+        pod: "db-postgres-0".into(),
+        uid: "uid-db".into(),
+        container: "app".into(),
+    };
+    let mut shell = ShellTool::new(target);
+    shell.connect();
+    shell.attach();
+    shell.apply_output("old prompt");
+    shell.disconnect_intentional();
+    shell.connect();
+    shell.attach();
+    shell.apply_output("new session\n");
+    assert_eq!(
+        shell.buffer().map(String::as_str).collect::<Vec<_>>(),
+        ["old prompt", "new session"]
+    );
+
+    shell.apply_output("split line\r");
+    shell.apply_output("\nnext");
+    assert_eq!(
+        shell.buffer().map(String::as_str).collect::<Vec<_>>(),
+        ["old prompt", "new session", "split line", "next"]
+    );
+}
+
+#[test]
 fn stdin_and_resize_are_queued_as_drainable_actions() {
     let mut shell = ShellTool::new(StreamTarget {
         context: "dev-local".into(),

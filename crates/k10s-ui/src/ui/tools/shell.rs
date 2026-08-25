@@ -43,6 +43,7 @@ pub struct ShellTool {
     phase: ShellPhase,
     buffer: VecDeque<String>,
     continuation: bool,
+    pending_cr: bool,
     actions: Vec<ShellAction>,
     scrollback_capacity: usize,
 }
@@ -56,6 +57,7 @@ impl ShellTool {
             phase: ShellPhase::Disconnected,
             buffer: VecDeque::new(),
             continuation: false,
+            pending_cr: false,
             actions: Vec::new(),
             scrollback_capacity: 4_096,
         }
@@ -102,6 +104,8 @@ impl ShellTool {
     pub fn attach(&mut self) {
         if self.can_attach() {
             self.phase = ShellPhase::Attached;
+            self.continuation = false;
+            self.pending_cr = false;
         }
     }
 
@@ -110,7 +114,23 @@ impl ShellTool {
         if self.phase != ShellPhase::Attached {
             return;
         }
-        let normalized = text.replace("\r\n", "\n");
+        let mut joined = String::with_capacity(text.len() + usize::from(self.pending_cr));
+        let mut text = text;
+        if self.pending_cr {
+            if let Some(remainder) = text.strip_prefix('\n') {
+                joined.push('\n');
+                text = remainder;
+            } else {
+                joined.push('\r');
+            }
+            self.pending_cr = false;
+        }
+        joined.push_str(text);
+        if joined.ends_with('\r') {
+            joined.pop();
+            self.pending_cr = true;
+        }
+        let normalized = joined.replace("\r\n", "\n");
         for segment in normalized.split_inclusive('\n') {
             let complete = segment.ends_with('\n');
             let text = segment.strip_suffix('\n').unwrap_or(segment);
