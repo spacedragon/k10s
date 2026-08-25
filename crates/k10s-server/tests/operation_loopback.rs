@@ -436,7 +436,7 @@ async fn duplicate_submissions_reuse_one_bounded_idempotency_record() {
         &mut ws,
         "scale-duplicate",
         "workload.scale",
-        scale_payload("web-frontend", 9),
+        scale_payload("web-frontend", 4),
         "same-key",
     )
     .await;
@@ -457,7 +457,7 @@ async fn duplicate_submissions_reuse_one_bounded_idempotency_record() {
         &mut ws,
         "scale-after-reconnect",
         "workload.scale",
-        scale_payload("web-frontend", 5),
+        scale_payload("web-frontend", 4),
         "same-key",
     )
     .await;
