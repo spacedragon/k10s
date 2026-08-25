@@ -1,17 +1,18 @@
 name: Release packaging
 
 # Two-phase release pipeline. Phase 1 (the `prepare` job) runs on `main` and
-# auto-bumps the workspace/packager version, then pushes the bump commit and a
-# `vX.Y.Z` tag. GitHub suppresses workflow runs triggered by GITHUB_TOKEN
-# pushes, so the tag push alone cannot start phase 2: `prepare` explicitly
+# auto-bumps the workspace/packager version. main is protected (changes must
+# come through pull requests), so the bump commit is landed through an
+# automatically merged release PR; `prepare` then tags the merged commit
+# `vX.Y.Z`. GitHub suppresses workflow runs triggered by GITHUB_TOKEN pushes,
+# so the tag push alone cannot start phase 2: `prepare` explicitly
 # re-dispatches this workflow at the tag ref (workflow_dispatch is exempt from
 # the suppression rule). Phase 2 (the platform jobs) builds every artifact and
 # `publish` creates the GitHub release. A maintainer-pushed tag also starts
 # phase 2. Manual `workflow_dispatch` without a `bump` choice keeps the pre-tag
 # smoke build; with a `bump` choice it runs phase 1 only. Queued `main` runs
 # sync to the current main tip before bumping, and a push that only re-delivers
-# an already-cut release commit is a no-op (or completes it if the tag is
-# missing).
+# an already-cut release is a no-op (or completes it if it is incomplete).
 on:
   push:
     branches: [main]
@@ -34,6 +35,7 @@ on:
 permissions:
   contents: write
   actions: write
+  pull-requests: write
 concurrency:
   group: release-${{ github.ref }}
   # Main pushes must serialize: a queued run re-reads the current version and
@@ -141,15 +143,17 @@ jobs:
           test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Packager.toml)" = "$next"
           echo "version=${next}" >> "$GITHUB_OUTPUT"
           echo "Bumped ${current} -> ${next}"
-      - name: Commit version bump, tag, and dispatch packaging
+      - name: Land version bump, tag, and dispatch packaging
         if: steps.bump.outputs.skip != 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if [[ "${{ steps.bump.outputs.finish }}" == 'true' ]]; then
-            # A previous run pushed the bump commit but the release was never
+            # A previous run landed the bump commit but the release was never
             # completed (tag missing, or tag present without a packaging run).
             echo "Completing interrupted release v${{ steps.bump.outputs.version }}"
             if ! git rev-parse -q --verify "refs/tags/v${{ steps.bump.outputs.version }}" >/dev/null 2>&1; then
@@ -157,24 +161,54 @@ jobs:
               git push origin "v${{ steps.bump.outputs.version }}"
             fi
           else
-            # Stage every modified manifest: a minor/major bump also rewrites
-            # the pinned k10s-* requirements in crates/k10s-server/Cargo.toml.
+            # main is protected ("changes must be made through a pull
+            # request"), so land the bump commit through a release PR and
+            # merge it once the required checks pass (the repo has
+            # auto-merge disabled, so poll and merge explicitly). The merge
+            # commit (not a squash) keeps main's tip free of a
+            # 'chore(release):' subject, so the next push still triggers a
+            # fresh bump.
             git add -u
             git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
-            # Rebase onto main if a commit landed while we were working; the
-            # serialized concurrency group makes this a rare fallback. Track
-            # success explicitly: the loop must end in a failed push if main
-            # keeps rejecting the token, never in a silent partial release.
-            pushed=0
-            for attempt in 1 2 3; do
-              if git push origin main; then pushed=1; break; fi
-              git pull --rebase origin main
+            branch="release/v${{ steps.bump.outputs.version }}"
+            git push --force origin "HEAD:refs/heads/${branch}"
+            pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
+            if [ -z "$pr" ]; then
+              # gh < 2.36 (hosted runner images) does not support --json on
+              # `pr create`; create without it and re-view the branch to
+              # resolve the PR number.
+              gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+                --title "chore(release): v${{ steps.bump.outputs.version }}" \
+                --body "Automated version bump for the v${{ steps.bump.outputs.version }} release."
+              pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number)"
+            fi
+            merged=0
+            for attempt in $(seq 1 90); do
+              info="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json state,mergeStateStatus --jq '.state + "|" + (.mergeStateStatus // "")')"
+              if [[ "$info" == MERGED* ]]; then merged=1; break; fi
+              if [[ "$info" == CLOSED* ]]; then
+                echo "release PR #$pr was closed before merging" >&2
+                exit 1
+              fi
+              # Refresh a stale PR branch so required checks can pass again.
+              if [[ "$info" == *BEHIND* ]]; then
+                git fetch origin main
+                git rebase origin/main
+                git push --force origin "HEAD:refs/heads/${branch}"
+              fi
+              if gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --merge >/dev/null 2>&1; then
+                merged=1
+                break
+              fi
+              sleep 30
             done
-            if [ "$pushed" -ne 1 ]; then
-              echo "failed to push the version bump to main after 3 attempts" >&2
+            if [ "$merged" -ne 1 ]; then
+              echo "release PR #$pr did not merge within 45 minutes (last state: $info)" >&2
               exit 1
             fi
-            git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}"
+            git fetch origin main
+            merge_sha="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json mergeCommit --jq -r '.mergeCommit.oid')"
+            git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}" "$merge_sha"
             git push origin "v${{ steps.bump.outputs.version }}"
           fi
       - name: Start packaging run at the release tag
