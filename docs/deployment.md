@@ -8,10 +8,11 @@ the same fingerprinted web assets and protocol version.
 
 1. Extract the `.tar.xz` (Linux/macOS) or `.zip` (Windows).
 2. Create a token file readable only by the service account.
-3. Ensure the service account can read its kubeconfig. Kubeconfigs that use an
-   exec credential plugin are rejected because k10s never executes external
-   credential binaries. Use credentials already supported by the kubeconfig
-   loader, then start `k10s-server --listen 127.0.0.1:8080 --token-file /run/secrets/k10s-token`.
+3. Ensure the service account can read its kubeconfig and any executable named
+   by an exec credential plugin. Plugins run non-interactively on the backend
+   host. A plugin failure disables only its context; the server and other
+   contexts remain available, and Refresh retries the failed context. Then
+   start `k10s-server --listen 127.0.0.1:8080 --token-file /run/secrets/k10s-token`.
 4. Put TLS and authentication at a reverse proxy before exposing the service.
 5. Configure liveness and readiness independently as described below.
 
@@ -58,7 +59,8 @@ This is the release acceptance procedure on a machine without a source tree.
 Any required step not described here is a release-blocking documentation bug.
 
 - [ ] Verify the downloaded archive/package and extract/install it.
-- [ ] Provide a readable kubeconfig without an exec credential plugin.
+- [ ] Provide a readable kubeconfig; if it uses an exec credential plugin,
+      verify that the service account can execute the trusted plugin binary.
 - [ ] Create a restricted token file; never put the token in a URL.
 - [ ] Start the binary and observe `/readyz`: starting 503, then ready 200.
 - [ ] Load `/`, authenticate, select a context, list/detail a resource, and run
