@@ -17,12 +17,9 @@ jobs:
   # Unit test gate: required status check that blocks PR merge until green.
   ci:
     name: Unit tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -60,12 +57,9 @@ jobs:
 
   ui-tests:
     name: UI unit tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -83,12 +77,9 @@ jobs:
   # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
   wasm:
     name: WASM check
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -103,17 +94,13 @@ jobs:
         run: cargo check --locked -p k10s-web --target wasm32-unknown-unknown
 
   # Plan 3 release gate: exercise the real kube-rs adapter and control socket
-  # against an ephemeral, least-privilege kind cluster. This stays on the
-  # self-hosted Linux runner so the gate does not consume hosted minutes.
+  # against an ephemeral, least-privilege kind cluster.
   kind-read-path:
     name: kind read-path E2E
     needs: [ci, ui-tests]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -188,12 +175,9 @@ jobs:
   # reconnect smokes on Firefox and WebKit.
   web:
     name: Web foundation
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure persistent Cargo build cache
-        run: bash .github/scripts/configure-cargo-cache.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -234,7 +218,6 @@ jobs:
 
       - name: Browser E2E suite
         run: |
-          # A self-hosted runner can retain a server from an interrupted job.
           # Give every workflow run its own port instead of colliding on 18080.
           export K10S_E2E_PORT="$((20000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT) % 20000))"
           npx playwright test
@@ -254,7 +237,7 @@ jobs:
 
   windows-ui-smoke:
     name: Windows build and loopback launch
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2025
     steps:
       - name: Checkout source (first attempt)
         id: windows_checkout_1
@@ -279,7 +262,7 @@ jobs:
           rustup default $channel
           if ($LASTEXITCODE -ne 0) { throw "rustup default failed: $LASTEXITCODE" }
 
-      - name: Configure persistent Cargo build directory
+      - name: Configure Cargo build directory
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $target = Join-Path '${{ runner.tool_cache }}' 'k10s\cargo-target-platform-smoke'
@@ -329,13 +312,9 @@ jobs:
             $server.WaitForExit()
           }
 
-  # Enable after registering a self-hosted runner with labels macOS/X64.
-  # The conditional is evaluated before scheduling, so repositories without
-  # one neither queue forever nor consume hosted macOS minutes.
   macos-ui-smoke:
     name: macOS build and loopback launch
-    if: vars.K10S_MACOS_RUNNER == 'enabled'
-    runs-on: [self-hosted, macOS, X64]
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
