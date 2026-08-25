@@ -3,12 +3,12 @@ use std::{future::Future, pin::Pin, time::Duration};
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::port::{BootstrapInfo, ContextInfo};
 use k10s_backend::{
-    BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
-    QueryResult, Subscribe, SubscriptionHandle,
+    BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, KubernetesAccess,
+    OperationId, Query, QueryResult, Subscribe, SubscriptionHandle,
 };
 use k10s_protocol::{
-    Ack, ClientFrame, ClientKind, ErrorCode, RequestId, Retryability, ServerFrame, ServerKind,
-    ServerPayload,
+    Ack, ClientFrame, ClientKind, ErrorCode, ErrorScope, RequestId, Retryability, ServerFrame,
+    ServerKind, ServerPayload,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::json;
@@ -29,6 +29,66 @@ struct SensitiveKubernetes;
 
 #[derive(Debug, Clone)]
 struct HugeKubernetes;
+
+#[derive(Debug, Clone)]
+struct StatusKubernetes {
+    events: tokio::sync::broadcast::Sender<BackendEvent>,
+}
+
+impl StatusKubernetes {
+    fn new() -> Self {
+        let (events, _) = tokio::sync::broadcast::channel(4);
+        Self { events }
+    }
+
+    fn unavailable(&self, context: &str, reason: &str) {
+        self.events
+            .send(BackendEvent::ContextUnavailable {
+                context: context.into(),
+                reason: reason.into(),
+            })
+            .expect("control subscription receives the transition");
+    }
+}
+
+impl KubernetesAccess for StatusKubernetes {
+    fn query<'a>(
+        &'a self,
+        _: Query,
+    ) -> Pin<Box<dyn Future<Output = Result<QueryResult, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("query")) })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _: Command,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("execute")) })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        request: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            match request {
+                Subscribe::BootstrapStatus => Ok(SubscriptionHandle::with_events(
+                    "bootstrap-status",
+                    self.events.subscribe(),
+                )),
+                _ => Err(BackendError::unsupported("subscribe")),
+            }
+        })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
+    }
+}
 
 impl KubernetesAccess for HugeKubernetes {
     fn query<'a>(
@@ -332,6 +392,56 @@ async fn bootstrap_status_subscription_is_acknowledged() {
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(response.kind, ServerKind::Subscribed);
     assert_eq!(response.subscription_id.unwrap().as_str(), "sub-1");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_status_forwards_background_context_failures() {
+    let backend = StatusKubernetes::new();
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(backend.clone(), "status-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"status-1",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let subscribed = receive_frame(&mut ws).await;
+    assert_eq!(subscribed.kind, ServerKind::Subscribed);
+
+    backend.unavailable("broken", "credential plugin denied");
+    let transition = receive_frame(&mut ws).await;
+    assert_eq!(transition.kind, ServerKind::Error);
+    assert_eq!(
+        transition.subscription_id.as_ref().map(|id| id.as_str()),
+        Some("status-1")
+    );
+    let ServerPayload::Error(error) = transition.decode_payload().unwrap() else {
+        panic!("transition is a structured error");
+    };
+    assert_eq!(error.scope, ErrorScope::Subscription);
+    assert_eq!(error.retryability, Retryability::AfterRefresh);
+    assert_eq!(
+        error.details,
+        Some(json!({
+            "kind": "contextUnavailable",
+            "context": "broken",
+            "reason": "credential plugin denied",
+        }))
+    );
     server.shutdown().await.unwrap();
 }
 

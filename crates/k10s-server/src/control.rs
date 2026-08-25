@@ -753,7 +753,7 @@ pub(crate) async fn serve_socket(
                 let outcome = match serde_json::from_value::<SubscriptionSelector>(selector.0) {
                     Ok(SubscriptionSelector::BootstrapStatus) => {
                         match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
-                            Ok(_) => Ok(None),
+                            Ok(handle) => Ok(Some(handle)),
                             Err(error) => Err(backend_rejection(&error)),
                         }
                     }
