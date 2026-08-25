@@ -8,12 +8,15 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use k10s_backend::{
     BackendError, PortForwardConnector, PortForwardPortSelection, PortForwardRequest,
@@ -73,9 +76,20 @@ struct SessionInner {
     revision: u64,
     /// Consecutive stream failures before any byte moved.
     open_failures: u32,
-    active_connections: usize,
+    /// Per-connection pump tasks; joined on teardown.
+    pumps: TaskTracker,
     cancel: CancellationToken,
     accept_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Global live-connection budget shared without the manager lock so data
+/// paths never serialize behind session publication.
+type LiveConnections = Arc<AtomicUsize>;
+
+/// Per-session accepted-connection budget, lock-free like the global one.
+#[derive(Debug, Default)]
+struct SessionCounters {
+    active: AtomicUsize,
 }
 
 /// Shared mutable manager state guarded by one lock so epochs and revisions
@@ -85,7 +99,6 @@ struct ManagerState {
     next_revision: u64,
     epoch: u64,
     current_context: String,
-    live_connections: usize,
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
 }
 
@@ -95,6 +108,9 @@ pub struct PortForwardManager {
     state: Arc<Mutex<ManagerState>>,
     connector: PortForwardConnector,
     cancel: CancellationToken,
+    /// Global accepted-connection budget, lock-free so data paths never
+    /// serialize behind session publication.
+    live_connections: LiveConnections,
 }
 
 impl std::fmt::Debug for PortForwardManager {
@@ -117,11 +133,11 @@ impl PortForwardManager {
                 next_revision: 1,
                 epoch: 0,
                 current_context: String::new(),
-                live_connections: 0,
                 events_tx,
             })),
             connector,
             cancel,
+            live_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -226,10 +242,9 @@ impl PortForwardManager {
             )
         })?;
         let session_cancel = self.cancel.child_token();
-        let service_port = match &selection {
-            PortForwardPortSelection::Number(number) => *number,
-            PortForwardPortSelection::Name(name) => name.parse().unwrap_or(0),
-        };
+        // The declared Service port comes from resolution so named
+        // selections retain their declared port identity.
+        let service_port = resolved.service_port;
         let inner = Arc::new(Mutex::new(SessionInner {
             id: id.clone(),
             identity,
@@ -240,19 +255,21 @@ impl PortForwardManager {
             failure: None,
             revision,
             open_failures: 0,
-            active_connections: 0,
+            pumps: TaskTracker::new(),
             cancel: session_cancel,
             accept_task: None,
         }));
         let events_tx = state.events_tx.clone();
-        let manager_state = self.state.clone();
+        let live = self.live_connections.clone();
+        let counters = Arc::new(SessionCounters::default());
         let connector = self.connector.clone();
         let accept_task = tokio::spawn(accept_loop(
             listener,
             inner.clone(),
             connector,
             events_tx,
-            manager_state,
+            live,
+            counters,
         ));
         inner.lock().await.accept_task = Some(accept_task);
         state.sessions.insert(id.clone(), inner.clone());
@@ -272,7 +289,7 @@ impl PortForwardManager {
         let Some(inner) = inner else {
             return StopOutcome::AlreadyTerminal;
         };
-        let final_snapshot = {
+        let accept_handle = {
             let mut guard = inner.lock().await;
             if matches!(
                 guard.state,
@@ -283,12 +300,14 @@ impl PortForwardManager {
             guard.state = PortForwardSessionState::Stopped;
             guard.failure = None;
             guard.revision += 1;
+            // Cancelling stops new accepts and tears down live pumps; their
+            // tasks are joined below WITHOUT any lock held so a pump that is
+            // mid-copy can always finish its release bookkeeping.
             guard.cancel.cancel();
+            guard.pumps.close();
             guard.accept_task.take()
         };
-        if let Some(handle) = final_snapshot {
-            let _ = handle.await;
-        }
+        Self::join_session_tasks(accept_handle, &inner).await;
         let snapshot = {
             let guard = inner.lock().await;
             snapshot_of(&guard)
@@ -296,6 +315,17 @@ impl PortForwardManager {
         self.publish_terminal(session_id.to_owned(), snapshot.clone())
             .await;
         StopOutcome::Stopped(snapshot)
+    }
+
+    /// Join one session's accept loop and pump tracker with no lock held.
+    async fn join_session_tasks(
+        accept_handle: Option<tokio::task::JoinHandle<()>>,
+        inner: &Arc<Mutex<SessionInner>>,
+    ) {
+        if let Some(handle) = accept_handle {
+            let _ = handle.await;
+        }
+        inner.lock().await.pumps.wait().await;
     }
 
     /// List every retained session of this server instance.
@@ -314,14 +344,19 @@ impl PortForwardManager {
     /// and joins every session, advances the epoch once, records the new
     /// committed context, then lets the backend commit the switch.
     pub async fn begin_context_transition(&self, to: String) {
-        let mut state = self.state.lock().await;
-        state.epoch += 1;
-        let ids: Vec<String> = state.sessions.keys().cloned().collect();
-        for id in ids {
-            let Some(inner) = state.sessions.get(&id) else {
-                continue;
-            };
-            let snapshot = {
+        type JoinableSession = (
+            Arc<Mutex<SessionInner>>,
+            Option<tokio::task::JoinHandle<()>>,
+        );
+        let mut joins: Vec<JoinableSession> = Vec::new();
+        {
+            let mut state = self.state.lock().await;
+            state.epoch += 1;
+            let ids: Vec<String> = state.sessions.keys().cloned().collect();
+            for id in ids {
+                let Some(inner) = state.sessions.get(&id).cloned() else {
+                    continue;
+                };
                 let mut guard = inner.lock().await;
                 if matches!(
                     guard.state,
@@ -336,33 +371,61 @@ impl PortForwardManager {
                 });
                 guard.revision += 1;
                 guard.cancel.cancel();
+                guard.pumps.close();
                 let handle = guard.accept_task.take();
                 let snapshot = snapshot_of(&guard);
-                drop(guard);
-                if let Some(handle) = handle {
-                    let _ = handle.await;
-                }
-                snapshot
-            };
-            let _ = state.events_tx.send(PortForwardSessionEvent {
-                revision: snapshot.revision,
-                session: snapshot.clone(),
-            });
-            state.sessions.remove(&id);
+                let _ = state.events_tx.send(PortForwardSessionEvent {
+                    revision: snapshot.revision,
+                    session: snapshot,
+                });
+                let inner = state.sessions.remove(&id).expect("checked above");
+                joins.push((inner, handle));
+            }
+            // Commit only after every drain finished; queued starts observe
+            // the advanced epoch plus this committed context under the same
+            // gate they serialize behind.
+            state.current_context = to;
         }
-        // Commit only after every drain finished.
-        state.current_context = to;
+        // Joins run while no manager or session lock is held: accept loops
+        // and pumps exit purely on cancellation plus lock-free atomics, so
+        // they can never wait on the gate that waits on them.
+        for (inner, handle) in joins {
+            Self::join_session_tasks(handle, &inner).await;
+        }
     }
 
-    /// Shut down: stop and join every session task.
+    /// Shut down: stop and join every listener and pump before returning.
     pub async fn shutdown(&self) {
         self.cancel.cancel();
-        let ids: Vec<String> = {
+        let ids: Vec<(String, Arc<Mutex<SessionInner>>)> = {
             let state = self.state.lock().await;
-            state.sessions.keys().cloned().collect()
+            state
+                .sessions
+                .iter()
+                .map(|(id, inner)| (id.clone(), inner.clone()))
+                .collect()
         };
-        for id in ids {
-            let _ = self.stop(&id).await;
+        let mut handles = Vec::new();
+        for (id, inner) in ids {
+            let handle = {
+                let mut guard = inner.lock().await;
+                if !matches!(
+                    guard.state,
+                    PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+                ) {
+                    guard.state = PortForwardSessionState::Stopped;
+                    guard.revision += 1;
+                }
+                guard.cancel.cancel();
+                guard.pumps.close();
+                guard.accept_task.take()
+            };
+            handles.push((id, inner, handle));
+        }
+        for (id, inner, handle) in handles {
+            Self::join_session_tasks(handle, &inner).await;
+            let mut state = self.state.lock().await;
+            state.sessions.remove(&id);
         }
     }
 
@@ -470,15 +533,19 @@ fn random_id() -> String {
 }
 
 /// Accept loop owning the session listener until cancellation.
+///
+/// Runs without the manager lock: budgets are lock-free atomics, so the
+/// context-transition gate can hold its write side while this loop drains.
 async fn accept_loop(
     listener: TcpListener,
     session: Arc<Mutex<SessionInner>>,
     connector: PortForwardConnector,
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
-    manager: Arc<Mutex<ManagerState>>,
+    live: LiveConnections,
+    counters: Arc<SessionCounters>,
 ) {
+    let cancel = session.lock().await.cancel.clone();
     loop {
-        let cancel = session.lock().await.cancel.clone();
         let accepted = tokio::select! {
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
@@ -487,30 +554,22 @@ async fn accept_loop(
             break;
         };
         // Enforce per-session and global connection budgets before spawning.
-        let admitted = {
-            let mut state = manager.lock().await;
-            let mut guard = session.lock().await;
-            if state.live_connections >= MAX_TOTAL_CONNECTIONS
-                || guard.active_connections >= MAX_SESSION_CONNECTIONS
-                || !matches!(guard.state, PortForwardSessionState::Active)
-            {
-                false
-            } else {
-                state.live_connections += 1;
-                guard.active_connections += 1;
-                true
-            }
-        };
-        if !admitted {
+        let admit_global = live.load(Ordering::Acquire) < MAX_TOTAL_CONNECTIONS;
+        let admit_session = counters.active.load(Ordering::Acquire) < MAX_SESSION_CONNECTIONS;
+        if !(admit_global && admit_session) {
             // Overload: close immediately without an upstream stream.
             continue;
         }
-        tokio::spawn(pump_connection(
+        live.fetch_add(1, Ordering::AcqRel);
+        counters.active.fetch_add(1, Ordering::AcqRel);
+        let tracker = session.lock().await.pumps.clone();
+        tracker.spawn(pump_connection(
             socket,
             session.clone(),
             connector.clone(),
             events_tx.clone(),
-            manager.clone(),
+            live.clone(),
+            counters.clone(),
         ));
     }
 }
@@ -526,69 +585,130 @@ async fn pump_connection(
     session: Arc<Mutex<SessionInner>>,
     connector: PortForwardConnector,
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
-    manager: Arc<Mutex<ManagerState>>,
+    live: LiveConnections,
+    counters: Arc<SessionCounters>,
 ) {
-    let (resolved, cancel, session_id) = {
+    let release = {
+        let counters = counters.clone();
+        move || {
+            counters.active.fetch_sub(1, Ordering::AcqRel);
+            live.fetch_sub(1, Ordering::AcqRel);
+        }
+    };
+    let release = &release;
+    let (resolved, cancel) = {
         let guard = session.lock().await;
-        (
-            guard.resolved.clone(),
-            guard.cancel.clone(),
-            guard.id.clone(),
-        )
+        (guard.resolved.clone(), guard.cancel.clone())
     };
     let opened = tokio::select! {
-        _ = cancel.cancelled() => return release(&session, &manager).await,
+        _ = cancel.cancelled() => {
+            release();
+            return;
+        }
         opened = connector.connect(&resolved) => opened,
     };
-    match opened {
+    let upstream = match opened {
+        Ok(upstream) => upstream,
         Err(_) => {
-            release(&session, &manager).await;
+            release();
+            record_open_failure(&session, &events_tx).await;
+            return;
+        }
+    };
+
+    // Count every byte that moves in either direction so pre-byte failures
+    // are distinguished from post-byte resets honestly.
+    let client_bytes = Arc::new(AtomicU64::new(0));
+    let upstream_bytes = Arc::new(AtomicU64::new(0));
+    let mut socket = CountingIo::new(socket, client_bytes.clone());
+    let mut upstream = CountingIo::new(upstream, upstream_bytes.clone());
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => None,
+        copied = copy_bidirectional(&mut socket, &mut upstream) => Some(copied),
+    };
+    release();
+    let moved = client_bytes.load(Ordering::Acquire) + upstream_bytes.load(Ordering::Acquire);
+    match outcome {
+        None => {}
+        // copy_bidirectional reports the byte counts of both directions.
+        Some(Ok(_)) => {
+            session.lock().await.open_failures = 0;
+        }
+        Some(Err(_)) if moved == 0 => {
             record_open_failure(&session, &events_tx).await;
         }
-        Ok(mut upstream) => {
-            let mut socket = socket;
-            // Probe with a bidirectional copy; track completion honestly by
-            // attempting one zero-length read on each direction first is not
-            // needed: copy_bidirectional returns Err only when a direction
-            // errored. Clean EOFs yield Ok(()).
-            let result = copy_bidirectional(&mut socket, &mut upstream).await;
-            if result.is_ok() {
-                let mut guard = session.lock().await;
-                guard.open_failures = 0;
-            } else {
-                // Distinguish pre-byte failures from post-byte errors by
-                // probing whether the upstream still has buffered data is
-                // impossible after the fact; treat any error whose peer saw
-                // no data as pre-byte via a conservative heuristic: only
-                // count it when the counter is already armed (a prior
-                // connect failure), otherwise leave the session untouched.
-                let arm = {
-                    let guard = session.lock().await;
-                    guard.open_failures > 0
-                };
-                if arm {
-                    record_open_failure(&session, &events_tx).await;
-                }
-            }
-            release(&session, &manager).await;
-            let _ = session_id;
+        Some(Err(_)) => {
+            // Connection-terminal only; never changes session state.
         }
     }
 }
 
-async fn release(session: &Arc<Mutex<SessionInner>>, manager: &Arc<Mutex<ManagerState>>) {
-    let mut state = manager.lock().await;
-    let mut guard = session.lock().await;
-    state.live_connections = state.live_connections.saturating_sub(1);
-    guard.active_connections = guard.active_connections.saturating_sub(1);
+/// Async I/O adapter counting transferred bytes per direction.
+struct CountingIo<T> {
+    inner: T,
+    counter: Arc<AtomicU64>,
 }
 
+impl<T> CountingIo<T> {
+    fn new(inner: T, counter: Arc<AtomicU64>) -> Self {
+        Self { inner, counter }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for CountingIo<T> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let read = buf.filled().len() - filled_before;
+            if read > 0 {
+                self.counter.fetch_add(read as u64, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for CountingIo<T> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(written)) = &result {
+            self.counter.fetch_add(*written as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Count one failed stream against the consecutive pre-byte threshold and
+/// fail the session at three, tearing down its listener and pumps.
 async fn record_open_failure(
     session: &Arc<Mutex<SessionInner>>,
     events_tx: &broadcast::Sender<PortForwardSessionEvent>,
 ) {
     let mut guard = session.lock().await;
-    if !matches!(guard.state, PortForwardSessionState::Active) {
+    if guard.state != PortForwardSessionState::Active {
         return;
     }
     guard.open_failures += 1;
@@ -602,6 +722,7 @@ async fn record_open_failure(
     });
     guard.revision += 1;
     guard.cancel.cancel();
+    guard.pumps.close();
     if let Some(handle) = guard.accept_task.take() {
         handle.abort();
     }

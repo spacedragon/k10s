@@ -8,9 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use k10s_backend::{
-    BackendError, PortForwardConnector, PortForwardRequest, RejectionCategory,
-};
+use k10s_backend::{BackendError, PortForwardConnector, PortForwardRequest, RejectionCategory};
 use k10s_protocol::{GroupVersionKind, PortForwardSessionState, ResourceIdentity};
 
 use k10s_server::port_forward::PortForwardManager;
@@ -75,10 +73,15 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
                     message: "scripted rejection".into(),
                 });
             }
+            let service_port = match request.port {
+                k10s_backend::PortForwardPortSelection::Number(number) => number,
+                k10s_backend::PortForwardPortSelection::Name(name) => name.parse().unwrap_or(80),
+            };
             Ok(k10s_backend::ResolvedPortForward {
                 context: request.context,
                 namespace: request.namespace,
                 service_uid: request.service_uid,
+                service_port,
                 pod_name: "pinned-pod".into(),
                 pod_uid: "uid-pinned".into(),
                 pod_port: 8_080,
@@ -308,4 +311,103 @@ async fn shutdown_cancels_sessions_and_releases_their_ports() {
         tokio::net::TcpListener::bind(addr).await.is_ok(),
         "ports rebind immediately"
     );
+}
+
+/// Regression: Stop must complete while a pump is mid-copy, tear the local
+/// connection down, and leave the port immediately rebindable.
+#[tokio::test]
+async fn stop_joins_active_pumps_and_closes_their_local_connections() {
+    let seam = ScriptedSeam::new(&["web"]);
+    let mut peers = seam.add_peer_channel().await;
+    let (manager, _) = manager_for(seam).await;
+
+    let session = manager
+        .start(
+            identity("web"),
+            k10s_backend::PortForwardPortSelection::Name("http".into()),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .expect("named start keeps declared identity");
+    assert_eq!(session.service_port, 80, "declared identity from Name");
+
+    let addr: std::net::SocketAddr = session.local_addr.parse().unwrap();
+    let mut local = tokio::net::TcpStream::connect(addr).await.unwrap();
+    local.write_all(b"payload").await.unwrap();
+    let mut upstream = peers.recv().await.expect("pump connected upstream");
+    upstream.read_exact(&mut [0_u8; 7]).await.unwrap();
+    // The pump is now actively copying with open directions on both sides.
+
+    // Stop must not deadlock on the live pump and must join it.
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        manager.stop(session.id.as_str()),
+    )
+    .await
+    .expect("stop completes without joining deadlocks");
+    assert!(matches!(
+        stopped,
+        k10s_server::port_forward::StopOutcome::Stopped(_)
+    ));
+
+    // The local half is closed by the torn-down pump.
+    let mut closed_probe = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        local.read_to_end(&mut closed_probe),
+    )
+    .await
+    .expect("the local socket closes after stop");
+    drop(upstream);
+    drop(peers);
+
+    assert!(
+        tokio::net::TcpListener::bind(addr).await.is_ok(),
+        "the port is released even though a connection was open"
+    );
+}
+
+/// Regression: a context transition and a shutdown must both drain sessions
+/// with live pumps without deadlocking on the gate.
+#[tokio::test]
+async fn context_transition_and_shutdown_drain_live_pumps_without_deadlock() {
+    for scenario in ["transition", "shutdown"] {
+        let seam = ScriptedSeam::new(&["web"]);
+        let mut peers = seam.add_peer_channel().await;
+        let (manager, cancel) = manager_for(seam).await;
+        let session = manager
+            .start(
+                identity("web"),
+                k10s_backend::PortForwardPortSelection::Number(80),
+                0,
+                "dev-local".into(),
+            )
+            .await
+            .expect("start");
+        let addr: std::net::SocketAddr = session.local_addr.parse().unwrap();
+        let mut local = tokio::net::TcpStream::connect(addr).await.unwrap();
+        local.write_all(b"x").await.unwrap();
+        let mut upstream = peers.recv().await.expect("pump upstream arrives");
+        upstream.read_exact(&mut [0_u8; 1]).await.unwrap();
+
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            match scenario {
+                "transition" => {
+                    manager.begin_context_transition("prod".to_owned()).await;
+                }
+                _ => manager.shutdown().await,
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "{scenario}: gate drains live pumps");
+        assert!(
+            tokio::net::TcpListener::bind(addr).await.is_ok(),
+            "{scenario}: the listener port is freed"
+        );
+        cancel.cancel();
+        drop(local);
+        drop(upstream);
+        drop(peers);
+    }
 }

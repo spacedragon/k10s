@@ -2567,13 +2567,22 @@ impl PortForwardSeam for FakePortForwardSeam {
                     message: "no ready endpoint backs this service port".into(),
                 });
             };
+            // The fake dataset forwards the declared Service port to the
+            // same numeric container port.
+            let service_port = match request.port {
+                crate::port_forward::PortForwardPortSelection::Number(number) => number,
+                crate::port_forward::PortForwardPortSelection::Name(name) => {
+                    name.parse().unwrap_or(80)
+                }
+            };
             Ok(ResolvedPortForward {
                 context: request.context,
                 namespace: request.namespace,
                 service_uid: request.service_uid,
+                service_port,
                 pod_name,
                 pod_uid: "uid-fake-pod".to_owned(),
-                pod_port: 8080,
+                pod_port: service_port.max(8_080.min(service_port)),
             })
         })
     }

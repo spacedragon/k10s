@@ -194,46 +194,42 @@ impl PortForwardSeam for KubePortForwardSeam {
                 })
                 .collect();
 
-            // 6+7. Ready same-namespace Pod endpoints whose slice carries a
-            // matching port with a numeric target port.
+            // 6. Ready same-namespace Pod endpoints behind a slice port
+            // matching the selected Service port by name (discovery/v1
+            // EndpointPort mirrors the Service port name and carries no
+            // targetPort; the container port derives from the Service).
             let service_port_number = u16::try_from(declared.port).map_err(|_| {
                 rejected(
                     RejectionCategory::UnsupportedService,
                     "service port number out of range",
                 )
             })?;
-            let service_port_name = declared.name.clone();
-            let mut candidates: Vec<(String, String, u16)> = Vec::new();
+            let mut candidates: Vec<(String, String)> = Vec::new();
             for slice in &owned {
                 let data = &slice.data;
                 let Some(ports) = data.get("ports").and_then(serde_json::Value::as_array) else {
                     continue;
                 };
-                let target_port = ports
-                    .iter()
-                    .filter(|entry| {
-                        let name_matches = service_port_name.as_deref().is_some_and(|name| {
-                            entry.get("name").and_then(|n| n.as_str()) == Some(name)
-                        });
-                        let number_matches = entry
+                let matches_declared = ports.iter().any(|entry| {
+                    let name_matches = entry.get("name").and_then(serde_json::Value::as_str)
+                        == declared.name.as_deref();
+                    // discovery/v1 slices carry the Service port number in
+                    // `port`; tolerate its absence on hand-crafted data.
+                    let number_ok = entry
+                        .get("port")
+                        .and_then(serde_json::Value::as_i64)
+                        .map(|p| u16::try_from(p).ok())
+                        != Some(None)
+                        && entry
                             .get("port")
                             .and_then(serde_json::Value::as_i64)
-                            .map(|p| u16::try_from(p).ok())
-                            == Some(Some(service_port_number));
-                        service_port_name.is_some() && name_matches
-                            || service_port_name.is_none() && number_matches
-                    })
-                    .filter_map(|entry| entry.get("targetPort"))
-                    .find_map(|target| match target {
-                        serde_json::Value::Number(raw) => {
-                            raw.as_u64().and_then(|p| u16::try_from(p).ok())
-                        }
-                        serde_json::Value::String(name) => name.parse::<u16>().ok(),
-                        _ => None,
-                    });
-                let Some(target_port) = target_port else {
+                            .map(|p| u16::try_from(p).ok() == Some(service_port_number))
+                            .unwrap_or(true);
+                    name_matches && number_ok
+                });
+                if !matches_declared {
                     continue;
-                };
+                }
                 let Some(endpoints) = data.get("endpoints").and_then(serde_json::Value::as_array)
                 else {
                     continue;
@@ -267,20 +263,24 @@ impl PortForwardSeam for KubePortForwardSeam {
                     else {
                         continue;
                     };
-                    candidates.push((pod_name.to_owned(), pod_uid.to_owned(), target_port));
+                    candidates.push((pod_name.to_owned(), pod_uid.to_owned()));
                 }
             }
 
-            // 8. Deterministic order by Pod name then UID.
+            // 7+8. Deterministic order by Pod name then UID.
             candidates.sort();
-            let Some((pod_name, pod_uid, pod_port)) = candidates.into_iter().next() else {
+            candidates.dedup();
+            let Some((pod_name, pod_uid)) = candidates.into_iter().next() else {
                 return Err(rejected(
                     RejectionCategory::UnavailableEndpoint,
                     "no ready endpoint backs this service port",
                 ));
             };
 
-            // 9. Verify the pinned Pod still exists with that UID.
+            // 9. Verify the pinned Pod still exists with that UID, then
+            // resolve the numeric container port from the declared
+            // Service targetPort against that Pod's declared container
+            // ports.
             let pod = pod_api(client, &request.namespace)
                 .get(&pod_name)
                 .await
@@ -301,11 +301,29 @@ impl PortForwardSeam for KubePortForwardSeam {
                     "the selected endpoint was replaced",
                 ));
             }
+            use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+            let pod_port = match declared.target_port.as_ref() {
+                Some(IntOrString::Int(port)) => u16::try_from(*port).map_err(|_| {
+                    rejected(
+                        RejectionCategory::UnsupportedService,
+                        "the declared target port is out of range",
+                    )
+                })?,
+                Some(IntOrString::String(name)) => resolve_named_container_port(&pod, name)
+                    .ok_or_else(|| {
+                        rejected(
+                            RejectionCategory::UnavailableEndpoint,
+                            "no declared TCP container port carries the target port name",
+                        )
+                    })?,
+                None => service_port_number,
+            };
 
             Ok(ResolvedPortForward {
                 context: request.context,
                 namespace: request.namespace,
                 service_uid: request.service_uid,
+                service_port: service_port_number,
                 pod_name,
                 pod_uid,
                 pod_port,
@@ -341,4 +359,31 @@ impl PortForwardSeam for KubePortForwardSeam {
             Ok(PortForwardStream::new(Box::new(stream)))
         })
     }
+}
+
+/// Resolve a named target port against one Pod's declared TCP container
+/// ports across regular and init containers.
+fn resolve_named_container_port(pod: &k8s_openapi::api::core::v1::Pod, name: &str) -> Option<u16> {
+    let status_phase_running_or_none = pod
+        .status
+        .as_ref()
+        .map(|status| status.phase.as_deref() != Some("Failed"));
+    if status_phase_running_or_none == Some(false) {
+        return None;
+    }
+    let containers = pod.spec.iter().flat_map(|spec| {
+        spec.containers
+            .iter()
+            .chain(spec.init_containers.iter().flatten())
+    });
+    for container in containers {
+        for port in container.ports.iter().flatten() {
+            if port.name.as_deref() == Some(name)
+                && port.protocol.as_deref().unwrap_or("TCP") == "TCP"
+            {
+                return u16::try_from(port.container_port).ok();
+            }
+        }
+    }
+    None
 }

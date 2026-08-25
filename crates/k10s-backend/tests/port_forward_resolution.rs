@@ -79,7 +79,7 @@ fn slice_json(name: &str, uid: &str, owner_uid: &str, endpoints: serde_json::Val
             "ownerReferences": owner_references,
         },
         "addressType": "IPv4",
-        "ports": [{"name": "http", "port": 80, "protocol": "TCP", "targetPort": 8080}],
+        "ports": [{"name": "http", "port": 80, "protocol": "TCP"}],
         "endpoints": endpoints,
     })
     .to_string()
@@ -145,6 +145,7 @@ async fn exact_service_identity_resolves_to_the_deterministic_ready_pod() {
             context: CONTEXT.into(),
             namespace: NS.into(),
             service_uid: SERVICE_UID.into(),
+            service_port: 80,
             pod_name: "web-7d9f8-b".into(),
             pod_uid: "uid-pod-b".into(),
             pod_port: 8_080,
@@ -167,6 +168,123 @@ async fn exact_service_identity_resolves_to_the_deterministic_ready_pod() {
         .await
         .expect("numeric selection resolves");
     assert_eq!(resolved.pod_port, 8_080);
+}
+
+/// A named selection keeps the DECLARED Service port identity on the
+/// resolved target even though the pod port differs.
+#[tokio::test]
+async fn named_selection_keeps_declared_service_port_identity() {
+    let server = RecordedApiServer::standard();
+    install_happy_path(&server);
+    let connector = connector_for(&server).await;
+
+    let resolved = connector
+        .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
+        .await
+        .expect("named selection resolves");
+    assert_eq!(resolved.service_port, 80, "declared identity preserved");
+    assert_eq!(resolved.pod_port, 8_080);
+
+    // Numeric selection reports the same declared port.
+    let numeric = connector
+        .resolve_service_port(request(PortForwardPortSelection::Number(80)))
+        .await
+        .expect("numeric selection resolves");
+    assert_eq!(numeric.service_port, 80);
+    assert_eq!(numeric.pod_name, resolved.pod_name);
+}
+
+/// A named targetPort resolves against the selected Pod's declared TCP
+/// container ports.
+#[tokio::test]
+async fn named_target_ports_resolve_through_pod_container_ports() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        &format!("/api/v1/namespaces/{NS}/services/web"),
+        200,
+        &serde_json::json!({
+            "kind": "Service", "apiVersion": "v1",
+            "metadata": {"name": "web", "namespace": NS, "uid": SERVICE_UID},
+            "spec": {"type": "ClusterIP",
+                     "ports": [{"name": "http", "port": 80, "targetPort": "web-http", "protocol": "TCP"}]}
+        })
+        .to_string(),
+    );
+    server.set_response(
+        &format!("/apis/discovery.k8s.io/v1/namespaces/{NS}/endpointslices"),
+        200,
+        &serde_json::json!({
+            "kind": "EndpointSliceList", "apiVersion": "discovery.k8s.io/v1",
+            "items": [serde_json::from_str::<serde_json::Value>(&slice_json(
+                "web-abc", "uid-slice-1", SERVICE_UID,
+                ready_pod_endpoint("pod-a", "uid-pod-a", NS),
+            ))
+            .unwrap()]
+        })
+        .to_string(),
+    );
+    server.set_response(
+        &format!("/api/v1/namespaces/{NS}/pods/pod-a"),
+        200,
+        &serde_json::json!({
+            "kind": "Pod", "apiVersion": "v1",
+            "metadata": {"name": "pod-a", "namespace": NS, "uid": "uid-pod-a"},
+            "spec": {"containers": [{
+                "name": "app",
+                "ports": [{"name": "web-http", "containerPort": 8080, "protocol": "TCP"},
+                          {"name": "web-http", "containerPort": 9999, "protocol": "UDP"}]
+            }]}
+        })
+        .to_string(),
+    );
+    let connector = connector_for(&server).await;
+    let resolved = connector
+        .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
+        .await
+        .expect("named target port resolves through the pod");
+    assert_eq!(resolved.service_port, 80);
+    assert_eq!(
+        resolved.pod_port, 8_080,
+        "the TCP container port is selected over the UDP one"
+    );
+
+    // An omitted targetPort defaults to the Service port number.
+    server.set_response(
+        &format!("/api/v1/namespaces/{NS}/services/web"),
+        200,
+        &serde_json::json!({
+            "kind": "Service", "apiVersion": "v1",
+            "metadata": {"name": "web", "namespace": NS, "uid": SERVICE_UID},
+            "spec": {"type": "ClusterIP",
+                     "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}
+        })
+        .to_string(),
+    );
+    server.set_response(
+        &format!("/apis/discovery.k8s.io/v1/namespaces/{NS}/endpointslices"),
+        200,
+        &serde_json::json!({
+            "kind": "EndpointSliceList", "apiVersion": "discovery.k8s.io/v1",
+            "items": [{
+                "kind": "EndpointSlice", "apiVersion": "discovery.k8s.io/v1",
+                "metadata": {"name": "web-abc", "namespace": NS, "uid": "uid-slice-2",
+                    "labels": {"kubernetes.io/service-name": "web"},
+                    "ownerReferences": [{"apiVersion": "v1", "kind": "Service",
+                                         "name": "web", "uid": SERVICE_UID, "controller": true}]},
+                "addressType": "IPv4",
+                "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}],
+                "endpoints": [{"addresses": ["10.244.0.5"], "conditions": {"ready": true},
+                               "targetRef": {"kind": "Pod", "name": "pod-a", "uid": "uid-pod-a",
+                                             "namespace": NS}}]
+            }]
+        })
+        .to_string(),
+    );
+    let defaulted = connector
+        .resolve_service_port(request(PortForwardPortSelection::Name("http".into())))
+        .await
+        .expect("defaulted target port resolves");
+    assert_eq!(defaulted.pod_port, 8_080);
 }
 
 #[tokio::test]
@@ -498,6 +616,7 @@ async fn connect_opens_a_stream_through_the_backend_only() {
         context: CONTEXT.into(),
         namespace: NS.into(),
         service_uid: SERVICE_UID.into(),
+        service_port: 80,
         pod_name: "web-1".into(),
         pod_uid: "uid-pod".into(),
         pod_port: 8_080,

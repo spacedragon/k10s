@@ -54,6 +54,10 @@ pub struct ResolvedPortForward {
     pub namespace: String,
     /// Verified live Service UID.
     pub service_uid: String,
+    /// Declared Service port number the session forwards. Kept separate
+    /// from [`Self::pod_port`] so named selections retain their declared
+    /// port identity on snapshots.
+    pub service_port: u16,
     /// Selected backing Pod name.
     pub pod_name: String,
     /// Verified Pod UID.
