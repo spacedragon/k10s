@@ -121,11 +121,6 @@ struct FakeIdempotency {
     fingerprint: String,
 }
 
-enum FakeAcceptance {
-    Fresh(OperationId),
-    Replay(OperationId),
-}
-
 #[cfg(test)]
 #[derive(Debug)]
 struct SubscriptionCutGate {
@@ -499,11 +494,11 @@ impl FakeKubernetes {
     /// Record a freshly accepted mutation as an operation: allocates its
     /// deterministic ID, stores the bounded record in `Pending`, remembers
     /// the idempotency key, and notifies watchers. Returns the ID.
-    fn accept_operation(
-        state: &mut FakeState,
+    fn replay_operation(
+        state: &FakeState,
         idempotency_key: &str,
         fingerprint: &str,
-    ) -> Result<FakeAcceptance, BackendError> {
+    ) -> Result<Option<OperationId>, BackendError> {
         if idempotency_key.is_empty() {
             return Err(BackendError::Conflict(
                 "an idempotency key is required".into(),
@@ -515,10 +510,16 @@ impl FakeKubernetes {
                     "the idempotency key was already used for a different submission".into(),
                 ));
             }
-            return Ok(FakeAcceptance::Replay(OperationId::new(
-                existing.operation_id.clone(),
-            )));
+            return Ok(Some(OperationId::new(existing.operation_id.clone())));
         }
+        Ok(None)
+    }
+
+    fn begin_operation(
+        state: &mut FakeState,
+        idempotency_key: &str,
+        fingerprint: &str,
+    ) -> OperationId {
         let operation_id = OperationId::new(format!("op-{:06}", state.next_operation));
         state.next_operation += 1;
         let record = crate::operation::OperationRecord {
@@ -558,7 +559,7 @@ impl FakeKubernetes {
                 detail: None,
             },
         );
-        Ok(FakeAcceptance::Fresh(operation_id))
+        operation_id
     }
 
     /// Advance every nonterminal operation exactly one deterministic step:
@@ -729,11 +730,9 @@ impl FakeKubernetes {
             buffer_hash
         );
         let mut state = self.lock();
-        let operation_id = match Self::accept_operation(&mut state, &idempotency_key, &fingerprint)?
-        {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         let ticket = {
             // Verify every binding before consuming: a rejected envelope
             // must leave the ticket intact.
@@ -763,17 +762,46 @@ impl FakeKubernetes {
                     "the validation ticket has expired".into(),
                 ));
             }
-            state.tickets.remove(&ticket_id);
-            state.ticket_order.retain(|id| *id != ticket_id);
-
             ticket
         };
-        match state.find_index(
+        let target_index = state.find_index(
             &ticket.target.context,
             &ticket.target.gvk,
             ticket.target.namespace.as_deref(),
             &ticket.target.name,
-        ) {
+        );
+        match target_index {
+            Some(index) => {
+                if state.records[index].reference.uid != ticket.target.uid {
+                    return Err(BackendError::Conflict(
+                        "the target was recreated since validation".into(),
+                    ));
+                }
+                if state.records[index].revision != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the target changed since validation".into(),
+                    ));
+                }
+            }
+            None => {
+                if state.current_revision() != ticket.resource_revision {
+                    return Err(BackendError::Conflict(
+                        "the cluster changed since validation".into(),
+                    ));
+                }
+                if state
+                    .contexts
+                    .iter()
+                    .all(|candidate| candidate.name != ticket.target.context)
+                {
+                    return Err(BackendError::NotFound);
+                }
+            }
+        }
+        state.tickets.remove(&ticket_id);
+        state.ticket_order.retain(|id| *id != ticket_id);
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
+        match target_index {
             // Update: the object must still be the same instance at exactly
             // the validated revision.
             Some(index) => {
@@ -861,11 +889,9 @@ impl FakeKubernetes {
         };
         let fingerprint = format!("scale/{}/{replicas}", target.exact_identity_key());
         let mut state = self.lock();
-        let operation_id = match Self::accept_operation(&mut state, &idempotency_key, &fingerprint)?
-        {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !state.contexts.iter().any(|c| c.name == context) {
             return Err(BackendError::NotFound);
         }
@@ -884,6 +910,7 @@ impl FakeKubernetes {
         let index = state
             .find_index(&context, &gvk, namespace.as_deref(), &name)
             .expect("the record was just resolved");
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         // The desired count becomes observable backend state wherever the
@@ -908,11 +935,9 @@ impl FakeKubernetes {
     ) -> Result<OperationId, BackendError> {
         let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
         let mut state = self.lock();
-        let operation_id = match Self::accept_operation(&mut state, &idempotency_key, &fingerprint)?
-        {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !state
             .contexts
             .iter()
@@ -937,6 +962,7 @@ impl FakeKubernetes {
                     .into(),
             ));
         }
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let _ = propagation;
         let index = state
             .find_index(
@@ -967,11 +993,9 @@ impl FakeKubernetes {
     ) -> Result<OperationId, BackendError> {
         let fingerprint = format!("restart/{}", target.exact_identity_key());
         let mut state = self.lock();
-        let operation_id = match Self::accept_operation(&mut state, &idempotency_key, &fingerprint)?
-        {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if target.context == READONLY_CONTEXT {
             return Err(BackendError::Forbidden);
         }
@@ -989,6 +1013,7 @@ impl FakeKubernetes {
                     .into(),
             ));
         }
+        let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         Ok(operation_id)
     }
 
@@ -999,10 +1024,9 @@ impl FakeKubernetes {
     ) -> Result<OperationId, BackendError> {
         let fingerprint = format!("create-job/{}", source.exact_identity_key());
         let mut state = self.lock();
-        let operation = match Self::accept_operation(&mut state, &idempotency_key, &fingerprint)? {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
+            return Ok(existing);
+        }
         if !matches!(source.gvk.kind.as_str(), "Job" | "CronJob") {
             return Err(BackendError::unsupported("job.create"));
         }
@@ -1020,6 +1044,7 @@ impl FakeKubernetes {
         if record.reference.uid != source.uid {
             return Err(BackendError::Conflict("the source was recreated".into()));
         }
+        let operation = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
         let revision = state.advance_revision();
         let name = format!("{}-run-{}", source.name, revision);
         let reference = ResourceRef {
@@ -1056,10 +1081,9 @@ impl FakeKubernetes {
             suspended
         );
         let mut state = self.lock();
-        let operation = match Self::accept_operation(&mut state, &key, &fingerprint)? {
-            FakeAcceptance::Replay(existing) => return Ok(existing),
-            FakeAcceptance::Fresh(operation_id) => operation_id,
-        };
+        if let Some(existing) = Self::replay_operation(&state, &key, &fingerprint)? {
+            return Ok(existing);
+        }
         if target.gvk != Gvk::new("batch", "v1", "CronJob") {
             return Err(BackendError::unsupported("cronjob.suspend"));
         }
@@ -1077,6 +1101,7 @@ impl FakeKubernetes {
         if state.records[index].reference.uid != target.uid {
             return Err(BackendError::Conflict("the target was recreated".into()));
         }
+        let operation = Self::begin_operation(&mut state, &key, &fingerprint);
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         state.records[index].summary = if suspended { "Suspended" } else { "Running" }.into();
@@ -2183,6 +2208,51 @@ mod tests {
             .filter(|record| record.reference.gvk == Gvk::new("batch", "v1", "Job"))
             .count();
         assert_eq!(jobs_after, jobs_before + 1, "the Job is created once");
+    }
+
+    #[tokio::test]
+    async fn rejected_submission_does_not_reserve_its_operation_or_key() {
+        let fake = FakeKubernetes::default();
+        let mut source = {
+            let state = fake.lock();
+            state
+                .records
+                .iter()
+                .find(|record| record.reference.gvk == Gvk::new("batch", "v1", "CronJob"))
+                .expect("the deterministic fixture has a CronJob")
+                .reference
+                .clone()
+        };
+        source.uid = "corrected-source-uid".into();
+
+        assert!(matches!(
+            fake.create_job(source.clone(), "retryable-create-key".into())
+                .await,
+            Err(BackendError::Conflict(_))
+        ));
+        {
+            let state = fake.lock();
+            assert!(state.operations.is_empty());
+            assert!(!state.idempotency.contains_key("retryable-create-key"));
+        }
+
+        {
+            let mut state = fake.lock();
+            let index = state
+                .find_index(
+                    &source.context,
+                    &source.gvk,
+                    source.namespace.as_deref(),
+                    &source.name,
+                )
+                .unwrap();
+            state.records[index].reference.uid = source.uid.clone();
+        }
+        let operation = fake
+            .create_job(source, "retryable-create-key".into())
+            .await
+            .unwrap();
+        assert_eq!(operation.as_str(), "op-000001");
     }
 
     /// Regression: capacity eviction must follow issuance order even across
