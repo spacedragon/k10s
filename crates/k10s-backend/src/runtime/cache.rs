@@ -61,6 +61,7 @@ pub(crate) fn record_from_row(row: &WatchRow, revision: u64) -> ResourceRecord {
         owner_references: row.owner_references.clone(),
         events: Vec::new(),
         manifest: String::new(),
+        projection: row.projection.clone(),
     }
 }
 
@@ -265,6 +266,7 @@ mod tests {
             summary: summary.to_owned(),
             created_at: "2026-08-21T00:00:00Z".into(),
             owner_references: Vec::new(),
+            projection: None,
         }
     }
 

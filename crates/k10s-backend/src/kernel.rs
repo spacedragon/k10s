@@ -12,14 +12,15 @@ use k10s_protocol::{
     BackendRevision, BootstrapResponse, Context, DetailRow, DetailSection, GroupVersionKind,
     InfrastructureResponse, MetricsAvailability, PodMetrics, ProtocolVersion, ResourceCapabilities,
     ResourceDetailResponse, ResourceIdentity, ResourceListResponse, ResourceListRow,
-    ResourceMetricsResponse, ServerInfo, WorkloadKind,
+    ResourceMetricsResponse, ResourceProjection as WireProjection, ServerInfo, TargetPort,
+    TransportProtocol, WorkloadKind,
 };
 use uuid::Uuid;
 
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, Query, QueryResult, RelatedData, ResourceRecord, ResourceRef, Subscribe,
-    SubscriptionHandle,
+    OperationId, Query, QueryResult, RelatedData, ResourceProjection, ResourceRecord, ResourceRef,
+    ServicePort, Subscribe, SubscriptionHandle,
 };
 
 /// The backend kernel.
@@ -548,7 +549,7 @@ impl ResourceDetailResult {
                 capabilities,
                 manifest,
                 identity,
-                projection: None,
+                projection: record.projection.as_ref().map(map_projection),
             },
         }
     }
@@ -798,7 +799,50 @@ fn map_row(record: &ResourceRecord) -> ResourceListRow {
             .collect::<BTreeMap<_, _>>(),
         summary: record.summary.clone(),
         created_at: record.created_at.clone(),
-        projection: None,
+        projection: record.projection.as_ref().map(map_projection),
+    }
+}
+
+/// Map a backend projection onto its protocol-facing payload.
+#[must_use]
+fn map_projection(projection: &ResourceProjection) -> WireProjection {
+    match projection {
+        ResourceProjection::Service(service) => {
+            WireProjection::Service(k10s_protocol::ServiceProjection {
+                service_type: service.service_type.clone(),
+                cluster_ips: service.cluster_ips.clone(),
+                selector: service
+                    .selector
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                external_name: service.external_name.clone(),
+                session_affinity: service.session_affinity.clone(),
+                external_traffic_policy: service.external_traffic_policy.clone(),
+                internal_traffic_policy: service.internal_traffic_policy.clone(),
+                ports: service.ports.iter().map(map_service_port).collect(),
+            })
+        }
+    }
+}
+
+/// Map one backend Service port onto its protocol-facing payload.
+#[must_use]
+fn map_service_port(port: &ServicePort) -> k10s_protocol::ServicePort {
+    k10s_protocol::ServicePort {
+        name: port.name.clone(),
+        service_port: port.service_port,
+        target_port: match &port.target_port {
+            crate::port::TargetPort::Name(name) => TargetPort::Name { name: name.clone() },
+            crate::port::TargetPort::Number(number) => TargetPort::Number { number: *number },
+        },
+        node_port: port.node_port,
+        protocol: match port.protocol {
+            crate::port::TransportProtocol::Tcp => TransportProtocol::Tcp,
+            crate::port::TransportProtocol::Udp => TransportProtocol::Udp,
+            crate::port::TransportProtocol::Sctp => TransportProtocol::Sctp,
+        },
+        app_protocol: port.app_protocol.clone(),
     }
 }
 

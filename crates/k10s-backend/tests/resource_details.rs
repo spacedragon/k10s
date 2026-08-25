@@ -608,3 +608,79 @@ fn hit_once(server: &RecordedApiServer, path: &str) {
         "{path} is read on demand for the detail"
     );
 }
+
+/// Service details carry the same structured projection as list rows so the
+/// Ports tab renders without re-reading or parsing the manifest.
+#[tokio::test]
+async fn service_details_carry_structured_projection() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/namespaces/default/services/web",
+        200,
+        &json!({
+            "kind": "Service",
+            "apiVersion": "v1",
+            "metadata": {
+                "name": "web",
+                "namespace": NS,
+                "uid": "uid-svc-web",
+                "resourceVersion": "42",
+                "creationTimestamp": "2026-08-21T00:00:00Z",
+            },
+            "spec": {
+                "type": "NodePort",
+                "clusterIP": "10.96.0.10",
+                "clusterIPs": ["10.96.0.10"],
+                "selector": {"app": "web"},
+                "sessionAffinity": "None",
+                "externalTrafficPolicy": "Local",
+                "ports": [
+                    {"name": "http", "port": 80, "protocol": "TCP", "nodePort": 31000},
+                    {"name": "dns", "port": 53, "protocol": "UDP"},
+                ],
+            },
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(
+        &kernel,
+        reference(Gvk::core("v1", "Service"), "web", "uid-svc-web"),
+    )
+    .await
+    .expect("service detail resolves");
+
+    assert_eq!(detail.identity.name, "web");
+    assert_eq!(detail.identity.uid, "uid-svc-web");
+    let Some(k10s_protocol::ResourceProjection::Service(projection)) = &detail.projection else {
+        panic!("service detail carries a Service projection")
+    };
+    assert_eq!(projection.service_type, "NodePort");
+    assert_eq!(projection.cluster_ips, ["10.96.0.10"]);
+    assert_eq!(projection.external_traffic_policy.as_deref(), Some("Local"));
+    assert_eq!(projection.ports.len(), 2);
+    let http = &projection.ports[0];
+    assert_eq!(http.name.as_deref(), Some("http"));
+    assert_eq!(http.node_port, Some(31_000));
+    // The omitted targetPort normalizes to the Service port number.
+    assert_eq!(
+        http.target_port,
+        k10s_protocol::TargetPort::Number { number: 80 }
+    );
+    assert_eq!(
+        projection.ports[1].protocol,
+        k10s_protocol::TransportProtocol::Udp
+    );
+
+    // Deployment details keep the projection absent.
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/deployments/web",
+        200,
+        &recorded_deployment(),
+    );
+    let deployment_detail = crate::detail(&kernel, reference(deployments_gvk(), "web", "uid-web"))
+        .await
+        .expect("deployment detail resolves");
+    assert!(deployment_detail.projection.is_none());
+}

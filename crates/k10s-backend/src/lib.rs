@@ -30,9 +30,9 @@ pub use port::{
     AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextInfo,
     ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample, OperationId,
     OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
-    ResourceTypesData, StreamGrant, StreamInput, StreamKind, StreamRouteKind, Subscribe,
-    SubscriptionHandle,
+    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
+    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamGrant, StreamInput,
+    StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use runtime::{BackendMode, ContextRegistry, build_kernel};
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

@@ -48,6 +48,7 @@ fn pod_row(name: &str, summary: &str) -> WatchRow {
         summary: summary.to_owned(),
         created_at: "2026-08-21T00:00:00Z".into(),
         owner_references: Vec::new(),
+        projection: None,
     }
 }
 

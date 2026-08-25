@@ -20,8 +20,9 @@ use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
     KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceRecord, ResourceRef,
-    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
+    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
+    SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
@@ -845,6 +846,7 @@ impl FakeKubernetes {
                     owner_references: Vec::new(),
                     events: Vec::new(),
                     manifest: String::new(),
+                    projection: None,
                 };
                 let changed = ResourceRecord {
                     reference: ticket.target.clone(),
@@ -855,6 +857,7 @@ impl FakeKubernetes {
                     owner_references: Vec::new(),
                     events: Vec::new(),
                     manifest: String::new(),
+                    projection: None,
                 };
                 let reference = ticket.target.clone();
                 state.records.push(record);
@@ -1063,6 +1066,7 @@ impl FakeKubernetes {
             owner_references: Vec::new(),
             events: Vec::new(),
             manifest: String::new(),
+            projection: None,
         };
         state.records.push(created.clone());
         state.notify_matching(&reference, crate::port::BackendEvent::Changed(created));
@@ -1736,6 +1740,7 @@ fn build_capacity_records(context: &str, objects: usize, nodes: usize) -> Vec<Re
             name: &format!("capacity-node-{index:05}"),
             labels: &[("role", "worker")],
             owner_references: Vec::new(),
+            projection: None,
         }));
     }
     for index in 0..objects {
@@ -1750,6 +1755,7 @@ fn build_capacity_records(context: &str, objects: usize, nodes: usize) -> Vec<Re
             name: &format!("scale-{}-{index:06}", kind.to_lowercase()),
             labels: &[("tier", "capacity")],
             owner_references: Vec::new(),
+            projection: None,
         }));
     }
     records
@@ -1773,6 +1779,8 @@ struct RecordSeed<'a> {
     labels: &'a [(&'a str, &'a str)],
     /// Owner chain references resolved up front.
     owner_references: Vec<OwnerRef>,
+    /// Kind-specific structured projection.
+    projection: Option<ResourceProjection>,
 }
 
 /// Build one deterministic record with a derived stable UID.
@@ -1797,6 +1805,7 @@ fn record(seed: RecordSeed<'_>) -> ResourceRecord {
         owner_references: seed.owner_references,
         events,
         manifest: String::new(),
+        projection: seed.projection,
     }
 }
 
@@ -1906,6 +1915,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             name,
             labels,
             owner_references: Vec::new(),
+            projection: None,
         }
     }
 
@@ -2000,6 +2010,73 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         )),
     ];
 
+    // Services carry structured projections so the panel and port-forward
+    // controls render from normalized columns in dev mode.
+    records.push(record(RecordSeed {
+        projection: Some(ResourceProjection::Service(ServiceProjection {
+            service_type: "ClusterIP".into(),
+            cluster_ips: vec!["10.96.0.10".into()],
+            selector: BTreeMap::from([("app".to_owned(), "web".to_owned())]),
+            external_name: None,
+            session_affinity: None,
+            external_traffic_policy: None,
+            internal_traffic_policy: None,
+            ports: vec![ServicePort {
+                name: Some("http".into()),
+                service_port: 80,
+                target_port: TargetPort::Number(8080),
+                node_port: None,
+                protocol: TransportProtocol::Tcp,
+                app_protocol: None,
+            }],
+        })),
+        ..seed(
+            3_600,
+            "ClusterIP",
+            Gvk::core("v1", "Service"),
+            Some("default"),
+            "web-frontend",
+            &[("app", "web")],
+        )
+    }));
+    records.push(record(RecordSeed {
+        projection: Some(ResourceProjection::Service(ServiceProjection {
+            service_type: "ClusterIP".into(),
+            cluster_ips: vec!["10.96.0.20".into()],
+            selector: BTreeMap::from([("app".to_owned(), "api".to_owned())]),
+            external_name: None,
+            session_affinity: Some("ClientIP".into()),
+            external_traffic_policy: None,
+            internal_traffic_policy: None,
+            ports: vec![
+                ServicePort {
+                    name: Some("https".into()),
+                    service_port: 443,
+                    target_port: TargetPort::Name("https".into()),
+                    node_port: None,
+                    protocol: TransportProtocol::Tcp,
+                    app_protocol: Some("https".into()),
+                },
+                ServicePort {
+                    name: Some("metrics".into()),
+                    service_port: 9100,
+                    target_port: TargetPort::Number(9100),
+                    node_port: None,
+                    protocol: TransportProtocol::Udp,
+                    app_protocol: None,
+                },
+            ],
+        })),
+        ..seed(
+            3_900,
+            "ClusterIP",
+            Gvk::core("v1", "Service"),
+            Some("default"),
+            "api-server",
+            &[("app", "api")],
+        )
+    }));
+
     // The web-frontend replica wave: twenty pods owned by its replicaset.
     for index in 1..=20_u32 {
         records.push(record(RecordSeed {
@@ -2075,6 +2152,7 @@ fn build_prod_records() -> Vec<ResourceRecord> {
         name: "edge-gateway",
         labels: &[("app", "edge")],
         owner_references: Vec::new(),
+        projection: None,
     })]
 }
 

@@ -495,6 +495,82 @@ pub struct ResourceRecord {
     /// bound to its UID/resourceVersion. Empty for watch rows; detail reads
     /// always carry it so guarded edits can detect drift.
     pub manifest: String,
+    /// Kind-specific structured projection; populated only for kinds with a
+    /// designed projection and absent everywhere else.
+    pub projection: Option<ResourceProjection>,
+}
+
+/// A kind-specific normalized projection carried by backend records.
+///
+/// Projections contain structured view-model data only: no raw Kubernetes
+/// objects and no credential-bearing fields ever appear here. The kernel
+/// maps them onto the protocol-facing payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceProjection {
+    /// Normalized core/v1 Service view model.
+    Service(ServiceProjection),
+}
+
+/// Normalized core/v1 Service projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceProjection {
+    /// Kubernetes Service type, such as `ClusterIP` or `NodePort`.
+    pub service_type: String,
+    /// Primary cluster IPs; empty for ExternalName Services.
+    pub cluster_ips: Vec<String>,
+    /// Selector labels, sorted by key.
+    pub selector: BTreeMap<String, String>,
+    /// External name of an ExternalName Service.
+    pub external_name: Option<String>,
+    /// Session affinity policy when explicitly set.
+    pub session_affinity: Option<String>,
+    /// External traffic policy when present.
+    pub external_traffic_policy: Option<String>,
+    /// Internal traffic policy when present.
+    pub internal_traffic_policy: Option<String>,
+    /// Every declared Service port, including non-forwardable ones.
+    pub ports: Vec<ServicePort>,
+}
+
+/// One declared Service port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicePort {
+    /// Declared port name, absent for unnamed ports.
+    pub name: Option<String>,
+    /// Declared Service port number.
+    pub service_port: u16,
+    /// Resolved target port on backing Pods.
+    pub target_port: TargetPort,
+    /// Node port declared by NodePort or LoadBalancer Services.
+    pub node_port: Option<u16>,
+    /// Wire protocol of the port.
+    pub protocol: TransportProtocol,
+    /// Optional application protocol label.
+    pub app_protocol: Option<String>,
+}
+
+/// The target port of a Service port declaration.
+///
+/// An omitted Kubernetes `targetPort` normalizes to
+/// [`TargetPort::Number`] carrying the Service port number so the defaulted
+/// case is explicit instead of reconstructed by consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetPort {
+    /// A named target port.
+    Name(String),
+    /// A numeric target port.
+    Number(u16),
+}
+
+/// Wire transport protocol of a Service port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportProtocol {
+    /// TCP ports may be forwarded by the desktop application.
+    Tcp,
+    /// UDP ports render read-only and are never forwarded.
+    Udp,
+    /// SCTP ports render read-only and are never forwarded.
+    Sctp,
 }
 
 /// A reference from a child object to its owner.

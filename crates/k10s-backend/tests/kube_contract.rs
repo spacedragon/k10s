@@ -801,6 +801,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                         summary: String::new(),
                         created_at: "2026-08-21T00:00:00Z".into(),
                         owner_references: Vec::new(),
+                        projection: None,
                     }],
                 })
             })
@@ -917,6 +918,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                 summary: "CrashLoopBackOff".into(),
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
+                projection: None,
             }),
             WatchUpdate::Delete(ResourceRef {
                 context: "contract-mock".into(),
