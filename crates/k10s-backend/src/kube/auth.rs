@@ -6,9 +6,9 @@ use crate::port::BackendError;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 2 * 1024;
 
-pub(super) fn classify_kube_error(error: &kube::Error) -> Option<String> {
+pub(super) fn classify_kube_error(error: &kube::Error, uses_exec_plugin: bool) -> Option<String> {
     match error {
-        kube::Error::Auth(error) => classify_exec_auth_error(error),
+        kube::Error::Auth(error) => classify_exec_auth_error(error, uses_exec_plugin),
         _ => None,
     }
 }
@@ -24,7 +24,13 @@ pub(super) fn context_unavailable(error: &kube::Error) -> Option<BackendError> {
     })
 }
 
-pub(super) fn classify_exec_auth_error(error: &AuthError) -> Option<String> {
+pub(super) fn classify_exec_auth_error(
+    error: &AuthError,
+    uses_exec_plugin: bool,
+) -> Option<String> {
+    if !uses_exec_plugin {
+        return None;
+    }
     let reason = match error {
         AuthError::MissingCommand => "credential plugin command is missing".to_owned(),
         AuthError::AuthExecStart(error) => format!(
@@ -57,6 +63,15 @@ pub(super) fn classify_exec_auth_error(error: &AuthError) -> Option<String> {
         AuthError::ExecMissingClusterInfo => {
             "credential plugin requires unavailable cluster information".to_owned()
         }
+        AuthError::MalformedTokenExpirationDate(_) => {
+            "credential plugin returned an invalid expiration timestamp".to_owned()
+        }
+        AuthError::UnrefreshableTokenResponse => {
+            "credential plugin response was not refreshable".to_owned()
+        }
+        AuthError::InvalidBearerToken(_) => {
+            "credential plugin returned an invalid bearer token".to_owned()
+        }
         _ => return None,
     };
     Some(reason)
@@ -74,8 +89,20 @@ fn sanitize_stderr(stderr: &[u8]) -> String {
         })
         .collect::<String>();
     let mut redact_next = false;
+    let mut inside_pem = false;
     let mut words = Vec::new();
     for word in normalized.split_whitespace() {
+        if inside_pem {
+            if word.contains("-----END") {
+                inside_pem = false;
+            }
+            continue;
+        }
+        if word.contains("-----BEGIN") {
+            words.push("[redacted]".to_owned());
+            inside_pem = !word.contains("-----END");
+            continue;
+        }
         if redact_next {
             words.push("[redacted]".to_owned());
             redact_next = false;
@@ -132,18 +159,19 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
-    let mut end = max_bytes;
+    let suffix = "…";
+    let mut end = max_bytes.saturating_sub(suffix.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", value[..end].trim_end())
+    format!("{}{suffix}", value[..end].trim_end())
 }
 
 #[cfg(test)]
 mod tests {
     use std::process::{ExitStatus, Output};
 
-    use super::{MAX_DIAGNOSTIC_BYTES, classify_exec_auth_error};
+    use super::{MAX_DIAGNOSTIC_BYTES, classify_exec_auth_error, sanitize_stderr};
 
     #[cfg(unix)]
     fn failed_status() -> ExitStatus {
@@ -170,7 +198,7 @@ mod tests {
             },
         };
 
-        let reason = classify_exec_auth_error(&error).expect("exec failure classifies");
+        let reason = classify_exec_auth_error(&error, true).expect("exec failure classifies");
         assert!(reason.contains("status 17: denied"));
         assert!(reason.contains("[redacted]"));
         for secret in [
@@ -187,8 +215,32 @@ mod tests {
     }
 
     #[test]
+    fn pem_blocks_are_fully_redacted_inside_the_hard_bound() {
+        let private_key_body = "cHJpdmF0ZS1rZXktYm9keS1tdXN0LW5ldmVyLWxlYWs=";
+        let stderr = format!(
+            "denied\n-----BEGIN PRIVATE KEY-----\n{private_key_body}\n-----END PRIVATE KEY-----\n{}",
+            "é".repeat(MAX_DIAGNOSTIC_BYTES)
+        );
+
+        let sanitized = sanitize_stderr(stderr.as_bytes());
+
+        assert!(sanitized.contains("denied [redacted]"));
+        assert!(!sanitized.contains(private_key_body));
+        assert!(
+            sanitized.len() <= MAX_DIAGNOSTIC_BYTES,
+            "diagnostic exceeded the hard byte bound: {}",
+            sanitized.len()
+        );
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+    }
+
+    #[test]
     fn non_exec_auth_errors_are_not_context_failures() {
         let error = kube::client::AuthError::UnrefreshableTokenResponse;
-        assert_eq!(classify_exec_auth_error(&error), None);
+        assert_eq!(classify_exec_auth_error(&error, false), None);
+        assert_eq!(
+            classify_exec_auth_error(&error, true).as_deref(),
+            Some("credential plugin response was not refreshable")
+        );
     }
 }

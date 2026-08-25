@@ -53,6 +53,28 @@ type WatchScript = crate::runtime::RuntimeWatchScript;
 #[derive(Clone)]
 struct ScriptedWatches(Arc<std::sync::Mutex<Option<WatchScript>>>);
 
+/// Stable per-context construction guards. The map is bounded by the
+/// kubeconfig context set, and the guard itself is never held while this map
+/// mutex is locked.
+#[derive(Debug, Default)]
+struct ClientBuildLocks {
+    locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ClientBuildLocks {
+    fn for_context(&self, context: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            locks
+                .entry(context.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+}
+
 #[cfg(feature = "testkit")]
 impl std::fmt::Debug for ScriptedWatches {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,7 +99,7 @@ pub struct KubeAdapter {
     clients: Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>,
     /// Coalesces lazy client construction so concurrent first use executes a
     /// credential plugin at most once.
-    client_build_lock: tokio::sync::Mutex<()>,
+    client_build_locks: ClientBuildLocks,
     /// Parsed kubeconfig seeding per-context client construction; absent when
     /// testkit pre-injected every context's client instead.
     kubeconfig_source: Option<kube::config::Kubeconfig>,
@@ -140,7 +162,7 @@ impl KubeAdapter {
         Ok(Self {
             registry: Arc::new(StdMutex::new(ContextRegistry::prepare(prepared)?)),
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            client_build_lock: tokio::sync::Mutex::new(()),
+            client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
@@ -193,7 +215,7 @@ impl KubeAdapter {
         Ok(Self {
             registry: Arc::new(StdMutex::new(registry)),
             clients: Arc::new(tokio::sync::Mutex::new(client_map)),
-            client_build_lock: tokio::sync::Mutex::new(()),
+            client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
@@ -697,14 +719,13 @@ impl KubeAdapter {
         // Prepare (cluster): validate the destination read path with live
         // traffic — a fresh cached catalog proves nothing about right now.
         self.discover_catalog(&to).await?;
-        self.mark_context_available(&to);
         // Commit: install the new current marker as one atomic swap.
         let previous = {
             let mut registry = self
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.commit_switch(prepared)
+            registry.commit_switch(prepared)?
         };
         // Retire: end the replaced context's watchers, collectors, and cached
         // catalog immediately. A redundant switch to the already-current
@@ -747,6 +768,21 @@ impl KubeAdapter {
     async fn catalog_for(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
         if !self.knows_context(context) {
             return Err(BackendError::NotFound);
+        }
+        if let Some(entry) = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .find(context)
+            .filter(|entry| entry.availability == crate::port::ContextAvailability::Unavailable)
+        {
+            return Err(BackendError::ContextUnavailable {
+                context: entry.name.clone(),
+                reason: entry
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "credential plugin is unavailable".into()),
+            });
         }
 
         // Fast path: a fresh catalog already cached for this context.
@@ -826,7 +862,8 @@ impl KubeAdapter {
             }
         }
 
-        let _build = self.client_build_lock.lock().await;
+        let build_lock = self.client_build_locks.for_context(context);
+        let _build = build_lock.lock().await;
         // Another request may have completed construction while this request
         // waited for the coalescing guard.
         {
@@ -844,10 +881,12 @@ impl KubeAdapter {
             )));
         };
 
+        let probe_generation = self.context_generation();
+        let uses_exec_plugin = config::context_uses_exec(kubeconfig_source, context);
         let kubeconfig = match config::noninteractive_for_context(kubeconfig_source, context) {
             Ok(kubeconfig) => kubeconfig,
             Err(reason) => {
-                self.mark_context_unavailable(context, reason.clone());
+                self.mark_context_unavailable(probe_generation, context, reason.clone());
                 return Err(BackendError::ContextUnavailable {
                     context: context.to_owned(),
                     reason,
@@ -880,10 +919,13 @@ impl KubeAdapter {
                 context,
                 Arc::clone(&self.registry),
                 Arc::clone(&self.clients),
+                self.watches.clone(),
+                self.metrics.clone(),
+                uses_exec_plugin,
             )),
             Err(error) => {
-                if let Some(reason) = auth::classify_kube_error(&error) {
-                    self.mark_context_unavailable(context, reason.clone());
+                if let Some(reason) = auth::classify_kube_error(&error, uses_exec_plugin) {
+                    self.mark_context_unavailable(probe_generation, context, reason.clone());
                     return Err(BackendError::ContextUnavailable {
                         context: context.to_owned(),
                         reason,
@@ -904,30 +946,46 @@ impl KubeAdapter {
         Ok(client)
     }
 
-    fn mark_context_unavailable(&self, context: &str, reason: String) {
-        tracing::warn!(
-            context,
-            reason = %reason,
-            "Kubernetes context credential plugin is unavailable"
-        );
+    fn context_generation(&self) -> u64 {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
+            .0
+    }
+
+    fn mark_context_unavailable(&self, generation: u64, context: &str, reason: String) -> bool {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (generation, _) = registry.snapshot();
         if registry.mark_unavailable(generation, context, reason) {
             registry.choose_available_fallback();
+            let reason = registry
+                .find(context)
+                .and_then(|entry| entry.unavailable_reason.as_deref())
+                .unwrap_or("credential plugin is unavailable");
+            tracing::warn!(
+                context,
+                reason,
+                "Kubernetes context credential plugin is unavailable"
+            );
+            true
+        } else {
+            false
         }
     }
 
-    fn mark_context_available(&self, context: &str) {
+    fn mark_context_available(&self, generation: u64, context: &str) -> bool {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (generation, _) = registry.snapshot();
         if registry.mark_available(generation, context) {
             registry.choose_available_fallback();
+            true
+        } else {
+            false
         }
     }
 
@@ -947,8 +1005,9 @@ impl KubeAdapter {
             .collect::<Vec<_>>();
         for context in unavailable {
             self.clients.lock().await.remove(&context);
+            let generation = self.context_generation();
             if self.cluster_client_for_probe(&context).await.is_ok() {
-                self.mark_context_available(&context);
+                self.mark_context_available(generation, &context);
             }
         }
 
@@ -964,10 +1023,11 @@ impl KubeAdapter {
                     && context.availability == crate::port::ContextAvailability::Unknown
             })
             .map(|context| context.name.clone());
-        if let Some(context) = current_unknown
-            && self.cluster_client(&context).await.is_ok()
-        {
-            self.mark_context_available(&context);
+        if let Some(context) = current_unknown {
+            let generation = self.context_generation();
+            if self.cluster_client(&context).await.is_ok() {
+                self.mark_context_available(generation, &context);
+            }
         }
 
         let has_available_current = self
@@ -991,8 +1051,10 @@ impl KubeAdapter {
                 .map(|context| context.name.clone())
                 .collect::<Vec<_>>();
             for context in unknown {
-                if self.cluster_client(&context).await.is_ok() {
-                    self.mark_context_available(&context);
+                let generation = self.context_generation();
+                if self.cluster_client(&context).await.is_ok()
+                    && self.mark_context_available(generation, &context)
+                {
                     break;
                 }
             }
@@ -1080,5 +1142,25 @@ impl CatalogCache {
             let moved = self.order.remove(position);
             self.order.push(moved);
         }
+    }
+}
+
+#[cfg(test)]
+mod client_build_lock_tests {
+    use super::ClientBuildLocks;
+
+    #[tokio::test]
+    async fn one_context_build_never_blocks_another_context() {
+        let locks = ClientBuildLocks::default();
+        let slow = locks.for_context("slow");
+        let same = locks.for_context("slow");
+        let independent = locks.for_context("independent");
+        let _slow_guard = slow.lock().await;
+
+        assert!(same.try_lock().is_err(), "same-context builds coalesce");
+        assert!(
+            independent.try_lock().is_ok(),
+            "a hung helper cannot block an unrelated context"
+        );
     }
 }

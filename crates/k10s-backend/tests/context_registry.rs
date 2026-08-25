@@ -151,6 +151,61 @@ users:
 }
 
 #[cfg(unix)]
+fn expiring_exec_plugin_fixture() -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let seed = write_fixture("expiring-seed", "");
+    let dir = seed.parent().expect("fixture has parent");
+    let counter = dir.join("expiring.count");
+    let return_nonrefreshable = dir.join("return-nonrefreshable");
+    let plugin = dir.join("expiring-plugin.sh");
+    std::fs::write(
+        &plugin,
+        format!(
+            "#!/bin/sh\ncount=0\n[ ! -f '{counter}' ] || count=$(cat '{counter}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{counter}'\nmode=''\n[ ! -f '{mode}' ] || mode=$(cat '{mode}')\nif [ \"$mode\" = 'nonrefreshable' ]; then\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"replacement-token\"}}}}'\nelif [ \"$mode\" = 'invalid-expiration' ]; then\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"invalid-token\",\"expirationTimestamp\":\"not-a-timestamp\"}}}}'\nelse\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"expired-token\",\"expirationTimestamp\":\"1970-01-01T00:00:00Z\"}}}}'\nfi\n",
+            counter = counter.display(),
+            mode = return_nonrefreshable.display(),
+        ),
+    )
+    .expect("expiring plugin writes");
+    let mut permissions = std::fs::metadata(&plugin)
+        .expect("plugin metadata reads")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&plugin, permissions).expect("plugin becomes executable");
+    let kubeconfig = dir.join("expiring-config");
+    std::fs::write(
+        &kubeconfig,
+        format!(
+            r#"apiVersion: v1
+kind: Config
+current-context: expiring
+clusters:
+- name: cluster
+  cluster:
+    server: https://127.0.0.1:9
+    insecure-skip-tls-verify: true
+contexts:
+- name: expiring
+  context:
+    cluster: cluster
+    user: expiring-user
+users:
+- name: expiring-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: {plugin}
+      interactiveMode: Never
+"#,
+            plugin = plugin.display(),
+        ),
+    )
+    .expect("expiring kubeconfig writes");
+    (kubeconfig, counter, return_nonrefreshable)
+}
+
+#[cfg(unix)]
 fn invocation_count(path: &Path) -> usize {
     std::fs::read_to_string(path)
         .ok()
@@ -359,6 +414,62 @@ async fn non_current_exec_is_lazy_and_failed_selection_stays_disabled() {
     assert!(refreshed[0].is_current);
     assert_eq!(refreshed[1].availability, ContextAvailability::Unavailable);
     assert!(!refreshed[1].is_current);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn expired_exec_credential_failure_disables_once() {
+    let (path, counter, return_nonrefreshable) = expiring_exec_plugin_fixture();
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    let contexts = bootstrap_contexts(&adapter).await;
+    assert_eq!(contexts[0].availability, ContextAvailability::Available);
+    let initial_invocations = invocation_count(&counter);
+    assert!(initial_invocations > 0);
+    std::fs::write(&return_nonrefreshable, "nonrefreshable").expect("fixture mode changes");
+
+    let first = adapter
+        .query(Query::ResourceTypes {
+            context: "expiring".into(),
+        })
+        .await
+        .expect_err("unrefreshable exec response disables the context");
+    assert!(matches!(
+        first,
+        BackendError::ContextUnavailable { ref context, .. } if context == "expiring"
+    ));
+    let failed_invocations = invocation_count(&counter);
+    assert_eq!(failed_invocations, initial_invocations + 1);
+
+    let second = adapter
+        .query(Query::ResourceTypes {
+            context: "expiring".into(),
+        })
+        .await
+        .expect_err("later requests are blocked without rerunning the plugin");
+    assert!(matches!(
+        second,
+        BackendError::ContextUnavailable { ref context, .. } if context == "expiring"
+    ));
+    assert_eq!(invocation_count(&counter), failed_invocations);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn malformed_exec_expiration_is_context_unavailable() {
+    let (path, _counter, mode) = expiring_exec_plugin_fixture();
+    std::fs::write(mode, "invalid-expiration").expect("fixture mode changes");
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(contexts[0].availability, ContextAvailability::Unavailable);
+    assert!(
+        contexts[0]
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("invalid expiration timestamp"))
+    );
+    assert!(!contexts[0].is_current);
 }
 
 /// A parseable kubeconfig whose current context references an undefined

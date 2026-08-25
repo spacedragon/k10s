@@ -235,6 +235,27 @@ pub(crate) fn noninteractive_for_context(
     }
 }
 
+/// Whether the named context resolves to a kubeconfig exec credential plugin.
+/// Callers carry this fact into runtime auth error classification so generic
+/// token-provider failures are never mislabeled as exec failures.
+pub(crate) fn context_uses_exec(kubeconfig: &Kubeconfig, context_name: &str) -> bool {
+    let user_name = kubeconfig
+        .contexts
+        .iter()
+        .find(|named| named.name == context_name)
+        .and_then(|named| named.context.as_ref())
+        .and_then(|context| context.user.as_deref());
+    let Some(user_name) = user_name else {
+        return false;
+    };
+    kubeconfig
+        .auth_infos
+        .iter()
+        .find(|named| named.name == user_name)
+        .and_then(|named| named.auth_info.as_ref())
+        .is_some_and(|auth| auth.exec.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use kube::config::{ExecInteractiveMode, Kubeconfig};

@@ -567,6 +567,58 @@ impl K10sApp {
                 let apply_result = self.client.apply_at(frame, now_ms, entropy);
                 let applied = apply_result.is_ok();
                 if let Err(error) = apply_result {
+                    let context_unavailable = match &error {
+                        ClientError::Server(server_error) => {
+                            server_error.details.as_ref().and_then(|details| {
+                                if details.get("kind")?.as_str()? != "contextUnavailable" {
+                                    return None;
+                                }
+                                Some((
+                                    details.get("context")?.as_str()?.to_owned(),
+                                    details
+                                        .get("reason")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("credential plugin is unavailable")
+                                        .to_owned(),
+                                ))
+                            })
+                        }
+                        _ => None,
+                    };
+                    let pending_destination = stream_request_id.as_ref().and_then(|id| {
+                        self.pending_switch.as_ref().and_then(|pending| {
+                            (pending.request.id() == id).then(|| pending.to.clone())
+                        })
+                    });
+                    let context_unavailable = context_unavailable.filter(|(context, _)| {
+                        pending_destination
+                            .as_ref()
+                            .is_none_or(|destination| destination == context)
+                    });
+                    let reconciled_context_unavailable =
+                        if let Some((context_name, reason)) = context_unavailable {
+                            let found = if let AppView::Ready { contexts, .. } = &mut self.view {
+                                contexts
+                                    .iter_mut()
+                                    .find(|context| context.name == context_name)
+                                    .map(|context| {
+                                        context.availability = ContextAvailability::Unavailable;
+                                        context.unavailable_reason = Some(reason);
+                                    })
+                                    .is_some()
+                            } else {
+                                false
+                            };
+                            if found && self.bootstrap.is_none() {
+                                self.bootstrap =
+                                    Some(self.client.begin(Query::Bootstrap).map_err(|error| {
+                                        AppEventError::Terminal(error.to_string())
+                                    })?);
+                            }
+                            found
+                        } else {
+                            false
+                        };
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.shell.yaml_editors_mut().connection_lost();
@@ -662,39 +714,9 @@ impl K10sApp {
                             if let Some(pending) = self.pending_switch.take() {
                                 let failed = pending.to;
                                 self.failed_switch = Some(failed.clone());
-                                if server_error
-                                    .details
-                                    .as_ref()
-                                    .and_then(|details| {
-                                        (details.get("kind")?.as_str()? == "contextUnavailable")
-                                            .then_some(details)
-                                    })
-                                    .is_some()
-                                {
-                                    let reason = server_error
-                                        .details
-                                        .as_ref()
-                                        .and_then(|details| details.get("reason"))
-                                        .and_then(serde_json::Value::as_str)
-                                        .unwrap_or("credential plugin is unavailable")
-                                        .to_owned();
-                                    if let AppView::Ready { contexts, .. } = &mut self.view
-                                        && let Some(context) = contexts
-                                            .iter_mut()
-                                            .find(|context| context.name == failed)
-                                    {
-                                        context.availability = ContextAvailability::Unavailable;
-                                        context.unavailable_reason = Some(reason);
-                                    }
-                                    if self.bootstrap.is_none() {
-                                        self.bootstrap =
-                                            Some(self.client.begin(Query::Bootstrap).map_err(
-                                                |error| AppEventError::Terminal(error.to_string()),
-                                            )?);
-                                    }
-                                }
                             }
                         }
+                        _ if reconciled_context_unavailable => {}
                         _ if self.client.phase() == ClientPhase::Disconnected => {
                             return Err(AppEventError::Transient);
                         }
@@ -2682,6 +2704,110 @@ mod tests {
                 .as_ref()
                 .map(|pending| pending.to.as_str()),
             Some("staging")
+        );
+    }
+
+    #[test]
+    fn runtime_context_unavailable_reconciles_outside_the_switch_flow() {
+        let (mut app, state) = ready_app();
+        let request_id = state
+            .borrow()
+            .sent
+            .iter()
+            .find(|frame| request_kind(frame).as_deref() == Some("resource.types"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("resource types request exists");
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(
+                ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "context unavailable",
+                    Retryability::AfterRefresh,
+                    ErrorScope::Request,
+                    "resource-types",
+                )
+                .with_details(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": "dev-local",
+                    "reason": "runtime plugin denied",
+                })),
+            )
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 150, 0)
+            .expect("runtime auth failure stays request-scoped");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(app.connection.is_some());
+        assert_eq!(app.shell.workspace().context(), "dev-local");
+        let AppView::Ready { contexts, .. } = app.view() else {
+            panic!("the ready workspace remains visible")
+        };
+        let failed = contexts
+            .iter()
+            .find(|context| context.name == "dev-local")
+            .expect("active context remains visible");
+        assert_eq!(
+            failed.availability,
+            k10s_protocol::ContextAvailability::Unavailable
+        );
+        assert_eq!(
+            failed.unavailable_reason.as_deref(),
+            Some("runtime plugin denied")
+        );
+        assert!(app.bootstrap.is_some(), "authoritative refresh is queued");
+    }
+
+    #[test]
+    fn mismatched_switch_unavailable_details_do_not_disable_another_context() {
+        let (mut app, _) = ready_app();
+        app.stage_context_switch("prod-readonly", true).unwrap();
+        app.flush_outbound().unwrap();
+        let request_id = app
+            .pending_switch
+            .as_ref()
+            .map(|pending| pending.request.id().clone())
+            .expect("switch request is pending");
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(
+                ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "context unavailable",
+                    Retryability::AfterRefresh,
+                    ErrorScope::Request,
+                    "context-switch",
+                )
+                .with_details(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": "dev-local",
+                    "reason": "stale response",
+                })),
+            )
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 150, 0)
+            .expect("mismatched details remain request-scoped");
+
+        let AppView::Ready { contexts, .. } = app.view() else {
+            panic!("the ready workspace remains visible")
+        };
+        assert!(contexts.iter().all(|context| {
+            context.availability != k10s_protocol::ContextAvailability::Unavailable
+                && context.unavailable_reason.is_none()
+        }));
+        assert!(
+            app.bootstrap.is_none(),
+            "invalid details do not queue refresh"
         );
     }
 

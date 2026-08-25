@@ -169,18 +169,58 @@ impl ContextRegistry {
                 .iter()
                 .find(|context| context.is_current)
                 .map(|context| context.name.clone()),
+            generation: self.generation,
         })
     }
 
     /// Commit a prepared switch as one atomic step: exactly the destination
     /// carries the current marker afterwards. Returns the previously current
     /// context name, when one existed.
-    pub(crate) fn commit_switch(&mut self, prepared: PreparedSwitch) -> Option<String> {
-        let PreparedSwitch { to, previous } = prepared;
+    pub(crate) fn commit_switch(
+        &mut self,
+        prepared: PreparedSwitch,
+    ) -> Result<Option<String>, BackendError> {
+        let PreparedSwitch {
+            to,
+            previous,
+            generation,
+        } = prepared;
+        if generation != self.generation {
+            let destination = self.find(&to).ok_or(BackendError::NotFound)?;
+            if destination.availability == ContextAvailability::Unavailable {
+                return Err(BackendError::ContextUnavailable {
+                    context: destination.name.clone(),
+                    reason: destination
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "credential plugin is unavailable".into()),
+                });
+            }
+            return Err(BackendError::Conflict(
+                "context availability changed while the destination was being validated".into(),
+            ));
+        }
+        let destination = self
+            .contexts
+            .iter_mut()
+            .find(|context| context.name == to)
+            .ok_or(BackendError::NotFound)?;
+        if destination.availability == ContextAvailability::Unavailable {
+            return Err(BackendError::ContextUnavailable {
+                context: destination.name.clone(),
+                reason: destination
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "credential plugin is unavailable".into()),
+            });
+        }
+        destination.availability = ContextAvailability::Available;
+        destination.unavailable_reason = None;
         for context in &mut self.contexts {
             context.is_current = context.name == to;
         }
-        previous
+        self.generation = self.generation.wrapping_add(1);
+        Ok(previous)
     }
 }
 
@@ -191,4 +231,38 @@ pub struct PreparedSwitch {
     to: String,
     /// Context holding the current marker before the commit, when any.
     previous: Option<String>,
+    /// Registry generation captured before the external destination probe.
+    generation: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::port::{ContextAvailability, ContextInfo};
+
+    use super::ContextRegistry;
+
+    #[test]
+    fn stale_prepared_switch_cannot_override_a_newer_unavailable_transition() {
+        let mut registry = ContextRegistry::prepare(vec![
+            ContextInfo::available("active", "cluster-a", None, true),
+            ContextInfo::available("destination", "cluster-b", None, false),
+        ])
+        .expect("registry prepares");
+        let prepared = registry
+            .prepare_switch("destination")
+            .expect("destination initially prepares");
+        let (generation, _) = registry.snapshot();
+        assert!(registry.mark_unavailable(
+            generation,
+            "destination",
+            "runtime plugin denied".into()
+        ));
+
+        let _ = registry.commit_switch(prepared);
+
+        assert!(registry.find("active").expect("active exists").is_current);
+        let destination = registry.find("destination").expect("destination exists");
+        assert!(!destination.is_current);
+        assert_eq!(destination.availability, ContextAvailability::Unavailable);
+    }
 }
