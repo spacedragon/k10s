@@ -13,8 +13,10 @@ TLS, authentication, and access control at a reverse proxy.
   placed in URLs, web assets, browser persistence, errors, or probes.
 - Config debug output substitutes `[REDACTED]`; normal telemetry records safe
   identifiers and state transitions, never credentials or raw kubeconfig.
-- Kubeconfig may invoke credential plugins. Protect it and the plugin's own
-  caches with operating-system permissions and run k10s as a dedicated user.
+- Kubeconfigs that reference exec credential plugins are rejected before the
+  backend is committed; k10s never executes external credential binaries.
+  Protect supported credential material with operating-system permissions and
+  run k10s as a dedicated user.
 - The OCI image runs as `10001:10001`; mount credentials read-only and grant
   only the Kubernetes RBAC needed for intended operations.
 

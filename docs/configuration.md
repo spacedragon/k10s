@@ -51,7 +51,7 @@ contradictory hard bounds.
 | `snapshot_rows_per_chunk` | 16 | Normalized rows per snapshot chunk. |
 | `drain_grace_timeout` | 250 ms | Read-only status window after shutdown notice. |
 | `drain_timeout` | 10 s | Absolute tracked-task drain deadline. |
-| `capabilities` | logs, exec | Advertised server capabilities. |
+| `capabilities` | logs.tail, exec.attach | Advertised wire capability identifiers. |
 | `max_stream_frame_size` | 64 KiB | Logs/exec frame bound. |
 | `max_stream_message_size` | 256 KiB | Assembled logs/exec message bound. |
 | `stream_hello_timeout` | 5 s | Dedicated-stream authentication deadline. |

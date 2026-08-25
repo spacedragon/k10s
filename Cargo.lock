@@ -1648,6 +1648,7 @@ name = "k10s-server-app"
 version = "0.1.0"
 dependencies = [
  "k10s-backend",
+ "k10s-protocol",
  "k10s-server",
  "tokio",
  "tokio-util",
@@ -1674,8 +1675,10 @@ name = "k10s-web"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "eframe",
  "k10s-ui",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

@@ -1,8 +1,10 @@
-//! Semantic WASM host for the shared k10s protocol application.
+#![cfg(target_arch = "wasm32")]
+//! Eframe WASM host for the shared k10s protocol application.
 //!
-//! eframe 0.36 does not expose its AccessKit tree to browser automation, so
-//! this host renders a semantic DOM adapter over the same [`K10sApp`] state
-//! and commands used by native egui. Credentials remain ephemeral.
+//! The visible application is the same egui renderer used by desktop. Because
+//! eframe 0.36 does not expose its AccessKit tree to browser automation, a
+//! hidden semantic companion drives the very same [`K10sApp`] instance.
+//! Credentials remain ephemeral.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,6 +14,8 @@ use k10s_ui::workspace::{DetailTab, WindowId, WorkloadKind};
 use k10s_ui::{AppView, ConnectionGate, K10sApp, derive_control_url};
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+#[cfg(target_arch = "wasm32")]
+use web_sys::HtmlCanvasElement;
 use web_sys::{Document, Element, HtmlInputElement};
 
 const POLL_INTERVAL_MS: i32 = 50;
@@ -38,14 +42,49 @@ struct Runtime {
     active_window: Option<WindowId>,
     render_key: String,
     action_status: String,
+    egui_token: String,
+}
+
+#[derive(Debug)]
+#[cfg(target_arch = "wasm32")]
+struct WebApp {
+    runtime: RuntimeHandle,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl eframe::App for WebApp {
+    fn logic(&mut self, context: &eframe::egui::Context, _: &mut eframe::Frame) {
+        self.runtime.borrow_mut().poll_once();
+        context.request_repaint_after(std::time::Duration::from_millis(POLL_INTERVAL_MS as u64));
+    }
+
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
+        let mut runtime = self.runtime.borrow_mut();
+        if let Some(app) = runtime.app.as_mut() {
+            app.render_ui(ui);
+            return;
+        }
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
+            ui.heading("Connect to k10s");
+            if let Some(error) = runtime.gate.error() {
+                ui.colored_label(eframe::egui::Color32::LIGHT_RED, error);
+            }
+            ui.label("Access token");
+            ui.add(eframe::egui::TextEdit::singleline(&mut runtime.egui_token).password(true));
+            if ui.button("Connect").clicked() {
+                let token = std::mem::take(&mut runtime.egui_token);
+                runtime.begin_connection(token);
+            }
+        });
+    }
 }
 
 impl Runtime {
-    fn begin_connection(&mut self) {
+    fn begin_connection(&mut self, token: String) {
         if matches!(self.stage, Stage::Ready | Stage::Connecting) {
             return;
         }
-        self.gate.set_token_input(self.token_input_value());
+        self.gate.set_token_input(token);
         match K10sApp::connect(self.gate.begin_connection()) {
             Ok(app) => {
                 self.app = Some(app);
@@ -91,7 +130,7 @@ impl Runtime {
 
     fn perform_action(&mut self, action: &str) {
         if action == "connect" {
-            self.begin_connection();
+            self.begin_connection(self.token_input_value());
             return;
         }
         let Some(app) = self.app.as_mut() else {
@@ -467,7 +506,8 @@ fn parse_tab(value: &str) -> Option<DetailTab> {
 }
 
 #[wasm_bindgen(start)]
-fn main() -> Result<(), JsValue> {
+#[cfg(target_arch = "wasm32")]
+async fn main() -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
     let document = window
@@ -479,6 +519,10 @@ fn main() -> Result<(), JsValue> {
     let root = document
         .get_element_by_id("app")
         .ok_or_else(|| JsValue::from_str("#app root element is missing"))?;
+    let canvas = document
+        .get_element_by_id("k10s-canvas")
+        .ok_or_else(|| JsValue::from_str("#k10s-canvas is missing"))?
+        .dyn_into::<HtmlCanvasElement>()?;
     let runtime = Rc::new(RefCell::new(Runtime {
         stage: Stage::Failure,
         gate: ConnectionGate::new(control_url),
@@ -488,12 +532,27 @@ fn main() -> Result<(), JsValue> {
         active_window: None,
         render_key: String::new(),
         action_status: String::new(),
+        egui_token: String::new(),
         root,
         document,
     }));
     runtime.borrow_mut().render_gate();
     attach_click_handler(&runtime)?;
-    start_polling(&window, runtime)?;
+    start_polling(&window, Rc::clone(&runtime))?;
+    let runner = eframe::WebRunner::new();
+    runner
+        .start(
+            canvas,
+            eframe::WebOptions::default(),
+            Box::new(move |_| {
+                Ok(Box::new(WebApp {
+                    runtime: Rc::clone(&runtime),
+                }))
+            }),
+        )
+        .await?;
+    // The runner owns the browser callbacks for the lifetime of the page.
+    std::mem::forget(runner);
     Ok(())
 }
 
