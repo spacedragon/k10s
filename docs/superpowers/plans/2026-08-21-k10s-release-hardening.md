@@ -1,8 +1,10 @@
 # k10s Release Hardening Implementation Plan
 
-**Status:** implementation complete; final release gates are enforced by CI
-and the Release workflow. Task checkboxes below preserve the original build
-plan; merged issue/PR history is the execution record.
+**Status:** implementation complete. Source, browser, and native launch gates
+are enforced per pull request by CI. Installer/archive and OCI gates run in the
+Release workflow only for a release tag or an explicit manual pre-tag smoke.
+Task checkboxes below preserve the original build plan; merged issue/PR history
+is the execution record.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -100,7 +102,8 @@ plan; merged issue/PR history is the execution record.
 - Every queue, journal, frame, subscription, and stream has a tested bound.
 - Tokens are absent from URLs, assets, persistence, and normal traces.
 - 50,000-object and 10,000-event scenarios satisfy recorded regression budgets.
-- Browser and three native platforms build and pass their required smoke suites.
+- Browser and enabled native platforms build and pass their required CI smoke suites.
 - Desktop and web artifacts contain the same protocol/UI version and are reproducible from CI.
-- Full fake and kind-cluster product workflows pass before release.
+- Full fake and kind-cluster product workflows pass before release; a manual
+  Release workflow smoke is required before tagging after packaging changes.
 - Release outputs are explicitly `.app/.dmg`, `.deb/.AppImage`, `.msi/NSIS .exe`, standalone archives, and one non-root OCI image built from the same committed lockfiles and fingerprinted web assets.
