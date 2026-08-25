@@ -53,6 +53,21 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        if !run(&[
+            "test",
+            "--release",
+            "--locked",
+            "-p",
+            "k10s-server",
+            "--test",
+            "load_paths",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ]) {
+            eprintln!("capacity pass {pass} failed at k10s-server/load_paths");
+            return ExitCode::FAILURE;
+        }
     }
     println!("k10s two-pass capacity gate OK");
     ExitCode::SUCCESS
