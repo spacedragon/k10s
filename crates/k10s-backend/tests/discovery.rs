@@ -15,6 +15,8 @@ fn adapter_with_recorded_context() -> (KubeAdapter, RecordedApiServer) {
         cluster: "recorded-apiserver".into(),
         namespace: Some("default".into()),
         is_current: true,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
     }];
     let adapter = KubeAdapter::with_cluster_clients(contexts, [("mock-cluster", client)])
         .expect("adapter builds around recorded clients");
@@ -144,6 +146,8 @@ async fn api_server_rejections_stay_typed_and_never_empty_catalog() {
         cluster: "denied-apiserver".into(),
         namespace: Some("default".into()),
         is_current: true,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
     }];
     let adapter = KubeAdapter::with_cluster_clients(contexts, [("denied-cluster", client)])
         .expect("adapter builds");
@@ -239,6 +243,8 @@ async fn cache_evicts_oldest_contexts_when_full() {
             cluster: format!("cluster-{index}"),
             namespace: None,
             is_current: index == 0,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         });
         let server = RecordedApiServer::standard();
         clients.push((name.clone(), server.clone().into_client("default")));

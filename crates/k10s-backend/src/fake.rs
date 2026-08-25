@@ -277,18 +277,13 @@ impl FakeKubernetes {
     #[must_use]
     pub fn with_metrics_scenario(metrics_scenario: FakeMetricsScenario) -> Self {
         let contexts = vec![
-            ContextInfo {
-                name: "dev-local".into(),
-                cluster: "dev-cluster".into(),
-                namespace: Some("default".into()),
-                is_current: true,
-            },
-            ContextInfo {
-                name: "prod-readonly".into(),
-                cluster: "prod-cluster".into(),
-                namespace: Some("default".into()),
-                is_current: false,
-            },
+            ContextInfo::available("dev-local", "dev-cluster", Some("default".into()), true),
+            ContextInfo::available(
+                "prod-readonly",
+                "prod-cluster",
+                Some("default".into()),
+                false,
+            ),
         ];
         let mut records = Vec::new();
         records.extend(build_dev_local_records());
@@ -377,18 +372,13 @@ impl FakeKubernetes {
     #[must_use]
     pub fn with_capacity(objects: usize, nodes: usize) -> Self {
         let adapter = Self::with_contexts(vec![
-            ContextInfo {
-                name: "dev-local".into(),
-                cluster: "dev-cluster".into(),
-                namespace: Some("default".into()),
-                is_current: true,
-            },
-            ContextInfo {
-                name: "prod-readonly".into(),
-                cluster: "prod-cluster".into(),
-                namespace: Some("default".into()),
-                is_current: false,
-            },
+            ContextInfo::available("dev-local", "dev-cluster", Some("default".into()), true),
+            ContextInfo::available(
+                "prod-readonly",
+                "prod-cluster",
+                Some("default".into()),
+                false,
+            ),
         ]);
         {
             let mut state = adapter.lock();
@@ -2267,6 +2257,8 @@ mod tests {
             cluster: "dev-cluster".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }]);
         {
             let mut state = fake.lock();

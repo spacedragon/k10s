@@ -59,7 +59,10 @@ impl KubeAdapter {
             Err(kube::Error::Api(status)) if status.code == 403 => {
                 return Err(BackendError::Forbidden);
             }
-            Err(_) => {
+            Err(error) => {
+                if let Some(unavailable) = super::auth::context_unavailable(&error) {
+                    return Err(unavailable);
+                }
                 return Err(BackendError::Internal(
                     "kubernetes api unreachable during YAML validation".into(),
                 ));
@@ -84,6 +87,9 @@ impl KubeAdapter {
             .patch(&parsed.name, &params, &Patch::Apply(&parsed.object))
             .await
         {
+            if let Some(unavailable) = super::auth::context_unavailable(&error) {
+                return Err(unavailable);
+            }
             return match error {
                 kube::Error::Api(status) if status.code == 403 => Err(BackendError::Forbidden),
                 kube::Error::Api(status) if status.code == 404 => Err(BackendError::NotFound),

@@ -13,6 +13,8 @@ use std::pin::Pin;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+pub use k10s_protocol::ContextAvailability;
+
 use crate::catalog::CatalogSnapshot;
 
 /// A behavior-level query to the Kubernetes adapter.
@@ -590,6 +592,15 @@ pub struct MetricsSample {
 /// One event delivered on a backend subscription stream.
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    /// One context became unavailable after a background credential refresh.
+    /// Bootstrap-status subscribers use this to reconcile without waiting for
+    /// an unrelated foreground request to observe the same failure.
+    ContextUnavailable {
+        /// Safe kubeconfig context name.
+        context: String,
+        /// Sanitized operator-facing failure reason.
+        reason: String,
+    },
     /// The full current snapshot for the watched selector.
     Snapshot(ResourceListData),
     /// One object changed; carries the full updated row.
@@ -628,6 +639,30 @@ pub struct ContextInfo {
     pub namespace: Option<String>,
     /// Whether this is the current context.
     pub is_current: bool,
+    /// Current credential availability.
+    pub availability: ContextAvailability,
+    /// Safe, bounded reason when the credential plugin is unavailable.
+    pub unavailable_reason: Option<String>,
+}
+
+impl ContextInfo {
+    /// Build an available context summary.
+    #[must_use]
+    pub fn available(
+        name: impl Into<String>,
+        cluster: impl Into<String>,
+        namespace: Option<String>,
+        is_current: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            cluster: cluster.into(),
+            namespace,
+            is_current,
+            availability: ContextAvailability::Available,
+            unavailable_reason: None,
+        }
+    }
 }
 
 /// Typed errors from the Kubernetes adapter.
@@ -640,6 +675,9 @@ pub enum BackendError {
     /// The target changed since validation, or the ticket is stale,
     /// consumed, or tampered. Safe reason attached.
     Conflict(String),
+    /// The context's exec credential helper failed. The reason is already
+    /// sanitized and safe for operator-facing diagnostics.
+    ContextUnavailable { context: String, reason: String },
     /// The operation was denied by authorization policy (RBAC).
     Forbidden,
     /// The request timed out.
@@ -675,6 +713,9 @@ impl std::fmt::Display for BackendError {
             Self::Unsupported { capability } => write!(f, "unsupported capability: {capability}"),
             Self::NotFound => write!(f, "context or resource not found"),
             Self::Conflict(reason) => write!(f, "conflict: {reason}"),
+            Self::ContextUnavailable { context, reason } => {
+                write!(f, "context '{context}' is unavailable: {reason}")
+            }
             Self::Forbidden => write!(f, "access denied"),
             Self::Timeout => write!(f, "request timed out"),
             Self::Cancelled => write!(f, "request was cancelled"),
@@ -700,9 +741,6 @@ pub enum AdapterError {
     /// The kubeconfig exists but cannot be read, parsed, or validated; the
     /// detail names the problem without exposing file contents.
     KubeconfigInvalid { source: String, detail: String },
-    /// A context's user relies on an exec-based credential plugin; k10s never
-    /// executes external helpers and refuses to commit such registries.
-    ExecPluginRejected { context: String, user: String },
     /// Context summaries violated registry invariants (duplicate names or
     /// multiple current contexts), so nothing was committed.
     InvalidContextSummaries { detail: String },
@@ -719,12 +757,6 @@ impl std::fmt::Display for AdapterError {
             }
             Self::KubeconfigInvalid { source, detail } => {
                 write!(f, "invalid kubeconfig from {source}: {detail}")
-            }
-            Self::ExecPluginRejected { context, user } => {
-                write!(
-                    f,
-                    "context '{context}' uses exec-plugin credentials (user '{user}'), which k10s does not support"
-                )
             }
             Self::InvalidContextSummaries { detail } => {
                 write!(f, "invalid context summaries: {detail}")

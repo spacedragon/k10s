@@ -3,8 +3,9 @@ use egui_kittest::{
     Harness,
     kittest::{NodeT as _, Queryable as _},
 };
+use k10s_protocol::{Context, ContextAvailability};
 use k10s_ui::{
-    ui::{ConnectionState, UiShell},
+    ui::{ConnectionState, ResourceFeed, UiShell},
     workspace::{
         BlockResolution, LauncherItem, WindowId, WindowKind, WorkloadKind, WorkspaceCommand,
         WorkspaceEvent,
@@ -17,7 +18,7 @@ const SECONDARY_CONTEXT: &str = "prod-admin@singapore-production";
 struct ShellFixture {
     shell: UiShell<()>,
     connection: ConnectionState,
-    contexts: Vec<String>,
+    contexts: Vec<Context>,
     selected_context: Option<String>,
 }
 
@@ -26,18 +27,23 @@ impl Default for ShellFixture {
         Self {
             shell: UiShell::new(),
             connection: ConnectionState::Connected,
-            contexts: vec![PRIMARY_CONTEXT.to_owned(), SECONDARY_CONTEXT.to_owned()],
+            contexts: vec![
+                context(PRIMARY_CONTEXT, true),
+                context(SECONDARY_CONTEXT, false),
+            ],
             selected_context: Some(PRIMARY_CONTEXT.to_owned()),
         }
     }
 }
 
 fn render_shell(ui: &mut egui::Ui, fixture: &mut ShellFixture) {
-    fixture.shell.show(
+    fixture.shell.show_with_contexts_and_resources(
         ui,
         fixture.connection,
         &fixture.contexts,
         &mut fixture.selected_context,
+        None,
+        &ResourceFeed::default(),
     );
     // Simulate the application layer's side of the contract: a staged
     // switch is validated against the backend and committed locally only
@@ -65,6 +71,17 @@ fn render_shell(ui: &mut egui::Ui, fixture: &mut ShellFixture) {
                 .shell
                 .apply_workspace_command(WorkspaceCommand::ContextSwitch { to });
         }
+    }
+}
+
+fn context(name: &str, is_current: bool) -> Context {
+    Context {
+        name: name.into(),
+        cluster: format!("{name}-cluster"),
+        namespace: Some("default".into()),
+        is_current,
+        availability: ContextAvailability::Available,
+        unavailable_reason: None,
     }
 }
 
@@ -147,6 +164,32 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
         "Overview is the only initial workspace window"
     );
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+}
+
+#[test]
+fn unavailable_context_stays_visible_but_cannot_dispatch_and_shows_reason() {
+    let mut harness = shell_harness();
+    harness.state_mut().contexts[1].availability = ContextAvailability::Unavailable;
+    harness.state_mut().contexts[1].unavailable_reason = Some("fixture plugin denied".into());
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+        .click();
+    harness.run_steps(4);
+    let disabled = harness.get_by_label(SECONDARY_CONTEXT);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, SECONDARY_CONTEXT)
+            .is_none(),
+        "an unavailable context must not expose a clickable selector action"
+    );
+    disabled.hover();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().selected_context.as_deref(),
+        Some(PRIMARY_CONTEXT)
+    );
 }
 
 #[test]

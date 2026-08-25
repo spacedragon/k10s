@@ -103,6 +103,9 @@ fn render_manifest(object: &kube::core::DynamicObject) -> String {
 /// Sanitized GET failure detail: 404s become typed not-founds and raw
 /// Kubernetes Status text never crosses the seam.
 pub(crate) fn sanitize_get_error(error: kube::Error) -> BackendError {
+    if let Some(unavailable) = super::auth::context_unavailable(&error) {
+        return unavailable;
+    }
     match error {
         kube::Error::Api(status) if status.code == 404 => BackendError::NotFound,
         kube::Error::Api(status) if status.code == 403 => BackendError::Forbidden,
@@ -117,6 +120,9 @@ pub(crate) fn sanitize_get_error(error: kube::Error) -> BackendError {
 /// Preserve authorization denials as the typed protocol error while keeping
 /// all Kubernetes Status messages out of the normalized boundary.
 fn sanitize_read_list_error(error: kube::Error) -> BackendError {
+    if let Some(unavailable) = super::auth::context_unavailable(&error) {
+        return unavailable;
+    }
     match error {
         kube::Error::Api(status) if status.code == 403 => BackendError::Forbidden,
         other => BackendError::Internal(sanitize_list_error(other)),

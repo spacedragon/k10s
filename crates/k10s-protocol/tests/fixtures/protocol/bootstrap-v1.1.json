@@ -19,13 +19,15 @@
         "name": "dev-local",
         "cluster": "dev-cluster",
         "namespace": "default",
-        "isCurrent": true
+        "isCurrent": true,
+        "availability": "available"
       },
       {
         "name": "prod-readonly",
         "cluster": "prod-cluster",
         "namespace": "default",
-        "isCurrent": false
+        "isCurrent": false,
+        "availability": "available"
       }
     ]
   }

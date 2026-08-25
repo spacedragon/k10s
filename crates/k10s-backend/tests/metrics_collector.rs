@@ -61,6 +61,8 @@ fn adapter_with_timing(
             cluster: "recorded-apiserver".into(),
             namespace: Some(NS.into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [(CONTEXT, client)],
     )

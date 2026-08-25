@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use k10s_backend::{
-    AdapterError, ContextInfo, ContextRegistry, KubeAdapter, KubernetesAccess, Query, QueryResult,
+    AdapterError, BackendError, BackendEvent, ContextAvailability, ContextInfo, ContextRegistry,
+    KubeAdapter, KubernetesAccess, Query, QueryResult, Subscribe,
 };
 
 /// Distinctive markers embedded in fixture kubeconfigs so redaction failures
@@ -66,6 +67,153 @@ fn write_fixture(name: &str, yaml: &str) -> PathBuf {
     file.write_all(yaml.as_bytes())
         .expect("fixture yaml writes");
     path
+}
+
+#[cfg(unix)]
+fn exec_plugin_fixture(
+    current_succeeds: bool,
+    fallback_succeeds: bool,
+) -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let seed = write_fixture("seed", "");
+    let dir = seed.parent().expect("fixture has parent");
+    let current_counter = dir.join("current.count");
+    let fallback_counter = dir.join("fallback.count");
+
+    let write_plugin = |name: &str, counter: &Path, succeeds: bool| {
+        let path = dir.join(name);
+        let outcome = if succeeds {
+            r#"printf '%s\n' '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"fixture-token"}}'"#
+                .to_owned()
+        } else {
+            "echo 'fixture plugin denied' >&2\nexit 17".to_owned()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ncount=0\n[ ! -f '{counter}' ] || count=$(cat '{counter}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{counter}'\n{outcome}\n",
+                counter = counter.display()
+            ),
+        )
+        .expect("plugin fixture writes");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("plugin metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("plugin becomes executable");
+        path
+    };
+
+    let current_plugin = write_plugin("current-plugin.sh", &current_counter, current_succeeds);
+    let fallback_plugin = write_plugin("fallback-plugin.sh", &fallback_counter, fallback_succeeds);
+    let kubeconfig = dir.join("config");
+    std::fs::write(
+        &kubeconfig,
+        format!(
+            r#"apiVersion: v1
+kind: Config
+current-context: current
+clusters:
+- name: cluster
+  cluster:
+    server: https://127.0.0.1:9
+    insecure-skip-tls-verify: true
+contexts:
+- name: current
+  context:
+    cluster: cluster
+    user: current-user
+- name: fallback
+  context:
+    cluster: cluster
+    user: fallback-user
+users:
+- name: current-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: /bin/sh
+      args: [{current_plugin}]
+      interactiveMode: Never
+- name: fallback-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: /bin/sh
+      args: [{fallback_plugin}]
+      interactiveMode: Never
+"#,
+            current_plugin = current_plugin.display(),
+            fallback_plugin = fallback_plugin.display(),
+        ),
+    )
+    .expect("exec kubeconfig writes");
+    (kubeconfig, current_counter, fallback_counter)
+}
+
+#[cfg(unix)]
+fn expiring_exec_plugin_fixture() -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let seed = write_fixture("expiring-seed", "");
+    let dir = seed.parent().expect("fixture has parent");
+    let counter = dir.join("expiring.count");
+    let return_nonrefreshable = dir.join("return-nonrefreshable");
+    let plugin = dir.join("expiring-plugin.sh");
+    std::fs::write(
+        &plugin,
+        format!(
+            "#!/bin/sh\ncount=0\n[ ! -f '{counter}' ] || count=$(cat '{counter}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{counter}'\nmode=''\n[ ! -f '{mode}' ] || mode=$(cat '{mode}')\nif [ \"$mode\" = 'nonrefreshable' ]; then\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"replacement-token\"}}}}'\nelif [ \"$mode\" = 'invalid-expiration' ]; then\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"invalid-token\",\"expirationTimestamp\":\"not-a-timestamp\"}}}}'\nelse\n  printf '%s\\n' '{{\"apiVersion\":\"client.authentication.k8s.io/v1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"expired-token\",\"expirationTimestamp\":\"1970-01-01T00:00:00Z\"}}}}'\nfi\n",
+            counter = counter.display(),
+            mode = return_nonrefreshable.display(),
+        ),
+    )
+    .expect("expiring plugin writes");
+    let mut permissions = std::fs::metadata(&plugin)
+        .expect("plugin metadata reads")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&plugin, permissions).expect("plugin becomes executable");
+    let kubeconfig = dir.join("expiring-config");
+    std::fs::write(
+        &kubeconfig,
+        format!(
+            r#"apiVersion: v1
+kind: Config
+current-context: expiring
+clusters:
+- name: cluster
+  cluster:
+    server: https://127.0.0.1:9
+    insecure-skip-tls-verify: true
+contexts:
+- name: expiring
+  context:
+    cluster: cluster
+    user: expiring-user
+users:
+- name: expiring-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: /bin/sh
+      args: [{plugin}]
+      interactiveMode: Never
+"#,
+            plugin = plugin.display(),
+        ),
+    )
+    .expect("expiring kubeconfig writes");
+    (kubeconfig, counter, return_nonrefreshable)
+}
+
+#[cfg(unix)]
+fn invocation_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 async fn bootstrap_contexts(adapter: &KubeAdapter) -> Vec<ContextInfo> {
@@ -144,7 +292,7 @@ async fn missing_kubeconfig_files_report_a_clear_typed_error() {
 }
 
 #[tokio::test]
-async fn exec_plugin_credentials_are_rejected_before_commit() {
+async fn exec_plugin_context_is_accepted_for_lazy_validation() {
     let yaml = r#"apiVersion: v1
 kind: Config
 current-context: aks-cluster
@@ -166,18 +314,178 @@ users:
       args: ["get-access-token"]
 "#;
     let path = write_fixture("kubeconfig", yaml);
-    let error = KubeAdapter::from_kubeconfig(Some(&path)).expect_err(
-        "k10s must refuse to execute external credential helpers instead of committing them",
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path))
+        .expect("exec credential helpers are accepted and validated lazily");
+    drop(adapter);
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bootstrap_runs_only_current_exec_plugin() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(true, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    assert_eq!(invocation_count(&current_counter), 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    let current_invocations = invocation_count(&current_counter);
+    assert!(current_invocations > 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    assert_eq!(contexts[0].availability, ContextAvailability::Available);
+    assert!(contexts[0].is_current);
+    assert_eq!(contexts[1].availability, ContextAvailability::Unknown);
+
+    let refreshed = bootstrap_contexts(&adapter).await;
+    assert_eq!(invocation_count(&current_counter), current_invocations);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    assert_eq!(refreshed, contexts);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn failed_current_exec_falls_back_without_failing_bootstrap() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(false, true);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    assert_eq!(invocation_count(&current_counter), 0);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(invocation_count(&current_counter), 1);
+    assert!(invocation_count(&fallback_counter) > 0);
+    assert_eq!(contexts[0].availability, ContextAvailability::Unavailable);
+    assert!(
+        contexts[0]
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("fixture plugin denied"))
+    );
+    assert!(!contexts[0].is_current);
+    assert_eq!(contexts[1].availability, ContextAvailability::Available);
+    assert!(contexts[1].is_current);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn all_exec_failures_remain_visible_without_current_context() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(false, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(invocation_count(&current_counter), 1);
+    assert_eq!(invocation_count(&fallback_counter), 1);
+    assert_eq!(contexts.len(), 2);
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.availability == ContextAvailability::Unavailable)
+    );
+    assert!(contexts.iter().all(|context| !context.is_current));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn non_current_exec_is_lazy_and_failed_selection_stays_disabled() {
+    let (path, current_counter, fallback_counter) = exec_plugin_fixture(true, false);
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    let initial = bootstrap_contexts(&adapter).await;
+    assert!(initial[0].is_current);
+    assert_eq!(invocation_count(&fallback_counter), 0);
+    let current_invocations = invocation_count(&current_counter);
+
+    let error = adapter
+        .query(Query::ContextSwitch {
+            to: "fallback".into(),
+        })
+        .await
+        .expect_err("failed plugin prevents the switch without exiting");
+    assert!(matches!(
+        error,
+        BackendError::ContextUnavailable { context, reason }
+            if context == "fallback" && reason.contains("fixture plugin denied")
+    ));
+    assert_eq!(invocation_count(&fallback_counter), 1);
+
+    // Bootstrap is also Refresh: the disabled context is retried, remains
+    // visible, and cannot displace the still-available current context.
+    let refreshed = bootstrap_contexts(&adapter).await;
+    assert_eq!(invocation_count(&fallback_counter), 2);
+    assert_eq!(invocation_count(&current_counter), current_invocations);
+    assert!(refreshed[0].is_current);
+    assert_eq!(refreshed[1].availability, ContextAvailability::Unavailable);
+    assert!(!refreshed[1].is_current);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn expired_exec_credential_failure_disables_once() {
+    let (path, counter, return_nonrefreshable) = expiring_exec_plugin_fixture();
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+    let contexts = bootstrap_contexts(&adapter).await;
+    assert_eq!(contexts[0].availability, ContextAvailability::Available);
+    let initial_invocations = invocation_count(&counter);
+    assert!(initial_invocations > 0);
+    let mut status = adapter
+        .subscribe(Subscribe::BootstrapStatus)
+        .await
+        .expect("bootstrap status subscribes");
+    let mut status_events = status.take_events().expect("status carries transitions");
+    std::fs::write(&return_nonrefreshable, "nonrefreshable").expect("fixture mode changes");
+
+    let burst = futures_util::future::join_all((0..16).map(|_| {
+        adapter.query(Query::ResourceTypes {
+            context: "expiring".into(),
+        })
+    }))
+    .await;
+    assert!(burst.into_iter().all(|result| matches!(
+        result,
+        Err(BackendError::ContextUnavailable { ref context, .. }) if context == "expiring"
+    )));
+    let failed_invocations = invocation_count(&counter);
+    assert_eq!(failed_invocations, initial_invocations + 1);
+    assert!(matches!(
+        status_events.try_recv(),
+        Ok(BackendEvent::ContextUnavailable { ref context, .. }) if context == "expiring"
+    ));
+    assert!(
+        status_events.try_recv().is_err(),
+        "transition publishes once"
     );
 
-    assert_eq!(
-        error,
-        AdapterError::ExecPluginRejected {
-            context: "aks-cluster".into(),
-            user: "aks-admin".into()
-        }
+    let later = adapter
+        .query(Query::ResourceTypes {
+            context: "expiring".into(),
+        })
+        .await
+        .expect_err("later requests are blocked without rerunning the plugin");
+    assert!(matches!(
+        later,
+        BackendError::ContextUnavailable { ref context, .. } if context == "expiring"
+    ));
+    assert_eq!(invocation_count(&counter), failed_invocations);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn malformed_exec_expiration_is_context_unavailable() {
+    let (path, _counter, mode) = expiring_exec_plugin_fixture();
+    std::fs::write(mode, "invalid-expiration").expect("fixture mode changes");
+    let adapter = KubeAdapter::from_kubeconfig(Some(&path)).expect("adapter constructs");
+
+    let contexts = bootstrap_contexts(&adapter).await;
+
+    assert_eq!(contexts[0].availability, ContextAvailability::Unavailable);
+    assert!(
+        contexts[0]
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("invalid expiration timestamp"))
     );
-    std::fs::remove_file(&path).ok();
+    assert!(!contexts[0].is_current);
 }
 
 /// A parseable kubeconfig whose current context references an undefined
@@ -270,12 +578,16 @@ async fn prepare_commits_only_complete_registries() {
             cluster: "cluster-a".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "second".into(),
             cluster: "cluster-b".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
 
@@ -294,12 +606,16 @@ fn prepare_refuses_ambiguous_or_corrupt_registries() {
             cluster: "a".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "same".into(),
             cluster: "b".into(),
             namespace: None,
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
     assert!(matches!(
@@ -313,16 +629,99 @@ fn prepare_refuses_ambiguous_or_corrupt_registries() {
             cluster: "x".into(),
             namespace: None,
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: "b".into(),
             cluster: "y".into(),
             namespace: None,
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ];
     assert!(matches!(
         ContextRegistry::prepare(two_current),
         Err(AdapterError::InvalidContextSummaries { .. })
     ));
+}
+
+fn availability_registry() -> ContextRegistry {
+    ContextRegistry::prepare(vec![
+        ContextInfo::available("first", "cluster-a", None, true),
+        ContextInfo {
+            availability: ContextAvailability::Unknown,
+            ..ContextInfo::available("second", "cluster-b", None, false)
+        },
+        ContextInfo::available("third", "cluster-c", None, false),
+    ])
+    .expect("availability registry prepares")
+}
+
+#[test]
+fn availability_transitions_are_generation_checked_and_normalized() {
+    let mut registry = availability_registry();
+    let (generation, snapshot) = registry.snapshot();
+    assert_eq!(generation, 0);
+    assert_eq!(snapshot.len(), 3);
+
+    assert!(registry.mark_unavailable(generation, "first", "plugin failed".into()));
+    let (next_generation, snapshot) = registry.snapshot();
+    assert_eq!(next_generation, generation + 1);
+    assert_eq!(snapshot[0].availability, ContextAvailability::Unavailable);
+    assert_eq!(
+        snapshot[0].unavailable_reason.as_deref(),
+        Some("plugin failed")
+    );
+
+    assert!(!registry.mark_available(generation, "first"));
+    assert!(registry.mark_available(next_generation, "first"));
+    let (_, snapshot) = registry.snapshot();
+    assert_eq!(snapshot[0].availability, ContextAvailability::Available);
+    assert_eq!(snapshot[0].unavailable_reason, None);
+}
+
+#[test]
+fn unavailable_switch_is_typed_and_available_fallback_is_stable() {
+    let mut registry = availability_registry();
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "first", "auth denied".into()));
+
+    assert!(matches!(
+        registry.prepare_switch("first"),
+        Err(BackendError::ContextUnavailable { context, reason })
+            if context == "first" && reason == "auth denied"
+    ));
+
+    assert_eq!(
+        registry.choose_available_fallback().as_deref(),
+        Some("third")
+    );
+    assert_eq!(
+        registry
+            .contexts()
+            .iter()
+            .find(|context| context.is_current)
+            .map(|context| context.name.as_str()),
+        Some("third")
+    );
+    assert_eq!(registry.context_names(), ["first", "second", "third"]);
+}
+
+#[test]
+fn fallback_clears_current_when_no_context_is_available() {
+    let mut registry = availability_registry();
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "first", "failed".into()));
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "third", "failed".into()));
+
+    assert_eq!(registry.choose_available_fallback(), None);
+    assert!(
+        registry
+            .contexts()
+            .iter()
+            .all(|context| !context.is_current)
+    );
 }

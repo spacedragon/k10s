@@ -24,6 +24,8 @@ async fn real_kubernetes_logs_flow_only_over_the_authenticated_dedicated_socket(
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("recorded", recorded.clone().into_client("default"))],
     )

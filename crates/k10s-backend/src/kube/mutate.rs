@@ -281,6 +281,9 @@ fn validate_ticket(
 }
 
 fn pre_submit_error(error: kube::Error) -> BackendError {
+    if let Some(unavailable) = super::auth::context_unavailable(&error) {
+        return unavailable;
+    }
     match error {
         kube::Error::Api(status) if status.code == 404 => BackendError::NotFound,
         kube::Error::Api(status) if status.code == 403 => BackendError::Forbidden,

@@ -137,6 +137,8 @@ fn scripted_kernel(rows: usize) -> (BackendKernel, Arc<ScriptState>) {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [(CONTEXT, client)],
     )

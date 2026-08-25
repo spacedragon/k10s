@@ -241,11 +241,12 @@ fn operational_contracts_have_acceptance_coverage() {
 
     let kubeconfig_loader = read("crates/k10s-backend/src/kube/config.rs");
     assert!(
-        kubeconfig_loader.contains("return Err(AdapterError::ExecPluginRejected"),
-        "backend no longer rejects exec credential plugins; update operator docs"
+        kubeconfig_loader.contains("ExecInteractiveMode::IfAvailable")
+            && kubeconfig_loader.contains("ExecInteractiveMode::Never"),
+        "backend no longer normalizes exec credential plugins to non-interactive mode"
     );
     for document in [&deployment, &security] {
         assert!(document.contains("exec credential plugin"));
-        assert!(normalized(document).contains("never executes external credential binaries"));
+        assert!(normalized(document).contains("plugin failure disables only its context"));
     }
 }

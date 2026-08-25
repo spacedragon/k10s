@@ -92,15 +92,22 @@ fn assert_bootstrap_shape(payload: &Value, label: &str) {
     // Every context shares the required keys (camelCase on the wire); namespace
     // is optional, and no credential-bearing key may ever appear.
     assert!(
-        ["cluster", "isCurrent", "name"]
+        ["availability", "cluster", "isCurrent", "name"]
             .iter()
             .all(|key| context_keys.contains(*key)),
         "{label}: contexts lost a required key: {context_keys:?}"
     );
-    let allowed: std::collections::BTreeSet<String> = ["cluster", "isCurrent", "name", "namespace"]
-        .map(str::to_owned)
-        .into_iter()
-        .collect();
+    let allowed: std::collections::BTreeSet<String> = [
+        "availability",
+        "cluster",
+        "isCurrent",
+        "name",
+        "namespace",
+        "unavailableReason",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect();
     assert!(
         context_keys.is_subset(&allowed),
         "{label}: contexts expose unexpected keys: {context_keys:?}"
@@ -248,6 +255,8 @@ async fn fake_and_kube_adapters_agree_on_resource_types_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -309,6 +318,8 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -453,6 +464,8 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -672,6 +685,8 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -935,6 +950,8 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -1045,12 +1062,16 @@ async fn fake_and_kube_adapters_agree_on_context_switch_shape() {
                 cluster: "recorded-apiserver".into(),
                 namespace: Some("default".into()),
                 is_current: true,
+                availability: k10s_protocol::ContextAvailability::Available,
+                unavailable_reason: None,
             },
             ContextInfo {
                 name: "contract-b".into(),
                 cluster: "recorded-apiserver".into(),
                 namespace: Some("default".into()),
                 is_current: false,
+                availability: k10s_protocol::ContextAvailability::Available,
+                unavailable_reason: None,
             },
         ],
         [("contract-a", client_a), ("contract-b", client_b)],
@@ -1146,6 +1167,8 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", client)],
     )
@@ -1290,6 +1313,8 @@ async fn fake_and_kube_adapters_agree_on_permission_probe_bound_and_duplicate_ha
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("contract-mock", server.clone().into_client("default"))],
     )
