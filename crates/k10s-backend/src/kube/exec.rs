@@ -253,13 +253,20 @@ async fn run_exec<In, Out, ErrOut, Resize, StatusFuture>(
             status = &mut status => break status,
             Some(input) = inputs.recv() => match input {
                 ExecInput::Stdin(text) => {
-                    if stdin.write_all(text.as_bytes()).await.is_err() { break None; }
-                    if stdin.flush().await.is_err() { break None; }
+                    if !forward_stdin(&mut stdin, text.as_bytes(), &sender).await {
+                        attached.abort();
+                        stdout_task.abort();
+                        if let Some(task) = &stderr_task { task.abort(); }
+                        return;
+                    }
                 }
                 ExecInput::Resize { cols, rows } => {
                     let Some(channel) = resize.as_mut() else { continue };
-                    if channel.send(TerminalSize { width: cols, height: rows }).await.is_err() {
-                        break None;
+                    if !forward_resize(channel, TerminalSize { width: cols, height: rows }, &sender).await {
+                        attached.abort();
+                        stdout_task.abort();
+                        if let Some(task) = &stderr_task { task.abort(); }
+                        return;
                     }
                 }
             }
@@ -285,20 +292,58 @@ async fn run_exec<In, Out, ErrOut, Resize, StatusFuture>(
     tracing::debug!(exit_code, tty, "exec session ended");
 }
 
+async fn forward_stdin<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    sender: &broadcast::Sender<BackendEvent>,
+) -> bool {
+    tokio::select! {
+        _ = sender.closed() => false,
+        result = async {
+            writer.write_all(bytes).await?;
+            writer.flush().await
+        } => result.is_ok(),
+    }
+}
+
+async fn forward_resize<S: futures_util::Sink<TerminalSize> + Unpin>(
+    channel: &mut S,
+    size: TerminalSize,
+    sender: &broadcast::Sender<BackendEvent>,
+) -> bool {
+    tokio::select! {
+        _ = sender.closed() => false,
+        result = channel.send(size) => result.is_ok(),
+    }
+}
+
 async fn pump_output<R: AsyncRead + Unpin>(
     mut reader: R,
     sender: broadcast::Sender<BackendEvent>,
     origin: StreamOrigin,
 ) {
     let mut buffer = vec![0_u8; OUTPUT_CHUNK_BYTES];
+    let mut undecoded = Vec::new();
     loop {
         tokio::select! {
             _ = sender.closed() => break,
             read = reader.read(&mut buffer) => match read {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, true)
+                        && sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err()
+                    {
+                        break;
+                    }
+                    break;
+                }
+                Err(_) => break,
                 Ok(count) => {
-                    let text = String::from_utf8_lossy(&buffer[..count]).into_owned();
-                    if sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err() { break; }
+                    undecoded.extend_from_slice(&buffer[..count]);
+                    if let Some(text) = super::logs::decode_utf8(&mut undecoded, false)
+                        && sender.send(BackendEvent::Stream(StreamChunk { origin, text, exit_code: None })).is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -353,6 +398,9 @@ fn exec_error(error: kube::Error) -> BackendError {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Status, StatusCause, StatusDetails};
 
@@ -429,5 +477,56 @@ mod tests {
                 .await,
             Err(BackendError::Conflict(_))
         ));
+    }
+
+    struct PendingWriter;
+
+    impl tokio::io::AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn consumer_disconnect_cancels_backpressured_stdin() {
+        let (sender, receiver) = broadcast::channel(1);
+        let mut writer = PendingWriter;
+        let forwarding = forward_stdin(&mut writer, b"blocked", &sender);
+        drop(receiver);
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_millis(100), forwarding)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn output_preserves_utf8_across_arbitrary_reads() {
+        let mut input = vec![b'x'; OUTPUT_CHUNK_BYTES - 1];
+        input.extend_from_slice("🦀done".as_bytes());
+        let reader = &input[..];
+        let (sender, mut receiver) = broadcast::channel(4);
+        pump_output(reader, sender, StreamOrigin::Stdout).await;
+
+        let mut output = String::new();
+        while let Ok(BackendEvent::Stream(chunk)) = receiver.try_recv() {
+            output.push_str(&chunk.text);
+        }
+        assert_eq!(
+            output,
+            format!("{}🦀done", "x".repeat(OUTPUT_CHUNK_BYTES - 1))
+        );
     }
 }

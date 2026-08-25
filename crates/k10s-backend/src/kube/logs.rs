@@ -273,7 +273,7 @@ async fn send_with_backpressure(sender: &broadcast::Sender<BackendEvent>, text: 
         .is_ok()
 }
 
-fn decode_utf8(bytes: &mut Vec<u8>, eof: bool) -> Option<String> {
+pub(super) fn decode_utf8(bytes: &mut Vec<u8>, eof: bool) -> Option<String> {
     let mut output = String::new();
     loop {
         match std::str::from_utf8(bytes) {
