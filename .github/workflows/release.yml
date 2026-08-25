@@ -109,11 +109,18 @@ jobs:
           git add -u
           git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
           # Rebase onto main if a commit landed while we were working; the
-          # serialized concurrency group makes this a rare fallback.
+          # serialized concurrency group makes this a rare fallback. Track
+          # success explicitly: the loop must end in a failed push if main
+          # keeps rejecting the token, never in a silent partial release.
+          pushed=0
           for attempt in 1 2 3; do
-            if git push origin main; then break; fi
+            if git push origin main; then pushed=1; break; fi
             git pull --rebase origin main
           done
+          if [ "$pushed" -ne 1 ]; then
+            echo "failed to push the version bump to main after 3 attempts" >&2
+            exit 1
+          fi
           git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}"
           git push origin "v${{ steps.bump.outputs.version }}"
       - name: Start packaging run at the release tag
