@@ -12,8 +12,9 @@
 use std::collections::VecDeque;
 
 use k10s_protocol::{
-    DeletePropagation, GroupVersionKind, OperationId, OperationProgress, OperationStatus,
-    OperationUpdate, ResourceIdentity, ResumeStatus, ServerFrame, ServerKind, SessionId, Welcome,
+    BackendRevision, DeletePropagation, GroupVersionKind, OperationId, OperationProgress,
+    OperationStatus, OperationUpdate, ResourceCapabilities, ResourceDetailResponse,
+    ResourceIdentity, ResumeStatus, ServerFrame, ServerKind, SessionId, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, Query, QueryResult,
@@ -609,8 +610,9 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
         "retry stays blocked until the refresh answers"
     );
 
-    // The server no longer knows the operation: it becomes unknown, which
-    // finally unlocks a guarded retry of the idempotency key.
+    // The replacement server no longer knows the operation. That proves the
+    // outcome is unknown, but it cannot deduplicate the old key, so retry
+    // authority still waits for an exact target read.
     client
         .apply(ServerFrame::response(
             refresh_id,
@@ -621,6 +623,32 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
         .unwrap();
     let view = client.operation(&OperationId::new("op-000002")).unwrap();
     assert_eq!(view.status(), OperationStatus::Unknown);
+    assert!(matches!(
+        client.retry_eligibility("idem-live"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+    let (target_refresh_id, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(
+        payload["identity"],
+        serde_json::json!(deployment("web-frontend"))
+    );
+    client
+        .apply(ServerFrame::response(
+            target_refresh_id,
+            ResourceDetailResponse {
+                identity: deployment("web-frontend"),
+                revision: BackendRevision::new(2),
+                created_at: "2026-08-25T00:00:00Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
     assert!(matches!(
         client.retry_eligibility("idem-live"),
         k10s_ui::client::RetryEligibility::Eligible

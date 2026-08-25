@@ -5,8 +5,9 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_protocol::{
-    OperationAccepted, OperationId, OperationStatus, OperationUpdate, ProtocolVersion,
-    ResourceIdentity, ResumeStatus, ServerFrame, ServerKind, SessionId, Welcome,
+    BackendRevision, OperationAccepted, OperationId, OperationStatus, OperationUpdate,
+    ProtocolVersion, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResumeStatus,
+    ServerFrame, ServerKind, SessionId, Welcome,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use k10s_ui::client::{
@@ -149,7 +150,8 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
         }
     };
     // A restarted backend cannot authoritatively call the old write failed or
-    // succeeded. Absence after the mandatory refresh becomes Unknown.
+    // succeeded. Absence after the mandatory refresh becomes Unknown, but is
+    // not retry authority because this backend cannot deduplicate the old key.
     client
         .apply(ServerFrame::response(
             refresh_id,
@@ -163,6 +165,40 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
             .status(),
         OperationStatus::Unknown
     );
+    assert!(matches!(
+        client.retry_eligibility("restart-idempotency-key"),
+        RetryEligibility::RefreshPending
+    ));
+    let target_refresh_id = loop {
+        let frame = client.take_outbound().expect("target refresh is queued");
+        let Some(id) = frame.request_id.clone() else {
+            continue;
+        };
+        let payload = frame.decode_payload().unwrap();
+        let k10s_protocol::ClientPayload::Request(request) = payload else {
+            continue;
+        };
+        if request.request_kind == "resource.detail" {
+            assert_eq!(request.payload["identity"], serde_json::json!(deployment()));
+            break id;
+        }
+    };
+    client
+        .apply(ServerFrame::response(
+            target_refresh_id,
+            ResourceDetailResponse {
+                identity: deployment(),
+                revision: BackendRevision::new(2),
+                created_at: "2026-08-25T00:00:00Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
     assert!(matches!(
         client.retry_eligibility("restart-idempotency-key"),
         RetryEligibility::Eligible
@@ -186,9 +222,42 @@ async fn repeated_full_runtime_shutdown_leaves_no_listener_or_session_task() {
         .unwrap();
         let address = server.addr();
         let (_, mut socket) = authenticated_welcome(&server).await;
-        socket.close(None).await.unwrap();
-        drop(socket);
-        server.shutdown().await.unwrap();
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "kind":"subscribe", "subscriptionId":format!("live-{iteration}"),
+                    "payload":{
+                        "kind":"resource", "context":"dev-local",
+                        "gvk":{"group":"","version":"v1","kind":"Pod"},
+                        "namespace":"default"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let subscribed: ServerFrame =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        assert_eq!(subscribed.kind, ServerKind::Subscribed);
+
+        // Keep both the client transport and its resource-watch child alive.
+        // Shutdown must own and terminate them; the test never closes first.
+        let shutdown = tokio::spawn(server.shutdown());
+        let peer_closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(frame) = socket.next().await {
+                match frame {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(_) => {}
+                }
+            }
+            true
+        })
+        .await
+        .expect("server shutdown must terminate the live client session");
+        assert!(peer_closed);
+        shutdown.await.unwrap().unwrap();
         assert!(
             TcpStream::connect(address).await.is_err(),
             "cycle {iteration} leaked its listener"
