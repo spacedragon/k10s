@@ -31,10 +31,10 @@
 - Create: `crates/k10s-protocol/tests/port_forward_contract.rs`
 - Modify: `docs/protocol.md`
 
-- [ ] Add failing serialization tests for `ServiceProjection`, `ServicePort`, `TargetPort`, TCP/UDP protocol values, optional `ResourceDetailResponse.projection`, and stable ordering.
+- [ ] Add failing serialization tests for `ServiceProjection`, `ServicePort`, `TargetPort`, TCP/UDP protocol values, optional `ResourceListRow.projection` and `ResourceDetailResponse.projection`, and stable ordering.
 - [ ] Add failing request/response tests for `portForward.start`, `portForward.stop`, `portForward.list`, session snapshots, session revisions, and the `portForward.sessions` subscription selector.
 - [ ] Test validation rules: exact core/v1 Service identity, port selected by name or number, local port `0..=65535`, non-empty session IDs, and safe terminal failures.
-- [ ] Test backward decoding of resource details without a projection and bump protocol minor version without changing the major version.
+- [ ] Test backward decoding of legacy payloads without a projection on both list rows and details, and prove populated row projections serialize through snapshot pages and `resource.changed` deltas; bump protocol minor version without changing the major version.
 - [ ] Run `cargo test --locked -p k10s-protocol`; expect unresolved contracts.
 - [ ] Implement normalized payloads and exports. Keep all Kubernetes and socket types out of the protocol crate.
 - [ ] Re-run protocol tests and `cargo fmt --all -- --check`; expect PASS.
@@ -51,9 +51,10 @@
 - Modify: `crates/k10s-server/tests/{resource_loopback,kube_detail_loopback}.rs`
 
 - [ ] Add failing fake and recorded-API tests for core/v1 Service lists, namespace filtering, stable sorting, Service type, cluster IP/headless state, selector, session affinity, traffic policy, named/unnamed ports, numeric/named target ports, node ports, protocol, and appProtocol.
+- [ ] Add failing tests proving Service list rows carry the populated `ResourceListRow.projection` in snapshot pages and watch deltas, while rows for other kinds keep `None` and legacy payloads still decode.
 - [ ] Add failing tests proving the UI-facing projection contains no raw Kubernetes object and no credential-bearing fields.
 - [ ] Run the focused backend tests; expect Service normalization/projection failures.
-- [ ] Extend the existing resource list/detail path. Use the generic normalized list row for watches and an optional `ResourceProjection::Service` for structured details.
+- [ ] Extend the existing resource list/detail path. Populate `ResourceListRow.projection` for core/v1 Service rows so watches supply structured columns, plus the same projection on structured details.
 - [ ] Keep YAML generation and events on the existing authoritative detail path.
 - [ ] Run backend tests plus `cargo test --locked -p k10s-server --test resource_loopback --test kube_detail_loopback`; expect PASS.
 - [ ] Commit `feat: project kubernetes services`.
@@ -74,7 +75,7 @@
 - Modify: `apps/k10s-web/src/lib.rs`
 
 - [ ] Add failing pure workspace tests for a singleton Services window, launcher highlight/focus, geometry, namespace/search/sort state, selection, integrated details, pop-out details, and context-switch reset.
-- [ ] Add failing egui tests for the Network launcher group, list columns, loading/empty/filtered-empty/stale/gone states, Ports tab, structured port labels, and accessibility names.
+- [ ] Add failing egui tests for the Network launcher group, list columns rendered strictly from `ResourceListRow.projection` delivered in snapshot pages and `resource.changed` deltas without parsing `summary`, loading/empty/filtered-empty/stale/gone states, Ports tab, structured port labels, and accessibility names.
 - [ ] Add a browser semantic-host test proving Services can be listed and inspected without exposing Start/Stop controls.
 - [ ] Run `cargo test --locked -p k10s-ui --test workspace_state --test ui_services`; expect missing window behavior.
 - [ ] Implement `WindowKind::Services`, `LauncherItem::Services`, `WindowContent::Services`, and rendering from normalized feeds only.
@@ -93,7 +94,7 @@
 - Create: `crates/k10s-backend/tests/port_forward_resolution.rs`
 - Modify: `crates/k10s-backend/src/testkit.rs`
 
-- [ ] Add failing recorded-API tests for exact Service UID validation, recreated Service rejection, named and numeric port selection, EndpointSlice label scoping, ready/not-ready endpoints, same-namespace Pod targetRefs, deterministic Pod name/UID ordering, numeric endpoint ports, and Pod UID revalidation.
+- [ ] Add failing recorded-API tests for exact Service UID validation, recreated Service rejection, named and numeric port selection, EndpointSlice label scoping, EndpointSlice-to-Service binding through owner references including a mixed stale/current-slice set after Service delete/recreate and skipping of ownerless or hand-crafted slices, ready/not-ready endpoints, same-namespace Pod targetRefs, deterministic Pod name/UID ordering, numeric endpoint ports, and Pod UID revalidation.
 - [ ] Add rejection tests for UDP/SCTP, ExternalName, missing or ambiguous port, no ready endpoint, endpoint without Pod targetRef, cross-namespace target, forbidden Service/EndpointSlice/Pod calls, and sanitized API failures.
 - [ ] Add connector tests proving `resolve_service_port` returns only backend-owned identifiers and `connect` opens the requested numeric Pod port through kube-rs.
 - [ ] Run `cargo test --locked -p k10s-backend --test port_forward_resolution`; expect missing connector behavior.
@@ -113,7 +114,7 @@
 
 - [ ] Add failing tests proving listeners bind only `127.0.0.1`, local port `0` returns an assigned port, explicit occupied ports fail without leaking a task, and no request field can select another interface.
 - [ ] Add failing lifecycle tests for Starting/Active/Stopping/Stopped/Failed, duplicate Service UID + port focus, multiple independent sessions, idempotent Stop, terminal retention/expiry, and monotonically revised snapshots.
-- [ ] Add data-path tests for one connector stream per accepted local TCP connection, bidirectional byte flow, per-connection isolation, client disconnect, upstream disconnect, and failed pinned Pod sessions.
+- [ ] Add data-path tests for one connector stream per accepted local TCP connection, bidirectional byte flow, per-connection isolation, client disconnect, upstream clean EOF leaving the session Active and a second connection succeeding immediately after, mid-transfer transport resets and pump errors failing only their own connection while the session stays Active, three consecutive pre-byte stream failures moving the session to Failed with the counter reset by any byte-transferring connection, and failed pinned Pod sessions.
 - [ ] Add hard-limit tests for 16 sessions, 32 global connections, 8 connections per session, bounded buffers, and overload errors.
 - [ ] Add shutdown tests proving listeners and pumps are cancelled and joined before the server runtime exits and their ports can immediately be rebound.
 - [ ] Run `cargo test --locked -p k10s-server --test port_forward_manager`; expect missing manager behavior.
@@ -150,6 +151,8 @@
 - Modify: `apps/k10s-desktop/src/lib.rs`
 - Modify: `apps/k10s-server/src/main.rs`
 - Modify: `crates/k10s-server/src/config.rs`
+- Modify: `crates/k10s-server/src/port_forward.rs`
+- Modify: `crates/k10s-server/src/control.rs`
 - Modify: `crates/k10s-ui/src/ui/detail/service.rs`
 - Modify: `crates/k10s-ui/src/workspace/guard.rs`
 - Modify: `crates/k10s-ui/src/app.rs`
@@ -157,13 +160,16 @@
 - Create: `apps/k10s-desktop/tests/port_forward.rs`
 - Modify: `crates/k10s-ui/tests/{ui_services,workspace_state}.rs`
 - Modify: `crates/k10s-server/tests/{standalone_startup,security}.rs`
+- Modify: `crates/k10s-server/tests/{port_forward_manager,port_forward_loopback}.rs`
 
 - [ ] Add failing desktop tests proving the embedded server advertises `service.portForward`, renders Start/Stop, accepts automatic and explicit local ports, copies a loopback address, and stops sessions on desktop shutdown.
 - [ ] Add failing standalone/web tests proving the capability is absent and requests are rejected even if a client manually sends them.
 - [ ] Add UI tests for blank/zero/invalid/occupied local ports, active-session display, selected Pod/remote port, safe failures, Retry, Stop, and active session count after closing/reopening the window.
-- [ ] Add guard tests for context switch with active sessions: Cancel preserves context/sessions; Stop all and switch waits for terminal Stop before submitting the context switch. Window close remains unguarded.
+- [ ] Add failing manager tests for the server-side transition gate: a context switch holds the manager write side, stops and joins every session, advances the epoch once, and only then lets the backend commit the switch; terminal session snapshots publish during the gate window.
+- [ ] Add failing interleaving tests over concurrent control sockets proving a Start queued while the gate is held and a Start racing resolution abort without binding and return the typed retryable context-transition error — including a stale request carrying the retired context submitted immediately after the switch. Publication must validate both the epoch and the authoritative committed current context against the request identity.
+- [ ] Add guard tests for context switch with active sessions: Cancel preserves context/sessions; Stop all and switch waits for terminal Stop before submitting the context switch. The prompt is presentation only; enforcement lives in the server-side transition gate. Window close remains unguarded.
 - [ ] Run focused tests; expect desktop capability and controls to be absent.
-- [ ] Enable forwarding only in `DesktopApp`'s embedded `ServerConfig`, then render controls from negotiated capability plus authoritative session state.
+- [ ] Implement the manager epoch/gate around control dispatch of `context.switch`, then enable forwarding only in `DesktopApp`'s embedded `ServerConfig` and render controls from negotiated capability plus authoritative session state.
 - [ ] Keep the standalone binary disabled with no CLI/environment opt-in in this version.
 - [ ] Run desktop, standalone, UI, security, and WASM checks; expect PASS.
 - [ ] Commit `feat: enable desktop service port forwarding`.

@@ -74,14 +74,13 @@ Starting -> Active -> Stopping -> Stopped
 
 Connection lifetime is separate from session lifetime. Each accepted local TCP connection owns its own Kubernetes port-forward stream, and that stream normally ends when either side closes: an upstream application finishing a response, or the local client disconnecting. Clean EOF on a forwarded connection is a successful connection completion, never a session failure. The listener keeps accepting, and a second connection started immediately after an upstream close must succeed.
 
-`Failed` retains a short safe reason and permits Retry. It is reserved for faults that make the pinned target unusable, not ordinary connection turnover. A session moves to `Failed` only when:
+`Failed` retains a short safe reason and permits Retry. It is reserved for faults that make the pinned target unusable, not ordinary connection turnover. Data-path errors are connection-terminal by default:
 
-- Its listening socket fails.
-- The pinned Pod disappears.
-- Three consecutive new port-forward streams fail with a transport or protocol error before transferring any byte, indicating the pinned target is gone or unreachable rather than a peer hanging up.
-- A data pump terminates with an error other than clean EOF.
+- Clean EOF on either side completes the connection normally.
+- A transport reset, Kubernetes stream protocol error, or pump read/write failure ends only its own connection, whether it happens before or after bytes flowed. It never changes session state by itself.
+- The only counted signal is consecutive open failures: new port-forward streams that fail with a transport or protocol error before transferring any byte. A third consecutive one indicates the pinned target is gone or unreachable rather than a peer hanging up and moves the session to `Failed`. Any connection that transfers at least one byte in either direction resets the counter to zero.
 
-A single abnormal stream error fails only that one connection. The session does not automatically select a different Pod because that could move a connection to a different workload instance without operator intent.
+A session therefore moves to `Failed` only when its listening socket fails, the pinned Pod disappears, or the consecutive open-failure threshold trips. The session does not automatically select a different Pod because that could move a connection to a different workload instance without operator intent.
 
 ### Desktop-only presentation
 
@@ -210,9 +209,9 @@ Stopping all sessions and committing the context switch must be atomic with resp
 
 The `PortForwardManager` therefore owns a transition gate:
 
-- The manager keeps a monotonic epoch counter. Session publication happens under the manager lock and stamps the epoch observed at Start time.
+- The manager keeps a monotonic epoch counter. Session publication happens under the manager lock and stamps the epoch observed when the Start entered the gate.
 - A context switch takes the manager write side under that same lock, increments the epoch, stops and joins every active session, and only then lets the backend commit the switch. Additional `portForward.start` requests serialize behind the gate instead of interleaving with the drain.
-- A Start whose resolution raced the switch detects the epoch mismatch at publication time, aborts without binding any socket, and returns a typed retryable context-transition error.
+- Publication validates the epoch and the request context together. Under the same lock, the manager reads the authoritative committed current context and requires it to equal the context carried by the request's Service identity. Epoch checks alone cannot catch stale work because explicit contexts resolve independently of which one is current. A mismatch in either dimension — a Start queued before the switch resolving against the retired context, or a stale Start carrying a retired context submitted after it — aborts without binding any socket and returns a typed retryable context-transition error.
 - The sessions subscription emits the resulting terminal snapshots, so every connected panel converges on zero old-context sessions.
 
 The client-side **Stop all and switch** blocker remains as presentation: it confirms intent and lets the UI drain sessions early when possible. The server-side gate is the enforcement point, including for clients that bypass the prompt.
@@ -223,7 +222,7 @@ The client-side **Stop all and switch** blocker remains as presentation: it conf
 - Default maximum: 16 active sessions per embedded server, 32 simultaneous accepted connections total, and 8 connections per session.
 - Session IDs are random opaque values and are scoped to the authenticated server instance.
 - Requests validate Service identity and context; no kubeconfig paths, credentials, raw Kubernetes errors, or arbitrary socket targets cross the protocol.
-- Error text uses stable categories: unavailable endpoint, forbidden, conflict/local port in use, vanished/recreated resource, unsupported Service, and transport closed.
+- Error text uses stable categories: unavailable endpoint, forbidden, conflict/local port in use, vanished/recreated resource, unsupported Service, retryable context transition, and transport closed.
 - Kubernetes authorization remains authoritative. Expected access is `get` on Services and Pods, `list` on EndpointSlices, and `create` on `pods/portforward`. Advisory SelfSubjectAccessReview results may disable the button but never replace the real API check.
 - Context switching drains all sessions through the manager's transition gate (see “Context-switch atomicity”); the navigation confirmation is presentation only. Keeping invisible forwards alive across contexts is unsafe and confusing.
 - Closing the Services window does not implicitly stop sessions; active sessions remain visible via a count badge and are recoverable by reopening the panel.
@@ -252,6 +251,8 @@ Dirty YAML and active port forwards are different guards:
 | Local port occupied | Conflict error; preserve the input for correction |
 | Pod disappears after Start | Session becomes Failed and listener closes |
 | Upstream closes one forwarded connection | That connection completes; session stays Active |
+| Mid-transfer transport or pump error | That connection fails; session stays Active |
+| Three consecutive pre-byte stream failures | Session becomes Failed; listener closes |
 | Start races a context switch | Typed retryable context-transition error; no listener bound |
 | Control WebSocket reconnects | `portForward.list` plus subscription rebuilds state; data forwarding continues |
 | Embedded server shuts down | All listeners and pumps are cancelled and joined |
@@ -262,8 +263,8 @@ Implementation follows TDD in these slices:
 
 1. **Protocol contracts:** JSON round trips, older payload defaults, invalid ports/protocols, list-row projection defaults on legacy payloads and populated Service projections on snapshot pages and `resource.changed` deltas, golden minor-version negotiation.
 2. **Workspace/UI:** launcher singleton behavior, namespace/search/sort, structured port rendering from row projections without parsing `summary`, capability gating, duplicate Start prevention, context-switch guard, accessibility labels.
-3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, owner-reference slice binding including a mixed stale/current-slice set after Service delete/recreate, deterministic ready-Pod selection, named target ports, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
-4. **Server manager:** loopback-only binding, OS-assigned port, occupied port, multiple local connections, a second connection succeeding after upstream EOF, limits, idempotent stop, reconnect/list reconstruction, in-flight Start aborted by a concurrent context switch with no listener left behind, concurrent Start/switch interleavings yielding no old-context session, and cancellation on shutdown.
+3. **Backend resolution:** recorded Kubernetes API tests for UID binding, EndpointSlice port matching, owner-reference slice binding including a mixed stale/current-slice set after Service delete/recreate and ownerless slices skipped, deterministic ready-Pod selection, named target ports, ExternalName/UDP/no-endpoint rejection, and sanitized failures.
+4. **Server manager:** loopback-only binding, OS-assigned port, occupied port, multiple local connections, a second connection succeeding after upstream EOF, per-connection pump/reset errors leaving the session Active, the consecutive pre-byte open-failure threshold and its reset on any byte transfer, limits, idempotent stop, reconnect/list reconstruction, in-flight and queued Starts aborted by a concurrent context switch — including stale old-context identities submitted after it — with no listener left behind, and cancellation on shutdown.
 5. **Desktop integration:** embedded config advertises and accepts `service.portForward`; standalone config neither advertises nor accepts it.
 6. **Real kind E2E:** create a Deployment and Service, start an automatic local port, issue HTTP through it, stop it, prove the port is released, then repeat with an explicit local port.
 
