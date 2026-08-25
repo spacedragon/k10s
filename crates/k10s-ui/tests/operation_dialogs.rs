@@ -571,6 +571,146 @@ fn yaml_apply_recovery_refreshes_the_ticket_bound_target() {
     ));
 }
 
+#[test]
+fn staggered_unknown_operations_share_the_pending_exact_target_refresh() {
+    let mut client = ready_client();
+    let target = deployment("shared-target");
+    for (key, operation) in [
+        ("idem-shared-1", "op-shared-1"),
+        ("idem-shared-2", "op-shared-2"),
+    ] {
+        let pending = client
+            .begin_command(Command::Scale {
+                target: target.clone(),
+                replicas: 3,
+                idempotency_key: key.into(),
+            })
+            .unwrap();
+        let (request_id, _, _, _) = encoded_request(&mut client);
+        client
+            .apply(ServerFrame::response(
+                request_id,
+                k10s_protocol::OperationAccepted {
+                    operation_id: OperationId::new(operation),
+                },
+            ))
+            .unwrap();
+        let _ = client.take(pending);
+    }
+
+    let first_status = client
+        .begin(Query::OperationStatus(vec![
+            OperationId::new("op-shared-1"),
+            OperationId::new("op-shared-2"),
+        ]))
+        .unwrap();
+    let _first_status_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            first_status.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: vec![k10s_protocol::OperationSnapshotEntry {
+                    operation_id: OperationId::new("op-shared-2"),
+                    status: OperationStatus::Running,
+                    progress: None,
+                }],
+            },
+        ))
+        .unwrap();
+    let (target_refresh_id, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(payload["identity"], serde_json::json!(target));
+
+    let second_status = client
+        .begin(Query::OperationStatus(vec![OperationId::new(
+            "op-shared-2",
+        )]))
+        .unwrap();
+    let _second_status_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            second_status.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-shared-2"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+
+    client
+        .apply(ServerFrame::response(
+            target_refresh_id,
+            ResourceDetailResponse {
+                identity: target,
+                revision: BackendRevision::new(3),
+                created_at: "2026-08-25T00:00:00Z".into(),
+                owner_references: Vec::new(),
+                sections: Vec::new(),
+                events: Vec::new(),
+                related: Vec::new(),
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    for key in ["idem-shared-1", "idem-shared-2"] {
+        assert!(matches!(
+            client.retry_eligibility(key),
+            k10s_ui::client::RetryEligibility::Eligible
+        ));
+    }
+}
+
+#[test]
+fn recovery_preflight_counts_the_future_target_refresh_at_exact_capacity() {
+    let mut client = ClientState::new(ClientConfig {
+        outbound_capacity: 3,
+        request_capacity: 3,
+        ..ClientConfig::default()
+    });
+    client
+        .connect(ConnectTarget::new(
+            "ws://127.0.0.1/api/v1/control",
+            "secret",
+        ))
+        .unwrap();
+    let _hello = client.take_outbound().unwrap();
+    client.apply(welcome(ResumeStatus::Fresh)).unwrap();
+    let accepted = client
+        .begin_command(Command::Scale {
+            target: deployment("capacity-target"),
+            replicas: 4,
+            idempotency_key: "idem-capacity".into(),
+        })
+        .unwrap();
+    let (accepted_id, _, _, _) = encoded_request(&mut client);
+    client
+        .apply(ServerFrame::response(
+            accepted_id,
+            k10s_protocol::OperationAccepted {
+                operation_id: OperationId::new("op-capacity"),
+            },
+        ))
+        .unwrap();
+    let _ = client.take(accepted);
+
+    client.transport_lost(1_000, 31);
+    assert!(client.retry_if_due(u64::MAX).unwrap());
+    let _reconnect_hello = client.take_outbound().unwrap();
+    client
+        .apply(welcome(ResumeStatus::ResyncRequired))
+        .expect("bootstrap + status + future target read fit the exact capacity");
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert_eq!(
+        client.outbound_len(),
+        2,
+        "future detail is preflighted, not sent early"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Client state: forced reconnect, resync queries, retry eligibility
 // ---------------------------------------------------------------------------

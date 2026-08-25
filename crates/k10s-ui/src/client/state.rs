@@ -636,6 +636,12 @@ struct PendingEntry {
     cancelled: bool,
 }
 
+#[derive(Debug)]
+struct TargetRefresh {
+    target: ResourceIdentity,
+    keys: Vec<String>,
+}
+
 /// In-progress reassembly of one chunked resource snapshot.
 #[derive(Debug)]
 struct SnapshotAssembly {
@@ -680,7 +686,7 @@ pub struct ClientState {
     /// Keys whose operation disappeared before their target was refreshed.
     unverified_unknown_keys: HashSet<String>,
     /// Automatically queued target refresh request → guarded keys.
-    target_refreshes: HashMap<RequestId, Vec<String>>,
+    target_refreshes: HashMap<RequestId, TargetRefresh>,
     /// Insertion order of retained idempotency records.
     key_order: VecDeque<String>,
     /// The in-flight resync refresh of nonterminal operations, if any.
@@ -1031,7 +1037,7 @@ impl ClientState {
             return if self
                 .target_refreshes
                 .values()
-                .any(|keys| keys.iter().any(|pending| pending == key))
+                .any(|refresh| refresh.keys.iter().any(|pending| pending == key))
             {
                 RetryEligibility::RefreshPending
             } else {
@@ -1392,8 +1398,8 @@ impl ClientState {
                     let detail: ResourceDetailResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    if let Some(keys) = self.target_refreshes.remove(&id) {
-                        for key in keys {
+                    if let Some(refresh) = self.target_refreshes.remove(&id) {
+                        for key in refresh.keys {
                             self.unverified_unknown_keys.remove(&key);
                         }
                     }
@@ -1843,11 +1849,33 @@ impl ClientState {
             self.phase = ClientPhase::Closed;
             return Err(ClientError::RequestRetentionLimit { limit: 0 });
         }
-        let required = 1_usize
+        let nonterminal = self.nonterminal_operation_ids();
+        let nonterminal_ids: HashSet<&OperationId> = nonterminal.iter().collect();
+        let target_refresh_count = self
+            .submitted_keys
+            .iter()
+            .filter(|(key, operation_id)| {
+                self.unverified_unknown_keys.contains(*key)
+                    || nonterminal_ids.contains(operation_id)
+            })
+            .filter_map(|(key, _)| self.submitted_targets.get(key))
+            .collect::<HashSet<_>>()
+            .len();
+        let request_required = 1_usize
+            .saturating_add(usize::from(!nonterminal.is_empty()))
+            .saturating_add(target_refresh_count);
+        let required = request_required
             .saturating_add(self.live_subscriptions.len())
             .saturating_add(reserved_outbound);
         if required > self.config.outbound_capacity {
             return self.fail_outbound_overload();
+        }
+        if request_required > self.config.request_capacity {
+            self.phase = ClientPhase::Closed;
+            self.outbound.clear();
+            return Err(ClientError::RequestRetentionLimit {
+                limit: self.config.request_capacity,
+            });
         }
         self.outbound.clear();
         self.invalidate_server_state();
@@ -1870,7 +1898,6 @@ impl ClientState {
         }
         // Refresh every nonterminal operation by ID before any retry of its
         // idempotency key may be allowed.
-        let nonterminal = self.nonterminal_operation_ids();
         if !nonterminal.is_empty() {
             let refresh = self.begin(Query::OperationStatus(nonterminal))?;
             self.operation_refresh = Some(refresh.id().clone());
@@ -1937,15 +1964,21 @@ impl ClientState {
             }
         }
         for (target, keys) in targets {
-            if self.target_refreshes.values().any(|pending| {
-                pending
-                    .iter()
-                    .any(|key| keys.iter().any(|candidate| candidate == key))
-            }) {
+            if let Some(refresh) = self
+                .target_refreshes
+                .values_mut()
+                .find(|refresh| refresh.target == target)
+            {
+                for key in keys {
+                    if !refresh.keys.contains(&key) {
+                        refresh.keys.push(key);
+                    }
+                }
                 continue;
             }
-            let refresh = self.begin(Query::ResourceDetail(target))?;
-            self.target_refreshes.insert(refresh.id().clone(), keys);
+            let request = self.begin(Query::ResourceDetail(target.clone()))?;
+            self.target_refreshes
+                .insert(request.id().clone(), TargetRefresh { target, keys });
         }
         Ok(())
     }
