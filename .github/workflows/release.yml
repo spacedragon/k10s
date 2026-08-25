@@ -2,10 +2,13 @@ name: Release packaging
 
 # Two-phase release pipeline. Phase 1 (the `prepare` job) runs on `main` and
 # auto-bumps the workspace/packager version, then pushes the bump commit and a
-# `vX.Y.Z` tag. Phase 2 (the platform jobs) runs on that tag push and builds
-# every artifact, and `publish` creates the GitHub release. Manual
-# `workflow_dispatch` without a `bump` choice keeps the pre-tag smoke build;
-# with a `bump` choice it runs phase 1 only (the tag run then does phase 2).
+# `vX.Y.Z` tag. GitHub suppresses workflow runs triggered by GITHUB_TOKEN
+# pushes, so the tag push alone cannot start phase 2: `prepare` explicitly
+# re-dispatches this workflow at the tag ref (workflow_dispatch is exempt from
+# the suppression rule). Phase 2 (the platform jobs) builds every artifact and
+# `publish` creates the GitHub release. A maintainer-pushed tag also starts
+# phase 2. Manual `workflow_dispatch` without a `bump` choice keeps the pre-tag
+# smoke build; with a `bump` choice it runs phase 1 only.
 on:
   push:
     branches: [main]
@@ -27,6 +30,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: release-${{ github.ref }}
   # Main pushes must serialize: a queued run re-reads the current version and
@@ -112,6 +116,17 @@ jobs:
           done
           git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}"
           git push origin "v${{ steps.bump.outputs.version }}"
+      - name: Start packaging run at the release tag
+        # GITHUB_TOKEN pushes never start new workflow runs, so the tag push
+        # above cannot trigger phase 2 by itself. Re-dispatch this workflow at
+        # the tag ref instead: workflow_dispatch is exempt from the suppression
+        # rule, and the tag-ref run skips `prepare` and runs the platform jobs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v${{ steps.bump.outputs.version }}"
+          echo "Dispatched packaging run at v${{ steps.bump.outputs.version }}"
 
   linux:
     name: Package Linux and OCI

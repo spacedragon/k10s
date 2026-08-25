@@ -206,16 +206,18 @@ the same web bundle embedded, plus a non-root OCI image.
 
 Every push to `main` cuts a patch release automatically: the workflow bumps the
 matching `version` in `Cargo.toml`, `Packager.toml`, and `Cargo.lock`, commits
-it as `chore(release): vX.Y.Z`, pushes the commit and a `vX.Y.Z` tag, and the
-tag run builds every platform and publishes the GitHub release with generated
-release notes. The release commit is recognized by its `chore(release):`
-subject and never triggers another bump, so the pipeline cannot re-trigger
-itself.
+it as `chore(release): vX.Y.Z`, pushes the commit and a `vX.Y.Z` tag, and then
+re-dispatches the Release workflow at that tag (GitHub suppresses workflow runs
+triggered by `GITHUB_TOKEN` pushes, so the tag push cannot start the packaging
+phase by itself). The packaging run builds every platform and publishes the
+GitHub release with generated release notes. The release commit is recognized
+by its `chore(release):` subject and never triggers another bump, so the
+pipeline cannot re-trigger itself.
 
 To cut a release manually — e.g. a minor or major bump — run the Release
 workflow from the Actions tab with `bump` set to `patch`, `minor`, or `major`
-on branch `main`. The first run bumps and tags; the tag run then builds and
-publishes.
+on branch `main`. The first run bumps and tags, then re-dispatches the workflow
+at the new tag; the packaging run builds and publishes.
 
 Local release verification uses the same order:
 
