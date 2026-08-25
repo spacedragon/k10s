@@ -312,9 +312,43 @@ async fn dropped_mutation_response_is_unknown_until_authoritative_refresh() {
         desired.to_string(),
         "an authoritative refresh reconciles the unknown write outcome"
     );
-    adapter
-        .operation_engine()
-        .refresh_scope(&deployment.coalescing_key());
+    assert!(matches!(
+        adapter
+            .execute(Command::Scale {
+                context: CONTEXT.into(),
+                gvk: deployment.gvk.clone(),
+                namespace: deployment.namespace.clone(),
+                name: deployment.name.clone(),
+                uid: deployment.uid.clone(),
+                replicas: desired,
+                idempotency_key: "kind-retry-before-refresh".into(),
+            })
+            .await,
+        Err(BackendError::Conflict(_))
+    ));
+    let QueryResult::ResourceDetail(_) = adapter
+        .query(Query::ResourceDetail {
+            reference: deployment.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("authoritative detail refresh returned the wrong result")
+    };
+    run(
+        &adapter,
+        "post-refresh scale",
+        Command::Scale {
+            context: CONTEXT.into(),
+            gvk: deployment.gvk.clone(),
+            namespace: deployment.namespace.clone(),
+            name: deployment.name.clone(),
+            uid: deployment.uid.clone(),
+            replicas: desired,
+            idempotency_key: "kind-retry-after-refresh".into(),
+        },
+    )
+    .await;
     assert_eq!(
         terminal(&adapter, id.as_str()).await.0,
         OperationState::OutcomeUnknown,
@@ -386,7 +420,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
     .parse()
     .unwrap();
     let yaml = format!(
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-log-ready; sleep 3600']\n",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: operations-web\n  namespace: {NAMESPACE}\n  uid: {}\n  resourceVersion: '{resource_version}'\nspec:\n  selector:\n    matchLabels:\n      app: operations-web\n  template:\n    metadata:\n      labels:\n        app: operations-web\n    spec:\n      containers:\n        - name: shell\n          image: busybox:1.36.1\n          command: [sh, -c, 'echo k10s-applied-ready; sleep 3600']\n",
         deployment.uid
     );
     let QueryResult::YamlValidation(validation) = adapter
@@ -427,6 +461,18 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         ]),
         replicas.to_string()
     );
+    assert_eq!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "deployment/operations-web",
+            "-o",
+            "jsonpath={.spec.template.spec.containers[0].command[2]}"
+        ]),
+        "echo k10s-applied-ready; sleep 3600",
+        "apply changes the intended pod command"
+    );
 
     let mut stale = deployment.clone();
     stale.uid = "replaced-uid".into();
@@ -462,6 +508,14 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "deployment/operations-web",
         "--timeout=60s",
     ]);
+    let previous_restart = kubectl(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "deployment/operations-web",
+        "-o",
+        "jsonpath={.spec.template.metadata.annotations.kubectl\\.kubernetes\\.io/restartedAt}",
+    ]);
     run(
         &adapter,
         "restart",
@@ -471,7 +525,32 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         },
     )
     .await;
+    let restart = kubectl(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "deployment/operations-web",
+        "-o",
+        "jsonpath={.spec.template.metadata.annotations.kubectl\\.kubernetes\\.io/restartedAt}",
+    ]);
+    assert!(!restart.is_empty(), "restart writes the rollout annotation");
+    assert_ne!(restart, previous_restart, "restart advances rollout state");
 
+    let _ = ProcessCommand::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(kubeconfig())
+        .arg("--context")
+        .arg(admin_context())
+        .args([
+            "-n",
+            NAMESPACE,
+            "patch",
+            "configmap/delete-dependent",
+            "--type=merge",
+            "-p",
+            r#"{"metadata":{"finalizers":null}}"#,
+        ])
+        .status();
     let _ = ProcessCommand::new("kubectl")
         .arg("--kubeconfig")
         .arg(kubeconfig())
@@ -482,6 +561,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             NAMESPACE,
             "delete",
             "configmap/delete-me",
+            "configmap/delete-dependent",
             "--ignore-not-found",
             "--wait=true",
         ])
@@ -494,6 +574,34 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         "delete-me",
         "--from-literal=value=fixture",
     ]);
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "create",
+        "configmap",
+        "delete-dependent",
+        "--from-literal=value=dependent",
+    ]);
+    let owner_uid = kubectl(&[
+        "-n",
+        NAMESPACE,
+        "get",
+        "configmap/delete-me",
+        "-o",
+        "jsonpath={.metadata.uid}",
+    ]);
+    let dependent_patch = format!(
+        r#"{{"metadata":{{"finalizers":["k10s.dev/hold"],"ownerReferences":[{{"apiVersion":"v1","kind":"ConfigMap","name":"delete-me","uid":"{owner_uid}","blockOwnerDeletion":true}}]}}}}"#
+    );
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "patch",
+        "configmap/delete-dependent",
+        "--type=merge",
+        "-p",
+        &dependent_patch,
+    ]);
     let target = reference(&adapter, Gvk::core("v1", "ConfigMap"), "delete-me").await;
     run(
         &adapter,
@@ -505,6 +613,49 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         },
     )
     .await;
+    assert!(
+        !kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "configmap/delete-me",
+            "-o",
+            "jsonpath={.metadata.deletionTimestamp}",
+        ])
+        .is_empty()
+    );
+    assert!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "configmap/delete-me",
+            "-o",
+            "jsonpath={.metadata.finalizers}",
+        ])
+        .contains("foregroundDeletion")
+    );
+    assert_eq!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "configmap/delete-dependent",
+            "-o",
+            "jsonpath={.metadata.finalizers[0]}",
+        ]),
+        "k10s.dev/hold",
+        "foreground deletion waits for a blocked dependent"
+    );
+    kubectl(&[
+        "-n",
+        NAMESPACE,
+        "patch",
+        "configmap/delete-dependent",
+        "--type=merge",
+        "-p",
+        r#"{"metadata":{"finalizers":null}}"#,
+    ]);
     for _ in 0..100 {
         if kubectl(&[
             "-n",
@@ -525,6 +676,16 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
             NAMESPACE,
             "get",
             "configmap/delete-me",
+            "--ignore-not-found"
+        ])
+        .is_empty()
+    );
+    assert!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "configmap/delete-dependent",
             "--ignore-not-found"
         ])
         .is_empty()
@@ -599,6 +760,18 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
         },
     )
     .await;
+    assert_eq!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "cronjob/operations-cron",
+            "-o",
+            "jsonpath={.spec.suspend}",
+        ]),
+        "true",
+        "suspend mutates CronJob state"
+    );
     run(
         &adapter,
         "cronjob resume",
@@ -609,6 +782,18 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
         },
     )
     .await;
+    assert_eq!(
+        kubectl(&[
+            "-n",
+            NAMESPACE,
+            "get",
+            "cronjob/operations-cron",
+            "-o",
+            "jsonpath={.spec.suspend}",
+        ]),
+        "false",
+        "resume restores CronJob state"
+    );
     run(
         &adapter,
         "job creation",
