@@ -80,6 +80,9 @@ pub(crate) async fn discover_resource_types(
 /// internal cluster detail; only a sanitized category and HTTP code survive,
 /// keeping the detail under 200 characters even for long context names.
 fn sanitize_discovery_error(context: &str, error: kube::Error) -> BackendError {
+    if let Some(unavailable) = super::auth::context_unavailable(&error) {
+        return unavailable;
+    }
     let detail = match error {
         // The API server answered but rejected discovery (401/403 and friends).
         kube::Error::Api(status) => format!(

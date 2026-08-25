@@ -73,12 +73,16 @@ fn contexts() -> Vec<ContextInfo> {
             cluster: "recorded-a".into(),
             namespace: Some(NS.into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
         ContextInfo {
             name: CONTEXT_B.into(),
             cluster: "recorded-b".into(),
             namespace: Some(NS.into()),
             is_current: false,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         },
     ]
 }
@@ -90,6 +94,8 @@ fn three_contexts() -> Vec<ContextInfo> {
         cluster: "recorded-c".into(),
         namespace: Some(NS.into()),
         is_current: false,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
     });
     contexts
 }

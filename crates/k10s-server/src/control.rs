@@ -63,6 +63,14 @@ struct WatchGeneration {
 struct ActiveWatchSubscription {
     task_id: u128,
     cancel: CancellationToken,
+    kind: ActiveSubscriptionKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveSubscriptionKind {
+    BootstrapStatus,
+    Resource,
+    PortForward,
 }
 
 impl WatchRecovery {
@@ -787,6 +795,7 @@ pub(crate) async fn serve_socket(
                 let Some(subscription_id) = frame.subscription_id else {
                     continue;
                 };
+                let mut active_kind = None;
                 let selector_kind = selector
                     .0
                     .get("kind")
@@ -794,15 +803,33 @@ pub(crate) async fn serve_socket(
                     .map(str::to_owned);
                 let outcome = match serde_json::from_value::<SubscriptionSelector>(selector.0) {
                     Ok(SubscriptionSelector::BootstrapStatus) => {
-                        match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
-                            Ok(_) => Ok(None),
-                            Err(error) => Err(backend_rejection(&error)),
+                        active_kind = Some(ActiveSubscriptionKind::BootstrapStatus);
+                        if watch_subscriptions.iter().any(|(id, active)| {
+                            id != &subscription_id
+                                && active.kind == ActiveSubscriptionKind::BootstrapStatus
+                        }) {
+                            Err((
+                                ErrorCode::Conflict,
+                                "bootstrap status subscription already exists".to_owned(),
+                            ))
+                        } else {
+                            match kernel.subscribe(BackendSubscribe::BootstrapStatus).await {
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
+                            }
                         }
                     }
                     Ok(SubscriptionSelector::Resource(spec)) => {
-                        if !watch_subscriptions.contains_key(&subscription_id)
-                            && watch_subscriptions.len()
-                                >= config.max_resource_subscriptions_per_session
+                        active_kind = Some(ActiveSubscriptionKind::Resource);
+                        let consumes_slot = watch_subscriptions
+                            .get(&subscription_id)
+                            .is_none_or(|active| active.kind != ActiveSubscriptionKind::Resource);
+                        let resource_count = watch_subscriptions
+                            .values()
+                            .filter(|active| active.kind == ActiveSubscriptionKind::Resource)
+                            .count();
+                        if consumes_slot
+                            && resource_count >= config.max_resource_subscriptions_per_session
                         {
                             Err((
                                 ErrorCode::Conflict,
@@ -830,9 +857,16 @@ pub(crate) async fn serve_socket(
                         }
                     }
                     Ok(SubscriptionSelector::Infrastructure(spec)) => {
-                        if !watch_subscriptions.contains_key(&subscription_id)
-                            && watch_subscriptions.len()
-                                >= config.max_resource_subscriptions_per_session
+                        active_kind = Some(ActiveSubscriptionKind::Resource);
+                        let consumes_slot = watch_subscriptions
+                            .get(&subscription_id)
+                            .is_none_or(|active| active.kind != ActiveSubscriptionKind::Resource);
+                        let resource_count = watch_subscriptions
+                            .values()
+                            .filter(|active| active.kind == ActiveSubscriptionKind::Resource)
+                            .count();
+                        if consumes_slot
+                            && resource_count >= config.max_resource_subscriptions_per_session
                         {
                             Err((
                                 ErrorCode::Conflict,
@@ -882,6 +916,7 @@ pub(crate) async fn serve_socket(
                                     ActiveWatchSubscription {
                                         task_id,
                                         cancel: cancel.clone(),
+                                        kind: ActiveSubscriptionKind::PortForward,
                                     },
                                 );
                                 if send_sequenced(
@@ -1013,6 +1048,7 @@ pub(crate) async fn serve_socket(
                                 ActiveWatchSubscription {
                                     task_id,
                                     cancel: cancel.clone(),
+                                    kind: active_kind.expect("accepted subscription has a kind"),
                                 },
                             );
                         }
@@ -1672,6 +1708,10 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
             "context or resource not found".to_owned(),
         ),
         BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::ContextUnavailable { context, reason } => (
+            ErrorCode::Conflict,
+            format!("context '{context}' is unavailable: {reason}"),
+        ),
         BackendError::Forbidden => (
             ErrorCode::Unauthorized,
             "access denied by policy".to_owned(),
@@ -1713,6 +1753,27 @@ async fn stream_backend_events(
             event = events.recv() => event,
         };
         match event {
+            Ok(BackendEvent::ContextUnavailable { context, reason }) => {
+                let message = format!("context '{context}' is unavailable: {reason}");
+                let details = Some(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": context,
+                    "reason": reason,
+                }));
+                if send_error_with(
+                    outbound,
+                    ErrorTarget::Subscription(subscription_id.clone()),
+                    ErrorCode::Conflict,
+                    message,
+                    Retryability::AfterRefresh,
+                    details,
+                )
+                .is_err()
+                {
+                    overload_close(outbound);
+                    break;
+                }
+            }
             Ok(BackendEvent::Snapshot(data)) => {
                 if stream_snapshot(
                     outbound,
@@ -2180,13 +2241,25 @@ fn send_error(
     code: ErrorCode,
     message: String,
 ) -> Result<(), EnqueueError> {
+    send_error_with(outbound, target, code, message, Retryability::Never, None)
+}
+
+fn send_error_with(
+    outbound: &Scheduler,
+    target: ErrorTarget,
+    code: ErrorCode,
+    message: String,
+    retryability: Retryability,
+    details: Option<serde_json::Value>,
+) -> Result<(), EnqueueError> {
     let correlation = target.correlation().to_owned();
     let (request_id, subscription_id, scope) = match target {
         ErrorTarget::Session => (None, None, ErrorScope::Session),
         ErrorTarget::Request(id) => (Some(id), None, ErrorScope::Request),
         ErrorTarget::Subscription(id) => (None, Some(id), ErrorScope::Subscription),
     };
-    let error = ErrorFrame::new(code, message, Retryability::Never, scope, correlation);
+    let mut error = ErrorFrame::new(code, message, retryability, scope, correlation);
+    error.details = details;
     send_frame(
         outbound,
         ServerFrame {
@@ -2206,25 +2279,59 @@ fn send_backend_error(
     session_id: &SessionId,
     error: BackendError,
 ) -> Result<(), EnqueueError> {
-    let (code, safe_message) = match error {
+    let (code, safe_message, retryability, details) = match error {
         BackendError::NotFound => (
             ErrorCode::NotFound,
             "context or resource not found".to_owned(),
+            Retryability::Never,
+            None,
         ),
-        BackendError::Conflict(reason) => (ErrorCode::Conflict, format!("conflict: {reason}")),
+        BackendError::Conflict(reason) => (
+            ErrorCode::Conflict,
+            format!("conflict: {reason}"),
+            Retryability::Never,
+            None,
+        ),
+        BackendError::ContextUnavailable { context, reason } => (
+            ErrorCode::Conflict,
+            format!("context '{context}' is unavailable: {reason}"),
+            Retryability::AfterRefresh,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": context,
+                "reason": reason,
+            })),
+        ),
         BackendError::Forbidden => (
             ErrorCode::Unauthorized,
             "access denied by policy".to_owned(),
+            Retryability::Never,
+            None,
         ),
-        BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
-        BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
+        BackendError::Timeout => (
+            ErrorCode::Timeout,
+            "request timed out".to_owned(),
+            Retryability::Never,
+            None,
+        ),
+        BackendError::Cancelled => (
+            ErrorCode::Cancelled,
+            "request was cancelled".to_owned(),
+            Retryability::Never,
+            None,
+        ),
         BackendError::Unsupported { capability } => (
             ErrorCode::UnsupportedMessage,
             format!("unsupported capability: {capability}"),
+            Retryability::Never,
+            None,
         ),
-        BackendError::PortForward { category, message } => {
-            (port_forward_error_code(category), message)
-        }
+        BackendError::PortForward { category, message } => (
+            port_forward_error_code(category),
+            message,
+            Retryability::Never,
+            None,
+        ),
         BackendError::Internal(_) => {
             let correlation = target.correlation();
             let request = match &target {
@@ -2243,10 +2350,15 @@ fn send_backend_error(
                 diagnostic = "backend adapter returned an internal error",
                 "control backend failure"
             );
-            (ErrorCode::Internal, "internal server error".to_owned())
+            (
+                ErrorCode::Internal,
+                "internal server error".to_owned(),
+                Retryability::Never,
+                None,
+            )
         }
     };
-    send_error(outbound, target, code, safe_message)
+    send_error_with(outbound, target, code, safe_message, retryability, details)
 }
 
 async fn close_and_join(
@@ -2521,6 +2633,59 @@ mod tests {
                 .expect("pending response and sequenced resync apply in wire order");
         }
         assert!(client.server_state_invalid());
+    }
+
+    #[tokio::test]
+    async fn background_context_failure_becomes_a_structured_subscription_error() {
+        let scheduler = Scheduler::new(8, 2);
+        let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
+        let subscription_id = SubscriptionId::new("bootstrap-status-1");
+        let counter = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        let recovery = WatchRecovery::new();
+        let generation = recovery.register();
+        let (sender, receiver) = tokio::sync::broadcast::channel(4);
+        sender
+            .send(BackendEvent::ContextUnavailable {
+                context: "broken".into(),
+                reason: "credential plugin denied".into(),
+            })
+            .expect("status subscriber is active");
+        drop(sender);
+
+        stream_backend_events(
+            &scheduler,
+            &kernel,
+            &subscription_id,
+            Some(receiver),
+            &counter,
+            16,
+            &cancel,
+            generation,
+        )
+        .await;
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, ServerKind::Error);
+        assert_eq!(frames[0].subscription_id.as_ref(), Some(&subscription_id));
+        let k10s_protocol::ServerPayload::Error(error) = frames[0]
+            .clone()
+            .decode_payload()
+            .expect("error frame decodes")
+        else {
+            panic!("availability transition is an error frame");
+        };
+        assert_eq!(error.scope, ErrorScope::Subscription);
+        assert_eq!(error.retryability, Retryability::AfterRefresh);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": "broken",
+                "reason": "credential plugin denied",
+            }))
+        );
     }
 
     #[tokio::test]
@@ -2869,5 +3034,35 @@ mod tests {
             .expect("snapshot reassembled after resync");
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(client.last_acked_sequence(), Some(11));
+    }
+
+    #[tokio::test]
+    async fn unavailable_context_error_is_machine_readable_and_retryable() {
+        let scheduler = Scheduler::new(8, 2);
+        send_backend_error(
+            &scheduler,
+            ErrorTarget::Request(RequestId::from_u128(42)),
+            &SessionId::new("session-availability"),
+            BackendError::ContextUnavailable {
+                context: "broken".into(),
+                reason: "credential plugin exited with status 17: denied".into(),
+            },
+        )
+        .expect("error enqueues");
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1);
+        let error: ErrorFrame =
+            serde_json::from_value(frames[0].payload.clone()).expect("error frame decodes");
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.retryability, Retryability::AfterRefresh);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": "broken",
+                "reason": "credential plugin exited with status 17: denied",
+            }))
+        );
     }
 }

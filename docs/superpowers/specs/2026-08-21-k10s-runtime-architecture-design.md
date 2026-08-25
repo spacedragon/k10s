@@ -214,6 +214,12 @@ The real and fake Kubernetes adapters are internal modules in `k10s-backend`; th
 - Creates and retires cluster runtimes.
 - Treats a context switch as prepare-then-commit: failure to connect or discover the destination leaves the current context usable.
 - Supports kubeconfig exec authentication plugins only on the backend host.
+- Exec plugins are non-interactive and isolated per context. Bootstrap checks
+  the configured current context, non-current contexts execute lazily, and a
+  construction or token-refresh exec failure leaves the process alive while
+  marking only that context unavailable. Bootstrap/Refresh retries unavailable
+  contexts; the UI retains them as disabled selector entries with a bounded,
+  best-effort sanitized stderr reason.
 
 ### Cluster runtime
 

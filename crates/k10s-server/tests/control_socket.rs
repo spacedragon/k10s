@@ -3,12 +3,12 @@ use std::{future::Future, pin::Pin, time::Duration};
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::port::{BootstrapInfo, ContextInfo};
 use k10s_backend::{
-    BackendError, BackendKernel, Command, FakeKubernetes, KubernetesAccess, OperationId, Query,
-    QueryResult, Subscribe, SubscriptionHandle,
+    BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, KubernetesAccess,
+    OperationId, Query, QueryResult, Subscribe, SubscriptionHandle,
 };
 use k10s_protocol::{
-    Ack, ClientFrame, ClientKind, ErrorCode, RequestId, Retryability, ServerFrame, ServerKind,
-    ServerPayload,
+    Ack, ClientFrame, ClientKind, ErrorCode, ErrorScope, RequestId, Retryability, ServerFrame,
+    ServerKind, ServerPayload,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::json;
@@ -30,6 +30,64 @@ struct SensitiveKubernetes;
 #[derive(Debug, Clone)]
 struct HugeKubernetes;
 
+#[derive(Debug, Clone)]
+struct StatusKubernetes {
+    events: tokio::sync::broadcast::Sender<BackendEvent>,
+}
+
+impl StatusKubernetes {
+    fn new() -> Self {
+        let (events, _) = tokio::sync::broadcast::channel(4);
+        Self { events }
+    }
+
+    fn unavailable(&self, context: &str, reason: &str) {
+        self.events
+            .send(BackendEvent::ContextUnavailable {
+                context: context.into(),
+                reason: reason.into(),
+            })
+            .expect("control subscription receives the transition");
+    }
+}
+
+impl KubernetesAccess for StatusKubernetes {
+    fn query<'a>(
+        &'a self,
+        _: Query,
+    ) -> Pin<Box<dyn Future<Output = Result<QueryResult, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("query")) })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _: Command,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("execute")) })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        request: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = match request {
+                Subscribe::BootstrapStatus => "bootstrap-status",
+                _ => "resource-watch",
+            };
+            Ok(SubscriptionHandle::with_events(id, self.events.subscribe()))
+        })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        _ticket_id: &'a str,
+        _input: k10s_backend::StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
+    }
+}
+
 impl KubernetesAccess for HugeKubernetes {
     fn query<'a>(
         &'a self,
@@ -42,6 +100,8 @@ impl KubernetesAccess for HugeKubernetes {
                     cluster: "large".into(),
                     namespace: None,
                     is_current: true,
+                    availability: k10s_protocol::ContextAvailability::Available,
+                    unavailable_reason: None,
                 }],
             }))
         })
@@ -122,6 +182,8 @@ impl KubernetesAccess for SlowKubernetes {
                     cluster: "slow".into(),
                     namespace: None,
                     is_current: true,
+                    availability: k10s_protocol::ContextAvailability::Available,
+                    unavailable_reason: None,
                 }],
             }))
         })
@@ -328,6 +390,139 @@ async fn bootstrap_status_subscription_is_acknowledged() {
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(response.kind, ServerKind::Subscribed);
     assert_eq!(response.subscription_id.unwrap().as_str(), "sub-1");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_status_is_singleton_without_consuming_resource_watch_capacity() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            max_resource_subscriptions_per_session: 1,
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(StatusKubernetes::new(), "status-limit-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+
+    for id in ["status-1", "status-2"] {
+        ws.send(Message::Text(
+            json!({
+                "kind":"subscribe", "subscriptionId":id,
+                "payload":{"kind":"bootstrapStatus"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let response = receive_frame(&mut ws).await;
+        assert_eq!(
+            response.kind,
+            if id == "status-1" {
+                ServerKind::Subscribed
+            } else {
+                ServerKind::Error
+            },
+            "{response:?}"
+        );
+    }
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"resource-1",
+            "payload":{
+                "kind":"resource", "context":"dev-local",
+                "gvk":{"group":"","version":"v1","kind":"Pod"},
+                "namespace":"default"
+            }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        receive_frame(&mut ws).await.kind,
+        ServerKind::Subscribed,
+        "the status receiver must not consume resource-watch capacity"
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "kind":"unsubscribe", "subscriptionId":"status-1",
+            "payload":null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"status-2",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_status_forwards_background_context_failures() {
+    let backend = StatusKubernetes::new();
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new_with_instance_id(backend.clone(), "status-server"),
+    )
+    .await
+    .unwrap();
+    let mut ws = connect(&server).await;
+    authenticate(&mut ws).await;
+    ws.send(Message::Text(
+        json!({
+            "kind":"subscribe", "subscriptionId":"status-1",
+            "payload":{"kind":"bootstrapStatus"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let subscribed = receive_frame(&mut ws).await;
+    assert_eq!(subscribed.kind, ServerKind::Subscribed);
+
+    backend.unavailable("broken", "credential plugin denied");
+    let transition = receive_frame(&mut ws).await;
+    assert_eq!(transition.kind, ServerKind::Error);
+    assert_eq!(
+        transition.subscription_id.as_ref().map(|id| id.as_str()),
+        Some("status-1")
+    );
+    let ServerPayload::Error(error) = transition.decode_payload().unwrap() else {
+        panic!("transition is a structured error");
+    };
+    assert_eq!(error.scope, ErrorScope::Subscription);
+    assert_eq!(error.retryability, Retryability::AfterRefresh);
+    assert_eq!(
+        error.details,
+        Some(json!({
+            "kind": "contextUnavailable",
+            "context": "broken",
+            "reason": "credential plugin denied",
+        }))
+    );
     server.shutdown().await.unwrap();
 }
 

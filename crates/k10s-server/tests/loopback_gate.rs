@@ -36,6 +36,7 @@ async fn gate_submission_authenticates_the_default_standalone_server() {
     let AppView::Ready {
         server_instance_id: _,
         context_names,
+        ..
     } = app.view()
     else {
         unreachable!("loop exited on Ready");

@@ -23,6 +23,8 @@ async fn real_adapter_validation_round_trips_over_the_authenticated_control_sock
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("recorded", recorded.clone().into_client("default"))],
     )

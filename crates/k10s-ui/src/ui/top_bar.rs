@@ -1,6 +1,7 @@
 //! Compact global menus, connection state, refresh, and context selection.
 
-use egui::{ComboBox, Layout, MenuBar, RichText, WidgetInfo, WidgetType};
+use egui::{ComboBox, Label, Layout, MenuBar, RichText, Sense, WidgetInfo, WidgetType};
+use k10s_protocol::{Context, ContextAvailability};
 
 use super::{ConnectionState, theme};
 
@@ -12,7 +13,7 @@ pub(super) struct TopBarAction {
 pub(super) fn show(
     ui: &mut egui::Ui,
     connection: ConnectionState,
-    contexts: &[String],
+    contexts: &[Context],
     selected_context: Option<&str>,
 ) -> TopBarAction {
     let mut context_change = None;
@@ -34,11 +35,27 @@ pub(super) fn show(
                         .width(220.0)
                         .show_ui(ui, |ui| {
                             for context in contexts {
-                                if ui
-                                    .selectable_label(selected_context == Some(context), context)
+                                if context.availability == ContextAvailability::Unavailable {
+                                    let reason = context
+                                        .unavailable_reason
+                                        .as_deref()
+                                        .unwrap_or("credential plugin is unavailable");
+                                    ui.add(
+                                        Label::new(
+                                            RichText::new(&context.name)
+                                                .color(ui.visuals().weak_text_color()),
+                                        )
+                                        .sense(Sense::hover()),
+                                    )
+                                    .on_hover_text(reason);
+                                } else if ui
+                                    .selectable_label(
+                                        selected_context == Some(context.name.as_str()),
+                                        &context.name,
+                                    )
                                     .clicked()
                                 {
-                                    context_change = Some(context.clone());
+                                    context_change = Some(context.name.clone());
                                     ui.close();
                                 }
                             }

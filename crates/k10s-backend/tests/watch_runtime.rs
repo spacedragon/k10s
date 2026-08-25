@@ -775,6 +775,8 @@ async fn unknown_context_and_gvk_are_typed_not_founds_on_the_adapter() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("dev", client)],
     )
@@ -818,6 +820,8 @@ async fn scope_and_capability_violations_are_typed_rejections() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("dev", client)],
     )
@@ -851,6 +855,8 @@ async fn scope_and_capability_violations_are_typed_rejections() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("dev", client)],
     )
@@ -889,6 +895,8 @@ async fn kube_adapter_serves_a_scripted_resource_watch() {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("dev", client)],
     )

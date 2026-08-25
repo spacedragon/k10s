@@ -23,6 +23,8 @@ fn adapter(server: &RecordedApiServer) -> KubeAdapter {
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [(CONTEXT, server.clone().into_client("default"))],
     )

@@ -131,6 +131,8 @@ async fn spawn_server() -> (k10s_server::ServerHandle, RecordedApiServer) {
             cluster: "recorded-apiserver".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [(CONTEXT, client)],
     )

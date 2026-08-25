@@ -604,6 +604,10 @@ impl PortForwardManager {
             BackendError::Conflict(reason) => {
                 StartRejected::new(PortForwardFailureCategory::ContextTransition, reason)
             }
+            BackendError::ContextUnavailable { context, reason } => StartRejected::new(
+                PortForwardFailureCategory::ContextTransition,
+                format!("context '{context}' is unavailable: {reason}"),
+            ),
             BackendError::Cancelled
             | BackendError::Timeout
             | BackendError::Internal(_)

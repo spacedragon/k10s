@@ -51,6 +51,8 @@ async fn real_engine_publishes_p0_updates_and_answers_status_after_reconnect() {
             cluster: "fixture".into(),
             namespace: Some("default".into()),
             is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
         }],
         [("recorded", recorded.into_client("default"))],
     )

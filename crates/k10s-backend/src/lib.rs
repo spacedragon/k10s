@@ -28,12 +28,13 @@ pub use operation::{
     Propagation, YamlValidationData,
 };
 pub use port::{
-    AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextInfo,
-    ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample, OperationId,
-    OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
-    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamGrant, StreamInput,
-    StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
+    AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextAvailability,
+    ContextInfo, ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample,
+    OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult,
+    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection,
+    ResourceRecord, ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamGrant,
+    StreamInput, StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort,
+    TransportProtocol,
 };
 pub use port_forward::{
     PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,
