@@ -24,8 +24,12 @@ use crate::port::{
     ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
     SubscriptionHandle, TargetPort, TransportProtocol,
 };
+use crate::port_forward::{
+    PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
+};
 use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
+use std::future::Future;
 
 /// Unix seconds for the fixed fake epoch `2026-08-21T00:00:00Z`.
 const FAKE_EPOCH_SECS: u64 = 1_787_270_400;
@@ -2497,5 +2501,90 @@ mod tests {
             matches!(first, BackendEvent::Snapshot(_)),
             "a mutation delta preceded the snapshot"
         );
+    }
+}
+
+/// Deterministic fake port-forward seam over the seeded dataset.
+///
+/// Resolution validates the Service record and UID, then pins the first
+/// Running Pod in the same namespace (sorted by name). Connections return a
+/// fresh duplex stream so server tests can pump bytes without a cluster.
+#[derive(Debug, Clone, Default)]
+pub struct FakePortForwardSeam;
+
+impl FakePortForwardSeam {
+    /// Build the seam; it reads no shared state so clones are free.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PortForwardSeam for FakePortForwardSeam {
+    fn resolve<'a>(
+        &'a self,
+        request: PortForwardRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedPortForward, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Reuse the deterministic dataset through a throwaway adapter
+            // only when callers did not inject one; the standard dataset is
+            // process-constant, so this stays stable across calls.
+            let adapter = FakeKubernetes::standard();
+            let state = adapter.state.lock().unwrap();
+            let service_ref = state.find_record(&ResourceRef {
+                context: request.context.clone(),
+                gvk: Gvk::core("v1", "Service"),
+                namespace: Some(request.namespace.clone()),
+                name: request.service_name.clone(),
+                uid: request.service_uid.clone(),
+            });
+            if service_ref.is_none() {
+                return Err(BackendError::PortForward {
+                    category: crate::port_forward::RejectionCategory::VanishedResource,
+                    message: "the service does not exist".into(),
+                });
+            }
+            drop(state);
+            let mut pods: Vec<String> = {
+                let state = adapter.state.lock().unwrap();
+                state
+                    .records
+                    .iter()
+                    .filter(|record| {
+                        record.reference.gvk == Gvk::core("v1", "Pod")
+                            && record.reference.context == request.context
+                            && record.reference.namespace.as_deref()
+                                == Some(request.namespace.as_str())
+                            && record.summary == "Running"
+                    })
+                    .map(|record| record.reference.name.clone())
+                    .collect()
+            };
+            pods.sort();
+            let Some(pod_name) = pods.into_iter().next() else {
+                return Err(BackendError::PortForward {
+                    category: crate::port_forward::RejectionCategory::UnavailableEndpoint,
+                    message: "no ready endpoint backs this service port".into(),
+                });
+            };
+            Ok(ResolvedPortForward {
+                context: request.context,
+                namespace: request.namespace,
+                service_uid: request.service_uid,
+                pod_name,
+                pod_uid: "uid-fake-pod".to_owned(),
+                pod_port: 8080,
+            })
+        })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        _resolved: &'a ResolvedPortForward,
+    ) -> Pin<Box<dyn Future<Output = Result<PortForwardStream, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (_client, server) = tokio::io::duplex(4096);
+            Ok(PortForwardStream::new(Box::new(server)))
+        })
     }
 }

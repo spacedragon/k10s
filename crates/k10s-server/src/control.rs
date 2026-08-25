@@ -1364,6 +1364,16 @@ fn allocate_sequence(counter: &AtomicU64) -> Option<u64> {
     }
 }
 
+/// Map a typed port-forward rejection onto the protocol error code space.
+fn port_forward_error_code(category: k10s_backend::RejectionCategory) -> ErrorCode {
+    use k10s_backend::RejectionCategory as C;
+    match category {
+        C::UnavailableEndpoint | C::VanishedResource => ErrorCode::NotFound,
+        C::Forbidden => ErrorCode::Unauthorized,
+        C::UnsupportedService | C::TransportClosed => ErrorCode::Conflict,
+    }
+}
+
 /// Map a backend failure onto a safe subscription-scoped error.
 fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
     match error {
@@ -1383,6 +1393,9 @@ fn backend_rejection(error: &BackendError) -> (ErrorCode, String) {
         BackendError::Timeout => (ErrorCode::Timeout, "request timed out".to_owned()),
         BackendError::Cancelled => (ErrorCode::Cancelled, "request was cancelled".to_owned()),
         BackendError::Internal(_) => (ErrorCode::Internal, "internal server error".to_owned()),
+        BackendError::PortForward { category, message } => {
+            (port_forward_error_code(*category), message.clone())
+        }
     }
 }
 
@@ -1923,6 +1936,9 @@ fn send_backend_error(
             ErrorCode::UnsupportedMessage,
             format!("unsupported capability: {capability}"),
         ),
+        BackendError::PortForward { category, message } => {
+            (port_forward_error_code(category), message)
+        }
         BackendError::Internal(_) => {
             let correlation = target.correlation();
             let request = match &target {

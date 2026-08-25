@@ -724,6 +724,13 @@ pub enum BackendError {
     Cancelled,
     /// An internal error occurred.
     Internal(String),
+    /// A typed port-forward rejection with a stable category.
+    PortForward {
+        /// Stable category driving typed protocol failures.
+        category: crate::port_forward::RejectionCategory,
+        /// Short sanitized reason.
+        message: String,
+    },
 }
 
 impl BackendError {
@@ -755,6 +762,7 @@ impl std::fmt::Display for BackendError {
             Self::Timeout => write!(f, "request timed out"),
             Self::Cancelled => write!(f, "request was cancelled"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
+            Self::PortForward { message, .. } => write!(f, "port forward rejected: {message}"),
         }
     }
 }

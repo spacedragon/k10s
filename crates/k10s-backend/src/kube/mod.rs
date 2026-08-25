@@ -17,6 +17,7 @@ mod mutate;
 mod normalize;
 mod owners;
 mod permissions;
+mod port_forward;
 mod read;
 mod validation;
 mod watch;
@@ -914,5 +915,25 @@ impl CatalogCache {
             let moved = self.order.remove(position);
             self.order.push(moved);
         }
+    }
+}
+
+impl KubeAdapter {
+    /// Expose the backend-owned port-forward seam over this adapter's
+    /// per-context clients.
+    ///
+    /// Clones share transport state cheaply; the kernel and server hold the
+    /// connector without owning Kubernetes types themselves.
+    pub async fn port_forward_connector(&self) -> crate::port_forward::PortForwardConnector {
+        let clients: std::collections::BTreeMap<String, kube::Client> = self
+            .clients
+            .lock()
+            .await
+            .iter()
+            .map(|(name, client)| (name.clone(), client.clone()))
+            .collect();
+        crate::port_forward::PortForwardConnector::new(std::sync::Arc::new(
+            port_forward::KubePortForwardSeam::new(clients),
+        ))
     }
 }
