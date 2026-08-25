@@ -13,10 +13,21 @@ TLS, authentication, and access control at a reverse proxy.
   placed in URLs, web assets, browser persistence, errors, or probes.
 - Config debug output substitutes `[REDACTED]`; normal telemetry records safe
   identifiers and state transitions, never credentials or raw kubeconfig.
-- Kubeconfigs that reference exec credential plugins are rejected before the
-  backend is committed; k10s never executes external credential binaries.
-  Protect supported credential material with operating-system permissions and
-  run k10s as a dedicated user.
+- Kubeconfig exec credential plugins run only on the backend host, by direct
+  argv execution without a shell. `interactiveMode: Always` is refused and
+  `IfAvailable` is forced to `Never`. The configured current context is
+  checked during Bootstrap; other plugins run lazily when selected.
+- A plugin failure disables only its context. The process and other contexts
+  stay live, the selector keeps the failed context visible, and Refresh retries
+  it. Diagnostics include exit status and best-effort sanitized stderr (control
+  characters removed, common credential forms redacted, UTF-8-safe 2 KiB
+  presentation bound); stdout, command arguments, environment, and raw process
+  output are never copied into normal errors or logs.
+- Plugin programs are trusted local executables with the user's filesystem and
+  network authority. kube-rs buffers child output and does not expose a hard
+  process-kill seam here, so k10s does not claim protection from a hostile or
+  indefinitely hung plugin. Protect kubeconfig and plugin binaries with
+  operating-system permissions and run k10s as a dedicated user.
 - The OCI image runs as `10001:10001`; mount credentials read-only and grant
   only the Kubernetes RBAC needed for intended operations.
 
