@@ -1052,11 +1052,14 @@ impl ClientState {
             REQUEST_PORT_FORWARD_LIST => {
                 let response: PortForwardListResponse = serde_json::from_value(payload.clone())
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                if response.revision < self.port_forward_revision {
+                    return Ok(());
+                }
                 // Reconstruction replaces state wholesale. Terminal rows
                 // advance the watermark but are not live controls: removing
                 // them restores Start/Retry immediately.
                 self.port_forward_sessions.clear();
-                let mut max_revision = self.port_forward_revision;
+                let mut max_revision = response.revision;
                 for session in response.sessions {
                     max_revision = max_revision.max(session.revision);
                     if !matches!(
@@ -1591,19 +1594,21 @@ impl ClientState {
                     let response: PortForwardListResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    self.port_forward_sessions.clear();
-                    let mut max_revision = self.port_forward_revision;
-                    for session in &response.sessions {
-                        max_revision = max_revision.max(session.revision);
-                        if !matches!(
-                            session.state,
-                            PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-                        ) {
-                            self.port_forward_sessions
-                                .insert(session.id.as_str().to_owned(), session.clone());
+                    if response.revision >= self.port_forward_revision {
+                        self.port_forward_sessions.clear();
+                        let mut max_revision = response.revision;
+                        for session in &response.sessions {
+                            max_revision = max_revision.max(session.revision);
+                            if !matches!(
+                                session.state,
+                                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+                            ) {
+                                self.port_forward_sessions
+                                    .insert(session.id.as_str().to_owned(), session.clone());
+                            }
                         }
+                        self.port_forward_revision = max_revision;
                     }
-                    self.port_forward_revision = max_revision;
                     QueryResult::PortForwardList(Box::new(response))
                 }
                 PendingAction::Query(Query::ResourceList(_)) => {

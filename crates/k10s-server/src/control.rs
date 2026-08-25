@@ -1655,12 +1655,13 @@ async fn dispatch_port_forward(
                     .expect("stop response serializes"),
             ),
         }),
-        PortForwardOp::List => Ok(RequestOutcome::PortForward(
-            serde_json::to_value(k10s_protocol::PortForwardListResponse {
-                sessions: manager.list().await,
-            })
-            .expect("list response serializes"),
-        )),
+        PortForwardOp::List => {
+            let (revision, sessions) = manager.list_snapshot().await;
+            Ok(RequestOutcome::PortForward(
+                serde_json::to_value(k10s_protocol::PortForwardListResponse { revision, sessions })
+                    .expect("list response serializes"),
+            ))
+        }
     }
 }
 

@@ -479,6 +479,7 @@ fn stop_and_list_payloads_round_trip() {
     assert!(round_trip(&idempotent).get("session").is_none());
 
     let list = PortForwardListResponse {
+        revision: 10,
         sessions: vec![PortForwardSession {
             id: PortForwardSessionId::try_new("pf-2").unwrap(),
             service: service_identity(),
@@ -499,6 +500,7 @@ fn stop_and_list_payloads_round_trip() {
     assert_eq!(encoded["sessions"][0]["podPort"], json!(8443));
     let decoded: PortForwardListResponse = serde_json::from_value(json!({"sessions": []})).unwrap();
     assert!(decoded.sessions.is_empty());
+    assert_eq!(decoded.revision, 0, "older peers default the watermark");
 }
 
 #[test]

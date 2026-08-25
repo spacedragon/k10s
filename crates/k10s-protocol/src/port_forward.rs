@@ -271,6 +271,10 @@ pub struct PortForwardListRequest {}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortForwardListResponse {
+    /// Manager-global revision covered by this reconstruction snapshot.
+    /// Clients reject responses older than an already-applied event.
+    #[serde(default)]
+    pub revision: u64,
     /// Every retained session owned by this server instance.
     pub sessions: Vec<PortForwardSession>,
 }

@@ -174,6 +174,7 @@ fn terminal_events_and_list_rows_advance_revision_without_remaining_live() {
         .unwrap();
 
     let failed = k10s_protocol::PortForwardListResponse {
+        revision: 4,
         sessions: vec![session("pf-terminal", PortForwardSessionState::Failed, 4)],
     };
     client
@@ -249,6 +250,7 @@ fn list_reconstruction_replaces_state_without_duplicates() {
 
     // After reconnect the server reports the same active session only.
     let listed = k10s_protocol::PortForwardListResponse {
+        revision: 5,
         sessions: vec![session("pf-1", PortForwardSessionState::Active, 5)],
     };
     client
@@ -260,6 +262,47 @@ fn list_reconstruction_replaces_state_without_duplicates() {
     let sessions = client.port_forward_sessions();
     assert_eq!(sessions.len(), 1, "no duplicate sessions after reconnect");
     assert_eq!(sessions[0].revision, 5);
+}
+
+#[test]
+fn delayed_list_cannot_resurrect_a_session_removed_by_a_newer_event() {
+    let mut client = ready_client_with_capability(true);
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_START,
+            &serde_json::to_value(k10s_protocol::PortForwardStartResponse {
+                session: session("pf-race", PortForwardSessionState::Active, 1),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    // Model a Stop event winning the race with an already in-flight List.
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_STOP,
+            &serde_json::to_value(k10s_protocol::PortForwardStopResponse {
+                session: Some(session("pf-race", PortForwardSessionState::Stopped, 2)),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(client.port_forward_sessions().is_empty());
+
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
+            &serde_json::to_value(k10s_protocol::PortForwardListResponse {
+                revision: 1,
+                sessions: vec![session("pf-race", PortForwardSessionState::Active, 1)],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        client.port_forward_sessions().is_empty(),
+        "revision-1 reconstruction must not overwrite revision-2 removal"
+    );
 }
 
 #[test]

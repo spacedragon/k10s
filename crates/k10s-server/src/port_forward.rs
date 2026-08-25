@@ -400,15 +400,29 @@ impl PortForwardManager {
     /// Terminal snapshots are retained for a bounded interval for
     /// diagnostics, then pruned here under the manager lock.
     pub async fn list(&self) -> Vec<PortForwardSession> {
+        self.list_snapshot().await.1
+    }
+
+    /// Capture retained sessions together with a manager-global watermark.
+    /// The baseline is read before the snapshot and then raised to every
+    /// included row revision, so a concurrently published event always
+    /// makes either the response include it or the response detectably stale.
+    pub async fn list_snapshot(&self) -> (u64, Vec<PortForwardSession>) {
+        let mut revision = self
+            .publication
+            .next
+            .load(Ordering::Acquire)
+            .saturating_sub(1);
         let mut state = self.state.lock().await;
         Self::prune_expired(&mut state).await;
         let mut snapshots = Vec::new();
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
+            revision = revision.max(guard.revision);
             snapshots.push(snapshot_of(&guard));
         }
         snapshots.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-        snapshots
+        (revision, snapshots)
     }
 
     /// Transition gate for context switches: holds the write side, stops
