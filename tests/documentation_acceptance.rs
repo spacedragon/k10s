@@ -85,6 +85,22 @@ fn embeddable_server_defaults_match_documentation() {
     let docs = read("docs/configuration.md");
     let expected = [
         (
+            "access_token",
+            if defaults.access_token.is_empty() {
+                "empty".to_owned()
+            } else {
+                defaults.access_token.clone()
+            },
+        ),
+        (
+            "startup_readiness_delay",
+            defaults.startup_readiness_delay.as_millis().to_string(),
+        ),
+        (
+            "probe_drain_grace",
+            defaults.probe_drain_grace.as_millis().to_string(),
+        ),
+        (
             "hello_timeout",
             format!("{} s", defaults.hello_timeout.as_secs()),
         ),
@@ -128,6 +144,7 @@ fn embeddable_server_defaults_match_documentation() {
             "drain_timeout",
             format!("{} s", defaults.drain_timeout.as_secs()),
         ),
+        ("capabilities", defaults.capabilities.join(", ")),
         (
             "max_stream_frame_size",
             format!("{} KiB", defaults.max_stream_frame_size >> 10),
