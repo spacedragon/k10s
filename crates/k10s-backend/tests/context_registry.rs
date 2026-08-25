@@ -133,13 +133,15 @@ users:
   user:
     exec:
       apiVersion: client.authentication.k8s.io/v1
-      command: {current_plugin}
+      command: /bin/sh
+      args: [{current_plugin}]
       interactiveMode: Never
 - name: fallback-user
   user:
     exec:
       apiVersion: client.authentication.k8s.io/v1
-      command: {fallback_plugin}
+      command: /bin/sh
+      args: [{fallback_plugin}]
       interactiveMode: Never
 "#,
             current_plugin = current_plugin.display(),
@@ -195,7 +197,8 @@ users:
   user:
     exec:
       apiVersion: client.authentication.k8s.io/v1
-      command: {plugin}
+      command: /bin/sh
+      args: [{plugin}]
       interactiveMode: Never
 "#,
             plugin = plugin.display(),
