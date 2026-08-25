@@ -518,6 +518,59 @@ fn outcome_unknown_stays_nonterminal_and_blocks_blind_retry() {
     ));
 }
 
+#[test]
+fn yaml_apply_recovery_refreshes_the_ticket_bound_target() {
+    let mut client = ready_client();
+    let target = deployment("yaml-target");
+    client
+        .begin_command(Command::YamlApply {
+            request: k10s_protocol::YamlApplyRequest {
+                context: CONTEXT.into(),
+                ticket_id: "ticket-yaml-target".into(),
+                target: target.clone(),
+                buffer_hash: "sha256:test".into(),
+                yaml: "kind: Deployment".into(),
+            },
+            idempotency_key: "idem-yaml-target".into(),
+        })
+        .unwrap();
+    let (accepted_id, _, _, _) = encoded_request(&mut client);
+    client
+        .apply(ServerFrame::response(
+            accepted_id,
+            k10s_protocol::OperationAccepted {
+                operation_id: OperationId::new("op-yaml-target"),
+            },
+        ))
+        .unwrap();
+
+    client.transport_lost(1_000, 9);
+    assert!(client.retry_if_due(u64::MAX).unwrap());
+    let _hello = client.take_outbound().unwrap();
+    client.apply(welcome(ResumeStatus::ResyncRequired)).unwrap();
+    let refresh_id = loop {
+        let (id, kind, _, _) = encoded_request(&mut client);
+        if kind == "operation.status" {
+            break id;
+        }
+    };
+    client
+        .apply(ServerFrame::response(
+            refresh_id,
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
+            },
+        ))
+        .unwrap();
+    let (_, kind, payload, _) = encoded_request(&mut client);
+    assert_eq!(kind, "resource.detail");
+    assert_eq!(payload["identity"], serde_json::json!(target));
+    assert!(matches!(
+        client.retry_eligibility("idem-yaml-target"),
+        k10s_ui::client::RetryEligibility::RefreshPending
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Client state: forced reconnect, resync queries, retry eligibility
 // ---------------------------------------------------------------------------
@@ -646,6 +699,27 @@ fn forced_reconnect_queries_every_nonterminal_operation_and_retries_only_after_r
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),
                 manifest: String::new(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("idem-live"),
+        k10s_ui::client::RetryEligibility::Eligible
+    ));
+
+    // A later, unrelated status response must not revoke completed target
+    // verification merely because the retained operation remains Unknown.
+    let unrelated = client
+        .begin(Query::OperationStatus(vec![OperationId::new(
+            "op-unrelated",
+        )]))
+        .unwrap();
+    let _unrelated_frame = client.take_outbound().unwrap();
+    client
+        .apply(ServerFrame::response(
+            unrelated.id().clone(),
+            k10s_protocol::OperationStatusResponse {
+                operations: Vec::new(),
             },
         ))
         .unwrap();

@@ -1439,8 +1439,9 @@ impl ClientState {
                     // key can be gated on this operation's terminal state.
                     let key_and_target = match &action {
                         PendingAction::Command(Command::YamlApply {
-                            idempotency_key, ..
-                        }) => Some((idempotency_key.clone(), None)),
+                            request,
+                            idempotency_key,
+                        }) => Some((idempotency_key.clone(), Some(request.target.clone()))),
                         PendingAction::Command(Command::Scale {
                             target,
                             idempotency_key,
@@ -1813,6 +1814,10 @@ impl ClientState {
         self.pending.clear();
         self.completed.clear();
         self.rebuilt_bootstrap = None;
+        // Request IDs belong to the lost transport generation. The guarded
+        // keys remain unverified and rebuild_server_state schedules fresh
+        // exact-target reads on the replacement transport.
+        self.target_refreshes.clear();
     }
 
     /// Whether the watch behind `id` selected `identity`.
@@ -1870,6 +1875,7 @@ impl ClientState {
             let refresh = self.begin(Query::OperationStatus(nonterminal))?;
             self.operation_refresh = Some(refresh.id().clone());
         }
+        self.queue_unverified_target_refreshes()?;
         Ok(())
     }
 
@@ -1903,21 +1909,29 @@ impl ClientState {
             })
             .cloned()
             .collect();
-        for id in unknown {
-            self.record_view(id, OperationStatus::Unknown, None);
+        for id in &unknown {
+            self.record_view(id.clone(), OperationStatus::Unknown, None);
         }
-        let unknown_ids: HashSet<OperationId> = self
-            .operations
-            .iter()
-            .filter(|(_, view)| view.status == OperationStatus::Unknown)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let unknown_ids: HashSet<OperationId> = unknown.into_iter().collect();
+        for (key, operation_id) in &self.submitted_keys {
+            if unknown_ids.contains(operation_id) {
+                self.unverified_unknown_keys.insert(key.clone());
+            }
+        }
+        self.queue_unverified_target_refreshes()
+    }
+
+    fn queue_unverified_target_refreshes(&mut self) -> Result<(), ClientError> {
         let mut targets: HashMap<ResourceIdentity, Vec<String>> = HashMap::new();
         for (key, operation_id) in &self.submitted_keys {
-            if !unknown_ids.contains(operation_id) {
+            if !self.unverified_unknown_keys.contains(key)
+                || self
+                    .operations
+                    .get(operation_id)
+                    .is_none_or(|view| view.status != OperationStatus::Unknown)
+            {
                 continue;
             }
-            self.unverified_unknown_keys.insert(key.clone());
             if let Some(target) = self.submitted_targets.get(key) {
                 targets.entry(target.clone()).or_default().push(key.clone());
             }

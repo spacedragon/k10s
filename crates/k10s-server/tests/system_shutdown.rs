@@ -169,7 +169,7 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
         client.retry_eligibility("restart-idempotency-key"),
         RetryEligibility::RefreshPending
     ));
-    let target_refresh_id = loop {
+    let lost_target_refresh_id = loop {
         let frame = client.take_outbound().expect("target refresh is queued");
         let Some(id) = frame.request_id.clone() else {
             continue;
@@ -179,6 +179,33 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
             continue;
         };
         if request.request_kind == "resource.detail" {
+            assert_eq!(request.payload["identity"], serde_json::json!(deployment()));
+            break id;
+        }
+    };
+    client.transport_lost(2_000, 23);
+    assert!(client.retry_if_due(u64::MAX).unwrap());
+    let _second_restart_hello = client.take_outbound().unwrap();
+    client
+        .apply(welcome("server-after-second-drop", ResumeStatus::Fresh))
+        .unwrap();
+    assert!(matches!(
+        client.retry_eligibility("restart-idempotency-key"),
+        RetryEligibility::RefreshPending
+    ));
+    let target_refresh_id = loop {
+        let frame = client
+            .take_outbound()
+            .expect("lost target refresh is rebuilt");
+        let Some(id) = frame.request_id.clone() else {
+            continue;
+        };
+        let payload = frame.decode_payload().unwrap();
+        let k10s_protocol::ClientPayload::Request(request) = payload else {
+            continue;
+        };
+        if request.request_kind == "resource.detail" {
+            assert_ne!(id, lost_target_refresh_id);
             assert_eq!(request.payload["identity"], serde_json::json!(deployment()));
             break id;
         }
