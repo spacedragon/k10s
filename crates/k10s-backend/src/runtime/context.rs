@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use crate::port::{AdapterError, ContextInfo};
+use crate::port::{AdapterError, BackendError, ContextAvailability, ContextInfo};
 
 /// Committed registry of safe context summaries exposed at bootstrap.
 ///
@@ -17,6 +17,7 @@ use crate::port::{AdapterError, ContextInfo};
 #[derive(Debug, Clone)]
 pub struct ContextRegistry {
     contexts: Vec<ContextInfo>,
+    generation: u64,
 }
 
 impl ContextRegistry {
@@ -50,6 +51,7 @@ impl ContextRegistry {
 
         Ok(Self {
             contexts: summaries,
+            generation: 0,
         })
     }
 
@@ -71,6 +73,77 @@ impl ContextRegistry {
         self.contexts.iter().find(|context| context.name == name)
     }
 
+    /// Clone a generation-tagged snapshot for work performed without holding
+    /// the registry lock.
+    #[must_use]
+    pub fn snapshot(&self) -> (u64, Vec<ContextInfo>) {
+        (self.generation, self.contexts.clone())
+    }
+
+    /// Commit a successful credential probe when its snapshot is still current.
+    pub fn mark_available(&mut self, generation: u64, name: &str) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(context) = self
+            .contexts
+            .iter_mut()
+            .find(|context| context.name == name)
+        else {
+            return false;
+        };
+        context.availability = ContextAvailability::Available;
+        context.unavailable_reason = None;
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    /// Commit a failed exec credential probe when its snapshot is still current.
+    pub fn mark_unavailable(&mut self, generation: u64, name: &str, reason: String) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(context) = self
+            .contexts
+            .iter_mut()
+            .find(|context| context.name == name)
+        else {
+            return false;
+        };
+        context.availability = ContextAvailability::Unavailable;
+        context.unavailable_reason = Some(reason);
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    /// Keep an available current context or atomically select the first one in
+    /// stable kubeconfig order. If none is available, clear the current marker.
+    pub fn choose_available_fallback(&mut self) -> Option<String> {
+        let selected = self
+            .contexts
+            .iter()
+            .find(|context| {
+                context.is_current && context.availability == ContextAvailability::Available
+            })
+            .or_else(|| {
+                self.contexts
+                    .iter()
+                    .find(|context| context.availability == ContextAvailability::Available)
+            })
+            .map(|context| context.name.clone());
+        let changed = self
+            .contexts
+            .iter()
+            .any(|context| context.is_current != (selected.as_deref() == Some(&context.name)));
+        for context in &mut self.contexts {
+            context.is_current = selected.as_deref() == Some(context.name.as_str());
+        }
+        if changed {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        selected
+    }
+
     /// Prepare a candidate switch of the current context toward `to`.
     ///
     /// Validation-only phase of the same prepare-then-commit protocol the
@@ -78,10 +151,15 @@ impl ContextRegistry {
     /// before anything observable moves, and callers still owe the commit a
     /// successful destination read-path validation. The returned token is
     /// inert until [`Self::commit_switch`] installs it.
-    pub fn prepare_switch(&self, to: &str) -> Result<PreparedSwitch, AdapterError> {
-        if self.find(to).is_none() {
-            return Err(AdapterError::InvalidContextSummaries {
-                detail: format!("unknown destination context '{to}'"),
+    pub fn prepare_switch(&self, to: &str) -> Result<PreparedSwitch, BackendError> {
+        let destination = self.find(to).ok_or(BackendError::NotFound)?;
+        if destination.availability == ContextAvailability::Unavailable {
+            return Err(BackendError::ContextUnavailable {
+                context: destination.name.clone(),
+                reason: destination
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "credential plugin is unavailable".into()),
             });
         }
         Ok(PreparedSwitch {

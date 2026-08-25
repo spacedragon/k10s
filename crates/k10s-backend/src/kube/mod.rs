@@ -691,8 +691,7 @@ impl KubeAdapter {
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .prepare_switch(&to)
-            .map_err(|_| BackendError::NotFound)?;
+            .prepare_switch(&to)?;
         // Prepare (cluster): validate the destination read path with live
         // traffic — a fresh cached catalog proves nothing about right now.
         self.discover_catalog(&to).await?;

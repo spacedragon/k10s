@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use k10s_backend::{
-    AdapterError, ContextInfo, ContextRegistry, KubeAdapter, KubernetesAccess, Query, QueryResult,
+    AdapterError, BackendError, ContextAvailability, ContextInfo, ContextRegistry, KubeAdapter,
+    KubernetesAccess, Query, QueryResult,
 };
 
 /// Distinctive markers embedded in fixture kubeconfigs so redaction failures
@@ -337,4 +338,83 @@ fn prepare_refuses_ambiguous_or_corrupt_registries() {
         ContextRegistry::prepare(two_current),
         Err(AdapterError::InvalidContextSummaries { .. })
     ));
+}
+
+fn availability_registry() -> ContextRegistry {
+    ContextRegistry::prepare(vec![
+        ContextInfo::available("first", "cluster-a", None, true),
+        ContextInfo {
+            availability: ContextAvailability::Unknown,
+            ..ContextInfo::available("second", "cluster-b", None, false)
+        },
+        ContextInfo::available("third", "cluster-c", None, false),
+    ])
+    .expect("availability registry prepares")
+}
+
+#[test]
+fn availability_transitions_are_generation_checked_and_normalized() {
+    let mut registry = availability_registry();
+    let (generation, snapshot) = registry.snapshot();
+    assert_eq!(generation, 0);
+    assert_eq!(snapshot.len(), 3);
+
+    assert!(registry.mark_unavailable(generation, "first", "plugin failed".into()));
+    let (next_generation, snapshot) = registry.snapshot();
+    assert_eq!(next_generation, generation + 1);
+    assert_eq!(snapshot[0].availability, ContextAvailability::Unavailable);
+    assert_eq!(
+        snapshot[0].unavailable_reason.as_deref(),
+        Some("plugin failed")
+    );
+
+    assert!(!registry.mark_available(generation, "first"));
+    assert!(registry.mark_available(next_generation, "first"));
+    let (_, snapshot) = registry.snapshot();
+    assert_eq!(snapshot[0].availability, ContextAvailability::Available);
+    assert_eq!(snapshot[0].unavailable_reason, None);
+}
+
+#[test]
+fn unavailable_switch_is_typed_and_available_fallback_is_stable() {
+    let mut registry = availability_registry();
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "first", "auth denied".into()));
+
+    assert!(matches!(
+        registry.prepare_switch("first"),
+        Err(BackendError::ContextUnavailable { context, reason })
+            if context == "first" && reason == "auth denied"
+    ));
+
+    assert_eq!(
+        registry.choose_available_fallback().as_deref(),
+        Some("third")
+    );
+    assert_eq!(
+        registry
+            .contexts()
+            .iter()
+            .find(|context| context.is_current)
+            .map(|context| context.name.as_str()),
+        Some("third")
+    );
+    assert_eq!(registry.context_names(), ["first", "second", "third"]);
+}
+
+#[test]
+fn fallback_clears_current_when_no_context_is_available() {
+    let mut registry = availability_registry();
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "first", "failed".into()));
+    let (generation, _) = registry.snapshot();
+    assert!(registry.mark_unavailable(generation, "third", "failed".into()));
+
+    assert_eq!(registry.choose_available_fallback(), None);
+    assert!(
+        registry
+            .contexts()
+            .iter()
+            .all(|context| !context.is_current)
+    );
 }

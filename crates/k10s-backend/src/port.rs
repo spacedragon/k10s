@@ -666,6 +666,9 @@ pub enum BackendError {
     /// The target changed since validation, or the ticket is stale,
     /// consumed, or tampered. Safe reason attached.
     Conflict(String),
+    /// The context's exec credential helper failed. The reason is already
+    /// sanitized and safe for operator-facing diagnostics.
+    ContextUnavailable { context: String, reason: String },
     /// The operation was denied by authorization policy (RBAC).
     Forbidden,
     /// The request timed out.
@@ -701,6 +704,9 @@ impl std::fmt::Display for BackendError {
             Self::Unsupported { capability } => write!(f, "unsupported capability: {capability}"),
             Self::NotFound => write!(f, "context or resource not found"),
             Self::Conflict(reason) => write!(f, "conflict: {reason}"),
+            Self::ContextUnavailable { context, reason } => {
+                write!(f, "context '{context}' is unavailable: {reason}")
+            }
             Self::Forbidden => write!(f, "access denied"),
             Self::Timeout => write!(f, "request timed out"),
             Self::Cancelled => write!(f, "request was cancelled"),
