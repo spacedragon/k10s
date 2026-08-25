@@ -1,15 +1,44 @@
 name: Release packaging
 
+# Two-phase release pipeline. Phase 1 (the `prepare` job) runs on `main` and
+# auto-bumps the workspace/packager version, then pushes the bump commit and a
+# `vX.Y.Z` tag. GitHub suppresses workflow runs triggered by GITHUB_TOKEN
+# pushes, so the tag push alone cannot start phase 2: `prepare` explicitly
+# re-dispatches this workflow at the tag ref (workflow_dispatch is exempt from
+# the suppression rule). Phase 2 (the platform jobs) builds every artifact and
+# `publish` creates the GitHub release. A maintainer-pushed tag also starts
+# phase 2. Manual `workflow_dispatch` without a `bump` choice keeps the pre-tag
+# smoke build; with a `bump` choice it runs phase 1 only. Queued `main` runs
+# sync to the current main tip before bumping, and a push that only re-delivers
+# an already-cut release commit is a no-op (or completes it if the tag is
+# missing).
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: >-
+          Semver bump to apply before releasing. none (default) runs the
+          pre-tag smoke build only; patch|minor|major bumps, tags, and releases.
+        type: choice
+        required: false
+        default: none
+        options:
+          - none
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  # Main pushes must serialize: a queued run re-reads the current version and
+  # bumps whatever is now on main, so releases cannot race each other.
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
   TRUNK_VERSION: 0.21.14
@@ -17,8 +46,158 @@ env:
   CARGO_DIST_VERSION: 0.32.0
 
 jobs:
+  prepare:
+    name: Bump version and tag
+    # Runs for push-to-main auto releases and manual dispatch with a bump
+    # choice. The release commit pushed back to main is detected in the bump
+    # step (git subject check) and becomes a no-op only when the release was
+    # actually completed (tag AND packaging run present); otherwise the
+    # interrupted release is completed instead of being lost.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch' && github.event.inputs.bump != null && github.event.inputs.bump != 'none')
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { clean: true }
+      - name: Sync to current main tip
+        # Runs for the same ref are serialized by the concurrency group, but a
+        # run that waited in the queue checked out the commit that triggered
+        # it. Release from the CURRENT main instead, so a queued run bumps the
+        # version that is actually on main (and sees any release commit a
+        # previous run already pushed).
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      - name: Bump workspace and packager versions
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Recovery applies to push events and to re-runs of a manual bump:
+          # a rerun must complete the interrupted release, while a brand-new
+          # dispatch (run_attempt 1) may intentionally cut the next release.
+          recovery=0
+          if [[ "${{ github.event_name }}" == push ]]; then recovery=1; fi
+          if [[ "${{ github.event_name }}" == workflow_dispatch && "${{ github.run_attempt }}" -gt 1 ]]; then recovery=1; fi
+          if [ "$recovery" -eq 1 ]; then
+            subject="$(git log -1 --format=%s)"
+            if [[ "$subject" == "chore(release):"* ]]; then
+              tag="v${subject#chore(release): v}"
+              if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+                # The tag alone proves nothing: phase 2 only starts through the
+                # explicit dispatch, which may have failed right after the tag
+                # push. Treat the release as complete only when a packaging run
+                # exists at this tag. (gh api exits 0 whenever the request
+                # succeeds, so compare the count explicitly.)
+                count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=${tag}&per_page=1" --jq '.total_count' 2>/dev/null || true)"
+                if [ "${count:-0}" -gt 0 ]; then
+                  echo "Release ${tag} already cut and packaged; this push is a no-op."
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "Tag ${tag} exists but no packaging run started; completing the release."
+              else
+                echo "Release commit found but ${tag} is missing; completing the release."
+              fi
+              echo "finish=true" >> "$GITHUB_OUTPUT"
+              echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          bump="${{ github.event.inputs.bump }}"
+          if [[ "${{ github.event_name }}" == push ]]; then bump=patch; fi
+          current="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          IFS=. read -r major minor patch <<<"$current"
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "unsupported bump: $bump" >&2; exit 1 ;;
+          esac
+          next="${major}.${minor}.${patch}"
+          # Bump the workspace version and every internal path-dependency
+          # requirement pinned to it (k10s-server pins its k10s-* deps).
+          sed -i "s/^version = \"${current}\"$/version = \"${next}\"/" Cargo.toml
+          sed -i "/k10s-/s/version = \"${current}\"/version = \"${next}\"/g" crates/*/Cargo.toml apps/*/Cargo.toml
+          sed -i "s/^version = \"${current}\"$/version = \"${next}\"/" Packager.toml
+          # Refresh the workspace-member versions in Cargo.lock; every CI and
+          # release build is --locked.
+          cargo metadata --format-version 1 >/dev/null
+          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)" = "$next"
+          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Packager.toml)" = "$next"
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "Bumped ${current} -> ${next}"
+      - name: Commit version bump, tag, and dispatch packaging
+        if: steps.bump.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ "${{ steps.bump.outputs.finish }}" == 'true' ]]; then
+            # A previous run pushed the bump commit but the release was never
+            # completed (tag missing, or tag present without a packaging run).
+            echo "Completing interrupted release v${{ steps.bump.outputs.version }}"
+            if ! git rev-parse -q --verify "refs/tags/v${{ steps.bump.outputs.version }}" >/dev/null 2>&1; then
+              git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}"
+              git push origin "v${{ steps.bump.outputs.version }}"
+            fi
+          else
+            # Stage every modified manifest: a minor/major bump also rewrites
+            # the pinned k10s-* requirements in crates/k10s-server/Cargo.toml.
+            git add -u
+            git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
+            # Rebase onto main if a commit landed while we were working; the
+            # serialized concurrency group makes this a rare fallback. Track
+            # success explicitly: the loop must end in a failed push if main
+            # keeps rejecting the token, never in a silent partial release.
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push origin main; then pushed=1; break; fi
+              git pull --rebase origin main
+            done
+            if [ "$pushed" -ne 1 ]; then
+              echo "failed to push the version bump to main after 3 attempts" >&2
+              exit 1
+            fi
+            git tag -a "v${{ steps.bump.outputs.version }}" -m "k10s v${{ steps.bump.outputs.version }}"
+            git push origin "v${{ steps.bump.outputs.version }}"
+          fi
+      - name: Start packaging run at the release tag
+        if: steps.bump.outputs.skip != 'true'
+        # GITHUB_TOKEN pushes never start new workflow runs, so the tag push
+        # above cannot trigger phase 2 by itself. Re-dispatch this workflow at
+        # the tag ref instead: workflow_dispatch is exempt from the suppression
+        # rule, and the tag-ref run skips `prepare` and runs the platform jobs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v${{ steps.bump.outputs.version }}"
+          echo "Dispatched packaging run at v${{ steps.bump.outputs.version }}"
+
   linux:
     name: Package Linux and OCI
+    # Platform packaging runs for a release tag or a manual pre-tag smoke
+    # (dispatch without a bump choice). Push-to-main runs only bump and tag.
+    if: >-
+      github.ref_type == 'tag' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.bump == null || github.event.inputs.bump == 'none'))
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +302,10 @@ jobs:
 
   windows:
     name: Package Windows
+    if: >-
+      github.ref_type == 'tag' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.bump == null || github.event.inputs.bump == 'none'))
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -241,6 +424,10 @@ jobs:
 
   macos:
     name: Package macOS
+    if: >-
+      github.ref_type == 'tag' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.bump == null || github.event.inputs.bump == 'none'))
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4

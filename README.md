@@ -193,16 +193,31 @@ error payloads or probe bodies.
 - **Web foundation** — pinned Trunk 0.21.14 release build plus the Chromium
   Playwright smoke against the standalone server
 - **Native platform smoke** — release-mode server/desktop builds and loopback
-  launch probes on registered Windows/macOS self-hosted runners
+  launch probes on Windows and macOS hosted runners
 
 ## Releasing
 
 Release builds are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-on self-hosted native runners. The fixed build order is Trunk 0.21.14, the
-locked release workspace, cargo-packager 0.11.8, cargo-dist 0.32.0, then the
-OCI image. Desktop outputs are `.deb` + `.AppImage`, `.msi` + NSIS `.exe`, and
+on hosted runners. The fixed build order is Trunk 0.21.14, the locked release
+workspace, cargo-packager 0.11.8, cargo-dist 0.32.0, then the OCI image.
+Desktop outputs are `.deb` + `.AppImage`, `.msi` + NSIS `.exe`, and
 `.app` + `.dmg`; the standalone server is a per-target `.tar.xz`/`.zip` with
 the same web bundle embedded, plus a non-root OCI image.
+
+Every push to `main` cuts a patch release automatically: the workflow bumps the
+matching `version` in `Cargo.toml`, `Packager.toml`, and `Cargo.lock`, commits
+it as `chore(release): vX.Y.Z`, pushes the commit and a `vX.Y.Z` tag, and then
+re-dispatches the Release workflow at that tag (GitHub suppresses workflow runs
+triggered by `GITHUB_TOKEN` pushes, so the tag push cannot start the packaging
+phase by itself). The packaging run builds every platform and publishes the
+GitHub release with generated release notes. The release commit is recognized
+by its `chore(release):` subject and never triggers another bump, so the
+pipeline cannot re-trigger itself.
+
+To cut a release manually — e.g. a minor or major bump — run the Release
+workflow from the Actions tab with `bump` set to `patch`, `minor`, or `major`
+on branch `main`. The first run bumps and tags, then re-dispatches the workflow
+at the new tag; the packaging run builds and publishes.
 
 Local release verification uses the same order:
 
@@ -224,19 +239,7 @@ the runner keychain/environment. Pull requests exercise source, web, native
 build, and loopback launch gates; installer/archive creation and OCI packaging
 run only for a release tag or an explicit manual release-pipeline smoke test.
 
-To cut a release:
-
-1. Bump the matching `version` in `Cargo.toml` and `Packager.toml`, then merge
-   the change (CI on `main` must stay green).
-2. Tag exactly `v<version>` (the workflow fails if the tag does not match the workspace version):
-
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-
-3. Monitor the Release workflow; the release is created automatically with generated release notes.
-
-A manual `workflow_dispatch` run of the same workflow builds all platform
-artifacts without publishing. Run it before tagging whenever packaging metadata,
-the container definition, release tooling, or release workflow changes.
+A manual `workflow_dispatch` run with `bump` unset (or `none`) builds all
+platform artifacts without publishing. Run it before releasing whenever
+packaging metadata, the container definition, release tooling, or release
+workflow changes.
