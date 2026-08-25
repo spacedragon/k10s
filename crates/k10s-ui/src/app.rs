@@ -102,6 +102,7 @@ pub struct K10sApp {
     /// therefore stay queued until [`WsEvent::Opened`] is observed.
     transport_open: bool,
     bootstrap: Option<PendingRequest>,
+    bootstrap_subscription: Option<LiveSubscription>,
     infrastructure_request: Option<PendingRequest>,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
@@ -171,6 +172,7 @@ impl std::fmt::Debug for K10sApp {
             .field("connection_active", &self.connection.is_some())
             .field("transport_open", &self.transport_open)
             .field("bootstrap", &self.bootstrap)
+            .field("bootstrap_subscription", &self.bootstrap_subscription)
             .field("infrastructure_request", &self.infrastructure_request)
             .field(
                 "infrastructure_subscription",
@@ -213,6 +215,7 @@ impl K10sApp {
             connection: Some(connection),
             transport_open: false,
             bootstrap: None,
+            bootstrap_subscription: None,
             infrastructure_request: None,
             infrastructure_subscription: None,
             infrastructure_context: None,
@@ -769,6 +772,13 @@ impl K10sApp {
                             AppEventError::Terminal("bootstrap omitted server identity".to_owned())
                         })?
                         .instance_id;
+                    if self.bootstrap_subscription.is_none() {
+                        self.bootstrap_subscription = Some(
+                            self.client
+                                .subscribe_bootstrap_status()
+                                .map_err(|error| AppEventError::Terminal(error.to_string()))?,
+                        );
+                    }
                     let context_names: Vec<String> = response
                         .contexts
                         .iter()
@@ -2759,6 +2769,60 @@ mod tests {
         assert_eq!(
             failed.unavailable_reason.as_deref(),
             Some("runtime plugin denied")
+        );
+        assert!(app.bootstrap.is_some(), "authoritative refresh is queued");
+    }
+
+    #[test]
+    fn background_context_unavailable_reconciles_from_bootstrap_status() {
+        let (mut app, _) = ready_app();
+        let subscription_id = app
+            .bootstrap_subscription
+            .as_ref()
+            .expect("ready app subscribes to availability transitions")
+            .id()
+            .clone();
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(
+                ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "context unavailable",
+                    Retryability::AfterRefresh,
+                    ErrorScope::Subscription,
+                    "bootstrap-status",
+                )
+                .with_details(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": "dev-local",
+                    "reason": "background plugin denied",
+                })),
+            )
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 150, 0)
+            .expect("background auth failure stays nonterminal");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(app.connection.is_some());
+        let AppView::Ready { contexts, .. } = app.view() else {
+            panic!("the ready workspace remains visible")
+        };
+        let failed = contexts
+            .iter()
+            .find(|context| context.name == "dev-local")
+            .expect("active context remains visible");
+        assert_eq!(
+            failed.availability,
+            k10s_protocol::ContextAvailability::Unavailable
+        );
+        assert_eq!(
+            failed.unavailable_reason.as_deref(),
+            Some("background plugin denied")
         );
         assert!(app.bootstrap.is_some(), "authoritative refresh is queued");
     }

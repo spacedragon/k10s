@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use kube::client::Body;
 use tower::{BoxError, Layer, Service};
 
-use crate::port::ContextAvailability;
+use crate::port::{BackendEvent, ContextAvailability};
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
 
@@ -24,6 +24,8 @@ pub(super) struct AuthObserverLayer {
     watches: ClusterWatches,
     metrics: ClusterMetrics,
     uses_exec_plugin: bool,
+    gate: Arc<tokio::sync::Mutex<()>>,
+    availability_events: tokio::sync::broadcast::Sender<BackendEvent>,
 }
 
 impl AuthObserverLayer {
@@ -34,6 +36,7 @@ impl AuthObserverLayer {
         watches: ClusterWatches,
         metrics: ClusterMetrics,
         uses_exec_plugin: bool,
+        availability_events: tokio::sync::broadcast::Sender<BackendEvent>,
     ) -> Self {
         Self {
             context: Arc::from(context),
@@ -42,6 +45,8 @@ impl AuthObserverLayer {
             watches,
             metrics,
             uses_exec_plugin,
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            availability_events,
         }
     }
 }
@@ -51,26 +56,30 @@ impl<S> Layer<S> for AuthObserverLayer {
 
     fn layer(&self, inner: S) -> Self::Service {
         AuthObserver {
-            inner,
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
             context: Arc::clone(&self.context),
             registry: Arc::clone(&self.registry),
             clients: Arc::clone(&self.clients),
             watches: self.watches.clone(),
             metrics: self.metrics.clone(),
             uses_exec_plugin: self.uses_exec_plugin,
+            gate: Arc::clone(&self.gate),
+            availability_events: self.availability_events.clone(),
         }
     }
 }
 
 #[derive(Clone)]
 pub(super) struct AuthObserver<S> {
-    inner: S,
+    inner: Arc<tokio::sync::Mutex<S>>,
     context: Arc<str>,
     registry: Arc<StdMutex<ContextRegistry>>,
     clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, kube::Client>>>,
     watches: ClusterWatches,
     metrics: ClusterMetrics,
     uses_exec_plugin: bool,
+    gate: Arc<tokio::sync::Mutex<()>>,
+    availability_events: tokio::sync::broadcast::Sender<BackendEvent>,
 }
 
 impl<S> Service<http::Request<Body>> for AuthObserver<S>
@@ -84,19 +93,59 @@ where
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Readiness is polled again after acquiring the async per-service
+        // guard in `call`; this keeps a non-Clone boxed kube service safe to
+        // share across the cloned outer clients.
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let future = self.inner.call(request);
+        let inner = Arc::clone(&self.inner);
         let context = Arc::clone(&self.context);
         let registry = Arc::clone(&self.registry);
         let clients = Arc::clone(&self.clients);
         let watches = self.watches.clone();
         let metrics = self.metrics.clone();
         let uses_exec_plugin = self.uses_exec_plugin;
+        let gate = Arc::clone(&self.gate);
+        let availability_events = self.availability_events.clone();
         Box::pin(async move {
+            // kube-rs refreshes exec credentials inside the request future.
+            // Serialize that boundary for this client so the first failure can
+            // poison shared availability before another retained clone starts
+            // the same credential helper.
+            let _gate = if uses_exec_plugin {
+                Some(gate.lock().await)
+            } else {
+                None
+            };
+            if uses_exec_plugin {
+                let unavailable = registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .find(&context)
+                    .filter(|entry| entry.availability == ContextAvailability::Unavailable)
+                    .map(|entry| {
+                        entry
+                            .unavailable_reason
+                            .clone()
+                            .unwrap_or_else(|| "credential plugin is unavailable".into())
+                    });
+                if let Some(reason) = unavailable {
+                    return Err(Box::new(ContextUnavailableMarker {
+                        context: context.to_string(),
+                        reason,
+                    }) as BoxError);
+                }
+            }
+            let future = {
+                let mut inner = inner.lock().await;
+                std::future::poll_fn(|cx| inner.poll_ready(cx))
+                    .await
+                    .map_err(Into::into)?;
+                inner.call(request)
+            };
             match future.await.map_err(Into::into) {
                 Ok(response) => Ok(response),
                 Err(error) => {
@@ -129,6 +178,10 @@ where
                     if transitioned {
                         watches.retire_context(&context);
                         metrics.retire_context(&context);
+                        let _ = availability_events.send(BackendEvent::ContextUnavailable {
+                            context: context.to_string(),
+                            reason: reason.clone(),
+                        });
                         tracing::warn!(
                             context = %context,
                             reason = %reason,
@@ -164,6 +217,7 @@ impl std::error::Error for ContextUnavailableMarker {}
 mod tests {
     use std::process::{ExitStatus, Output};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tower::{Layer as _, ServiceExt as _, service_fn};
@@ -261,6 +315,7 @@ mod tests {
                 },
             }))
         });
+        let (availability_events, mut availability_receiver) = tokio::sync::broadcast::channel(4);
         let observed = AuthObserverLayer::new(
             "active",
             Arc::clone(&registry),
@@ -268,6 +323,7 @@ mod tests {
             watches.clone(),
             metrics.clone(),
             true,
+            availability_events,
         )
         .layer(service);
 
@@ -310,5 +366,86 @@ mod tests {
             0,
             "runtime failure retires retained metrics clients"
         );
+        let BackendEvent::ContextUnavailable { context, reason } = availability_receiver
+            .try_recv()
+            .expect("transition publishes")
+        else {
+            panic!("bootstrap-status receives a context transition");
+        };
+        assert_eq!(context, "active");
+        assert!(reason.contains("access denied"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn concurrent_refresh_failure_executes_inner_service_once() {
+        let registry = Arc::new(StdMutex::new(
+            ContextRegistry::prepare(vec![ContextInfo::available(
+                "active",
+                "cluster-a",
+                None,
+                true,
+            )])
+            .expect("registry prepares"),
+        ));
+        let clients = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let calls = Arc::clone(&calls);
+            move |_: http::Request<Body>| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    Err::<http::Response<Body>, BoxError>(Box::new(
+                        kube::client::AuthError::AuthExecRun {
+                            cmd: "fixture".into(),
+                            status: failed_status(),
+                            out: Output {
+                                status: failed_status(),
+                                stdout: Vec::new(),
+                                stderr: b"burst denied".to_vec(),
+                            },
+                        },
+                    ))
+                }
+            }
+        });
+        let (availability_events, mut availability_receiver) = tokio::sync::broadcast::channel(4);
+        let observed = AuthObserverLayer::new(
+            "active",
+            Arc::clone(&registry),
+            clients,
+            ClusterWatches::default(),
+            ClusterMetrics::default(),
+            true,
+            availability_events,
+        )
+        .layer(service);
+
+        let requests = (0..16).map(|_| {
+            let service = observed.clone();
+            async move {
+                service
+                    .oneshot(
+                        http::Request::builder()
+                            .uri("https://cluster.invalid/api")
+                            .body(Body::empty())
+                            .expect("request builds"),
+                    )
+                    .await
+                    .expect_err("poisoned context rejects every caller")
+            }
+        });
+        for error in futures_util::future::join_all(requests).await {
+            assert!(error.downcast_ref::<ContextUnavailableMarker>().is_some());
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            availability_receiver.try_recv(),
+            Ok(BackendEvent::ContextUnavailable { .. })
+        ));
+        assert!(availability_receiver.try_recv().is_err());
     }
 }

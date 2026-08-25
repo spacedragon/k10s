@@ -112,6 +112,9 @@ pub struct KubeAdapter {
     /// context, started only by active consumer requests and exited after a
     /// linger window without them.
     metrics: ClusterMetrics,
+    /// Background availability transitions consumed by bootstrap-status
+    /// subscriptions on every connected frontend.
+    availability_events: tokio::sync::broadcast::Sender<crate::port::BackendEvent>,
     /// Serializes complete switch transactions: prepare, live destination
     /// validation, commit, and retirement run under one guard so overlapping
     /// switches cannot interleave their phases or retire the wrong runtime.
@@ -159,6 +162,7 @@ impl KubeAdapter {
         // the parsed kube-rs config as the lazy per-context client source.
         let (prepared, kubeconfig) = config::load_with_source(path)?;
         // Commit: install the complete registry and shared runtime state.
+        let (availability_events, _) = tokio::sync::broadcast::channel(32);
         Ok(Self {
             registry: Arc::new(StdMutex::new(ContextRegistry::prepare(prepared)?)),
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -167,6 +171,7 @@ impl KubeAdapter {
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
+            availability_events,
             switch_lock: tokio::sync::Mutex::new(()),
             refresh_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
@@ -212,6 +217,7 @@ impl KubeAdapter {
             });
         }
 
+        let (availability_events, _) = tokio::sync::broadcast::channel(32);
         Ok(Self {
             registry: Arc::new(StdMutex::new(registry)),
             clients: Arc::new(tokio::sync::Mutex::new(client_map)),
@@ -220,6 +226,7 @@ impl KubeAdapter {
             catalogs: StdMutex::new(CatalogCache::new()),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
+            availability_events,
             switch_lock: tokio::sync::Mutex::new(()),
             refresh_lock: tokio::sync::Mutex::new(()),
             operations: crate::operation::OperationEngine::default(),
@@ -348,8 +355,10 @@ impl KubernetesAccess for KubeAdapter {
     > {
         Box::pin(async move {
             match req {
-                // Same protocol shape as the fake adapter's bootstrap status.
-                Subscribe::BootstrapStatus => Ok(SubscriptionHandle::new("bootstrap-status")),
+                Subscribe::BootstrapStatus => Ok(SubscriptionHandle::with_events(
+                    "bootstrap-status",
+                    self.availability_events.subscribe(),
+                )),
                 Subscribe::ResourceWatch {
                     context,
                     gvk,
@@ -922,6 +931,7 @@ impl KubeAdapter {
                 self.watches.clone(),
                 self.metrics.clone(),
                 uses_exec_plugin,
+                self.availability_events.clone(),
             )),
             Err(error) => {
                 if let Some(reason) = auth::classify_kube_error(&error, uses_exec_plugin) {

@@ -592,6 +592,15 @@ pub struct MetricsSample {
 /// One event delivered on a backend subscription stream.
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    /// One context became unavailable after a background credential refresh.
+    /// Bootstrap-status subscribers use this to reconcile without waiting for
+    /// an unrelated foreground request to observe the same failure.
+    ContextUnavailable {
+        /// Safe kubeconfig context name.
+        context: String,
+        /// Sanitized operator-facing failure reason.
+        reason: String,
+    },
     /// The full current snapshot for the watched selector.
     Snapshot(ResourceListData),
     /// One object changed; carries the full updated row.

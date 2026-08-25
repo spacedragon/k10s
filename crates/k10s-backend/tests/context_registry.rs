@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use k10s_backend::{
-    AdapterError, BackendError, ContextAvailability, ContextInfo, ContextRegistry, KubeAdapter,
-    KubernetesAccess, Query, QueryResult,
+    AdapterError, BackendError, BackendEvent, ContextAvailability, ContextInfo, ContextRegistry,
+    KubeAdapter, KubernetesAccess, Query, QueryResult, Subscribe,
 };
 
 /// Distinctive markers embedded in fixture kubeconfigs so redaction failures
@@ -428,29 +428,42 @@ async fn expired_exec_credential_failure_disables_once() {
     assert_eq!(contexts[0].availability, ContextAvailability::Available);
     let initial_invocations = invocation_count(&counter);
     assert!(initial_invocations > 0);
+    let mut status = adapter
+        .subscribe(Subscribe::BootstrapStatus)
+        .await
+        .expect("bootstrap status subscribes");
+    let mut status_events = status.take_events().expect("status carries transitions");
     std::fs::write(&return_nonrefreshable, "nonrefreshable").expect("fixture mode changes");
 
-    let first = adapter
-        .query(Query::ResourceTypes {
+    let burst = futures_util::future::join_all((0..16).map(|_| {
+        adapter.query(Query::ResourceTypes {
             context: "expiring".into(),
         })
-        .await
-        .expect_err("unrefreshable exec response disables the context");
-    assert!(matches!(
-        first,
-        BackendError::ContextUnavailable { ref context, .. } if context == "expiring"
-    ));
+    }))
+    .await;
+    assert!(burst.into_iter().all(|result| matches!(
+        result,
+        Err(BackendError::ContextUnavailable { ref context, .. }) if context == "expiring"
+    )));
     let failed_invocations = invocation_count(&counter);
     assert_eq!(failed_invocations, initial_invocations + 1);
+    assert!(matches!(
+        status_events.try_recv(),
+        Ok(BackendEvent::ContextUnavailable { ref context, .. }) if context == "expiring"
+    ));
+    assert!(
+        status_events.try_recv().is_err(),
+        "transition publishes once"
+    );
 
-    let second = adapter
+    let later = adapter
         .query(Query::ResourceTypes {
             context: "expiring".into(),
         })
         .await
         .expect_err("later requests are blocked without rerunning the plugin");
     assert!(matches!(
-        second,
+        later,
         BackendError::ContextUnavailable { ref context, .. } if context == "expiring"
     ));
     assert_eq!(invocation_count(&counter), failed_invocations);

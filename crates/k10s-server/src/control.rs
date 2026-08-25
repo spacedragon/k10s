@@ -1404,6 +1404,27 @@ async fn stream_backend_events(
             event = events.recv() => event,
         };
         match event {
+            Ok(BackendEvent::ContextUnavailable { context, reason }) => {
+                let message = format!("context '{context}' is unavailable: {reason}");
+                let details = Some(serde_json::json!({
+                    "kind": "contextUnavailable",
+                    "context": context,
+                    "reason": reason,
+                }));
+                if send_error_with(
+                    outbound,
+                    ErrorTarget::Subscription(subscription_id.clone()),
+                    ErrorCode::Conflict,
+                    message,
+                    Retryability::AfterRefresh,
+                    details,
+                )
+                .is_err()
+                {
+                    overload_close(outbound);
+                    break;
+                }
+            }
             Ok(BackendEvent::Snapshot(data)) => {
                 if stream_snapshot(
                     outbound,
@@ -2256,6 +2277,59 @@ mod tests {
                 .expect("pending response and sequenced resync apply in wire order");
         }
         assert!(client.server_state_invalid());
+    }
+
+    #[tokio::test]
+    async fn background_context_failure_becomes_a_structured_subscription_error() {
+        let scheduler = Scheduler::new(8, 2);
+        let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
+        let subscription_id = SubscriptionId::new("bootstrap-status-1");
+        let counter = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        let recovery = WatchRecovery::new();
+        let generation = recovery.register();
+        let (sender, receiver) = tokio::sync::broadcast::channel(4);
+        sender
+            .send(BackendEvent::ContextUnavailable {
+                context: "broken".into(),
+                reason: "credential plugin denied".into(),
+            })
+            .expect("status subscriber is active");
+        drop(sender);
+
+        stream_backend_events(
+            &scheduler,
+            &kernel,
+            &subscription_id,
+            Some(receiver),
+            &counter,
+            16,
+            &cancel,
+            generation,
+        )
+        .await;
+
+        let frames = drain_frames(&scheduler).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, ServerKind::Error);
+        assert_eq!(frames[0].subscription_id.as_ref(), Some(&subscription_id));
+        let k10s_protocol::ServerPayload::Error(error) = frames[0]
+            .clone()
+            .decode_payload()
+            .expect("error frame decodes")
+        else {
+            panic!("availability transition is an error frame");
+        };
+        assert_eq!(error.scope, ErrorScope::Subscription);
+        assert_eq!(error.retryability, Retryability::AfterRefresh);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({
+                "kind": "contextUnavailable",
+                "context": "broken",
+                "reason": "credential plugin denied",
+            }))
+        );
     }
 
     #[tokio::test]
