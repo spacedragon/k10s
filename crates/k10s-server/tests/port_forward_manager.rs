@@ -30,6 +30,7 @@ fn identity(name: &str) -> ResourceIdentity {
 struct ScriptedSeam {
     allowed: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     peers: tokio::sync::Mutex<Vec<mpsc::Sender<tokio::io::DuplexStream>>>,
+    fail_connections: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ScriptedSeam {
@@ -39,7 +40,12 @@ impl ScriptedSeam {
                 names.iter().map(|name| (*name).to_owned()).collect(),
             )),
             peers: tokio::sync::Mutex::new(Vec::new()),
+            fail_connections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    fn failure_switch(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.fail_connections.clone()
     }
 
     async fn add_peer_channel(&self) -> mpsc::Receiver<tokio::io::DuplexStream> {
@@ -100,6 +106,15 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
         >,
     > {
         Box::pin(async move {
+            if self
+                .fail_connections
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(BackendError::PortForward {
+                    category: RejectionCategory::UnavailableEndpoint,
+                    message: "scripted open failure".into(),
+                });
+            }
             let (client_side, server_side) = tokio::io::duplex(4096);
             let mut channels = self.peers.lock().await;
             match channels.last_mut() {
@@ -112,6 +127,59 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
             Ok(k10s_backend::PortForwardStream::new(Box::new(client_side)))
         })
     }
+}
+
+#[tokio::test]
+async fn publication_revisions_follow_wire_order_during_start_failure_race() {
+    let seam = ScriptedSeam::new(&["first", "second"]);
+    let failures = seam.failure_switch();
+    let (manager, _) = manager_for(seam).await;
+    let first = manager
+        .start(
+            identity("first"),
+            k10s_backend::PortForwardPortSelection::Number(80),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    let mut events = manager.subscribe().await;
+    failures.store(true, std::sync::atomic::Ordering::Release);
+
+    let racing_manager = manager.clone();
+    let start_second = tokio::spawn(async move {
+        racing_manager
+            .start(
+                identity("second"),
+                k10s_backend::PortForwardPortSelection::Number(80),
+                0,
+                "dev-local".into(),
+            )
+            .await
+            .unwrap()
+    });
+    let first_addr: std::net::SocketAddr = first.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        let _ = tokio::net::TcpStream::connect(first_addr).await.unwrap();
+    }
+    let second = start_second.await.unwrap();
+
+    let mut revisions = Vec::new();
+    while revisions.len() < 2 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("publication arrives")
+            .expect("subscription remains live");
+        revisions.push(event.revision);
+    }
+    assert!(
+        revisions.windows(2).all(|pair| pair[0] < pair[1]),
+        "wire order must be identical to global revision order: {revisions:?}"
+    );
+    assert!(
+        revisions.contains(&second.revision),
+        "the raced Active snapshot is published exactly at its response revision"
+    );
 }
 
 async fn manager_for(seam: ScriptedSeam) -> (PortForwardManager, CancellationToken) {

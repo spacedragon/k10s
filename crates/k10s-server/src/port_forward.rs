@@ -97,9 +97,15 @@ struct SessionCounters {
     active: AtomicUsize,
 }
 
-/// Globally monotonic snapshot-revision source shared by every session so
-/// the wire order matches the client's single monotonic expectation.
-type RevisionCounter = Arc<AtomicU64>;
+/// Serializes revision allocation with event publication. This makes wire
+/// order identical to revision order across Start, Stop, and async failures.
+#[derive(Debug)]
+struct PublicationClock {
+    next: AtomicU64,
+    gate: Mutex<()>,
+}
+
+type SharedPublicationClock = Arc<PublicationClock>;
 
 /// Shared mutable manager state guarded by one lock so epochs and revisions
 /// are linearizable with respect to publication and the transition gate.
@@ -116,7 +122,7 @@ pub struct PortForwardManager {
     state: Arc<Mutex<ManagerState>>,
     connector: PortForwardConnector,
     cancel: CancellationToken,
-    revisions: RevisionCounter,
+    publication: SharedPublicationClock,
     /// Global accepted-connection budget, lock-free so data paths never
     /// serialize behind session publication.
     live_connections: LiveConnections,
@@ -145,7 +151,10 @@ impl PortForwardManager {
             })),
             connector,
             cancel,
-            revisions: Arc::new(AtomicU64::new(1)),
+            publication: Arc::new(PublicationClock {
+                next: AtomicU64::new(1),
+                gate: Mutex::new(()),
+            }),
             live_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -259,7 +268,6 @@ impl PortForwardManager {
             return Ok(existing);
         }
 
-        let revision = self.revisions.fetch_add(1, Ordering::AcqRel);
         let id = random_id();
         let local_addr = listener.local_addr().map_err(|_| {
             StartRejected::new(
@@ -280,7 +288,7 @@ impl PortForwardManager {
             resolved,
             state: PortForwardSessionState::Active,
             failure: None,
-            revision,
+            revision: 0,
             open_failures: 0,
             terminal_at: None,
             pumps: TaskTracker::new(),
@@ -298,7 +306,7 @@ impl PortForwardManager {
             events_tx,
             live,
             counters,
-            self.revisions.clone(),
+            self.publication.clone(),
         ));
         let mut guard = inner.lock().await;
         guard.accept_task = Some(accept_task);
@@ -310,7 +318,9 @@ impl PortForwardManager {
         // Publish the authoritative Active snapshot so every subscribed
         // panel converges without polling.
         {
-            let guard = inner.lock().await;
+            let mut guard = inner.lock().await;
+            let _publication = self.publication.gate.lock().await;
+            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             let _ = state.events_tx.send(PortForwardSessionEvent {
                 revision: guard.revision,
                 session: snapshot_of(&guard),
@@ -354,7 +364,8 @@ impl PortForwardManager {
         let snapshot = {
             let mut state = self.state.lock().await;
             let mut guard = inner.lock().await;
-            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
+            let _publication = self.publication.gate.lock().await;
+            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             let snapshot = snapshot_of(&guard);
             let _ = state.events_tx.send(PortForwardSessionEvent {
                 revision: snapshot.revision,
@@ -432,7 +443,8 @@ impl PortForwardManager {
                 message: "the context switched while the forward was active".into(),
             });
             guard.terminal_at = Some(std::time::Instant::now());
-            guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
+            let _publication = self.publication.gate.lock().await;
+            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             guard.cancel.cancel();
             guard.pumps.close();
             let handle = guard.accept_task.take();
@@ -484,7 +496,6 @@ impl PortForwardManager {
                 ) {
                     guard.state = PortForwardSessionState::Stopped;
                     guard.terminal_at = Some(std::time::Instant::now());
-                    guard.revision = self.revisions.fetch_add(1, Ordering::AcqRel);
                 }
                 guard.cancel.cancel();
                 guard.pumps.close();
@@ -657,7 +668,7 @@ async fn accept_loop(
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
     live: LiveConnections,
     counters: Arc<SessionCounters>,
-    revisions: RevisionCounter,
+    publication: SharedPublicationClock,
 ) {
     let cancel = session.lock().await.cancel.clone();
     loop {
@@ -687,7 +698,7 @@ async fn accept_loop(
             events_tx.clone(),
             live.clone(),
             counters.clone(),
-            revisions.clone(),
+            publication.clone(),
         ));
     }
 }
@@ -705,7 +716,7 @@ async fn pump_connection(
     events_tx: broadcast::Sender<PortForwardSessionEvent>,
     live: LiveConnections,
     counters: Arc<SessionCounters>,
-    revisions: RevisionCounter,
+    publication: SharedPublicationClock,
 ) {
     let release = {
         let counters = counters.clone();
@@ -730,7 +741,7 @@ async fn pump_connection(
         Ok(upstream) => upstream,
         Err(_) => {
             release();
-            record_open_failure(&session, &events_tx, revisions).await;
+            record_open_failure(&session, &events_tx, publication).await;
             return;
         }
     };
@@ -754,7 +765,7 @@ async fn pump_connection(
             session.lock().await.open_failures = 0;
         }
         Some(Err(_)) if moved == 0 => {
-            record_open_failure(&session, &events_tx, revisions).await;
+            record_open_failure(&session, &events_tx, publication).await;
         }
         Some(Err(_)) => {
             // Connection-terminal only; never changes session state.
@@ -825,7 +836,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for CountingIo<T> {
 async fn record_open_failure(
     session: &Arc<Mutex<SessionInner>>,
     events_tx: &broadcast::Sender<PortForwardSessionEvent>,
-    revisions: RevisionCounter,
+    publication: SharedPublicationClock,
 ) {
     let mut guard = session.lock().await;
     if guard.state != PortForwardSessionState::Active {
@@ -841,12 +852,13 @@ async fn record_open_failure(
         message: "the pinned endpoint stopped accepting streams".into(),
     });
     guard.terminal_at = Some(std::time::Instant::now());
-    guard.revision = revisions.fetch_add(1, Ordering::AcqRel);
     guard.cancel.cancel();
     guard.pumps.close();
     if let Some(handle) = guard.accept_task.take() {
         handle.abort();
     }
+    let _publication = publication.gate.lock().await;
+    guard.revision = publication.next.fetch_add(1, Ordering::AcqRel);
     let _ = events_tx.send(PortForwardSessionEvent {
         revision: guard.revision,
         session: snapshot_of(&guard),

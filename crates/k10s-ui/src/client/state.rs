@@ -7,15 +7,15 @@ use k10s_protocol::{
     InfrastructureWatchSpec, OperationAccepted, OperationId, OperationProgress, OperationStatus,
     OperationStatusRequest, OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PROTOCOL_MAJOR,
     PROTOCOL_MINOR, PortForwardListResponse, PortForwardSession, PortForwardSessionEvent,
-    PortForwardSessionId, PortForwardStartRequest, PortForwardStartResponse,
-    PortForwardStopRequest, PortForwardStopResponse, REQUEST_PORT_FORWARD_LIST,
-    REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP, RESOURCE_EVENT_CHANGED,
-    RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse, ResourceIdentity,
-    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceRefRequest,
-    ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
-    ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, StreamType, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
-    YamlApplyRequest, YamlOutcome, YamlValidateRequest,
+    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
+    PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse,
+    REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
+    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
+    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
+    ScaleRequest, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
+    StreamTicketRequest, StreamTicketResponse, StreamType, Subscribe, SubscriptionId,
+    SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -835,6 +835,11 @@ impl ClientState {
         self.last_acked_sequence = None;
         self.outbound.clear();
         self.live_subscriptions.clear();
+        // A fresh explicit connection is a new subscription generation.
+        // Keeping this cached handle would make bootstrap believe the
+        // port-forward stream was registered even though the live map and
+        // outbound queue were just cleared.
+        self.port_forward_subscribed = None;
         self.invalidate_server_state();
         self.queue_hello(target)?;
         self.phase = ClientPhase::Authenticating;
@@ -1047,17 +1052,20 @@ impl ClientState {
             REQUEST_PORT_FORWARD_LIST => {
                 let response: PortForwardListResponse = serde_json::from_value(payload.clone())
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
-                // Reconstruction replaces state wholesale so vanished
-                // terminal sessions disappear together. A list is one
-                // authoritative snapshot, so retain every entry regardless
-                // of iteration order and advance the global event watermark
-                // only after rebuilding it.
+                // Reconstruction replaces state wholesale. Terminal rows
+                // advance the watermark but are not live controls: removing
+                // them restores Start/Retry immediately.
                 self.port_forward_sessions.clear();
                 let mut max_revision = self.port_forward_revision;
                 for session in response.sessions {
                     max_revision = max_revision.max(session.revision);
-                    self.port_forward_sessions
-                        .insert(session.id.as_str().to_owned(), session);
+                    if !matches!(
+                        session.state,
+                        PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+                    ) {
+                        self.port_forward_sessions
+                            .insert(session.id.as_str().to_owned(), session);
+                    }
                 }
                 self.port_forward_revision = max_revision;
                 Ok(())
@@ -1080,8 +1088,15 @@ impl ClientState {
             return; // stale, reordered, or duplicated delivery
         }
         self.port_forward_revision = session.revision;
-        self.port_forward_sessions
-            .insert(session.id.as_str().to_owned(), session);
+        if matches!(
+            session.state,
+            PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+        ) {
+            self.port_forward_sessions.remove(session.id.as_str());
+        } else {
+            self.port_forward_sessions
+                .insert(session.id.as_str().to_owned(), session);
+        }
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -1580,8 +1595,13 @@ impl ClientState {
                     let mut max_revision = self.port_forward_revision;
                     for session in &response.sessions {
                         max_revision = max_revision.max(session.revision);
-                        self.port_forward_sessions
-                            .insert(session.id.as_str().to_owned(), session.clone());
+                        if !matches!(
+                            session.state,
+                            PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+                        ) {
+                            self.port_forward_sessions
+                                .insert(session.id.as_str().to_owned(), session.clone());
+                        }
                     }
                     self.port_forward_revision = max_revision;
                     QueryResult::PortForwardList(Box::new(response))

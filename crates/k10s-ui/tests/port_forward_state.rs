@@ -152,12 +152,86 @@ fn start_response_and_events_populate_authoritative_state() {
             .unwrap(),
         )
         .unwrap();
-    assert_eq!(
-        client.port_forward_sessions()[0].state,
-        PortForwardSessionState::Stopped
+    assert!(
+        client.port_forward_sessions().is_empty(),
+        "terminal snapshots remove live controls so Start/Retry returns"
     );
 
     let _unused = SubscriptionId::new("x");
+}
+
+#[test]
+fn terminal_events_and_list_rows_advance_revision_without_remaining_live() {
+    let mut client = ready_client_with_capability(true);
+    let active = k10s_protocol::PortForwardStartResponse {
+        session: session("pf-terminal", PortForwardSessionState::Active, 3),
+    };
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_START,
+            &serde_json::to_value(active).unwrap(),
+        )
+        .unwrap();
+
+    let failed = k10s_protocol::PortForwardListResponse {
+        sessions: vec![session("pf-terminal", PortForwardSessionState::Failed, 4)],
+    };
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
+            &serde_json::to_value(failed).unwrap(),
+        )
+        .unwrap();
+    assert!(client.port_forward_sessions().is_empty());
+
+    // A newer retry becomes visible; an older retained terminal cannot hide it.
+    let retry = k10s_protocol::PortForwardStartResponse {
+        session: session("pf-retry", PortForwardSessionState::Active, 5),
+    };
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_START,
+            &serde_json::to_value(retry).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(client.port_forward_sessions()[0].id.as_str(), "pf-retry");
+}
+
+#[test]
+fn explicit_connect_registers_a_fresh_port_forward_subscription() {
+    let mut client = ready_client_with_capability(true);
+    client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("first subscription");
+    while client.take_outbound().is_some() {}
+
+    client
+        .connect(ConnectTarget::new(
+            "ws://localhost/api/v1/control",
+            "secret",
+        ))
+        .unwrap();
+    client.apply(welcome()).unwrap();
+    let pending = client.begin(k10s_ui::client::Query::Bootstrap).unwrap();
+    let mut bootstrap = BootstrapResponse::fixture();
+    bootstrap.capabilities = vec![k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned()];
+    client
+        .apply(ServerFrame::response(pending.id().clone(), bootstrap))
+        .unwrap();
+    client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("fresh subscription");
+
+    assert!(std::iter::from_fn(|| client.take_outbound()).any(|frame| {
+        frame.kind == k10s_protocol::ClientKind::Subscribe
+            && frame
+                .payload
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("portForwardSessions")
+    }));
 }
 
 #[test]
