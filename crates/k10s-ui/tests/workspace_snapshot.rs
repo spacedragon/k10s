@@ -2,8 +2,53 @@
 //! rebuilds a workspace from it. Pure Rust; no egui or protocol connection.
 
 use k10s_ui::workspace::{
-    LauncherItem, PersistedWindowKind, SortSpec, WorkloadKind, WorkspaceCommand, WorkspaceState,
+    LauncherItem, NamespaceScope, PersistedWindowKind, SortSpec, WorkloadKind, WorkspaceCommand,
+    WorkspaceState,
 };
+
+#[test]
+fn v2_namespace_scope_uses_the_documented_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(NamespaceScope::ContextDefault).unwrap(),
+        serde_json::json!({"kind":"context_default"})
+    );
+    assert_eq!(
+        serde_json::to_value(NamespaceScope::Namespace("prod".into())).unwrap(),
+        serde_json::json!({"kind":"namespace","value":"prod"})
+    );
+    assert_eq!(
+        serde_json::to_value(NamespaceScope::AllNamespaces).unwrap(),
+        serde_json::json!({"kind":"all_namespaces"})
+    );
+}
+
+#[test]
+fn v1_literal_migrates_namespace_without_inventing_all_namespaces() {
+    let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":"g/v/K"}},{"kind":"nodes","title":"Nodes","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace":null,"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+    assert_eq!(loaded.migrated_from, Some(1));
+    assert_eq!(loaded.snapshot.version, 2);
+    assert_eq!(
+        loaded.snapshot.windows[0]
+            .view
+            .as_ref()
+            .unwrap()
+            .namespace_scope,
+        NamespaceScope::Namespace("prod".into())
+    );
+    assert_eq!(
+        loaded.snapshot.windows[1]
+            .view
+            .as_ref()
+            .unwrap()
+            .namespace_scope,
+        NamespaceScope::ContextDefault
+    );
+    let view = loaded.snapshot.windows[0].view.as_ref().unwrap();
+    assert_eq!(view.search, "web");
+    assert_eq!(view.filters["phase"], "Running");
+    assert_eq!(view.custom_kind.as_deref(), Some("g/v/K"));
+}
 
 /// Stand-in for the protocol `ResourceIdentity`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -27,9 +72,9 @@ fn state() -> WorkspaceState<TestIdentity> {
         .find(|window| matches!(window.kind, k10s_ui::workspace::WindowKind::Workload(_)))
         .expect("pods window opened");
     let pods_id = pods.id;
-    state.apply(WorkspaceCommand::SetNamespace(
+    state.apply(WorkspaceCommand::SetNamespaceScope(
         pods_id,
-        Some("prod".to_owned()),
+        NamespaceScope::Namespace("prod".to_owned()),
     ));
     state.apply(WorkspaceCommand::SetSearch(pods_id, "web".to_owned()));
     state.apply(WorkspaceCommand::SetSort(
@@ -85,7 +130,10 @@ fn snapshot_captures_open_windows_geometry_and_view_settings() {
     assert_eq!(pods.geometry.position, [150.0, 120.0]);
     assert_eq!(pods.geometry.size, [900.0, 640.0]);
     let view = pods.view.as_ref().expect("view settings persisted");
-    assert_eq!(view.namespace.as_deref(), Some("prod"));
+    assert_eq!(
+        view.namespace_scope,
+        NamespaceScope::Namespace("prod".into())
+    );
     assert_eq!(&*view.search, "web");
     assert!(view.sort.is_some());
     // ToggleDetailPane flipped the default.
@@ -128,7 +176,10 @@ fn restore_rebuilds_the_same_layout() {
         k10s_ui::workspace::WindowContent::Resource(resource) => resource,
         _ => panic!("expected a list body"),
     };
-    assert_eq!(resource.namespace.as_deref(), Some("prod"));
+    assert_eq!(
+        resource.namespace_scope,
+        NamespaceScope::Namespace("prod".into())
+    );
     assert_eq!(&*resource.search, "web");
     assert!(resource.sort.is_some());
     assert!(resource.selection.is_none());

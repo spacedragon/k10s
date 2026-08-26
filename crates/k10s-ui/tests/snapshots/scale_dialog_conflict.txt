@@ -123,8 +123,11 @@ Window
               GenericContainer
                 TextInput label="Search deployments" value=""
                   TextRun value=""
+                Label value="Context default (default)"
+                  TextRun value="Context default (default)"
                 TextInput label="Namespace filter" value=""
                   TextRun value=""
+                Button label="All namespaces"
                 Button label="Hide details"
               GenericContainer
                 GenericContainer

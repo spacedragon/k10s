@@ -177,7 +177,17 @@ pub(super) fn show<I>(
         }
 
         if namespaced {
-            let mut namespace = state.namespace.clone().unwrap_or_default();
+            ui.label(match &state.namespace_scope {
+                crate::workspace::NamespaceScope::ContextDefault => {
+                    "Context default (default)".to_owned()
+                }
+                crate::workspace::NamespaceScope::Namespace(value) => format!("Namespace: {value}"),
+                crate::workspace::NamespaceScope::AllNamespaces => "All namespaces".to_owned(),
+            });
+            let mut namespace = match &state.namespace_scope {
+                crate::workspace::NamespaceScope::Namespace(value) => value.clone(),
+                _ => String::new(),
+            };
             let namespace_edit = ui.add(
                 TextEdit::singleline(&mut namespace)
                     .hint_text("Namespace filter")
@@ -188,9 +198,17 @@ pub(super) fn show<I>(
             });
             if namespace_edit.changed() {
                 let parsed = namespace.trim().to_owned();
-                queued.push(WorkspaceCommand::SetNamespace(
+                let scope = if parsed.is_empty() {
+                    crate::workspace::NamespaceScope::ContextDefault
+                } else {
+                    crate::workspace::NamespaceScope::Namespace(parsed)
+                };
+                queued.push(WorkspaceCommand::SetNamespaceScope(window_id, scope));
+            }
+            if ui.button("All namespaces").clicked() {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
                     window_id,
-                    (!parsed.is_empty()).then_some(parsed),
+                    crate::workspace::NamespaceScope::AllNamespaces,
                 ));
             }
         }
@@ -204,10 +222,14 @@ pub(super) fn show<I>(
         } else {
             "Show details"
         };
-        let filters_active = !state.search.is_empty() || state.namespace.is_some();
+        let filters_active = !state.search.is_empty()
+            || state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault;
         if filters_active && ui.button("Clear filters").clicked() {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespace(window_id, None));
+            queued.push(WorkspaceCommand::SetNamespaceScope(
+                window_id,
+                crate::workspace::NamespaceScope::ContextDefault,
+            ));
         }
 
         if ui.button(toggle_label).clicked() {
@@ -230,10 +252,11 @@ pub(super) fn show<I>(
     let filtered: Vec<&ResourceListRow> = rows
         .iter()
         .filter(|row| {
-            state
-                .namespace
-                .as_deref()
-                .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref())
+            (!namespaced
+                || state
+                    .namespace_scope
+                    .resolve(None)
+                    .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref()))
                 && super::resource_table::matches_search(row, &needle)
         })
         .collect();
@@ -308,7 +331,10 @@ pub(super) fn show<I>(
     if let Some(actions) = list_actions {
         if actions.cleared {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespace(window_id, None));
+            queued.push(WorkspaceCommand::SetNamespaceScope(
+                window_id,
+                crate::workspace::NamespaceScope::ContextDefault,
+            ));
         }
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));

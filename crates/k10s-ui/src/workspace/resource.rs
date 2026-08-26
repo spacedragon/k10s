@@ -7,6 +7,28 @@ use serde::{Deserialize, Serialize};
 
 use super::detail::DetailState;
 
+/// Namespace intent for a namespaced list. Context defaults resolve to the
+/// active kube context namespace (or Kubernetes' `default` namespace).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum NamespaceScope {
+    #[default]
+    ContextDefault,
+    Namespace(String),
+    AllNamespaces,
+}
+
+impl NamespaceScope {
+    #[must_use]
+    pub fn resolve<'a>(&'a self, context_namespace: Option<&'a str>) -> Option<&'a str> {
+        match self {
+            Self::ContextDefault => Some(context_namespace.unwrap_or("default")),
+            Self::Namespace(namespace) => Some(namespace),
+            Self::AllNamespaces => None,
+        }
+    }
+}
+
 /// List sorting specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortSpec {
@@ -19,8 +41,7 @@ pub struct SortSpec {
 /// independent namespace, search, filters, sort, split, and selection state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceWindowState<I> {
-    /// Local namespace filter; `None` means "all namespaces".
-    pub namespace: Option<String>,
+    pub namespace_scope: NamespaceScope,
     pub search: String,
     /// Key/value list filters (for example `phase` → `Running`).
     pub filters: BTreeMap<String, String>,
@@ -42,7 +63,7 @@ pub struct ResourceWindowState<I> {
 impl<I> Default for ResourceWindowState<I> {
     fn default() -> Self {
         Self {
-            namespace: None,
+            namespace_scope: NamespaceScope::ContextDefault,
             search: String::new(),
             filters: BTreeMap::new(),
             sort: None,

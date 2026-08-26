@@ -11,13 +11,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::resource::{ResourceWindowState, SortSpec};
+use super::resource::{NamespaceScope, ResourceWindowState, SortSpec};
 use super::service::ServiceWindowState;
 use super::window::{WindowGeom, WindowKind, WorkloadKind};
 use super::{Window, WindowContent, WindowId, WorkspaceState};
 
 /// Snapshot format version written to and read from the desktop state file.
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// Upper bound for persisted allocation counters. Real workspaces hand out
 /// a handful of ids per session; values near this ceiling are corruption,
@@ -42,7 +42,7 @@ pub enum PersistedWindowKind {
 /// and detail state are intentionally absent (see module docs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedListView {
-    pub namespace: Option<String>,
+    pub namespace_scope: NamespaceScope,
     pub search: String,
     /// Key/value list filters (for example `phase` → `Running`).
     pub filters: BTreeMap<String, String>,
@@ -81,7 +81,7 @@ impl PersistedListView {
     /// state are dropped on purpose.
     fn from_resource<I>(resource: &ResourceWindowState<I>) -> Self {
         Self {
-            namespace: resource.namespace.clone(),
+            namespace_scope: resource.namespace_scope.clone(),
             search: resource.search.clone(),
             filters: resource.filters.clone(),
             sort: resource.sort.clone(),
@@ -95,7 +95,7 @@ impl PersistedListView {
     /// detail, and port drafts are dropped on purpose.
     fn from_service<I>(service: &ServiceWindowState<I>) -> Self {
         Self {
-            namespace: service.namespace.clone(),
+            namespace_scope: service.namespace_scope.clone(),
             search: service.search.clone(),
             // The Services window has no key/value filters or GVK picker.
             filters: BTreeMap::new(),
@@ -111,7 +111,7 @@ impl PersistedListView {
     fn into_resource<I>(self) -> ResourceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ResourceWindowState {
-            namespace: self.namespace,
+            namespace_scope: self.namespace_scope,
             search: self.search,
             filters: self.filters,
             sort: self.sort,
@@ -127,7 +127,7 @@ impl PersistedListView {
     fn into_service<I>(self) -> ServiceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ServiceWindowState {
-            namespace: self.namespace,
+            namespace_scope: self.namespace_scope,
             search: self.search,
             sort: self.sort,
             split_ratio,
@@ -153,7 +153,7 @@ pub struct PersistedWindow {
 /// A complete persistable workspace snapshot. Written by the desktop app and
 /// validated here so the shared state module stays the single authority on
 /// what a snapshot may contain.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WorkspaceSnapshot {
     /// Bumped whenever the persisted layout is incompatible; mismatched
     /// snapshots are rejected wholesale by [`WorkspaceState::from_snapshot`].
@@ -164,6 +164,112 @@ pub struct WorkspaceSnapshot {
     pub next_z: u64,
     /// The restorable windows in their persisted order.
     pub windows: Vec<PersistedWindow>,
+}
+
+/// A decoded snapshot plus provenance used by desktop persistence to rewrite
+/// migrated files without treating the normalized value as already saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedWorkspaceSnapshot {
+    pub snapshot: WorkspaceSnapshot,
+    pub migrated_from: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct RawSnapshot {
+    version: u32,
+    next_id: u64,
+    next_z: u64,
+    windows: Vec<RawWindow>,
+}
+
+#[derive(Deserialize)]
+struct RawWindow {
+    kind: PersistedWindowKind,
+    title: String,
+    geometry: WindowGeom,
+    #[serde(default)]
+    z: u64,
+    view: Option<RawListView>,
+}
+
+#[derive(Deserialize)]
+struct RawListView {
+    #[serde(default, alias = "namespace")]
+    namespace_scope: serde_json::Value,
+    search: String,
+    filters: BTreeMap<String, String>,
+    sort: Option<SortSpec>,
+    #[serde(default = "default_split_ratio")]
+    split_ratio: f32,
+    #[serde(default = "default_true")]
+    detail_visible: bool,
+    custom_kind: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawSnapshot::deserialize(deserializer)?;
+        if raw.version != 1 && raw.version != SNAPSHOT_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported workspace snapshot version {}",
+                raw.version
+            )));
+        }
+        let migrated_from = (raw.version == 1).then_some(1);
+        let windows = raw
+            .windows
+            .into_iter()
+            .map(|window| {
+                let view = window
+                    .view
+                    .map(|view| {
+                        let namespace_scope = if raw.version == 1 {
+                            match serde_json::from_value::<Option<String>>(view.namespace_scope)
+                                .map_err(serde::de::Error::custom)?
+                            {
+                                Some(value) => NamespaceScope::Namespace(value),
+                                None => NamespaceScope::ContextDefault,
+                            }
+                        } else {
+                            serde_json::from_value(view.namespace_scope)
+                                .map_err(serde::de::Error::custom)?
+                        };
+                        Ok(PersistedListView {
+                            namespace_scope,
+                            search: view.search,
+                            filters: view.filters,
+                            sort: view.sort,
+                            split_ratio: view.split_ratio,
+                            detail_visible: view.detail_visible,
+                            custom_kind: view.custom_kind,
+                        })
+                    })
+                    .transpose()?;
+                Ok(PersistedWindow {
+                    kind: window.kind,
+                    title: window.title,
+                    geometry: window.geometry,
+                    z: window.z,
+                    view,
+                })
+            })
+            .collect::<Result<Vec<_>, D::Error>>()?;
+        Ok(Self {
+            snapshot: WorkspaceSnapshot {
+                version: SNAPSHOT_VERSION,
+                next_id: raw.next_id,
+                next_z: raw.next_z,
+                windows,
+            },
+            migrated_from,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(LoadedWorkspaceSnapshot::deserialize(deserializer)?.snapshot)
+    }
 }
 
 impl WorkspaceSnapshot {

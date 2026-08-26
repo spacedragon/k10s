@@ -14,7 +14,7 @@ use k10s_backend::{AdapterError, BackendMode, build_kernel};
 use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
-use k10s_ui::workspace::WorkspaceSnapshot;
+use k10s_ui::workspace::{LoadedWorkspaceSnapshot, WorkspaceSnapshot};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -192,8 +192,10 @@ impl DesktopApp {
             // differs from it (mismatched version, normalized counters...)
             // is written back through the debounced save; an exact match
             // means relaunching never touches the file.
-            store.mark_loaded(&on_disk);
-            app.restore_workspace_snapshot(on_disk);
+            if on_disk.migrated_from.is_none() {
+                store.mark_loaded(&on_disk.snapshot);
+            }
+            app.restore_workspace_snapshot(on_disk.snapshot);
         }
         Ok(Self {
             app: Some(app),
@@ -274,9 +276,9 @@ impl StateStore {
 
     /// Read the persisted snapshot; `None` when the file is absent, unreadable,
     /// or not valid JSON for this format.
-    fn load(&self) -> Option<WorkspaceSnapshot> {
+    fn load(&self) -> Option<LoadedWorkspaceSnapshot> {
         let raw = fs::read_to_string(&self.path).ok()?;
-        match serde_json::from_str::<WorkspaceSnapshot>(&raw) {
+        match serde_json::from_str::<LoadedWorkspaceSnapshot>(&raw) {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
                 tracing::warn!("ignoring unreadable state file: {error}");
@@ -651,7 +653,9 @@ mod tests {
 
         // A fresh store at the same path reads it back unchanged.
         let reader = StateStore::at(path.clone());
-        assert_eq!(reader.load().as_ref(), Some(&snapshot));
+        let loaded = reader.load().expect("load snapshot");
+        assert_eq!(loaded.snapshot, snapshot);
+        assert_eq!(loaded.migrated_from, None);
     }
 
     #[test]
@@ -691,6 +695,27 @@ mod tests {
             first_write, second_write,
             "steady state must not rewrite the file"
         );
+    }
+
+    #[test]
+    fn migrated_v1_state_is_rewritten_as_v2_after_debounce() {
+        let path = tmp_state_file("migrate-v1");
+        let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":null}}]}"#;
+        std::fs::write(&path, raw).unwrap();
+        let mut store = StateStore::at(path.clone());
+        let loaded = store.load().expect("migrate v1");
+        assert_eq!(loaded.migrated_from, Some(1));
+        store.tick(&loaded.snapshot, Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        store.tick(&loaded.snapshot, Instant::now());
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["version"], 2);
+        assert_eq!(
+            json["windows"][0]["view"]["namespace_scope"],
+            serde_json::json!({"kind":"namespace","value":"prod"})
+        );
+        assert_eq!(json["windows"][0]["view"]["search"], "web");
     }
 
     #[test]

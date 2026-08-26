@@ -20,10 +20,10 @@ mod window;
 
 pub use detail::{DetailState, DetailTab, ShellState, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
-pub use resource::{ResourceWindowState, SortSpec};
+pub use resource::{NamespaceScope, ResourceWindowState, SortSpec};
 pub use snapshot::{
-    COUNTER_LIMIT, PersistedListView, PersistedWindow, PersistedWindowKind, SNAPSHOT_VERSION,
-    WorkspaceSnapshot,
+    COUNTER_LIMIT, LoadedWorkspaceSnapshot, PersistedListView, PersistedWindow,
+    PersistedWindowKind, SNAPSHOT_VERSION, WorkspaceSnapshot,
 };
 
 pub use service::ServiceWindowState;
@@ -60,7 +60,7 @@ pub enum WorkspaceCommand<I> {
     FocusWindow(WindowId),
     CloseWindow(WindowId),
     SetGeometry(WindowId, WindowGeom),
-    SetNamespace(WindowId, Option<String>),
+    SetNamespaceScope(WindowId, NamespaceScope),
     SetSearch(WindowId, String),
     SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
@@ -291,11 +291,7 @@ where
                 }
                 Vec::new()
             }
-            WorkspaceCommand::SetNamespace(id, namespace) => {
-                self.with_resource_mut(id, |resource| resource.namespace = namespace.clone());
-                self.with_service_mut(id, |service| service.namespace = namespace);
-                Vec::new()
-            }
+            WorkspaceCommand::SetNamespaceScope(id, scope) => self.set_namespace_scope(id, scope),
             WorkspaceCommand::SetSearch(id, search) => {
                 self.with_resource_mut(id, |resource| resource.search = search.clone());
                 self.with_service_mut(id, |service| service.search = search);
@@ -587,8 +583,38 @@ where
             WorkspaceCommand::ClearSelection(id) => self.clear_selection(id),
             WorkspaceCommand::CloseWindow(id) => self.close_window(id),
             WorkspaceCommand::ContextSwitch { to } => self.context_switch(to),
+            WorkspaceCommand::SetNamespaceScope(id, scope) => self.set_namespace_scope(id, scope),
             other => self.dispatch(other),
         }
+    }
+
+    fn set_namespace_scope(
+        &mut self,
+        id: WindowId,
+        scope: NamespaceScope,
+    ) -> Vec<WorkspaceEvent<I>> {
+        let current = self
+            .resource_state(id)
+            .map(|s| &s.namespace_scope)
+            .or_else(|| self.service_state(id).map(|s| &s.namespace_scope));
+        if current.is_none_or(|current| current == &scope) {
+            return Vec::new();
+        }
+        let blockers = self.blockers_for(id);
+        if !blockers.is_empty() {
+            return self.block(WorkspaceCommand::SetNamespaceScope(id, scope), blockers);
+        }
+        self.with_resource_mut(id, |state| {
+            state.namespace_scope = scope.clone();
+            state.selection = None;
+            state.detail = None;
+        });
+        self.with_service_mut(id, |state| {
+            state.namespace_scope = scope;
+            state.selection = None;
+            state.detail = None;
+        });
+        Vec::new()
     }
 
     // -- selections ----------------------------------------------------------

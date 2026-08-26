@@ -6,9 +6,52 @@
 use std::collections::HashSet;
 
 use k10s_ui::workspace::{
-    BlockReason, BlockResolution, DetailTab, LauncherItem, WindowContent, WindowKind, WorkloadKind,
-    WorkspaceCommand, WorkspaceEvent, WorkspaceState,
+    BlockReason, BlockResolution, DetailTab, LauncherItem, NamespaceScope, WindowContent,
+    WindowKind, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState,
 };
+
+#[test]
+fn namespace_scope_has_explicit_resolution_semantics() {
+    assert_eq!(
+        NamespaceScope::ContextDefault.resolve(Some("sea")),
+        Some("sea")
+    );
+    assert_eq!(
+        NamespaceScope::ContextDefault.resolve(None),
+        Some("default")
+    );
+    assert_eq!(
+        NamespaceScope::Namespace("team-a".into()).resolve(Some("sea")),
+        Some("team-a")
+    );
+    assert_eq!(NamespaceScope::AllNamespaces.resolve(Some("sea")), None);
+}
+
+#[test]
+fn namespace_scope_change_is_guarded_and_clears_stale_detail_on_commit() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    let identity = TestIdentity::pod("dirty");
+    select(&mut state, window, identity.clone());
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
+    let out = events(
+        &mut state,
+        WorkspaceCommand::SetNamespaceScope(window, NamespaceScope::AllNamespaces),
+    );
+    assert!(matches!(out.as_slice(), [WorkspaceEvent::Blocked(_)]));
+    let before = state.resource_state(window).unwrap();
+    assert_eq!(before.namespace_scope, NamespaceScope::ContextDefault);
+    assert_eq!(before.selection.as_ref(), Some(&identity));
+    events(
+        &mut state,
+        WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window }),
+    );
+    let after = state.resource_state(window).unwrap();
+    assert_eq!(after.namespace_scope, NamespaceScope::AllNamespaces);
+    assert!(after.selection.is_none());
+    assert!(after.detail.is_none());
+    assert!(state.pending().is_none());
+}
 
 /// Stand-in for the protocol `ResourceIdentity`; the workspace state is
 /// generic over the identity type so this module has no protocol dependency.
@@ -151,7 +194,7 @@ fn services_window_opens_with_singleton_geometry_and_defaults() {
         WindowContent::Services(service) => service,
         other => panic!("expected a Services window, got {other:?}"),
     };
-    assert_eq!(service.namespace, None);
+    assert_eq!(service.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(service.search, "");
     assert_eq!(service.sort, None);
     assert_eq!(service.selection, None);
@@ -169,7 +212,7 @@ fn list_window_commands_drive_the_services_window_independently() {
 
     events(
         &mut state,
-        WorkspaceCommand::SetNamespace(services, Some("payments".into())),
+        WorkspaceCommand::SetNamespaceScope(services, NamespaceScope::Namespace("payments".into())),
     );
     events(
         &mut state,
@@ -189,7 +232,10 @@ fn list_window_commands_drive_the_services_window_independently() {
     events(&mut state, WorkspaceCommand::ToggleDetailPane(services));
 
     let service = state.service_state(services).unwrap();
-    assert_eq!(service.namespace.as_deref(), Some("payments"));
+    assert_eq!(
+        service.namespace_scope,
+        NamespaceScope::Namespace("payments".into())
+    );
     assert_eq!(service.search, "api");
     assert_eq!(
         service.sort.as_ref().map(|sort| sort.column.as_str()),
@@ -203,7 +249,7 @@ fn list_window_commands_drive_the_services_window_independently() {
 
     // The workload window keeps fully independent state.
     let resource = state.resource_state(pods).unwrap();
-    assert_eq!(resource.namespace, None);
+    assert_eq!(resource.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(resource.search, "");
     assert!(resource.sort.is_none());
     assert_eq!(resource.split_ratio, 0.5);
@@ -470,7 +516,7 @@ fn commands_for_unknown_windows_are_ignored() {
 
     let out = events(
         &mut state,
-        WorkspaceCommand::SetNamespace(bogus, Some("x".into())),
+        WorkspaceCommand::SetNamespaceScope(bogus, NamespaceScope::Namespace("x".into())),
     );
     assert!(out.is_empty());
     let out = events(&mut state, WorkspaceCommand::CloseWindow(bogus));
@@ -513,7 +559,7 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
 
     events(
         &mut state,
-        WorkspaceCommand::SetNamespace(first, Some("payments".into())),
+        WorkspaceCommand::SetNamespaceScope(first, NamespaceScope::Namespace("payments".into())),
     );
     events(
         &mut state,
@@ -543,8 +589,11 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
         other => panic!("expected resource window, got {other:?}"),
     };
 
-    assert_eq!(first_state.namespace.as_deref(), Some("payments"));
-    assert_eq!(second_state.namespace, None);
+    assert_eq!(
+        first_state.namespace_scope,
+        NamespaceScope::Namespace("payments".into())
+    );
+    assert_eq!(second_state.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(first_state.search, "");
     assert_eq!(second_state.search, "fluentd");
     assert!(first_state.filters.is_empty());
@@ -861,7 +910,7 @@ fn context_switch_commits_after_all_blockers_resolve() {
     select(&mut state, clean, TestIdentity::pod("clean-pod"));
     events(
         &mut state,
-        WorkspaceCommand::SetNamespace(clean, Some("payments".into())),
+        WorkspaceCommand::SetNamespaceScope(clean, NamespaceScope::Namespace("payments".into())),
     );
     events(&mut state, WorkspaceCommand::SetSplitRatio(clean, 0.35));
 
@@ -917,7 +966,10 @@ fn context_switch_commits_after_all_blockers_resolve() {
         WindowContent::Resource(resource) => resource,
         other => panic!("expected a resource window, got {other:?}"),
     };
-    assert_eq!(clean_state.namespace.as_deref(), Some("payments"));
+    assert_eq!(
+        clean_state.namespace_scope,
+        NamespaceScope::Namespace("payments".into())
+    );
     assert!((clean_state.split_ratio - 0.35).abs() < f32::EPSILON);
 }
 
@@ -1097,7 +1149,6 @@ fn non_destructive_updates_are_allowed_while_yaml_is_dirty() {
     events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
 
     let commands = [
-        WorkspaceCommand::SetNamespace(window, Some("other".into())),
         WorkspaceCommand::SetSearch(window, "needle".into()),
         WorkspaceCommand::SetFilter(window, "phase".into(), "Running".into()),
         WorkspaceCommand::SetSplitRatio(window, 0.4),

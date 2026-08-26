@@ -458,9 +458,9 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::SetNamespace(
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
             instances[0],
-            Some("kube-system".to_owned()),
+            k10s_ui::workspace::NamespaceScope::Namespace("kube-system".to_owned()),
         ));
     let workspace = harness.state().shell.workspace();
     assert_eq!(
@@ -480,7 +480,10 @@ fn workspace_resource_namespace(
 ) -> Option<String> {
     workspace
         .resource_state(id)
-        .and_then(|resource| resource.namespace.clone())
+        .and_then(|resource| match &resource.namespace_scope {
+            k10s_ui::workspace::NamespaceScope::Namespace(value) => Some(value.clone()),
+            _ => None,
+        })
 }
 
 #[test]

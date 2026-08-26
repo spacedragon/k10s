@@ -245,9 +245,9 @@ fn loading_empty_and_filtered_states_are_distinct() {
     harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::SetNamespace(
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
             id,
-            Some("kube-system".to_owned()),
+            k10s_ui::workspace::NamespaceScope::Namespace("kube-system".to_owned()),
         ));
     harness.run_steps(4);
     harness
