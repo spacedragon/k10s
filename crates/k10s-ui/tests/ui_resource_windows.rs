@@ -257,6 +257,65 @@ fn open(harness: &mut Harness<'static, Fixture>, item: LauncherItem) {
 }
 
 #[test]
+fn same_kind_windows_render_their_own_window_keyed_rows() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.remove(&WorkspaceWorkload::Pods);
+    let first = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+            WorkspaceWorkload::Pods,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let second = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+            WorkspaceWorkload::Pods,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture.feed.window_lists.insert(
+        first,
+        vec![list_row(
+            "",
+            "v1",
+            "Pod",
+            Some("default"),
+            "pod-first",
+            "Running",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+    fixture.feed.window_lists.insert(
+        second,
+        vec![list_row(
+            "",
+            "v1",
+            "Pod",
+            Some("default"),
+            "pod-second",
+            "Running",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    harness.get_by_label("pod-first");
+    harness.get_by_label("pod-second");
+}
+
+#[test]
 fn all_seven_workload_kinds_render_rows_and_columns() {
     let mut harness = harness();
     harness.state_mut().feed.lists.clear();

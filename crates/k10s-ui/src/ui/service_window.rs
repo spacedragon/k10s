@@ -283,7 +283,11 @@ where
     });
     ui.separator();
 
-    let Some(rows) = &feed.services else {
+    let Some(rows) = feed
+        .window_services
+        .get(&window_id)
+        .or(feed.services.as_ref())
+    else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());
             ui.label("Loading services");

@@ -23,11 +23,16 @@ use super::{ConnectionState, theme};
 /// read-only. An absent list entry means the window is still loading.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
-    /// Rows per workload kind for the selected context.
+    /// Legacy kind-keyed fixture input. Production uses `window_lists` so
+    /// same-kind windows with different scopes never collapse.
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
+    /// Rows per open workload window.
+    pub window_lists: HashMap<WindowId, Vec<ResourceListRow>>,
     /// Core/v1 Service rows for the selected context, carrying structured
     /// projections; `None` while the Services watch is still loading.
     pub services: Option<Vec<ResourceListRow>>,
+    /// Production Service rows per open window.
+    pub window_services: HashMap<WindowId, Vec<ResourceListRow>>,
     /// Types offered by the searchable GVK picker.
     pub types: Vec<ResourceTypeEntry>,
     /// Backend-resolved detail responses keyed by stable identity. Both the
@@ -245,7 +250,11 @@ pub(super) fn show<I>(
     });
     ui.separator();
 
-    let Some(rows) = feed.lists.get(&kind) else {
+    let Some(rows) = feed
+        .window_lists
+        .get(&window_id)
+        .or_else(|| feed.lists.get(&kind))
+    else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());
             ui.label(format!("Loading {}", title.to_lowercase()));
