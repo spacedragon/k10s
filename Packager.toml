@@ -1,6 +1,6 @@
 name = "k10s-desktop"
 product-name = "k10s"
-version = "0.1.3"
+version = "0.1.4"
 identifier = "dev.k10s.desktop"
 description = "A fast Kubernetes desktop and browser client"
 authors = ["k10s contributors"]

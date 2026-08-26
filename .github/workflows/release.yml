@@ -526,6 +526,9 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/*
+          # download-artifact@v4 preserves the uploaded paths, so assets land
+          # under artifacts/release/packages and artifacts/distrib; a
+          # top-level glob matches only directories.
+          files: artifacts/**/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
