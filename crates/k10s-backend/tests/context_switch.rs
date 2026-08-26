@@ -182,8 +182,6 @@ const APIS_GROUP_LIST_WITHOUT_CRD_GROUP: &str = r#"{"kind":"APIGroupList","apiVe
   {"name":"storage.k8s.io","versions":[{"groupVersion":"storage.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"storage.k8s.io/v1","version":"v1"}}
 ]}"#;
 
-const API_VERSIONS_V1: &str = r#"{"kind":"APIVersions","apiVersion":"v1","versions":["v1"],"resources":["namespacedNames","nonNamespacedNames"]}"#;
-
 fn empty_pod_list() -> String {
     r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"41"},"items":[]}"#.into()
 }
@@ -869,13 +867,7 @@ async fn switch_validation_always_contacts_the_destination_even_with_a_fresh_cac
     assert!(b_apis_before > 0, "the warm-up discovered through B");
 
     // B breaks without its cached catalog expiring.
-    server_b.set_accept_response(
-        "GET",
-        APIS_PATH,
-        "apidiscovery.k8s.io",
-        500,
-        &status_error(500, "api group list down"),
-    );
+    server_b.set_response(APIS_PATH, 500, &status_error(500, "api group list down"));
 
     let failure = world
         .kernel
@@ -935,14 +927,6 @@ async fn a_successful_switch_publishes_the_freshly_observed_destination_catalog(
 
     // B loses its CRD group without the warm catalog expiring.
     server_b.set_response(APIS_PATH, 200, APIS_GROUP_LIST_WITHOUT_CRD_GROUP);
-    server_b.set_accept_response(
-        "GET",
-        APIS_PATH,
-        "apidiscovery.k8s.io",
-        200,
-        APIS_GROUP_LIST_WITHOUT_CRD_GROUP,
-    );
-    server_b.set_accept_response("GET", "/api", "apidiscovery.k8s.io", 200, API_VERSIONS_V1);
 
     world
         .kernel

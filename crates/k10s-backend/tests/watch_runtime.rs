@@ -840,7 +840,7 @@ async fn scope_and_capability_violations_are_typed_rejections() {
 
     // List-only type (discovery without the watch verb): unsupported rather
     // than a supervised selection that can never attach and relist-loops.
-    let server = RecordedApiServer::legacy();
+    let server = RecordedApiServer::standard();
     server.set_response(
         "/api/v1",
         200,

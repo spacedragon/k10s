@@ -8,7 +8,7 @@ use k10s_backend::{
 
 /// Build an adapter whose single context is backed by a recorded API server.
 fn adapter_with_recorded_context() -> (KubeAdapter, RecordedApiServer) {
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::aggregated();
     let adapter = adapter_for_server(&server, "mock-cluster");
     (adapter, server)
 }
@@ -58,6 +58,24 @@ const LEGACY_GROUP_VERSION_PATHS: &[&str] = &[
 ];
 
 #[tokio::test]
+async fn standard_fixture_preserves_legacy_discovery_contract() {
+    let server = RecordedApiServer::standard();
+    let client = server.clone().into_client("default");
+
+    let groups = client
+        .list_api_groups_aggregated()
+        .await
+        .expect("legacy group list remains a successful compatibility response");
+    let core = client
+        .list_core_api_versions_aggregated()
+        .await
+        .expect("legacy core versions remain a successful compatibility response");
+
+    assert!(groups.items.is_empty());
+    assert!(core.items.is_empty());
+}
+
+#[tokio::test]
 async fn supported_cluster_uses_two_aggregated_requests() {
     let (adapter, server) = adapter_with_recorded_context();
     let data = resource_types(types_for(&adapter, "mock-cluster").await);
@@ -85,7 +103,7 @@ async fn supported_cluster_uses_two_aggregated_requests() {
 
 #[tokio::test]
 async fn aggregated_non_core_api_item_falls_back_to_legacy() {
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::aggregated();
     server.set_accept_response(
         "GET",
         "/api",
@@ -112,7 +130,7 @@ async fn aggregated_non_core_api_item_falls_back_to_legacy() {
 
 #[tokio::test]
 async fn exact_path_response_does_not_remove_accept_specific_routes() {
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::aggregated();
     server.set_response("/apis", 200, r#"{}"#);
     server.set_response("/api", 200, r#"{}"#);
     server.set_response(
@@ -137,7 +155,7 @@ async fn exact_path_response_does_not_remove_accept_specific_routes() {
 
 #[tokio::test]
 async fn method_response_does_not_remove_accept_specific_route() {
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::aggregated();
     server.set_method_response("GET", "/apis", 200, r#"{}"#);
     server.set_method_response("GET", "/api", 200, r#"{}"#);
     let client = server.clone().into_client("default");
@@ -245,7 +263,7 @@ async fn aggregated_fallback_runs_legacy_discovery_once() {
 #[tokio::test]
 async fn aggregated_failure_does_not_fallback() {
     for status in [401, 403, 429, 500] {
-        let server = RecordedApiServer::legacy();
+        let server = RecordedApiServer::aggregated();
         server.set_accept_response(
             "GET",
             "/apis",
@@ -282,7 +300,7 @@ async fn aggregated_failure_does_not_fallback() {
         }
     }
 
-    let server = RecordedApiServer::legacy();
+    let server = RecordedApiServer::aggregated();
     server.set_transport_error("GET", "/apis");
     let adapter = adapter_for_server(&server, "transport-failure");
     let error = adapter
@@ -413,7 +431,7 @@ async fn unavailable_context_and_gvk_are_typed_failures() {
 
 #[tokio::test]
 async fn api_server_rejections_stay_typed_and_never_empty_catalog() {
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::aggregated();
     let client = server.clone().into_client("default");
     let contexts = vec![ContextInfo {
         name: "denied-cluster".into(),
@@ -530,7 +548,7 @@ async fn cache_evicts_oldest_contexts_when_full() {
             availability: k10s_protocol::ContextAvailability::Available,
             unavailable_reason: None,
         });
-        let server = RecordedApiServer::standard();
+        let server = RecordedApiServer::aggregated();
         clients.push((name.clone(), server.clone().into_client("default")));
         servers.push(server);
     }

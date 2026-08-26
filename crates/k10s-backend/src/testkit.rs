@@ -295,11 +295,17 @@ impl RecordedApiServer {
             .unwrap_or_default()
     }
 
-    /// A recorded discovery surface matching the standard fake Kubernetes
-    /// world: core built-ins, apps workloads (with scale subresources where a
-    /// real cluster exposes them), apiextensions, and one CRD group.
+    /// The historical standard fake Kubernetes world, served through legacy
+    /// discovery documents.
     #[must_use]
     pub fn standard() -> Self {
+        Self::legacy()
+    }
+
+    /// The standard fake Kubernetes world with Accept-negotiated aggregated
+    /// discovery v2 routes and legacy documents retained as fallback.
+    #[must_use]
+    pub fn aggregated() -> Self {
         let server = Self::legacy();
         server.set_accept_response(
             "GET",
