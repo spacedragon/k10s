@@ -94,17 +94,17 @@ fn trace_attempt(context: &str, mode: &str, started: Instant, outcome: &str) {
 
 fn has_usable_core(discovery: &Discovery) -> bool {
     discovery.get("").is_some_and(|core| {
-        core.versions().any(|version| {
-            !version.is_empty()
-                && core
-                    .versioned_resources(version)
-                    .into_iter()
-                    .any(|(resource, capabilities)| {
-                        !resource.kind.is_empty()
-                            && !resource.plural.is_empty()
-                            && capabilities.supports_operation(verbs::LIST)
-                    })
-        })
+        core.name().is_empty()
+            && core.versions().any(|version| {
+                !version.is_empty()
+                    && core.versioned_resources(version).into_iter().any(
+                        |(resource, capabilities)| {
+                            !resource.kind.is_empty()
+                                && !resource.plural.is_empty()
+                                && capabilities.supports_operation(verbs::LIST)
+                        },
+                    )
+            })
     })
 }
 

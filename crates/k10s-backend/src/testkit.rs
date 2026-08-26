@@ -134,6 +134,8 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                         .then_some(response)
                     },
                 );
+                // Route precedence is explicit and setters never mutate other
+                // routes: Accept-specific, then method/path, then path-only.
                 match negotiated
                     .or_else(|| shared.method_responses.get(&method_path))
                     .or_else(|| shared.responses.get(&path))
@@ -176,31 +178,11 @@ impl RecordedApiServer {
     }
 
     /// Record one canned response for an exact request path.
-    ///
-    /// A legacy group-version discovery override switches the standard fake
-    /// world back to its coherent legacy discovery surface, so the customized
-    /// document is observable instead of being shadowed by canned aggregate
-    /// documents.
     pub fn set_response(&self, path: &str, status: u16, body: &str) {
         let mut shared = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A later generic override is commonly used to simulate an endpoint
-        // changing underneath a cached client. Make it replace any standard
-        // content-negotiated fixture for that path as well.
-        shared
-            .accept_responses
-            .retain(|(method_path, _), _| !method_path.ends_with(&format!(" {path}")));
-        if is_legacy_group_version_path(path) {
-            // Tests that customize a legacy discovery document need the next
-            // discovery run to observe it. Remove both aggregate fixtures so
-            // the successful default-empty compatibility branch selects the
-            // customized legacy surface as a coherent whole.
-            shared.accept_responses.retain(|(method_path, _), _| {
-                method_path != "GET /apis" && method_path != "GET /api"
-            });
-        }
         shared
             .responses
             .insert(path.to_owned(), (status, body.to_owned()));
@@ -213,9 +195,6 @@ impl RecordedApiServer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let method_path = format!("{} {path}", method.to_ascii_uppercase());
-        shared
-            .accept_responses
-            .retain(|(candidate, _), _| candidate != &method_path);
         shared
             .method_responses
             .insert(method_path, (status, body.to_owned()));
@@ -406,14 +385,6 @@ impl RecordedApiServer {
         );
         server
     }
-}
-
-fn is_legacy_group_version_path(path: &str) -> bool {
-    let segments = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    matches!(segments.as_slice(), ["api", _] | ["apis", _, _])
 }
 
 /// Kubernetes Status error body for unrecorded paths (mirrors real clusters).

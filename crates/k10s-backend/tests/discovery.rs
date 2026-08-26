@@ -84,6 +84,78 @@ async fn supported_cluster_uses_two_aggregated_requests() {
 }
 
 #[tokio::test]
+async fn aggregated_non_core_api_item_falls_back_to_legacy() {
+    let server = RecordedApiServer::standard();
+    server.set_accept_response(
+        "GET",
+        "/api",
+        "apidiscovery.k8s.io",
+        200,
+        r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":[
+          {"metadata":{"name":"not-core.example.com"},"versions":[{"version":"v1","resources":[
+            {"resource":"impostors","responseKind":{"group":"not-core.example.com","version":"v1","kind":"Impostor"},"scope":"Cluster","verbs":["get","list","watch"]}
+          ]}]}
+        ]}"#,
+    );
+    let adapter = adapter_for_server(&server, "non-core-api-item");
+
+    let data = resource_types(types_for(&adapter, "non-core-api-item").await);
+
+    assert_normalized_catalog(&data);
+    assert!(data.find_kind("Impostor").is_none());
+    assert_eq!(server.hit_count("/apis"), 2);
+    assert_eq!(server.hit_count("/api"), 2);
+    for path in LEGACY_GROUP_VERSION_PATHS {
+        assert_eq!(server.hit_count(path), 1, "one legacy hit for {path}");
+    }
+}
+
+#[tokio::test]
+async fn exact_path_response_does_not_remove_accept_specific_routes() {
+    let server = RecordedApiServer::standard();
+    server.set_response("/apis", 200, r#"{}"#);
+    server.set_response("/api", 200, r#"{}"#);
+    server.set_response(
+        "/apis/k10s.example.com/v1alpha1",
+        200,
+        r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"k10s.example.com/v1alpha1","resources":[]}"#,
+    );
+    let client = server.clone().into_client("default");
+
+    let groups = client
+        .list_api_groups_aggregated()
+        .await
+        .expect("exact-path update leaves aggregated /apis route intact");
+    let core = client
+        .list_core_api_versions_aggregated()
+        .await
+        .expect("exact-path update leaves aggregated /api route intact");
+
+    assert_eq!(groups.items.len(), 5);
+    assert_eq!(core.items.len(), 1);
+}
+
+#[tokio::test]
+async fn method_response_does_not_remove_accept_specific_route() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", "/apis", 200, r#"{}"#);
+    server.set_method_response("GET", "/api", 200, r#"{}"#);
+    let client = server.clone().into_client("default");
+
+    let groups = client
+        .list_api_groups_aggregated()
+        .await
+        .expect("method response leaves the more-specific Accept route intact");
+    let core = client
+        .list_core_api_versions_aggregated()
+        .await
+        .expect("method response leaves the more-specific core route intact");
+
+    assert_eq!(groups.items.len(), 5);
+    assert_eq!(core.items.len(), 1);
+}
+
+#[tokio::test]
 async fn aggregated_fallback_runs_legacy_discovery_once() {
     enum AggregatedFailure {
         Http(u16),

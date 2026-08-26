@@ -118,7 +118,7 @@ async fn cronjob_suspend_and_resume_patch_exact_uid_and_resource_version() {
 
 #[tokio::test]
 async fn custom_resources_obey_discovered_scale_and_delete_capabilities() {
-    let enabled = RecordedApiServer::standard();
+    let enabled = RecordedApiServer::legacy();
     enabled.set_response(
         "/apis/k10s.example.com/v1alpha1",
         200,
@@ -145,7 +145,7 @@ async fn custom_resources_obey_discovered_scale_and_delete_capabilities() {
     success(&enabled_adapter, id.as_str()).await;
     assert!(enabled.request_bodies(scale_path)[0].contains("\"replicas\":2"));
 
-    let server = RecordedApiServer::standard();
+    let server = RecordedApiServer::legacy();
     server.set_response(
         "/apis/k10s.example.com/v1alpha1",
         200,
