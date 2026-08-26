@@ -20,12 +20,14 @@ struct GatedRecordedApiServer {
     path: Arc<str>,
     entered: Arc<tokio::sync::Semaphore>,
     releases: Arc<tokio::sync::Semaphore>,
+    completed: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone)]
 struct DiscoveryGate {
     entered: Arc<tokio::sync::Semaphore>,
     releases: Arc<tokio::sync::Semaphore>,
+    completed: Arc<tokio::sync::Semaphore>,
 }
 
 impl DiscoveryGate {
@@ -40,19 +42,33 @@ impl DiscoveryGate {
     fn release_one(&self) {
         self.releases.add_permits(1);
     }
+
+    async fn wait_until_completed(&self) {
+        self.completed
+            .acquire()
+            .await
+            .expect("discovery completion gate remains open")
+            .forget();
+    }
 }
 
 fn gate_path(inner: RecordedApiServer, path: &str) -> (GatedRecordedApiServer, DiscoveryGate) {
     let entered = Arc::new(tokio::sync::Semaphore::new(0));
     let releases = Arc::new(tokio::sync::Semaphore::new(0));
+    let completed = Arc::new(tokio::sync::Semaphore::new(0));
     (
         GatedRecordedApiServer {
             inner,
             path: Arc::from(path),
             entered: Arc::clone(&entered),
             releases: Arc::clone(&releases),
+            completed: Arc::clone(&completed),
         },
-        DiscoveryGate { entered, releases },
+        DiscoveryGate {
+            entered,
+            releases,
+            completed,
+        },
     )
 }
 
@@ -71,6 +87,7 @@ impl Service<Request<kube::client::Body>> for GatedRecordedApiServer {
         let gated = request.uri().path() == self.path.as_ref();
         let entered = Arc::clone(&self.entered);
         let releases = Arc::clone(&self.releases);
+        let completed = Arc::clone(&self.completed);
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let response = inner.call(request).await?;
@@ -81,6 +98,7 @@ impl Service<Request<kube::client::Body>> for GatedRecordedApiServer {
                     .await
                     .expect("discovery release gate remains open")
                     .forget();
+                completed.add_permits(1);
             }
             Ok(response)
         })
@@ -457,6 +475,120 @@ async fn forced_refresh_joins_running_generation_and_bypasses_fresh_cache() {
             })
             .await
             .expect("the replaced cache serves the refreshed catalog"),
+    );
+    assert!(refreshed.find_kind("Widget").is_some());
+    assert!(refreshed.find_kind("Gadget").is_none());
+    assert_eq!(server_b.hit_count("/apis"), 2);
+    assert_eq!(server_b.hit_count("/api"), 2);
+}
+
+#[tokio::test]
+async fn cancelled_waiters_do_not_orphan_discovery_generation() {
+    const CONTEXT_A: &str = "cancel-source";
+    const CONTEXT_B: &str = "cancel-target";
+    const WAITERS: usize = 4;
+
+    let server_a = RecordedApiServer::aggregated();
+    let server_b = RecordedApiServer::aggregated();
+    let (gated_b, gate_b) = gate_path(server_b.clone(), "/apis");
+    let client_a = server_a.into_client("default");
+    let client_b = kube::client::ClientBuilder::new(gated_b, "default").build();
+    let adapter = Arc::new(
+        KubeAdapter::with_cluster_clients(
+            vec![
+                ContextInfo::available(
+                    CONTEXT_A,
+                    "recorded-cancel-source",
+                    Some("default".into()),
+                    true,
+                ),
+                ContextInfo::available(
+                    CONTEXT_B,
+                    "recorded-cancel-target",
+                    Some("default".into()),
+                    false,
+                ),
+            ],
+            [(CONTEXT_A, client_a), (CONTEXT_B, client_b)],
+        )
+        .expect("adapter builds around cancellation contexts"),
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(WAITERS));
+    let mut waiters = Vec::with_capacity(WAITERS);
+    for _ in 0..WAITERS {
+        let adapter = Arc::clone(&adapter);
+        let barrier = Arc::clone(&barrier);
+        waiters.push(tokio::spawn(async move {
+            barrier.wait().await;
+            adapter
+                .query(Query::ResourceTypes {
+                    context: CONTEXT_B.into(),
+                })
+                .await
+        }));
+    }
+
+    gate_b.wait_until_entered().await;
+    tokio::task::yield_now().await;
+    for waiter in &waiters {
+        assert!(
+            !waiter.is_finished(),
+            "every waiter is blocked on generation one"
+        );
+        waiter.abort();
+    }
+    for waiter in waiters {
+        assert!(
+            waiter
+                .await
+                .expect_err("aborted waiter has no query result")
+                .is_cancelled()
+        );
+    }
+
+    // Generation one already buffered the old Gadget response. Updating the
+    // route now affects only a genuinely new live generation.
+    server_b.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        200,
+        r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+          {"metadata":{"name":"k10s.example.com"},"versions":[{"version":"v1alpha1","resources":[
+            {"resource":"widgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Widget"},"scope":"Cluster","verbs":["get","list"]}
+          ]}]}
+        ]}"#,
+    );
+    gate_b.release_one();
+    tokio::time::timeout(Duration::from_secs(1), gate_b.wait_until_completed())
+        .await
+        .expect("adapter-owned generation one keeps progressing without request waiters");
+
+    let release_generation_two = async {
+        gate_b.wait_until_entered().await;
+        assert_eq!(
+            server_b.hit_count("/apis"),
+            2,
+            "forced validation starts generation two after orphan cleanup"
+        );
+        gate_b.release_one();
+    };
+    let (forced, ()) = tokio::join!(
+        biased;
+        adapter.query(Query::ContextSwitch {
+            to: CONTEXT_B.into(),
+        }),
+        release_generation_two,
+    );
+    forced.expect("generation two validates and commits");
+
+    let refreshed = resource_types(
+        adapter
+            .query(Query::ResourceTypes {
+                context: CONTEXT_B.into(),
+            })
+            .await
+            .expect("generation two replaces the cached catalog"),
     );
     assert!(refreshed.find_kind("Widget").is_some());
     assert!(refreshed.find_kind("Gadget").is_none());
