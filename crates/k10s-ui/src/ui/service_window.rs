@@ -213,7 +213,7 @@ where
     let compact_controls = ui.ctx().content_rect().width() < 700.0;
     // Keep search, scope, and detail controls reachable in narrow windows.
     // Concise labels preserve every action without collapsing editors.
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         let mut search = state.search.clone();
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)

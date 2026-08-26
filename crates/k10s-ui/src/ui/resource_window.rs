@@ -169,9 +169,9 @@ pub(super) fn show<I>(
 
     let compact_controls = ui.ctx().content_rect().width() < 700.0;
     // Scope controls must remain reachable in the supported compact web
-    // viewport. Use concise labels and useful-but-smaller editors before
-    // wrapping whole controls onto a following line.
-    ui.horizontal_wrapped(|ui| {
+    // viewport. Concise labels and useful-but-smaller editors keep the
+    // established single-row layout intact.
+    ui.horizontal(|ui| {
         let search_hint = format!("Search {}", title.to_lowercase());
         let mut search = state.search.clone();
         let search_edit = ui.add(
