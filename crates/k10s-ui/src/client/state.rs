@@ -901,6 +901,41 @@ impl ClientState {
         }
     }
 
+    /// Validate a whole desired-subscription diff without changing client
+    /// state. A successful preflight reserves no external resource, but all
+    /// subsequent unsubscribe/subscribe validations are deterministic while
+    /// the caller executes the batch synchronously.
+    pub fn preflight_subscription_changes(
+        &self,
+        removals: usize,
+        additions: usize,
+    ) -> Result<(), ClientError> {
+        if self.phase != ClientPhase::Ready {
+            return Err(ClientError::InvalidState("client is not ready"));
+        }
+        if removals > self.live_subscriptions.len() {
+            return Err(ClientError::InvalidState(
+                "subscription preflight removes more than the desired set",
+            ));
+        }
+        let final_count = self
+            .live_subscriptions
+            .len()
+            .saturating_sub(removals)
+            .saturating_add(additions);
+        let limit = self.live_subscription_limit();
+        if final_count > limit {
+            return Err(ClientError::LiveSubscriptionLimit { limit });
+        }
+        let required_frames = removals.saturating_add(additions);
+        if self.outbound.len().saturating_add(required_frames) > self.config.outbound_capacity {
+            return Err(ClientError::OutboundOverload {
+                capacity: self.config.outbound_capacity,
+            });
+        }
+        Ok(())
+    }
+
     /// Start and remember the Plan 1 bootstrap-status subscription.
     pub fn subscribe_bootstrap_status(&mut self) -> Result<LiveSubscription, ClientError> {
         if self.phase != ClientPhase::Ready {

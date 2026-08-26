@@ -185,6 +185,9 @@ struct SubscriptionKey {
     context: String,
     gvk: k10s_protocol::GroupVersionKind,
     scope: SubscriptionScope,
+    /// Effective selector sent on the wire. Kept beside namespace intent so
+    /// a Bootstrap default-namespace change replaces ContextDefault watches.
+    protocol_namespace: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1599,6 +1602,12 @@ impl K10sApp {
             let key = SubscriptionKey {
                 context: context.to_owned(),
                 gvk,
+                protocol_namespace: match &scope {
+                    SubscriptionScope::Namespaced(intent) => {
+                        intent.resolve(context_namespace).map(str::to_owned)
+                    }
+                    SubscriptionScope::ClusterScoped => None,
+                },
                 scope,
             };
             desired.entry(key.clone()).or_default().insert(window.id);
@@ -1611,10 +1620,19 @@ impl K10sApp {
             .filter(|key| !desired.contains_key(*key))
             .cloned()
             .collect();
+        let additions = desired
+            .keys()
+            .filter(|key| !self.resource_subscriptions.contains_key(*key))
+            .count();
+        if self.client.phase() == ClientPhase::Ready {
+            self.client
+                .preflight_subscription_changes(removed.len(), additions)?;
+        }
         for key in removed {
-            if let Some(entry) = self.resource_subscriptions.remove(&key) {
+            if let Some(entry) = self.resource_subscriptions.get(&key) {
                 self.client.unsubscribe(&entry.live)?;
             }
+            self.resource_subscriptions.remove(&key);
         }
         if self.client.phase() != ClientPhase::Ready {
             self.window_subscriptions = window_subscriptions;
@@ -1628,19 +1646,22 @@ impl K10sApp {
                 entry.windows = windows;
                 continue;
             }
-            let namespace = match &key.scope {
-                SubscriptionScope::Namespaced(scope) => {
-                    scope.resolve(context_namespace).map(str::to_owned)
-                }
-                SubscriptionScope::ClusterScoped => None,
-            };
-            let live = self.client.subscribe_resource(
+            let live = match self.client.subscribe_resource(
                 key.context.clone(),
                 key.gvk.group.clone(),
                 key.gvk.version.clone(),
                 key.gvk.kind.clone(),
-                namespace,
-            )?;
+                key.protocol_namespace.clone(),
+            ) {
+                Ok(live) => live,
+                Err(error) => {
+                    window_subscriptions.retain(|_, desired_key| {
+                        self.resource_subscriptions.contains_key(desired_key)
+                    });
+                    self.window_subscriptions = window_subscriptions;
+                    return Err(error);
+                }
+            };
             self.resource_subscriptions
                 .insert(key, RetainedSubscription { live, windows });
         }
@@ -1703,6 +1724,7 @@ impl K10sApp {
             && self.types_context.as_deref() == Some(requested.as_str())
         {
             self.resource_types = response.types;
+            self.reconcile_selected_resource_streams();
         } else {
             // The answer no longer matches the selection: force a refetch on
             // the next reconciliation.
@@ -2329,7 +2351,7 @@ mod tests {
     };
 
     use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
-    use crate::client::{ClientPhase, ConnectTarget, TransportError};
+    use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
     use crate::workspace::{
         NamespaceScope, WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
@@ -3144,6 +3166,93 @@ mod tests {
     }
 
     #[test]
+    fn context_default_replaces_watch_when_same_context_namespace_changes() {
+        let (mut app, state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        assert_eq!(
+            resource_watches(&state)[0].namespace.as_deref(),
+            Some("default")
+        );
+
+        let AppView::Ready { contexts, .. } = &mut app.view else {
+            panic!("ready")
+        };
+        contexts
+            .iter_mut()
+            .find(|context| context.name == "dev-local")
+            .unwrap()
+            .namespace = Some("team-b".to_owned());
+        app.reconcile_selected_resource_streams();
+
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches.last().unwrap().namespace.as_deref(), Some("team-b"));
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| frame.kind == ClientKind::Unsubscribe)
+                .count(),
+            1
+        );
+        let key = app.window_subscriptions.get(&window).unwrap();
+        assert!(matches!(
+            key.scope,
+            super::SubscriptionScope::Namespaced(NamespaceScope::ContextDefault)
+        ));
+        assert_eq!(app.resource_subscriptions.len(), 1);
+        assert!(
+            app.build_resource_feed()
+                .window_lists
+                .get(&window)
+                .is_none(),
+            "the replaced watch has no stale rows projected under the window"
+        );
+    }
+
+    #[test]
+    fn successful_resource_types_response_immediately_subscribes_selected_custom_kind() {
+        let (mut app, state) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                window,
+                Some("example.io/v1/Widget".to_owned()),
+            ));
+        let request_id = state
+            .borrow()
+            .sent
+            .iter()
+            .find(|frame| request_kind(frame).as_deref() == Some("resource.types"))
+            .and_then(|frame| frame.request_id.clone())
+            .unwrap();
+        let response = ServerFrame::response(
+            request_id,
+            k10s_protocol::ResourceTypesResponse {
+                context: "dev-local".to_owned(),
+                types: vec![k10s_protocol::ResourceTypeEntry {
+                    gvk: GroupVersionKind {
+                        group: "example.io".to_owned(),
+                        version: "v1".to_owned(),
+                        kind: "Widget".to_owned(),
+                    },
+                    namespaced: true,
+                }],
+            },
+        );
+
+        app.handle_event(server_message(&response), 100, 0).unwrap();
+        app.finish_mutations();
+
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].gvk.kind, "Widget");
+    }
+
+    #[test]
     fn equal_window_keys_share_and_last_close_unsubscribes() {
         let (mut app, state) = ready_app();
         let first = app
@@ -3191,6 +3300,91 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn failed_unsubscribe_preflight_retains_app_mapping_and_client_desire() {
+        let (mut app, _state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let key = app.window_subscriptions.get(&window).cloned().unwrap();
+        let _extra = app
+            .client
+            .subscribe_resource(
+                "dev-local",
+                "",
+                "v1",
+                "ConfigMap",
+                Some("default".to_owned()),
+            )
+            .unwrap();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        assert_eq!(app.client.outbound_len(), 256);
+        let desired_before = app.client.live_subscription_count();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+
+        assert!(app.reconcile_resource_streams("dev-local").is_err());
+        assert!(app.resource_subscriptions.contains_key(&key));
+        assert_eq!(app.window_subscriptions.get(&window), Some(&key));
+        assert_eq!(app.client.live_subscription_count(), desired_before);
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+    }
+
+    #[test]
+    fn failed_multi_addition_preflight_leaves_no_partial_app_or_client_state() {
+        let (mut app, _state) = ready_app();
+        let first = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                first,
+                NamespaceScope::Namespace("a".to_owned()),
+            ));
+        let second = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                second,
+                NamespaceScope::Namespace("b".to_owned()),
+            ));
+        let target_count = app.client.live_subscription_limit() - 1;
+        let mut index = 0;
+        while app.client.live_subscription_count() < target_count {
+            app.client
+                .subscribe_resource(
+                    "dev-local",
+                    "test.example",
+                    "v1",
+                    format!("Filler{index}"),
+                    None,
+                )
+                .unwrap();
+            let _ = app.client.take_outbound();
+            index += 1;
+        }
+        let desired_before = app.client.live_subscription_count();
+
+        assert!(app.reconcile_resource_streams("dev-local").is_err());
+        assert!(app.resource_subscriptions.is_empty());
+        assert!(app.window_subscriptions.is_empty());
+        assert_eq!(app.client.live_subscription_count(), desired_before);
+        assert_eq!(app.client.outbound_len(), 0);
     }
 
     #[test]

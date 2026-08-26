@@ -585,6 +585,49 @@ fn subscribe_rolls_back_when_reliable_outbound_is_full() {
 }
 
 #[test]
+fn subscription_change_preflight_is_non_mutating_when_outbound_is_full() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 4,
+        ..ClientConfig::default()
+    });
+    client
+        .subscribe_resource("dev", "", "v1", "Pod", Some("default".to_owned()))
+        .unwrap();
+    client.begin(Query::Bootstrap).unwrap();
+    client.begin(Query::Bootstrap).unwrap();
+    assert_eq!(client.outbound_len(), 3);
+
+    assert_eq!(
+        client.preflight_subscription_changes(1, 1).unwrap_err(),
+        ClientError::OutboundOverload { capacity: 4 }
+    );
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert_eq!(client.outbound_len(), 3);
+    assert_eq!(client.live_subscription_count(), 1);
+}
+
+#[test]
+fn subscription_change_preflight_rejects_final_live_set_before_mutation() {
+    let mut client = ready_client_with_config(ClientConfig {
+        outbound_capacity: 4,
+        ..ClientConfig::default()
+    });
+    client
+        .subscribe_resource("dev", "", "v1", "Pod", Some("a".to_owned()))
+        .unwrap();
+    client
+        .subscribe_resource("dev", "", "v1", "Pod", Some("b".to_owned()))
+        .unwrap();
+
+    assert_eq!(
+        client.preflight_subscription_changes(0, 1).unwrap_err(),
+        ClientError::LiveSubscriptionLimit { limit: 2 }
+    );
+    assert_eq!(client.outbound_len(), 2);
+    assert_eq!(client.live_subscription_count(), 2);
+}
+
+#[test]
 fn cancel_keeps_request_pending_when_cancel_frame_cannot_be_enqueued() {
     let mut client = ready_client_with_config(ClientConfig {
         outbound_capacity: 1,
