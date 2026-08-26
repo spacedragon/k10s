@@ -48,7 +48,7 @@ contradictory hard bounds.
 | `max_authenticated_connections` | 128 | Authenticated control socket cap. |
 | `outbound_queue_capacity` | 64 | Per-control-socket outbound queue. |
 | `max_resource_subscriptions_per_session` | 64 | Live resource watches per session. |
-| `snapshot_rows_per_chunk` | 16 | Normalized rows per snapshot chunk. |
+| `snapshot_rows_per_chunk` | 128 | Normalized rows per snapshot chunk. |
 | `drain_grace_timeout` | 250 ms | Read-only status window after shutdown notice. |
 | `drain_timeout` | 10 s | Absolute tracked-task drain deadline. |
 | `capabilities` | logs.tail, exec.attach | Advertised wire capability identifiers. |
