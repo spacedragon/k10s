@@ -196,15 +196,32 @@ async fn default_4300_row_snapshot_uses_exact_default_chunk_count() {
             break;
         }
     }
-    client
+    let subscription = client
         .subscribe_resource("dev-local", "", "v1", "Pod", None)
         .unwrap();
     flush_outbound(&mut ws, &mut client).await;
-    assert_eq!(recv_frame(&mut ws).await.kind, ServerKind::Subscribed);
+    let subscribed = recv_frame(&mut ws).await;
+    assert_eq!(subscribed.kind, ServerKind::Subscribed);
+    assert_eq!(subscribed.subscription_id.as_ref(), Some(subscription.id()));
     let begin = recv_frame(&mut ws).await;
+    assert_eq!(begin.subscription_id.as_ref(), Some(subscription.id()));
     let chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
         .unwrap()
         .total_chunks as usize;
-    assert_eq!(chunks, expected_rows.div_ceil(128));
+    let expected_chunks = expected_rows.div_ceil(128);
+    assert_eq!(chunks, expected_chunks);
+    let mut observed_chunks = 0;
+    for expected_index in 0..expected_chunks {
+        let frame = recv_frame(&mut ws).await;
+        assert_eq!(frame.kind, ServerKind::SnapshotChunk);
+        assert_eq!(frame.subscription_id.as_ref(), Some(subscription.id()));
+        let chunk: SnapshotChunk = serde_json::from_value(frame.payload).unwrap();
+        assert_eq!(chunk.chunk_index as usize, expected_index);
+        observed_chunks += 1;
+    }
+    assert_eq!(observed_chunks, expected_rows.div_ceil(128));
+    let end = recv_frame(&mut ws).await;
+    assert_eq!(end.kind, ServerKind::SnapshotEnd);
+    assert_eq!(end.subscription_id.as_ref(), Some(subscription.id()));
     server.shutdown().await.unwrap();
 }
