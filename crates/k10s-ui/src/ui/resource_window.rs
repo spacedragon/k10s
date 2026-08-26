@@ -135,6 +135,7 @@ pub(super) fn show<I>(
     streams: &mut super::tools::StreamStores,
     dialogs: &mut super::dialogs::OperationDialogs,
     feed: &ResourceFeed,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -179,7 +180,10 @@ pub(super) fn show<I>(
         if namespaced {
             ui.label(match &state.namespace_scope {
                 crate::workspace::NamespaceScope::ContextDefault => {
-                    "Context default (default)".to_owned()
+                    format!(
+                        "Context default ({})",
+                        context_namespace.unwrap_or("default")
+                    )
                 }
                 crate::workspace::NamespaceScope::Namespace(value) => format!("Namespace: {value}"),
                 crate::workspace::NamespaceScope::AllNamespaces => "All namespaces".to_owned(),
@@ -255,7 +259,7 @@ pub(super) fn show<I>(
             (!namespaced
                 || state
                     .namespace_scope
-                    .resolve(None)
+                    .resolve(context_namespace)
                     .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref()))
                 && super::resource_table::matches_search(row, &needle)
         })

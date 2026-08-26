@@ -288,6 +288,12 @@ where
             .map(str::to_owned);
 
         let mut context_change = None;
+        let selected_namespace = selected.as_deref().and_then(|name| {
+            contexts
+                .iter()
+                .find(|context| context.name == name)
+                .and_then(|context| context.namespace.as_deref())
+        });
         let mut refresh_requested = false;
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
@@ -318,6 +324,7 @@ where
                 &mut self.dialogs,
                 response,
                 feed,
+                selected_namespace,
                 connection,
                 &mut queued,
             );

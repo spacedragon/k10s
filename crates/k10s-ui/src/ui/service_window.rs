@@ -195,6 +195,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     state: &mut ServiceWindowState<I>,
     feed: &ResourceFeed,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     yaml: &mut super::tools::YamlEditors,
     streams: &mut super::tools::StreamStores,
@@ -225,7 +226,10 @@ where
 
         ui.label(match &state.namespace_scope {
             crate::workspace::NamespaceScope::ContextDefault => {
-                "Context default (default)".to_owned()
+                format!(
+                    "Context default ({})",
+                    context_namespace.unwrap_or("default")
+                )
             }
             crate::workspace::NamespaceScope::Namespace(value) => format!("Namespace: {value}"),
             crate::workspace::NamespaceScope::AllNamespaces => "All namespaces".to_owned(),
@@ -295,7 +299,7 @@ where
         .filter(|row| {
             state
                 .namespace_scope
-                .resolve(None)
+                .resolve(context_namespace)
                 .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref())
                 && search_matches(row, &needle)
         })

@@ -21,6 +21,7 @@ const CONTEXT: &str = "dev-local";
 struct Fixture {
     shell: UiShell<ResourceIdentity>,
     feed: ResourceFeed,
+    context_namespace: Option<String>,
 }
 
 impl Default for Fixture {
@@ -28,14 +29,22 @@ impl Default for Fixture {
         Self {
             shell: UiShell::new(),
             feed: default_feed(),
+            context_namespace: None,
         }
     }
 }
 
 fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let mut selected_context = Some(CONTEXT.to_owned());
-    let contexts = [CONTEXT.to_owned()];
-    fixture.shell.show_with_resources(
+    let contexts = [k10s_protocol::Context {
+        name: CONTEXT.to_owned(),
+        cluster: "cluster".into(),
+        namespace: fixture.context_namespace.clone(),
+        is_current: true,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
+    }];
+    fixture.shell.show_with_contexts_and_resources(
         ui,
         ConnectionState::Connected,
         &contexts,
@@ -43,6 +52,67 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
         None,
         &fixture.feed,
     );
+}
+
+#[test]
+fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
+    let mut fixture = Fixture {
+        context_namespace: Some("sea-team".into()),
+        ..Fixture::default()
+    };
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::Deployments,
+        vec![
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                Some("sea-team"),
+                "sea-api",
+                "1/1 ready",
+                "2026-08-21T00:00:00Z",
+            ),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                Some("other"),
+                "other-api",
+                "1/1 ready",
+                "2026-08-21T00:00:00Z",
+            ),
+        ],
+    );
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Context default (sea-team)");
+    window.get_by_label("sea-api");
+    assert!(window.query_by_label("other-api").is_none());
+}
+
+#[test]
+fn context_default_falls_back_to_default_when_selected_context_has_no_namespace() {
+    let mut fixture = Fixture::default();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Context default (default)");
+    window.get_by_label("api-server");
 }
 
 fn harness() -> Harness<'static, Fixture> {

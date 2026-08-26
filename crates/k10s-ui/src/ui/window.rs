@@ -23,6 +23,7 @@ pub(super) fn show_canvas<I>(
     dialogs: &mut super::dialogs::OperationDialogs,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     feed: &resource_window::ResourceFeed,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
@@ -54,6 +55,7 @@ where
             dialogs,
             feed,
             response,
+            context_namespace,
             connection,
             queued,
         );
@@ -88,6 +90,7 @@ fn show_window<I>(
     dialogs: &mut super::dialogs::OperationDialogs,
     feed: &resource_window::ResourceFeed,
     response: Option<&k10s_protocol::InfrastructureResponse>,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
@@ -133,8 +136,18 @@ where
                 (resource_state.as_mut(), state.kind)
             {
                 super::resource_window::show(
-                    ui, resources, state.id, kind, resource, yaml, streams, dialogs, feed,
-                    connection, queued,
+                    ui,
+                    resources,
+                    state.id,
+                    kind,
+                    resource,
+                    yaml,
+                    streams,
+                    dialogs,
+                    feed,
+                    context_namespace,
+                    connection,
+                    queued,
                 );
                 false
             } else {
@@ -156,7 +169,15 @@ where
                     WindowKind::Services => {
                         if let Some(service) = service_state.as_mut() {
                             super::service_window::show(
-                                ui, state.id, service, feed, connection, yaml, streams, dialogs,
+                                ui,
+                                state.id,
+                                service,
+                                feed,
+                                context_namespace,
+                                connection,
+                                yaml,
+                                streams,
+                                dialogs,
                                 queued,
                             )
                         } else {
