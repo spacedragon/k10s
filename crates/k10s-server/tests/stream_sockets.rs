@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::Message,
-    tungstenite::protocol::frame::{Frame, coding::Data, coding::OpCode},
+    tungstenite::protocol::frame::{
+        Frame,
+        coding::{CloseCode, Data, OpCode},
+    },
 };
 
 type Ws =
@@ -655,15 +658,22 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
     }
     let mut saw_overload_error = false;
     let mut saw_close = false;
+    let mut terminal = "no terminal event".to_owned();
     loop {
         match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
             Err(_) => panic!("the server must close a flooding socket explicitly"),
-            Ok(None) | Ok(Some(Err(_))) => break,
+            Ok(None) => {
+                terminal = "stream ended without a close frame".to_owned();
+                break;
+            }
+            Ok(Some(Err(error))) => {
+                terminal = format!("websocket error: {error}");
+                break;
+            }
             Ok(Some(Ok(Message::Close(frame)))) => {
-                saw_close = true;
-                if frame.is_some_and(|frame| frame.reason.contains("budget")) {
-                    saw_overload_error = true;
-                }
+                saw_close = frame.is_some_and(|frame| {
+                    frame.code == CloseCode::Again && frame.reason.contains("budget")
+                });
                 break;
             }
             Ok(Some(Ok(Message::Text(text)))) => {
@@ -679,7 +689,7 @@ async fn rate_budget_overload_closes_the_socket_explicitly() {
     }
     assert!(
         saw_overload_error && saw_close,
-        "the flood must end in an explicit overload closure (error={saw_overload_error}, close={saw_close})"
+        "the flood must end in an explicit overload closure (error={saw_overload_error}, close={saw_close}, terminal={terminal})"
     );
     let _ = banner;
 

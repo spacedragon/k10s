@@ -58,6 +58,42 @@ fn error_message(code: ErrorCode, message: &str) -> Message {
     })
 }
 
+async fn close_overloaded_stream<S, I, SendError, ReceiveError>(
+    sink: &mut S,
+    inbound: &mut I,
+    error: &str,
+    reason: &str,
+    flush_timeout: Duration,
+) where
+    S: futures_util::Sink<Message, Error = SendError> + Unpin,
+    I: futures_util::Stream<Item = Result<Message, ReceiveError>> + Unpin,
+{
+    let _ = sink.send(error_message(ErrorCode::Internal, error)).await;
+    let _ = sink
+        .send(Message::Close(Some(CloseFrame {
+            code: 1013,
+            reason: reason.into(),
+        })))
+        .await;
+
+    // A flooding peer can still have data in flight when the close frame is
+    // sent. Keep consuming it until the peer acknowledges the close so
+    // dropping the TCP socket cannot turn the explicit close into a reset.
+    let handshake = async {
+        loop {
+            match inbound.next().await {
+                Some(Ok(Message::Close(_))) => {
+                    let _ = sink.close().await;
+                    return;
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => return,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(flush_timeout, handshake).await;
+}
+
 /// Serialize one JSON status frame.
 fn text_message(message: &StreamServerMessage) -> Message {
     let raw = serde_json::to_string(message).expect("stream status frames serialize");
@@ -251,13 +287,14 @@ pub(crate) async fn serve_stream(
                         config.stream_rate_budget_bytes_per_sec,
                     ) {
                         tracing::warn!("stream outbound rate budget exceeded; closing");
-                        let _ = sink
-                            .send(error_message(ErrorCode::Internal, "stream rate budget exceeded"))
-                            .await;
-                        let _ = sink.send(Message::Close(Some(CloseFrame {
-                            code: 1013,
-                            reason: "rate budget exceeded".into(),
-                        }))).await;
+                        close_overloaded_stream(
+                            &mut sink,
+                            &mut inbound,
+                            "stream rate budget exceeded",
+                            "rate budget exceeded",
+                            config.graceful_flush_timeout,
+                        )
+                        .await;
                         return;
                     }
                     let frame =
@@ -270,15 +307,14 @@ pub(crate) async fn serve_stream(
                 // silent loss.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                     tracing::warn!(dropped, "stream consumer lagged; closing");
-                    let _ = sink
-                        .send(error_message(ErrorCode::Internal, "stream queue overload"))
-                        .await;
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1013,
-                            reason: "stream queue overload".into(),
-                        })))
-                        .await;
+                    close_overloaded_stream(
+                        &mut sink,
+                        &mut inbound,
+                        "stream queue overload",
+                        "stream queue overload",
+                        config.graceful_flush_timeout,
+                    )
+                    .await;
                     return;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -287,18 +323,14 @@ pub(crate) async fn serve_stream(
             frame = inbound.next() => match frame {
                 Some(Ok(Message::Binary(raw))) => {
                     if !admit_rate(&mut window_start, &mut window_bytes, raw.len(), config.stream_rate_budget_bytes_per_sec) {
-                        let _ = sink
-                            .send(error_message(
-                                ErrorCode::Internal,
-                                "inbound rate budget exceeded; closing to prevent overload",
-                            ))
-                            .await;
-                        let _ = sink
-                            .send(Message::Close(Some(CloseFrame {
-                                code: 1013,
-                                reason: "rate budget exceeded".into(),
-                            })))
-                            .await;
+                        close_overloaded_stream(
+                            &mut sink,
+                            &mut inbound,
+                            "inbound rate budget exceeded; closing to prevent overload",
+                            "rate budget exceeded",
+                            config.graceful_flush_timeout,
+                        )
+                        .await;
                         return;
                     }
                     let Ok(payload) = decode_stream_payload(&raw) else {
@@ -427,4 +459,60 @@ fn admit_rate(
     }
     *window_bytes = window_bytes.saturating_add(incoming);
     *window_bytes <= budget.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn overload_close_emits_error_and_1013_then_drains_through_peer_close() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut sink = Box::pin(futures_util::sink::unfold(
+            sent.clone(),
+            |sent, message| async move {
+                sent.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(message);
+                Ok::<_, std::convert::Infallible>(sent)
+            },
+        ));
+        let mut inbound = futures_util::stream::iter([
+            Ok::<_, std::convert::Infallible>(Message::Binary(vec![1].into())),
+            Ok(Message::Binary(vec![2].into())),
+            Ok(Message::Close(None)),
+        ]);
+
+        close_overloaded_stream(
+            &mut sink,
+            &mut inbound,
+            "stream rate budget exceeded",
+            "rate budget exceeded",
+            Duration::from_secs(1),
+        )
+        .await;
+
+        {
+            let sent = sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(sent.len(), 2, "one error and one close frame");
+            let Message::Text(error) = &sent[0] else {
+                panic!("overload must emit a safe text error first");
+            };
+            let error: serde_json::Value = serde_json::from_str(error).unwrap();
+            assert_eq!(error["kind"], "error");
+            assert_eq!(error["code"], "internal");
+            assert_eq!(error["message"], "stream rate budget exceeded");
+            assert!(matches!(
+                &sent[1],
+                Message::Close(Some(CloseFrame { code: 1013, reason }))
+                    if reason.as_str() == "rate budget exceeded"
+            ));
+        }
+        assert!(
+            inbound.next().await.is_none(),
+            "overload closure must drain through the peer's close acknowledgment"
+        );
+    }
 }
