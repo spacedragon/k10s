@@ -1,10 +1,91 @@
 //! Discovery and dynamic resource catalog behavior for the real kube-rs
 //! adapter, driven by a recorded tower Service (no live cluster).
 
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use bytes::Bytes;
+use http::{Request, Response};
+use http_body_util::Full;
 use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{
     BackendError, ContextInfo, KubeAdapter, KubernetesAccess, Query, QueryResult, ResourceTypesData,
 };
+use tower::{BoxError, Service};
+
+#[derive(Clone)]
+struct GatedRecordedApiServer {
+    inner: RecordedApiServer,
+    path: Arc<str>,
+    entered: Arc<tokio::sync::Semaphore>,
+    releases: Arc<tokio::sync::Semaphore>,
+}
+
+#[derive(Clone)]
+struct DiscoveryGate {
+    entered: Arc<tokio::sync::Semaphore>,
+    releases: Arc<tokio::sync::Semaphore>,
+}
+
+impl DiscoveryGate {
+    async fn wait_until_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("discovery gate remains open")
+            .forget();
+    }
+
+    fn release_one(&self) {
+        self.releases.add_permits(1);
+    }
+}
+
+fn gate_path(inner: RecordedApiServer, path: &str) -> (GatedRecordedApiServer, DiscoveryGate) {
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let releases = Arc::new(tokio::sync::Semaphore::new(0));
+    (
+        GatedRecordedApiServer {
+            inner,
+            path: Arc::from(path),
+            entered: Arc::clone(&entered),
+            releases: Arc::clone(&releases),
+        },
+        DiscoveryGate { entered, releases },
+    )
+}
+
+impl Service<Request<kube::client::Body>> for GatedRecordedApiServer {
+    type Response = Response<Full<Bytes>>;
+    type Error = BoxError;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>,
+    >;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request<kube::client::Body>) -> Self::Future {
+        let gated = request.uri().path() == self.path.as_ref();
+        let entered = Arc::clone(&self.entered);
+        let releases = Arc::clone(&self.releases);
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let response = inner.call(request).await?;
+            if gated {
+                entered.add_permits(1);
+                releases
+                    .acquire()
+                    .await
+                    .expect("discovery release gate remains open")
+                    .forget();
+            }
+            Ok(response)
+        })
+    }
+}
 
 /// Build an adapter whose single context is backed by a recorded API server.
 fn adapter_with_recorded_context() -> (KubeAdapter, RecordedApiServer) {
@@ -99,6 +180,288 @@ async fn supported_cluster_uses_two_aggregated_requests() {
             "{path} advertises aggregated discovery: {accepts:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_cold_queries_share_one_discovery_generation() {
+    const CALLERS: usize = 8;
+
+    let (adapter, server) = adapter_with_recorded_context();
+    let adapter = Arc::new(adapter);
+    let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+    let mut callers = Vec::with_capacity(CALLERS);
+
+    for _ in 0..CALLERS {
+        let adapter = Arc::clone(&adapter);
+        let barrier = Arc::clone(&barrier);
+        callers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            adapter
+                .query(Query::ResourceTypes {
+                    context: "mock-cluster".into(),
+                })
+                .await
+        }));
+    }
+
+    let mut results = Vec::with_capacity(CALLERS);
+    for caller in callers {
+        results.push(
+            caller
+                .await
+                .expect("concurrent discovery task completes")
+                .expect("shared discovery generation succeeds"),
+        );
+    }
+
+    assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(server.hit_count("/apis"), 1);
+    assert_eq!(server.hit_count("/api"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn different_contexts_discover_independently() {
+    let server_a = RecordedApiServer::aggregated();
+    let server_b = RecordedApiServer::aggregated();
+    let (gated_a, gate_a) = gate_path(server_a.clone(), "/apis");
+    let client_a = kube::client::ClientBuilder::new(gated_a, "default").build();
+    let client_b = server_b.clone().into_client("default");
+    let contexts = vec![
+        ContextInfo::available("context-a", "recorded-a", Some("default".into()), true),
+        ContextInfo::available("context-b", "recorded-b", Some("default".into()), false),
+    ];
+    let adapter = Arc::new(
+        KubeAdapter::with_cluster_clients(
+            contexts,
+            [("context-a", client_a), ("context-b", client_b)],
+        )
+        .expect("adapter builds around independent recorded clients"),
+    );
+
+    let pending_a = {
+        let adapter = Arc::clone(&adapter);
+        tokio::spawn(async move {
+            adapter
+                .query(Query::ResourceTypes {
+                    context: "context-a".into(),
+                })
+                .await
+        })
+    };
+    gate_a.wait_until_entered().await;
+
+    let result_b = tokio::time::timeout(
+        Duration::from_secs(1),
+        adapter.query(Query::ResourceTypes {
+            context: "context-b".into(),
+        }),
+    )
+    .await
+    .expect("context B is not blocked by context A")
+    .expect("context B discovery succeeds");
+    assert!(matches!(result_b, QueryResult::ResourceTypes(_)));
+    assert!(!pending_a.is_finished(), "context A remains gated");
+
+    gate_a.release_one();
+    let result_a = pending_a
+        .await
+        .expect("context A task completes")
+        .expect("context A discovery succeeds after release");
+    assert!(matches!(result_a, QueryResult::ResourceTypes(_)));
+
+    assert_eq!(server_a.hit_count("/apis"), 1);
+    assert_eq!(server_a.hit_count("/api"), 1);
+    assert_eq!(server_b.hit_count("/apis"), 1);
+    assert_eq!(server_b.hit_count("/api"), 1);
+}
+
+#[tokio::test]
+async fn all_waiters_share_one_failed_generation() {
+    const CALLERS: usize = 8;
+    const CONTEXT: &str = "shared-failure";
+
+    let server = RecordedApiServer::aggregated();
+    server.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        500,
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"private generation failure","reason":"InternalError","code":500}"#,
+    );
+    let (gated, gate) = gate_path(server.clone(), "/apis");
+    let client = kube::client::ClientBuilder::new(gated, "default").build();
+    let adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo::available(
+            CONTEXT,
+            "recorded-failure",
+            Some("default".into()),
+            true,
+        )],
+        [(CONTEXT, client)],
+    )
+    .expect("adapter builds around the gated client");
+    let barrier = tokio::sync::Barrier::new(CALLERS);
+
+    async fn failed_query(adapter: &KubeAdapter, barrier: &tokio::sync::Barrier) -> BackendError {
+        barrier.wait().await;
+        adapter
+            .query(Query::ResourceTypes {
+                context: CONTEXT.into(),
+            })
+            .await
+            .expect_err("the first generation fails")
+    }
+
+    let release_failure = async {
+        gate.wait_until_entered().await;
+        // With biased polling, this yields the controller until all seven
+        // barrier waiters ahead of it have cloned the pending Shared future.
+        tokio::task::yield_now().await;
+        gate.release_one();
+    };
+    let (
+        failure_0,
+        failure_1,
+        failure_2,
+        failure_3,
+        failure_4,
+        failure_5,
+        failure_6,
+        failure_7,
+        (),
+    ) = tokio::join!(
+        biased;
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        failed_query(&adapter, &barrier),
+        release_failure,
+    );
+    let failures = [
+        failure_0, failure_1, failure_2, failure_3, failure_4, failure_5, failure_6, failure_7,
+    ];
+    assert!(failures.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(server.hit_count("/apis"), 1);
+    assert_eq!(server.hit_count("/api"), 0);
+
+    server.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        200,
+        r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+          {"metadata":{"name":"k10s.example.com"},"versions":[{"version":"v1alpha1","resources":[
+            {"resource":"gadgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Gadget"},"scope":"Namespaced","verbs":["get","list","watch"]}
+          ]}]}
+        ]}"#,
+    );
+    let release_retry = async {
+        gate.wait_until_entered().await;
+        gate.release_one();
+    };
+    let (retry, ()) = tokio::join!(
+        biased;
+        adapter.query(Query::ResourceTypes {
+            context: CONTEXT.into(),
+        }),
+        release_retry,
+    );
+    let retry = retry.expect("a later caller starts a successful second generation");
+    assert!(matches!(retry, QueryResult::ResourceTypes(_)));
+    assert_eq!(server.hit_count("/apis"), 2);
+    assert_eq!(server.hit_count("/api"), 1);
+}
+
+#[tokio::test]
+async fn forced_refresh_joins_running_generation_and_bypasses_fresh_cache() {
+    const CONTEXT_A: &str = "switch-source";
+    const CONTEXT_B: &str = "switch-target";
+
+    let server_a = RecordedApiServer::aggregated();
+    let server_b = RecordedApiServer::aggregated();
+    let (gated_b, gate_b) = gate_path(server_b.clone(), "/apis");
+    let client_a = server_a.into_client("default");
+    let client_b = kube::client::ClientBuilder::new(gated_b, "default").build();
+    let adapter = KubeAdapter::with_cluster_clients(
+        vec![
+            ContextInfo::available(CONTEXT_A, "recorded-source", Some("default".into()), true),
+            ContextInfo::available(CONTEXT_B, "recorded-target", Some("default".into()), false),
+        ],
+        [(CONTEXT_A, client_a), (CONTEXT_B, client_b)],
+    )
+    .expect("adapter builds around the switch contexts");
+
+    let release_first = async {
+        gate_b.wait_until_entered().await;
+        assert_eq!(
+            server_b.hit_count("/apis"),
+            1,
+            "cold query and forced validation join one generation"
+        );
+        gate_b.release_one();
+    };
+    let (cold, switched, ()) = tokio::join!(
+        biased;
+        adapter.query(Query::ResourceTypes {
+            context: CONTEXT_B.into(),
+        }),
+        adapter.query(Query::ContextSwitch {
+            to: CONTEXT_B.into(),
+        }),
+        release_first,
+    );
+    let cold = cold.expect("cold discovery succeeds");
+    let switched = switched.expect("the joined switch validation succeeds");
+    assert!(matches!(cold, QueryResult::ResourceTypes(_)));
+    assert!(matches!(switched, QueryResult::ContextSwitch(_)));
+    assert_eq!(server_b.hit_count("/apis"), 1);
+    assert_eq!(server_b.hit_count("/api"), 1);
+
+    server_b.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        200,
+        r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+          {"metadata":{"name":"k10s.example.com"},"versions":[{"version":"v1alpha1","resources":[
+            {"resource":"widgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Widget"},"scope":"Cluster","verbs":["get","list"]}
+          ]}]}
+        ]}"#,
+    );
+    let release_second = async {
+        gate_b.wait_until_entered().await;
+        assert_eq!(
+            server_b.hit_count("/apis"),
+            2,
+            "forced validation bypasses the fresh cache exactly once"
+        );
+        gate_b.release_one();
+    };
+    let (forced_again, ()) = tokio::join!(
+        biased;
+        adapter.query(Query::ContextSwitch {
+            to: CONTEXT_B.into(),
+        }),
+        release_second,
+    );
+    forced_again.expect("forced refresh succeeds");
+
+    let refreshed = resource_types(
+        adapter
+            .query(Query::ResourceTypes {
+                context: CONTEXT_B.into(),
+            })
+            .await
+            .expect("the replaced cache serves the refreshed catalog"),
+    );
+    assert!(refreshed.find_kind("Widget").is_some());
+    assert!(refreshed.find_kind("Gadget").is_none());
+    assert_eq!(server_b.hit_count("/apis"), 2);
+    assert_eq!(server_b.hit_count("/api"), 2);
 }
 
 #[tokio::test]
