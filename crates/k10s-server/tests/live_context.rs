@@ -11,7 +11,7 @@ use k10s_protocol::{
     Ack, BootstrapResponse, ClientFrame, ClientKind, ContextSwitchRequest, ContextSwitchResponse,
     ErrorFrame, GroupVersionKind, PROTOCOL_MAJOR, PROTOCOL_MINOR, ResourceSnapshotPage,
     ResourceTypesRequest, ResourceTypesResponse, ResourceWatchSpec, ServerFrame, ServerKind,
-    SnapshotBegin, SnapshotChunk, SubscriptionSelector,
+    SnapshotBegin, SnapshotChunk, SnapshotEnd, SubscriptionSelector,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde::Serialize;
@@ -24,6 +24,10 @@ type Ws =
 
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const STABILITY_WINDOW: Duration = Duration::from_secs(60);
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[tokio::test]
 #[ignore = "live cluster: set K10S_LIVE_CONTEXT=<kube-context> and pass --ignored"]
@@ -53,11 +57,24 @@ async fn selected_live_context_completes_a_pod_snapshot_and_stays_stable() {
     .await
     .expect("the loopback server must start");
 
-    let outcome = run_smoke(&server, &token, &context).await;
-    server
-        .shutdown()
+    let outcome = tokio::time::timeout(SMOKE_TIMEOUT, run_smoke(&server, &token, &context))
         .await
-        .expect("the live-smoke loopback server must shut down cleanly");
+        .unwrap_or_else(|_| Err("live smoke exceeded its 120-second hard deadline".to_owned()));
+
+    // Spawn shutdown so a timeout can abort the waiting task. `shutdown`
+    // signals cancellation before awaiting the server join; aborting the
+    // waiter therefore cannot leave an accepting loopback listener behind.
+    let mut shutdown = tokio::spawn(server.shutdown());
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut shutdown).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(_))) => panic!("the live-smoke loopback server failed to shut down"),
+        Ok(Err(_)) => panic!("the live-smoke shutdown task failed"),
+        Err(_) => {
+            shutdown.abort();
+            let _ = shutdown.await;
+            panic!("the live-smoke loopback server exceeded its shutdown deadline");
+        }
+    }
     if let Err(reason) = outcome {
         panic!("live context stability smoke failed: {reason}");
     }
@@ -211,6 +228,9 @@ async fn run_smoke(
     }
     let end = receive_checked(&mut ws, &mut last_sequence, FRAME_TIMEOUT).await?;
     require_frame(&end, ServerKind::SnapshotEnd, None, Some("live-pods"))?;
+    let end: SnapshotEnd = serde_json::from_value(end.payload)
+        .map_err(|_| "snapshotEnd payload was invalid".to_owned())?;
+    validate_snapshot_checksum(&pages, &end.checksum)?;
     ack_latest(&mut ws, last_sequence).await?;
 
     let deadline = Instant::now() + STABILITY_WINDOW;
@@ -356,12 +376,32 @@ fn check_sequence(frame: &ServerFrame, last_sequence: &mut Option<u64>) -> Resul
     let Some(sequence) = frame.sequence else {
         return Ok(());
     };
-    if let Some(previous) = *last_sequence
-        && sequence != previous + 1
-    {
-        return Err("server sequence contained a gap".to_owned());
+    match *last_sequence {
+        None if sequence != 1 => return Err("first server sequence was not one".to_owned()),
+        Some(previous) if sequence != previous + 1 => {
+            return Err("server sequence contained a gap".to_owned());
+        }
+        None | Some(_) => {}
     }
     *last_sequence = Some(sequence);
+    Ok(())
+}
+
+fn validate_snapshot_checksum(pages: &[ResourceSnapshotPage], actual: &str) -> Result<(), String> {
+    let mut checksum = FNV_OFFSET_BASIS;
+    for page in pages {
+        // This deliberately matches `control::stream_snapshot`: hash the
+        // canonical serde_json bytes of each typed page, in chunk order.
+        let bytes = serde_json::to_vec(page)
+            .map_err(|_| "reassembled snapshot page could not serialize".to_owned())?;
+        for byte in bytes {
+            checksum = (checksum ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+    }
+    let expected = format!("fnv-64:{checksum:016x}");
+    if actual != expected {
+        return Err("snapshot checksum did not match the reassembled pages".to_owned());
+    }
     Ok(())
 }
 
@@ -378,4 +418,36 @@ fn require_frame(
         return Err("server returned an unexpected frame envelope".to_owned());
     }
     Ok(())
+}
+
+#[test]
+fn snapshot_checksum_rejects_a_mismatched_end_frame() {
+    let pages = vec![ResourceSnapshotPage {
+        revision: k10s_protocol::BackendRevision::new(7),
+        rows: Vec::new(),
+    }];
+    let actual = "fnv-64:0000000000000000";
+
+    assert_eq!(
+        validate_snapshot_checksum(&pages, actual),
+        Err("snapshot checksum did not match the reassembled pages".to_owned())
+    );
+}
+
+#[test]
+fn first_sequenced_frame_must_start_at_one() {
+    let frame = ServerFrame {
+        kind: ServerKind::Subscribed,
+        request_id: None,
+        subscription_id: Some("live-pods".into()),
+        sequence: Some(2),
+        payload: json!({}),
+    };
+    let mut last_sequence = None;
+
+    assert_eq!(
+        check_sequence(&frame, &mut last_sequence),
+        Err("first server sequence was not one".to_owned())
+    );
+    assert_eq!(last_sequence, None);
 }
