@@ -21,6 +21,7 @@ const CONTEXT: &str = "dev-local";
 struct Fixture {
     shell: UiShell<ResourceIdentity>,
     feed: ResourceFeed,
+    context_namespace: Option<String>,
 }
 
 impl Default for Fixture {
@@ -28,14 +29,22 @@ impl Default for Fixture {
         Self {
             shell: UiShell::new(),
             feed: default_feed(),
+            context_namespace: None,
         }
     }
 }
 
 fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let mut selected_context = Some(CONTEXT.to_owned());
-    let contexts = [CONTEXT.to_owned()];
-    fixture.shell.show_with_resources(
+    let contexts = [k10s_protocol::Context {
+        name: CONTEXT.to_owned(),
+        cluster: "cluster".into(),
+        namespace: fixture.context_namespace.clone(),
+        is_current: true,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
+    }];
+    fixture.shell.show_with_contexts_and_resources(
         ui,
         ConnectionState::Connected,
         &contexts,
@@ -43,6 +52,67 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
         None,
         &fixture.feed,
     );
+}
+
+#[test]
+fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
+    let mut fixture = Fixture {
+        context_namespace: Some("sea-team".into()),
+        ..Fixture::default()
+    };
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::Deployments,
+        vec![
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                Some("sea-team"),
+                "sea-api",
+                "1/1 ready",
+                "2026-08-21T00:00:00Z",
+            ),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                Some("other"),
+                "other-api",
+                "1/1 ready",
+                "2026-08-21T00:00:00Z",
+            ),
+        ],
+    );
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Context default (sea-team)");
+    window.get_by_label("sea-api");
+    assert!(window.query_by_label("other-api").is_none());
+}
+
+#[test]
+fn context_default_falls_back_to_default_when_selected_context_has_no_namespace() {
+    let mut fixture = Fixture::default();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Context default (default)");
+    window.get_by_label("api-server");
 }
 
 fn harness() -> Harness<'static, Fixture> {
@@ -187,6 +257,65 @@ fn open(harness: &mut Harness<'static, Fixture>, item: LauncherItem) {
 }
 
 #[test]
+fn same_kind_windows_render_their_own_window_keyed_rows() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.remove(&WorkspaceWorkload::Pods);
+    let first = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+            WorkspaceWorkload::Pods,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let second = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+            WorkspaceWorkload::Pods,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture.feed.window_lists.insert(
+        first,
+        vec![list_row(
+            "",
+            "v1",
+            "Pod",
+            Some("default"),
+            "pod-first",
+            "Running",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+    fixture.feed.window_lists.insert(
+        second,
+        vec![list_row(
+            "",
+            "v1",
+            "Pod",
+            Some("default"),
+            "pod-second",
+            "Running",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    harness.get_by_label("pod-first");
+    harness.get_by_label("pod-second");
+}
+
+#[test]
 fn all_seven_workload_kinds_render_rows_and_columns() {
     let mut harness = harness();
     harness.state_mut().feed.lists.clear();
@@ -301,6 +430,14 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         &mut harness,
         LauncherItem::Workload(WorkspaceWorkload::CustomResources),
     );
+    let custom_id = workload_id(harness.state(), WorkspaceWorkload::CustomResources);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            custom_id,
+            k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
+        ));
 
     let picker = harness.get_by_role_and_label(Role::Window, "Custom Resources");
     picker.get_by_role_and_label(Role::Button, "monitoring.example.com/v1 Dashboard");
@@ -335,6 +472,18 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         window
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
+    );
+    assert!(window.query_by_label("Clear filters").is_none());
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(custom_id)
+            .unwrap()
+            .namespace_scope,
+        k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
+        "ignored cluster scope intent is preserved for a later namespaced GVK"
     );
     window.get_by_label("dashboards.monitoring.example.com");
     window.get_by_label("Established");
@@ -458,9 +607,9 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::SetNamespace(
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
             instances[0],
-            Some("kube-system".to_owned()),
+            k10s_ui::workspace::NamespaceScope::Namespace("kube-system".to_owned()),
         ));
     let workspace = harness.state().shell.workspace();
     assert_eq!(
@@ -480,7 +629,10 @@ fn workspace_resource_namespace(
 ) -> Option<String> {
     workspace
         .resource_state(id)
-        .and_then(|resource| resource.namespace.clone())
+        .and_then(|resource| match &resource.namespace_scope {
+            k10s_ui::workspace::NamespaceScope::Namespace(value) => Some(value.clone()),
+            _ => None,
+        })
 }
 
 #[test]

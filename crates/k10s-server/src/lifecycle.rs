@@ -432,6 +432,33 @@ impl ServerHandle {
         self.cancel.cancel();
         self.task.await.map_err(io::Error::other)?
     }
+
+    /// Gracefully stop and join the server within `timeout`.
+    ///
+    /// If graceful teardown exceeds the deadline, the owned server task is
+    /// aborted and still awaited before this method returns. This preserves
+    /// the handle's no-detached-task guarantee and releases the listener even
+    /// when teardown itself stalls.
+    pub async fn shutdown_timeout(mut self, timeout: Duration) -> io::Result<()> {
+        self.cancel.cancel();
+        match tokio::time::timeout(timeout, &mut self.task).await {
+            Ok(joined) => joined.map_err(io::Error::other)??,
+            Err(_) => {
+                self.task.abort();
+                match self.task.await {
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => return Err(io::Error::other(error)),
+                    Ok(Err(error)) => return Err(error),
+                    Ok(Ok(())) => {}
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "server shutdown exceeded its deadline",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Spawn a test-friendly server on an ephemeral loopback port.
@@ -859,6 +886,51 @@ async fn control_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_aborts_and_joins_a_hung_server_task() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let task = tokio::spawn(async move {
+            let _listener = listener;
+            let _drop_signal = DropSignal(task_dropped);
+            std::future::pending::<io::Result<()>>().await
+        });
+        let server = ServerHandle {
+            addr,
+            cancel: CancellationToken::new(),
+            task,
+        };
+
+        let started = tokio::time::Instant::now();
+        let error = server
+            .shutdown_timeout(Duration::from_millis(20))
+            .await
+            .expect_err("hung server task must hit the bounded deadline");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "server task was not joined"
+        );
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "aborted server task leaked its listener"
+        );
+    }
 
     /// A pending upgrade must block drain success until it converts or drops,
     /// and releasing it must let the drain complete. This is the deterministic

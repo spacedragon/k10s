@@ -22,6 +22,7 @@ struct Fixture {
     shell: UiShell<ResourceIdentity>,
     feed: ResourceFeed,
     connection: ConnectionState,
+    context_namespace: Option<String>,
 }
 
 impl Default for Fixture {
@@ -30,6 +31,7 @@ impl Default for Fixture {
             shell: UiShell::new(),
             feed: ResourceFeed::default(),
             connection: ConnectionState::Connected,
+            context_namespace: None,
         };
         fixture.feed.services = Some(vec![
             service_row(
@@ -93,14 +95,51 @@ impl Default for Fixture {
 
 fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let mut selected_context = Some(CONTEXT.to_owned());
-    let contexts = [CONTEXT.to_owned()];
-    fixture.shell.show_with_resources(
+    let contexts = [k10s_protocol::Context {
+        name: CONTEXT.to_owned(),
+        cluster: "cluster".into(),
+        namespace: fixture.context_namespace.clone(),
+        is_current: true,
+        availability: k10s_protocol::ContextAvailability::Available,
+        unavailable_reason: None,
+    }];
+    fixture.shell.show_with_contexts_and_resources(
         ui,
         fixture.connection,
         &contexts,
         &mut selected_context,
         None,
         &fixture.feed,
+    );
+}
+
+#[test]
+fn context_default_uses_selected_context_namespace_for_service_filtering() {
+    let mut fixture = Fixture {
+        context_namespace: Some("sea-team".into()),
+        ..Fixture::default()
+    };
+    let rows = fixture.feed.services.as_mut().unwrap();
+    rows[0].identity.namespace = Some("sea-team".into());
+    rows[0].identity.name = "sea-service".into();
+    rows[1].identity.namespace = Some("other".into());
+    rows[1].identity.name = "other-service".into();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            k10s_ui::workspace::LauncherItem::Services,
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("Context default (sea-team)");
+    window.get_by_label("Select service sea-service");
+    assert!(
+        window
+            .query_by_label("Select service other-service")
+            .is_none()
     );
 }
 
@@ -245,9 +284,9 @@ fn loading_empty_and_filtered_states_are_distinct() {
     harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::SetNamespace(
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
             id,
-            Some("kube-system".to_owned()),
+            k10s_ui::workspace::NamespaceScope::Namespace("kube-system".to_owned()),
         ));
     harness.run_steps(4);
     harness

@@ -23,11 +23,16 @@ use super::{ConnectionState, theme};
 /// read-only. An absent list entry means the window is still loading.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
-    /// Rows per workload kind for the selected context.
+    /// Legacy kind-keyed fixture input. Production uses `window_lists` so
+    /// same-kind windows with different scopes never collapse.
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
+    /// Rows per open workload window.
+    pub window_lists: HashMap<WindowId, Vec<ResourceListRow>>,
     /// Core/v1 Service rows for the selected context, carrying structured
     /// projections; `None` while the Services watch is still loading.
     pub services: Option<Vec<ResourceListRow>>,
+    /// Production Service rows per open window.
+    pub window_services: HashMap<WindowId, Vec<ResourceListRow>>,
     /// Types offered by the searchable GVK picker.
     pub types: Vec<ResourceTypeEntry>,
     /// Backend-resolved detail responses keyed by stable identity. Both the
@@ -135,6 +140,7 @@ pub(super) fn show<I>(
     streams: &mut super::tools::StreamStores,
     dialogs: &mut super::dialogs::OperationDialogs,
     feed: &ResourceFeed,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -161,13 +167,17 @@ pub(super) fn show<I>(
         return;
     };
 
+    let compact_controls = ui.ctx().content_rect().width() < 700.0;
+    // Scope controls must remain reachable in the supported compact web
+    // viewport. Concise labels and useful-but-smaller editors keep the
+    // established single-row layout intact.
     ui.horizontal(|ui| {
         let search_hint = format!("Search {}", title.to_lowercase());
         let mut search = state.search.clone();
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
                 .hint_text(search_hint.clone())
-                .desired_width(200.0),
+                .desired_width(if compact_controls { 100.0 } else { 200.0 }),
         );
         search_edit.widget_info(move || {
             WidgetInfo::labeled(WidgetType::TextEdit, true, search_hint.clone())
@@ -177,20 +187,52 @@ pub(super) fn show<I>(
         }
 
         if namespaced {
-            let mut namespace = state.namespace.clone().unwrap_or_default();
+            ui.label(match (&state.namespace_scope, compact_controls) {
+                (crate::workspace::NamespaceScope::ContextDefault, true) => {
+                    format!("Default: {}", context_namespace.unwrap_or("default"))
+                }
+                (crate::workspace::NamespaceScope::ContextDefault, false) => format!(
+                    "Context default ({})",
+                    context_namespace.unwrap_or("default")
+                ),
+                (crate::workspace::NamespaceScope::Namespace(value), true) => {
+                    format!("NS: {value}")
+                }
+                (crate::workspace::NamespaceScope::Namespace(value), false) => {
+                    format!("Namespace: {value}")
+                }
+                (crate::workspace::NamespaceScope::AllNamespaces, _) => "All namespaces".to_owned(),
+            });
+            let mut namespace = match &state.namespace_scope {
+                crate::workspace::NamespaceScope::Namespace(value) => value.clone(),
+                _ => String::new(),
+            };
             let namespace_edit = ui.add(
                 TextEdit::singleline(&mut namespace)
                     .hint_text("Namespace filter")
-                    .desired_width(140.0),
+                    .desired_width(if compact_controls { 70.0 } else { 140.0 }),
             );
             namespace_edit.widget_info(|| {
                 WidgetInfo::labeled(WidgetType::TextEdit, true, "Namespace filter".to_owned())
             });
             if namespace_edit.changed() {
                 let parsed = namespace.trim().to_owned();
-                queued.push(WorkspaceCommand::SetNamespace(
+                let scope = if parsed.is_empty() {
+                    crate::workspace::NamespaceScope::ContextDefault
+                } else {
+                    crate::workspace::NamespaceScope::Namespace(parsed)
+                };
+                queued.push(WorkspaceCommand::SetNamespaceScope(window_id, scope));
+            }
+            let all_namespaces_label = if compact_controls {
+                "All"
+            } else {
+                "All namespaces"
+            };
+            if ui.button(all_namespaces_label).clicked() {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
                     window_id,
-                    (!parsed.is_empty()).then_some(parsed),
+                    crate::workspace::NamespaceScope::AllNamespaces,
                 ));
             }
         }
@@ -204,10 +246,22 @@ pub(super) fn show<I>(
         } else {
             "Show details"
         };
-        let filters_active = !state.search.is_empty() || state.namespace.is_some();
-        if filters_active && ui.button("Clear filters").clicked() {
+        let filters_active = !state.search.is_empty()
+            || (namespaced
+                && state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault);
+        let clear_label = if compact_controls {
+            "Clear"
+        } else {
+            "Clear filters"
+        };
+        if filters_active && ui.button(clear_label).clicked() {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespace(window_id, None));
+            if namespaced {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
+                    window_id,
+                    crate::workspace::NamespaceScope::ContextDefault,
+                ));
+            }
         }
 
         if ui.button(toggle_label).clicked() {
@@ -216,7 +270,11 @@ pub(super) fn show<I>(
     });
     ui.separator();
 
-    let Some(rows) = feed.lists.get(&kind) else {
+    let Some(rows) = feed
+        .window_lists
+        .get(&window_id)
+        .or_else(|| feed.lists.get(&kind))
+    else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());
             ui.label(format!("Loading {}", title.to_lowercase()));
@@ -230,10 +288,11 @@ pub(super) fn show<I>(
     let filtered: Vec<&ResourceListRow> = rows
         .iter()
         .filter(|row| {
-            state
-                .namespace
-                .as_deref()
-                .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref())
+            (!namespaced
+                || state
+                    .namespace_scope
+                    .resolve(context_namespace)
+                    .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref()))
                 && super::resource_table::matches_search(row, &needle)
         })
         .collect();
@@ -308,7 +367,12 @@ pub(super) fn show<I>(
     if let Some(actions) = list_actions {
         if actions.cleared {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespace(window_id, None));
+            if namespaced {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
+                    window_id,
+                    crate::workspace::NamespaceScope::ContextDefault,
+                ));
+            }
         }
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));

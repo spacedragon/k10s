@@ -20,10 +20,14 @@ use crate::ui::ResourceFeed;
 use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
-use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
+use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
 };
+
+/// Bounded production control-event inbox sized to absorb one large
+/// default snapshot page burst while the native frame loop drains it.
+const CONTROL_INBOX_CAPACITY: usize = 256;
 
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
@@ -47,7 +51,8 @@ struct RealConnection {
 
 impl ConnectionFactory for RealConnectionFactory {
     fn connect(&mut self, url: &str) -> Result<Box<dyn AppConnection>, TransportError> {
-        let (transport, inbox) = WebSocketTransport::connect(url, Options::default(), 64)?;
+        let (transport, inbox) =
+            WebSocketTransport::connect(url, Options::default(), CONTROL_INBOX_CAPACITY)?;
         Ok(Box::new(RealConnection { transport, inbox }))
     }
 }
@@ -106,18 +111,17 @@ pub struct K10sApp {
     bootstrap: Option<PendingRequest>,
     bootstrap_subscription: Option<LiveSubscription>,
     infrastructure_request: Option<PendingRequest>,
+    infrastructure_load: InfrastructureLoad,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
-    /// Live per-kind resource watch subscriptions and the context they
-    /// were created against; rebuilt automatically on reconnect by the
-    /// shared client's desired-subscription recovery.
-    resource_subscriptions: BTreeMap<WorkloadKind, (String, LiveSubscription)>,
-    /// The singleton core/v1 Service watch for the Services panel and the
-    /// context it was created against; same lifecycle as the workload
-    /// watches.
-    services_subscription: Option<(String, LiveSubscription)>,
+    /// Canonical resource watches retained by visible workspace demand;
+    /// rebuilt automatically on reconnect by shared client recovery.
+    resource_subscriptions: BTreeMap<SubscriptionKey, RetainedSubscription>,
+    /// Deterministic projection from every open list window to its shared
+    /// canonical subscription.
+    window_subscriptions: BTreeMap<WindowId, SubscriptionKey>,
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
@@ -171,6 +175,31 @@ struct PendingMutation {
 struct PendingSwitch {
     request: PendingRequest,
     to: String,
+}
+
+/// Namespace part of a canonical watch identity. Cluster-scoped resources
+/// deliberately do not reuse `AllNamespaces`: that is namespaced user intent,
+/// while this variant is descriptor-derived wire behavior.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SubscriptionScope {
+    Namespaced(crate::workspace::NamespaceScope),
+    ClusterScoped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SubscriptionKey {
+    context: String,
+    gvk: k10s_protocol::GroupVersionKind,
+    scope: SubscriptionScope,
+    /// Effective selector sent on the wire. Kept beside namespace intent so
+    /// a Bootstrap default-namespace change replaces ContextDefault watches.
+    protocol_namespace: Option<String>,
+}
+
+#[derive(Debug)]
+struct RetainedSubscription {
+    live: LiveSubscription,
+    windows: std::collections::BTreeSet<WindowId>,
 }
 
 /// Semantic Service detail projection for the web host.
@@ -240,12 +269,13 @@ impl K10sApp {
             bootstrap: None,
             bootstrap_subscription: None,
             infrastructure_request: None,
+            infrastructure_load: InfrastructureLoad::Loading,
             infrastructure_subscription: None,
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
-            services_subscription: None,
+            window_subscriptions: BTreeMap::new(),
             port_forward_list: None,
             pending_port_forwards: Vec::new(),
             port_forward_error: None,
@@ -340,6 +370,7 @@ impl K10sApp {
         {
             self.handle_workspace_event(event);
         }
+        self.reconcile_selected_resource_streams();
     }
 
     /// Whether the authenticated server negotiated desktop Service port forwarding.
@@ -370,14 +401,21 @@ impl K10sApp {
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
         let feed = self.build_resource_feed();
-        let refresh = self.shell.show_with_contexts_and_resources(
+        let refresh = self.shell.show_with_contexts_and_resources_load(
             ui,
             connection,
             contexts,
             &mut self.client.local_ui_mut().selected_context,
             response.as_ref(),
             &feed,
+            self.infrastructure_load,
         );
+        if let Some(context) = selected_before.as_deref()
+            && let Err(error) = self.reconcile_resource_streams(context)
+        {
+            self.terminal_failure(error.to_string());
+            return;
+        }
         for action in self.shell.drain_port_forward_actions() {
             self.port_forward_error = None;
             let query = match action {
@@ -579,9 +617,20 @@ impl K10sApp {
     /// authoritative watch projection rendered by the egui resource table.
     #[must_use]
     pub fn web_resource_rows(&self, kind: WorkloadKind) -> Vec<k10s_protocol::ResourceListRow> {
+        let Some(window) = self
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| window.kind == crate::workspace::WindowKind::Workload(kind))
+            .max_by_key(|window| window.z)
+            .map(|window| window.id)
+        else {
+            return Vec::new();
+        };
         self.build_resource_feed()
-            .lists
-            .remove(&kind)
+            .window_lists
+            .remove(&window)
             .unwrap_or_default()
     }
 
@@ -595,6 +644,7 @@ impl K10sApp {
         for event in events {
             self.handle_workspace_event(event);
         }
+        self.reconcile_selected_resource_streams();
         self.shell
             .workspace()
             .windows()
@@ -602,6 +652,22 @@ impl K10sApp {
             .filter(|window| window.kind == crate::workspace::WindowKind::Workload(kind))
             .max_by_key(|window| window.z)
             .map(|window| window.id)
+    }
+
+    /// Change one open namespaced workload window through the same command
+    /// path used by native controls, then reconcile its live watch.
+    pub fn web_set_namespace_scope(
+        &mut self,
+        window: WindowId,
+        scope: crate::workspace::NamespaceScope,
+    ) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(window, scope))
+        {
+            self.handle_workspace_event(event);
+        }
+        self.reconcile_selected_resource_streams();
     }
 
     /// Open/focus the singleton Services window through the shared
@@ -615,6 +681,7 @@ impl K10sApp {
         {
             self.handle_workspace_event(event);
         }
+        self.reconcile_selected_resource_streams();
         self.shell
             .workspace()
             .windows()
@@ -630,8 +697,19 @@ impl K10sApp {
     /// uid lets row clicks pin the exact identity.
     #[must_use]
     pub fn web_service_rows(&self) -> Vec<(String, String, String, String, String)> {
+        let Some(window) = self
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::Services)
+            .map(|window| window.id)
+        else {
+            return Vec::new();
+        };
         self.build_resource_feed()
-            .services
+            .window_services
+            .remove(&window)
             .unwrap_or_default()
             .into_iter()
             .map(|row| {
@@ -670,7 +748,8 @@ impl K10sApp {
     pub fn web_select_service(&mut self, window: WindowId, uid: &str) {
         let Some(identity) = self
             .build_resource_feed()
-            .services
+            .window_services
+            .remove(&window)
             .unwrap_or_default()
             .into_iter()
             .find(|row| row.identity.uid == uid)
@@ -998,6 +1077,35 @@ impl K10sApp {
                                 self.detail_requests.remove(&identity);
                             }
                         }
+                        ClientError::Server(ref server_error)
+                            if server_error.code
+                                == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && server_error.scope == k10s_protocol::ErrorScope::Request
+                                && server_error.retryability
+                                    != k10s_protocol::Retryability::AfterReconnect
+                                && stream_request_id.as_ref().is_some_and(|id| {
+                                    self.infrastructure_request
+                                        .as_ref()
+                                        .is_some_and(|request| request.id() == id)
+                                }) => {}
+                        ClientError::Server(ref server_error)
+                            if server_error.code
+                                == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && server_error.scope
+                                    == k10s_protocol::ErrorScope::Subscription
+                                && server_error.retryability
+                                    != k10s_protocol::Retryability::AfterReconnect
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.infrastructure_subscription
+                                        .as_ref()
+                                        .is_some_and(|subscription| subscription.id() == id)
+                                }) =>
+                        {
+                            if let Some(subscription) = self.infrastructure_subscription.take() {
+                                let _ = self.client.retire_rejected_subscription(&subscription);
+                            }
+                            self.infrastructure_load = InfrastructureLoad::Unavailable;
+                        }
                         // A request-scoped stream-ticket denial is projected
                         // into the requesting tool; it never kills the
                         // control connection or any other stream.
@@ -1204,7 +1312,7 @@ impl K10sApp {
                         // The bootstrap answer already wrote the selection,
                         // so the render-time context-change path would skip
                         // it: reconcile the resource streams here.
-                        self.ensure_resource_streams(&context)
+                        self.reconcile_resource_streams(&context)
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.select_infrastructure_context(&context)
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
@@ -1290,16 +1398,17 @@ impl K10sApp {
                 self.failed_switch = None;
                 let current = response.current;
                 self.client.local_ui_mut().selected_context = Some(current.clone());
-                self.ensure_resource_streams(&current)
-                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
-                self.select_infrastructure_context(&current)
-                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                 for event in self
                     .shell
                     .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to: current })
                 {
                     self.handle_workspace_event(event);
                 }
+                let current = self.shell.workspace().context().to_owned();
+                self.reconcile_resource_streams(&current)
+                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                self.select_infrastructure_context(&current)
+                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                 Ok(())
             }
             Some(other) => Err(AppEventError::Terminal(format!(
@@ -1341,8 +1450,16 @@ impl K10sApp {
         if self.client.is_pending(&request) {
             return;
         }
-        if let Some(QueryResult::Infrastructure(_)) = self.client.take(request) {
+        if let Some(QueryResult::Infrastructure(_)) = self.client.take(request.clone()) {
             self.infrastructure_request = None;
+            self.infrastructure_load = InfrastructureLoad::Available;
+        } else if self
+            .client
+            .take_failure(request)
+            .is_some_and(|failure| failure.code == k10s_protocol::ErrorCode::UnsupportedMessage)
+        {
+            self.infrastructure_request = None;
+            self.infrastructure_load = InfrastructureLoad::Unavailable;
         }
     }
 
@@ -1372,7 +1489,8 @@ impl K10sApp {
             if self.client.is_pending(&request) {
                 self.client.cancel(&request)?;
             } else {
-                let _ = self.client.take(request);
+                let _ = self.client.take(request.clone());
+                let _ = self.client.take_failure(request);
             }
         }
         self.infrastructure_request = Some(self.client.begin(Query::Infrastructure(
@@ -1380,6 +1498,7 @@ impl K10sApp {
                 context: context.to_owned(),
             },
         ))?);
+        self.infrastructure_load = InfrastructureLoad::Loading;
         Ok(())
     }
 
@@ -1445,20 +1564,27 @@ impl K10sApp {
     /// applied per-kind list views, Service rows, selectable types, and
     /// resolved details.
     fn build_resource_feed(&self) -> ResourceFeed {
-        let mut lists = std::collections::HashMap::new();
-        for (kind, (_, subscription)) in &self.resource_subscriptions {
-            if let Some(state) = self.client.resource_list(subscription.id()) {
-                lists.insert(*kind, state.rows().cloned().collect());
+        let mut window_lists = std::collections::HashMap::new();
+        let mut window_services = std::collections::HashMap::new();
+        for (window, key) in &self.window_subscriptions {
+            let Some(subscription) = self.resource_subscriptions.get(key) else {
+                continue;
+            };
+            if let Some(state) = self.client.resource_list(subscription.live.id()) {
+                let rows = state.rows().cloned().collect();
+                if key.gvk.group.is_empty() && key.gvk.version == "v1" && key.gvk.kind == "Service"
+                {
+                    window_services.insert(*window, rows);
+                } else {
+                    window_lists.insert(*window, rows);
+                }
             }
         }
-        let services = self
-            .services_subscription
-            .as_ref()
-            .and_then(|(_, subscription)| self.client.resource_list(subscription.id()))
-            .map(|state| state.rows().cloned().collect());
         ResourceFeed {
-            lists,
-            services,
+            lists: std::collections::HashMap::new(),
+            window_lists,
+            services: None,
+            window_services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
@@ -1472,58 +1598,147 @@ impl K10sApp {
         }
     }
 
-    /// Keep one live resource watch per built-in workload kind on the
-    /// selected context, plus a cached `resource.types` answer for the GVK
-    /// picker. The shared client resubscribes the desired set after every
-    /// reconnect, so this only reconciles context switches.
-    fn ensure_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
-        let same_context = self
-            .resource_subscriptions
-            .values()
-            .all(|(subscribed, _)| subscribed == context)
-            && !self.resource_subscriptions.is_empty();
-        if !same_context {
-            let old: Vec<(WorkloadKind, (String, LiveSubscription))> =
-                std::mem::take(&mut self.resource_subscriptions)
-                    .into_iter()
-                    .collect();
-            for (_, (_, subscription)) in old {
-                self.client.unsubscribe(&subscription)?;
-            }
-            for kind in WorkloadKind::ALL {
-                if let Some((group, version, k)) = builtin_kind_gvk(kind) {
-                    let subscription = self
-                        .client
-                        .subscribe_resource(context, group, version, k, None)?;
-                    self.resource_subscriptions
-                        .insert(kind, (context.to_owned(), subscription));
+    /// Diff the watches demanded by open workspace list windows against the
+    /// retained live set. Equal canonical keys share one bounded client
+    /// subscription while every window retains its own projection mapping.
+    fn reconcile_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
+        use crate::workspace::{WindowContent, WindowKind};
+
+        let context_namespace = match &self.view {
+            AppView::Ready { contexts, .. } => contexts
+                .iter()
+                .find(|candidate| candidate.name == context)
+                .and_then(|candidate| candidate.namespace.as_deref()),
+            _ => None,
+        };
+        let mut desired: BTreeMap<SubscriptionKey, std::collections::BTreeSet<WindowId>> =
+            BTreeMap::new();
+        let mut window_subscriptions = BTreeMap::new();
+        let mut custom_open = false;
+        for window in self.shell.workspace().windows() {
+            let (gvk, scope) = match (&window.kind, &window.content) {
+                (WindowKind::Services, WindowContent::Services(state)) => (
+                    k10s_protocol::GroupVersionKind::core("v1", "Service"),
+                    SubscriptionScope::Namespaced(state.namespace_scope.clone()),
+                ),
+                (WindowKind::Workload(kind), WindowContent::Resource(state)) => {
+                    if *kind == WorkloadKind::CustomResources {
+                        custom_open = true;
+                        if self.types_context.as_deref() != Some(context)
+                            || self.types_request.is_some()
+                        {
+                            continue;
+                        }
+                        let Some(selected) = state.custom_kind.as_deref() else {
+                            continue;
+                        };
+                        let Some(descriptor) = self.resource_types.iter().find(|entry| {
+                            format!(
+                                "{}/{}/{}",
+                                entry.gvk.group, entry.gvk.version, entry.gvk.kind
+                            ) == selected
+                        }) else {
+                            continue;
+                        };
+                        let scope = if descriptor.namespaced {
+                            SubscriptionScope::Namespaced(state.namespace_scope.clone())
+                        } else {
+                            SubscriptionScope::ClusterScoped
+                        };
+                        (descriptor.gvk.clone(), scope)
+                    } else {
+                        let Some((group, version, kind)) = builtin_kind_gvk(*kind) else {
+                            continue;
+                        };
+                        (
+                            k10s_protocol::GroupVersionKind {
+                                group: group.to_owned(),
+                                version: version.to_owned(),
+                                kind: kind.to_owned(),
+                            },
+                            SubscriptionScope::Namespaced(state.namespace_scope.clone()),
+                        )
+                    }
                 }
-            }
+                _ => continue,
+            };
+            let key = SubscriptionKey {
+                context: context.to_owned(),
+                gvk,
+                protocol_namespace: match &scope {
+                    SubscriptionScope::Namespaced(intent) => {
+                        intent.resolve(context_namespace).map(str::to_owned)
+                    }
+                    SubscriptionScope::ClusterScoped => None,
+                },
+                scope,
+            };
+            desired.entry(key.clone()).or_default().insert(window.id);
+            window_subscriptions.insert(window.id, key);
         }
-        // The Services panel watches core/v1 Service through the same
-        // bounded machinery; resubscribe only when the context changed.
-        if !self
-            .services_subscription
-            .as_ref()
-            .is_some_and(|(subscribed, _)| subscribed == context)
-        {
-            if let Some((_, subscription)) = self.services_subscription.take() {
-                self.client.unsubscribe(&subscription)?;
-            }
-            let subscription = self
-                .client
-                .subscribe_resource(context, "", "v1", "Service", None)?;
-            self.services_subscription = Some((context.to_owned(), subscription));
+
+        let removed: Vec<_> = self
+            .resource_subscriptions
+            .keys()
+            .filter(|key| !desired.contains_key(*key))
+            .cloned()
+            .collect();
+        let additions = desired
+            .keys()
+            .filter(|key| !self.resource_subscriptions.contains_key(*key))
+            .count();
+        if self.client.phase() == ClientPhase::Ready {
+            self.client
+                .preflight_subscription_changes(removed.len(), additions)?;
         }
-        match &self.types_request {
-            Some((requested, _)) if requested == context => {}
-            _ => {
-                // A stale cache or a mismatched in-flight request must never
-                // populate the new context's picker: cancel the old one and
-                // start fresh.
-                if let Some((requested, request)) = self.types_request.take()
-                    && requested != context
-                {
+        for key in removed {
+            if let Some(entry) = self.resource_subscriptions.get(&key) {
+                self.client.unsubscribe(&entry.live)?;
+            }
+            self.resource_subscriptions.remove(&key);
+        }
+        if self.client.phase() != ClientPhase::Ready {
+            self.window_subscriptions = window_subscriptions;
+            self.resource_types.clear();
+            self.types_context = None;
+            self.types_request = None;
+            return Ok(());
+        }
+        for (key, windows) in desired {
+            if let Some(entry) = self.resource_subscriptions.get_mut(&key) {
+                entry.windows = windows;
+                continue;
+            }
+            let live = match self.client.subscribe_resource(
+                key.context.clone(),
+                key.gvk.group.clone(),
+                key.gvk.version.clone(),
+                key.gvk.kind.clone(),
+                key.protocol_namespace.clone(),
+            ) {
+                Ok(live) => live,
+                Err(error) => {
+                    window_subscriptions.retain(|_, desired_key| {
+                        self.resource_subscriptions.contains_key(desired_key)
+                    });
+                    self.window_subscriptions = window_subscriptions;
+                    return Err(error);
+                }
+            };
+            self.resource_subscriptions
+                .insert(key, RetainedSubscription { live, windows });
+        }
+        self.window_subscriptions = window_subscriptions;
+
+        if custom_open {
+            let cache_ready =
+                self.types_context.as_deref() == Some(context) && self.types_request.is_none();
+            let request_current = self
+                .types_request
+                .as_ref()
+                .is_some_and(|(requested, _)| requested == context);
+            if !cache_ready && !request_current {
+                if let Some((_, request)) = self.types_request.take() {
                     let _ = self.client.cancel(&request);
                 }
                 self.resource_types.clear();
@@ -1534,11 +1749,27 @@ impl K10sApp {
                         context: context.to_owned(),
                     }))?;
                 self.types_request = Some((context.to_owned(), request));
-                self.flush_outbound()
-                    .map_err(|error| ClientError::Protocol(format!("{error:?}")))?;
             }
+        } else {
+            if let Some((_, request)) = self.types_request.take() {
+                let _ = self.client.cancel(&request);
+            }
+            self.resource_types.clear();
+            self.types_context = None;
         }
         Ok(())
+    }
+
+    fn reconcile_selected_resource_streams(&mut self) {
+        let Some(context) = self.client.local_ui().selected_context.clone() else {
+            return;
+        };
+        if let Err(error) = self.reconcile_resource_streams(&context).and_then(|()| {
+            self.flush_outbound()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+        }) {
+            self.terminal_failure(error.to_string());
+        }
     }
 
     /// Complete the in-flight `resource.types` request.
@@ -1556,6 +1787,7 @@ impl K10sApp {
             && self.types_context.as_deref() == Some(requested.as_str())
         {
             self.resource_types = response.types;
+            self.reconcile_selected_resource_streams();
         } else {
             // The answer no longer matches the selection: force a refetch on
             // the next reconciliation.
@@ -2177,13 +2409,20 @@ mod tests {
         ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
         ResourceChanged, ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus,
         Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk,
-        SnapshotEnd, Subscribed, SubscriptionId, ValidationTicket, Welcome, YamlOutcome,
-        buffer_hash,
+        SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome,
+        YamlOutcome, buffer_hash,
     };
 
     use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
-    use crate::client::{ClientPhase, ConnectTarget, TransportError};
-    use crate::workspace::{WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent};
+    use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
+    use crate::workspace::{
+        NamespaceScope, WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
+    };
+
+    #[test]
+    fn production_control_inbox_holds_a_large_default_snapshot_burst() {
+        assert_eq!(super::CONTROL_INBOX_CAPACITY, 256);
+    }
 
     #[derive(Debug, Default)]
     pub(super) struct FactoryState {
@@ -2269,6 +2508,27 @@ mod tests {
             return None;
         };
         Some(request.request_kind)
+    }
+
+    fn resource_watches(
+        state: &Rc<RefCell<FactoryState>>,
+    ) -> Vec<k10s_protocol::ResourceWatchSpec> {
+        state
+            .borrow()
+            .sent
+            .iter()
+            .filter_map(|frame| {
+                let k10s_protocol::ClientPayload::Subscribe(k10s_protocol::Subscribe(selector)) =
+                    frame.decode_payload().ok()?
+                else {
+                    return None;
+                };
+                match serde_json::from_value(selector).ok()? {
+                    SubscriptionSelector::Resource(spec) => Some(spec),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -2748,8 +3008,12 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "resource.types", "infrastructure.get"],
-            "recovery loads bootstrap, per-kind streams/types, and one infrastructure snapshot"
+            ["bootstrap", "infrastructure.get"],
+            "overview-only recovery loads bootstrap and one infrastructure snapshot on demand"
+        );
+        assert!(
+            resource_watches(&state).is_empty(),
+            "overview-only recovery creates no hidden resource watches"
         );
         assert_eq!(app.client.outbound_len(), 0);
     }
@@ -2786,9 +3050,366 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            ["bootstrap", "resource.types", "infrastructure.get"],
+            ["bootstrap", "infrastructure.get"],
             "subscription acknowledgement must not re-bootstrap or restart the snapshot"
         );
+    }
+
+    #[test]
+    fn unsupported_infrastructure_request_is_panel_local_and_ends_loading() {
+        let bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(RequestId::from_u128(2)),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsafe backend-specific detail",
+                Retryability::Never,
+                ErrorScope::Request,
+                "infrastructure",
+            ))
+            .unwrap(),
+        };
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+                server_message(&unsupported),
+            ]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 0);
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.infrastructure_request.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| request_kind(frame).as_deref() == Some("infrastructure.get"))
+                .count(),
+            1,
+            "render/poll does not retry unsupported infrastructure automatically"
+        );
+    }
+
+    #[test]
+    fn subscription_scoped_error_cannot_impersonate_an_infrastructure_request() {
+        let (mut app, _) = ready_app();
+        let request_id = app
+            .infrastructure_request
+            .as_ref()
+            .expect("overview request is pending")
+            .id()
+            .clone();
+        let wrong_scope = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: Some(SubscriptionId::new("unrelated-subscription")),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "wrong scope",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "wrong-scope-request",
+            ))
+            .unwrap(),
+        };
+
+        assert!(
+            app.handle_event(server_message(&wrong_scope), 110, 0)
+                .is_err(),
+            "malformed scope follows the existing safe error policy"
+        );
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert!(app.infrastructure_request.is_some());
+    }
+
+    #[test]
+    fn request_scoped_error_cannot_impersonate_an_infrastructure_subscription() {
+        let (mut app, _) = ready_app();
+        let unrelated = app.client.begin(Query::Bootstrap).unwrap();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        let wrong_scope = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(unrelated.id().clone()),
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "wrong scope",
+                Retryability::Never,
+                ErrorScope::Request,
+                "wrong-scope-subscription",
+            ))
+            .unwrap(),
+        };
+
+        assert!(
+            app.handle_event(server_message(&wrong_scope), 110, 0)
+                .is_err()
+        );
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert!(app.infrastructure_subscription.is_some());
+    }
+
+    #[test]
+    fn unsupported_infrastructure_subscription_does_not_end_the_control_session() {
+        let (mut app, state) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let resource_subscriptions = app
+            .resource_subscriptions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("ready overview has one infrastructure watch")
+            .id()
+            .clone();
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "backend implementation detail",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "infrastructure-watch",
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&unsupported), 120, 0)
+            .expect("unsupported capability remains panel-local");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.infrastructure_subscription.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            app.resource_subscriptions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            resource_subscriptions,
+            "an infrastructure capability failure cannot disturb resource watches"
+        );
+        let before = state.borrow().sent.len();
+        app.poll_at(130, 0);
+        assert_eq!(
+            state.borrow().sent.len(),
+            before,
+            "polling does not resubscribe"
+        );
+
+        app.refresh_infrastructure("dev-local").unwrap();
+        app.flush_outbound().unwrap();
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| request_kind(frame).as_deref() == Some("infrastructure.get"))
+                .count(),
+            2,
+            "only an explicit refresh retries the panel request"
+        );
+    }
+
+    #[test]
+    fn replacing_a_completed_infrastructure_failure_retires_its_old_outcome() {
+        let (mut app, _) = ready_app();
+        let old = app
+            .infrastructure_request
+            .clone()
+            .expect("initial overview request is pending");
+        let failure = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(old.id().clone()),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsupported",
+                Retryability::Never,
+                ErrorScope::Request,
+                "overview",
+            ))
+            .unwrap(),
+        };
+        let _ = app.client.apply(failure);
+
+        app.refresh_infrastructure("dev-local").unwrap();
+
+        assert!(app.client.take_failure(old).is_none());
+    }
+
+    #[test]
+    fn unsupported_infrastructure_subscription_retires_locally_when_outbound_is_full() {
+        let (mut app, _) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let resource_keys = app
+            .resource_subscriptions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let infrastructure = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        let _filler = app.client.subscribe_bootstrap_status().unwrap();
+        assert_eq!(app.client.outbound_len(), 256);
+        let desired_before = app.client.live_subscription_count();
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(infrastructure),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsupported",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "infrastructure-watch",
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&unsupported), 120, 0)
+            .expect("server rejection needs no outbound unsubscribe");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert_eq!(
+            app.client.live_subscription_count(),
+            desired_before - 1,
+            "the rejected infrastructure desire is retired without touching other watches"
+        );
+        assert!(app.infrastructure_subscription.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            app.resource_subscriptions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            resource_keys
+        );
+    }
+
+    #[test]
+    fn reconnectable_unsupported_infrastructure_request_uses_transport_recovery() {
+        let (mut app, _) = ready_app();
+        let request_id = app
+            .infrastructure_request
+            .as_ref()
+            .expect("overview request exists")
+            .id()
+            .clone();
+        let reconnect = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "server requires reconnect",
+                Retryability::AfterReconnect,
+                ErrorScope::Request,
+                "infrastructure-request",
+            ))
+            .unwrap(),
+        };
+        assert!(matches!(
+            app.handle_event(server_message(&reconnect), 100, 200),
+            Err(super::AppEventError::Transient)
+        ));
+        app.transient_loss(100, 200);
+
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(app.connection.is_none());
+        assert!(app.infrastructure_request.is_none());
+        assert_ne!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert!(app.client.retry_schedule().is_some());
+    }
+
+    #[test]
+    fn reconnectable_unsupported_infrastructure_subscription_uses_transport_recovery() {
+        let (mut app, _) = ready_app();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        let reconnect = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "server requires reconnect",
+                Retryability::AfterReconnect,
+                ErrorScope::Subscription,
+                "infrastructure-subscription",
+            ))
+            .unwrap(),
+        };
+        assert!(matches!(
+            app.handle_event(server_message(&reconnect), 100, 200),
+            Err(super::AppEventError::Transient)
+        ));
+        app.transient_loss(100, 200);
+
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(app.connection.is_none());
+        assert!(app.infrastructure_request.is_none());
+        assert!(
+            app.infrastructure_subscription.is_some(),
+            "desired watch survives for reconnect reconstruction"
+        );
+        assert_ne!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert!(app.client.retry_schedule().is_some());
     }
 
     #[test]
@@ -2827,12 +3448,7 @@ mod tests {
             .collect();
         assert_eq!(
             request_kinds,
-            [
-                "bootstrap",
-                "resource.types",
-                "infrastructure.get",
-                "bootstrap"
-            ],
+            ["bootstrap", "infrastructure.get", "bootstrap"],
             "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
         );
         assert_eq!(app.client.outbound_len(), 0);
@@ -2940,9 +3556,375 @@ mod tests {
     }
 
     #[test]
+    fn opening_visible_lists_subscribes_only_their_demand() {
+        let (mut app, state) = ready_app();
+        assert!(resource_watches(&state).is_empty());
+
+        app.web_activate_workload(WorkloadKind::Pods);
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].gvk, GroupVersionKind::core("v1", "Pod"));
+        assert_eq!(watches[0].namespace.as_deref(), Some("default"));
+
+        app.web_activate_services();
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches[1].gvk, GroupVersionKind::core("v1", "Service"));
+    }
+
+    #[test]
+    fn custom_resource_picker_requests_types_without_opening_a_watch() {
+        let (mut app, state) = ready_app();
+        app.web_activate_workload(WorkloadKind::CustomResources);
+
+        assert!(resource_watches(&state).is_empty());
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.types")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn context_default_replaces_watch_when_same_context_namespace_changes() {
+        let (mut app, state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        assert_eq!(
+            resource_watches(&state)[0].namespace.as_deref(),
+            Some("default")
+        );
+
+        let AppView::Ready { contexts, .. } = &mut app.view else {
+            panic!("ready")
+        };
+        contexts
+            .iter_mut()
+            .find(|context| context.name == "dev-local")
+            .unwrap()
+            .namespace = Some("team-b".to_owned());
+        app.reconcile_selected_resource_streams();
+
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches.last().unwrap().namespace.as_deref(), Some("team-b"));
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| frame.kind == ClientKind::Unsubscribe)
+                .count(),
+            1
+        );
+        let key = app.window_subscriptions.get(&window).unwrap();
+        assert!(matches!(
+            key.scope,
+            super::SubscriptionScope::Namespaced(NamespaceScope::ContextDefault)
+        ));
+        assert_eq!(app.resource_subscriptions.len(), 1);
+        assert!(
+            !app.build_resource_feed().window_lists.contains_key(&window),
+            "the replaced watch has no stale rows projected under the window"
+        );
+    }
+
+    #[test]
+    fn successful_resource_types_response_immediately_subscribes_selected_custom_kind() {
+        let (mut app, state) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                window,
+                Some("example.io/v1/Widget".to_owned()),
+            ));
+        let request_id = state
+            .borrow()
+            .sent
+            .iter()
+            .find(|frame| request_kind(frame).as_deref() == Some("resource.types"))
+            .and_then(|frame| frame.request_id.clone())
+            .unwrap();
+        let response = ServerFrame::response(
+            request_id,
+            k10s_protocol::ResourceTypesResponse {
+                context: "dev-local".to_owned(),
+                types: vec![k10s_protocol::ResourceTypeEntry {
+                    gvk: GroupVersionKind {
+                        group: "example.io".to_owned(),
+                        version: "v1".to_owned(),
+                        kind: "Widget".to_owned(),
+                    },
+                    namespaced: true,
+                }],
+            },
+        );
+
+        app.handle_event(server_message(&response), 100, 0).unwrap();
+        app.finish_mutations();
+
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].gvk.kind, "Widget");
+    }
+
+    #[test]
+    fn equal_window_keys_share_and_last_close_unsubscribes() {
+        let (mut app, state) = ready_app();
+        let first = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        let second = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        app.reconcile_selected_resource_streams();
+        assert_eq!(resource_watches(&state).len(), 1);
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(first));
+        app.reconcile_selected_resource_streams();
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| frame.kind == ClientKind::Unsubscribe)
+                .count(),
+            0
+        );
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(second));
+        app.reconcile_selected_resource_streams();
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| frame.kind == ClientKind::Unsubscribe)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_unsubscribe_preflight_retains_app_mapping_and_client_desire() {
+        let (mut app, _state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let key = app.window_subscriptions.get(&window).cloned().unwrap();
+        let _extra = app
+            .client
+            .subscribe_resource(
+                "dev-local",
+                "",
+                "v1",
+                "ConfigMap",
+                Some("default".to_owned()),
+            )
+            .unwrap();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        assert_eq!(app.client.outbound_len(), 256);
+        let desired_before = app.client.live_subscription_count();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+
+        assert!(app.reconcile_resource_streams("dev-local").is_err());
+        assert!(app.resource_subscriptions.contains_key(&key));
+        assert_eq!(app.window_subscriptions.get(&window), Some(&key));
+        assert_eq!(app.client.live_subscription_count(), desired_before);
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+    }
+
+    #[test]
+    fn failed_multi_addition_preflight_leaves_no_partial_app_or_client_state() {
+        let (mut app, _state) = ready_app();
+        let first = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                first,
+                NamespaceScope::Namespace("a".to_owned()),
+            ));
+        let second = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                second,
+                NamespaceScope::Namespace("b".to_owned()),
+            ));
+        let target_count = app.client.live_subscription_limit() - 1;
+        let mut index = 0;
+        while app.client.live_subscription_count() < target_count {
+            app.client
+                .subscribe_resource(
+                    "dev-local",
+                    "test.example",
+                    "v1",
+                    format!("Filler{index}"),
+                    None,
+                )
+                .unwrap();
+            let _ = app.client.take_outbound();
+            index += 1;
+        }
+        let desired_before = app.client.live_subscription_count();
+
+        assert!(app.reconcile_resource_streams("dev-local").is_err());
+        assert!(app.resource_subscriptions.is_empty());
+        assert!(app.window_subscriptions.is_empty());
+        assert_eq!(app.client.live_subscription_count(), desired_before);
+        assert_eq!(app.client.outbound_len(), 0);
+    }
+
+    #[test]
+    fn namespace_scope_changes_replace_only_the_changed_reference() {
+        let (mut app, state) = ready_app();
+        let windows: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|namespace| {
+                let id = app
+                    .shell
+                    .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+                        WorkloadKind::Pods,
+                    ))
+                    .into_iter()
+                    .find_map(|event| match event {
+                        WorkspaceEvent::Opened(id) => Some(id),
+                        _ => None,
+                    })
+                    .unwrap();
+                app.shell
+                    .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                        id,
+                        NamespaceScope::Namespace(namespace.to_owned()),
+                    ));
+                id
+            })
+            .collect();
+        app.reconcile_selected_resource_streams();
+        assert_eq!(resource_watches(&state).len(), 2);
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                windows[0],
+                NamespaceScope::Namespace("c".to_owned()),
+            ));
+        app.reconcile_selected_resource_streams();
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 3);
+        assert_eq!(watches.last().unwrap().namespace.as_deref(), Some("c"));
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| frame.kind == ClientKind::Unsubscribe)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn custom_gvks_are_independent_and_cluster_scoped_duplicates_share() {
+        let (mut app, state) = ready_app();
+        app.types_context = Some("dev-local".to_owned());
+        app.resource_types = vec![
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".to_owned(),
+                    version: "v1".to_owned(),
+                    kind: "Widget".to_owned(),
+                },
+                namespaced: true,
+            },
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".to_owned(),
+                    version: "v1".to_owned(),
+                    kind: "ClusterThing".to_owned(),
+                },
+                namespaced: false,
+            },
+        ];
+        let mut open_custom = |key: &str, scope: NamespaceScope| {
+            let id = app
+                .shell
+                .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+                    WorkloadKind::CustomResources,
+                ))
+                .into_iter()
+                .find_map(|event| match event {
+                    WorkspaceEvent::Opened(id) => Some(id),
+                    _ => None,
+                })
+                .unwrap();
+            app.shell
+                .apply_workspace_command(WorkspaceCommand::SetCustomKind(id, Some(key.to_owned())));
+            app.shell
+                .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(id, scope));
+        };
+        open_custom(
+            "example.io/v1/Widget",
+            NamespaceScope::Namespace("a".to_owned()),
+        );
+        open_custom(
+            "example.io/v1/ClusterThing",
+            NamespaceScope::Namespace("a".to_owned()),
+        );
+        open_custom("example.io/v1/ClusterThing", NamespaceScope::AllNamespaces);
+        app.reconcile_selected_resource_streams();
+
+        let watches = resource_watches(&state);
+        assert_eq!(watches.len(), 2);
+        let widget = watches
+            .iter()
+            .find(|watch| watch.gvk.kind == "Widget")
+            .unwrap();
+        assert_eq!(widget.namespace.as_deref(), Some("a"));
+        let cluster = watches
+            .iter()
+            .find(|watch| watch.gvk.kind == "ClusterThing")
+            .unwrap();
+        assert_eq!(cluster.namespace, None);
+    }
+
+    #[test]
     fn context_switch_round_trips_through_the_backend_before_local_commit() {
         let switched = ServerFrame::response(
-            RequestId::from_u128(4),
+            RequestId::from_u128(3),
             k10s_protocol::ContextSwitchResponse {
                 current: "prod-readonly".into(),
                 previous: Some("dev-local".into()),
@@ -2962,12 +3944,7 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            [
-                "bootstrap",
-                "resource.types",
-                "infrastructure.get",
-                "context.switch"
-            ],
+            ["bootstrap", "infrastructure.get", "context.switch"],
             "the staged switch is sent to the backend"
         );
         assert_eq!(
@@ -2997,10 +3974,8 @@ mod tests {
             kinds,
             [
                 "bootstrap",
-                "resource.types",
                 "infrastructure.get",
                 "context.switch",
-                "resource.types",
                 "infrastructure.get"
             ],
             "streams and infrastructure resubscribe on the committed context"
@@ -3022,7 +3997,7 @@ mod tests {
         let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap_payload);
         let rejection = ServerFrame {
             kind: ServerKind::Error,
-            request_id: Some(RequestId::from_u128(4)),
+            request_id: Some(RequestId::from_u128(3)),
             subscription_id: None,
             sequence: None,
             payload: serde_json::to_value(
@@ -3123,6 +4098,7 @@ mod tests {
     #[test]
     fn runtime_context_unavailable_reconciles_outside_the_switch_flow() {
         let (mut app, state) = ready_app();
+        app.web_activate_workload(WorkloadKind::CustomResources);
         let request_id = state
             .borrow()
             .sent
@@ -3480,10 +4456,8 @@ mod tests {
             kinds,
             [
                 "bootstrap",
-                "resource.types",
                 "infrastructure.get",
                 "bootstrap",
-                "resource.types",
                 "infrastructure.get"
             ],
             "streams and infrastructure resubscribe onto the marker context after reconnect"
@@ -3505,7 +4479,7 @@ mod tests {
         let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap_payload);
         let rejection = ServerFrame {
             kind: ServerKind::Error,
-            request_id: Some(RequestId::from_u128(4)),
+            request_id: Some(RequestId::from_u128(3)),
             subscription_id: None,
             sequence: None,
             payload: serde_json::to_value(ErrorFrame::new(

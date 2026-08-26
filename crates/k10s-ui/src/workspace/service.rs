@@ -7,15 +7,14 @@
 use std::collections::BTreeMap;
 
 use super::detail::DetailState;
-use super::resource::SortSpec;
+use super::resource::{NamespaceScope, SortSpec};
 
 /// State owned by the singleton Services window. It follows the same
 /// command-driven shape as workload list windows so guards, geometry, and
 /// context switching behave identically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceWindowState<I> {
-    /// Local namespace filter; `None` means "all namespaces".
-    pub namespace: Option<String>,
+    pub namespace_scope: NamespaceScope,
     pub search: String,
     pub sort: Option<SortSpec>,
     /// Selected row identity; owns the integrated detail below.
@@ -36,7 +35,7 @@ pub struct ServiceWindowState<I> {
 impl<I> Default for ServiceWindowState<I> {
     fn default() -> Self {
         Self {
-            namespace: None,
+            namespace_scope: NamespaceScope::ContextDefault,
             search: String::new(),
             sort: None,
             selection: None,

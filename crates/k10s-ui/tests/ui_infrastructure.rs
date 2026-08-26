@@ -10,7 +10,7 @@ use k10s_protocol::{
     WorkloadHealth,
 };
 use k10s_ui::{
-    ui::{ConnectionState, UiShell},
+    ui::{ConnectionState, InfrastructureLoad, UiShell},
     workspace::{LauncherItem, WorkspaceCommand},
 };
 
@@ -23,6 +23,7 @@ struct Fixture {
     show_response: bool,
     connection: ConnectionState,
     selected_context: Option<String>,
+    load: InfrastructureLoad,
 }
 
 impl Default for Fixture {
@@ -33,18 +34,20 @@ impl Default for Fixture {
             show_response: true,
             connection: ConnectionState::Connected,
             selected_context: Some(CONTEXT.to_owned()),
+            load: InfrastructureLoad::Available,
         }
     }
 }
 
 fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let response = fixture.show_response.then_some(&fixture.response);
-    fixture.shell.show_with_infrastructure(
+    fixture.shell.show_with_infrastructure_load(
         ui,
         fixture.connection,
         &[CONTEXT.to_owned()],
         &mut fixture.selected_context,
         response,
+        fixture.load,
     );
 }
 
@@ -496,4 +499,37 @@ fn loading_and_empty_storage_states_keep_window_chrome_explanatory() {
     harness
         .get_by_role_and_label(Role::Window, "Storage")
         .get_by_label("No StorageClasses");
+}
+
+#[test]
+fn unavailable_infrastructure_has_safe_copy_refresh_and_no_spinner() {
+    let mut harness = harness();
+    harness.state_mut().show_response = false;
+    harness.state_mut().load = InfrastructureLoad::Unavailable;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Storage,
+        ));
+    harness.step();
+
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    overview.get_by_label("Cluster overview is not available in this build");
+    overview.get_by_role_and_label(Role::Button, "Refresh overview");
+    assert!(overview.query_by_role(Role::ProgressIndicator).is_none());
+    assert!(
+        overview
+            .query_by_label("Loading cluster overview")
+            .is_none()
+    );
+    for name in ["Nodes", "Storage"] {
+        let window = harness.get_by_role_and_label(Role::Window, name);
+        window.get_by_label("Cluster infrastructure is not available in this build");
+        assert!(window.query_by_role(Role::ProgressIndicator).is_none());
+    }
 }

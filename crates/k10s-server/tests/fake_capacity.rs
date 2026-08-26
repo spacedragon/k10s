@@ -166,3 +166,62 @@ async fn fifty_thousand_object_dataset_streams_in_bounded_pages() {
 
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn default_4300_row_snapshot_uses_exact_default_chunk_count() {
+    const OBJECTS: usize = 12_000;
+    let expected_rows = OBJECTS * 3 / 8;
+    assert!(expected_rows >= 4_300);
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        k10s_backend::BackendKernel::new(FakeKubernetes::with_capacity(OBJECTS, 0)),
+    )
+    .await
+    .unwrap();
+    let url = format!("ws://{}{}", server.addr(), k10s_protocol::CONTROL_PATH);
+    let mut client = ClientState::new(ClientConfig::default());
+    client
+        .connect(ConnectTarget::new(url.clone(), "secret"))
+        .unwrap();
+    let mut ws = connect_async(url.as_str()).await.unwrap().0;
+    flush_outbound(&mut ws, &mut client).await;
+    loop {
+        let frame = recv_frame(&mut ws).await;
+        let ready = frame.kind == ServerKind::Welcome;
+        apply_and_ack(&mut ws, &mut client, frame).await;
+        if ready {
+            break;
+        }
+    }
+    let subscription = client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+    let subscribed = recv_frame(&mut ws).await;
+    assert_eq!(subscribed.kind, ServerKind::Subscribed);
+    assert_eq!(subscribed.subscription_id.as_ref(), Some(subscription.id()));
+    let begin = recv_frame(&mut ws).await;
+    assert_eq!(begin.subscription_id.as_ref(), Some(subscription.id()));
+    let chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
+        .unwrap()
+        .total_chunks as usize;
+    let expected_chunks = expected_rows.div_ceil(128);
+    assert_eq!(chunks, expected_chunks);
+    let mut observed_chunks = 0;
+    for expected_index in 0..expected_chunks {
+        let frame = recv_frame(&mut ws).await;
+        assert_eq!(frame.kind, ServerKind::SnapshotChunk);
+        assert_eq!(frame.subscription_id.as_ref(), Some(subscription.id()));
+        let chunk: SnapshotChunk = serde_json::from_value(frame.payload).unwrap();
+        assert_eq!(chunk.chunk_index as usize, expected_index);
+        observed_chunks += 1;
+    }
+    assert_eq!(observed_chunks, expected_rows.div_ceil(128));
+    let end = recv_frame(&mut ws).await;
+    assert_eq!(end.kind, ServerKind::SnapshotEnd);
+    assert_eq!(end.subscription_id.as_ref(), Some(subscription.id()));
+    server.shutdown().await.unwrap();
+}

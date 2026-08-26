@@ -26,6 +26,9 @@ struct RecordedState {
     responses: BTreeMap<String, Recorded>,
     /// More specific canned responses keyed by `METHOD path`.
     method_responses: BTreeMap<String, Recorded>,
+    /// Content-negotiated canned responses keyed by `(METHOD path, Accept
+    /// substring)`. The substring must occur verbatim in the request header.
+    accept_responses: BTreeMap<(String, String), Recorded>,
     /// Paths whose requests never complete (stalled api server simulation).
     hanging: BTreeSet<String>,
     /// Method/path keys that fail at the transport layer.
@@ -37,6 +40,9 @@ struct RecordedState {
     bodies: BTreeMap<String, Vec<String>>,
     /// Full request URIs (including query parameters) in arrival order.
     uris: BTreeMap<String, Vec<String>>,
+    /// Accept headers in arrival order for each request path. Missing headers
+    /// are recorded as empty strings so the request sequence remains aligned.
+    accepts: BTreeMap<String, Vec<String>>,
 }
 
 /// A recorded Kubernetes API server implemented as a tower Service.
@@ -67,6 +73,12 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
         let path = request.uri().path().to_owned();
         let uri = request.uri().to_string();
         let method_path = format!("{} {path}", request.method());
+        let accept = request
+            .headers()
+            .get(http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
         let state = self.state.clone();
         Box::pin(async move {
             let hanging = {
@@ -93,6 +105,11 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                     .or_default()
                     .push(String::from_utf8_lossy(&body).into_owned());
                 shared.uris.entry(path.clone()).or_default().push(uri);
+                shared
+                    .accepts
+                    .entry(path.clone())
+                    .or_default()
+                    .push(accept.clone());
             }
             if hanging {
                 // A stalled connection: the request never completes.
@@ -110,9 +127,17 @@ impl Service<Request<kube::client::Body>> for RecordedApiServer {
                 let shared = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match shared
-                    .method_responses
-                    .get(&method_path)
+                let negotiated = shared.accept_responses.iter().find_map(
+                    |((candidate_method_path, accept_substring), response)| {
+                        (candidate_method_path == &method_path
+                            && accept.contains(accept_substring.as_str()))
+                        .then_some(response)
+                    },
+                );
+                // Route precedence is explicit and setters never mutate other
+                // routes: Accept-specific, then method/path, then path-only.
+                match negotiated
+                    .or_else(|| shared.method_responses.get(&method_path))
                     .or_else(|| shared.responses.get(&path))
                 {
                     Some(recorded) => recorded.clone(),
@@ -133,11 +158,13 @@ impl Default for RecordedApiServer {
             state: Arc::new(std::sync::Mutex::new(RecordedState {
                 responses: BTreeMap::new(),
                 method_responses: BTreeMap::new(),
+                accept_responses: BTreeMap::new(),
                 hanging: BTreeSet::new(),
                 failing: BTreeSet::new(),
                 hits: BTreeMap::new(),
                 bodies: BTreeMap::new(),
                 uris: BTreeMap::new(),
+                accepts: BTreeMap::new(),
             })),
         }
     }
@@ -167,8 +194,31 @@ impl RecordedApiServer {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        shared.method_responses.insert(
-            format!("{} {path}", method.to_ascii_uppercase()),
+        let method_path = format!("{} {path}", method.to_ascii_uppercase());
+        shared
+            .method_responses
+            .insert(method_path, (status, body.to_owned()));
+    }
+
+    /// Record a canned response for one method/path when the request's Accept
+    /// header contains `accept_substring` verbatim.
+    pub fn set_accept_response(
+        &self,
+        method: &str,
+        path: &str,
+        accept_substring: &str,
+        status: u16,
+        body: &str,
+    ) {
+        let mut shared = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared.accept_responses.insert(
+            (
+                format!("{} {path}", method.to_ascii_uppercase()),
+                accept_substring.to_owned(),
+            ),
             (status, body.to_owned()),
         );
     }
@@ -232,11 +282,53 @@ impl RecordedApiServer {
             .unwrap_or_default()
     }
 
-    /// A recorded discovery surface matching the standard fake Kubernetes
-    /// world: core built-ins, apps workloads (with scale subresources where a
-    /// real cluster exposes them), apiextensions, and one CRD group.
+    /// Accept headers observed for one path in arrival order. Requests with
+    /// no Accept header are represented by an empty string.
+    #[must_use]
+    pub fn request_accepts(&self, path: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepts
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The historical standard fake Kubernetes world, served through legacy
+    /// discovery documents.
     #[must_use]
     pub fn standard() -> Self {
+        Self::legacy()
+    }
+
+    /// The standard fake Kubernetes world with Accept-negotiated aggregated
+    /// discovery v2 routes and legacy documents retained as fallback.
+    #[must_use]
+    pub fn aggregated() -> Self {
+        let server = Self::legacy();
+        server.set_accept_response(
+            "GET",
+            "/apis",
+            "apidiscovery.k8s.io",
+            200,
+            APIS_AGGREGATED_DISCOVERY_V2,
+        );
+        server.set_accept_response(
+            "GET",
+            "/api",
+            "apidiscovery.k8s.io",
+            200,
+            API_AGGREGATED_DISCOVERY_V2,
+        );
+        server
+    }
+
+    /// The standard fake Kubernetes world served only through legacy
+    /// discovery documents. Aggregated requests therefore receive successful
+    /// legacy shapes, exercising kube-rs' default-empty v2 compatibility path.
+    #[must_use]
+    pub fn legacy() -> Self {
         let server = Self::default();
         server.set_response("/apis", 200, APIS_GROUP_LIST);
         server.set_response("/api", 200, API_VERSIONS_V1);
@@ -319,3 +411,44 @@ const APIS_GROUP_LIST: &str = r#"{"kind":"APIGroupList","apiVersion":"v1","group
 
 /// The recorded /api core-group version list.
 const API_VERSIONS_V1: &str = r#"{"kind":"APIVersions","apiVersion":"v1","versions":["v1"],"resources":["namespacedNames","nonNamespacedNames"]}"#;
+
+/// Aggregated discovery for every non-core group in the standard fake world.
+const APIS_AGGREGATED_DISCOVERY_V2: &str = r#"{
+  "kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+    {"metadata":{"name":"apps"},"versions":[{"version":"v1","freshness":"Current","resources":[
+      {"resource":"deployments","responseKind":{"group":"apps","version":"v1","kind":"Deployment"},"scope":"Namespaced","singularResource":"deployment","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["deploy"],"subresources":[{"subresource":"scale","responseKind":{"group":"autoscaling","version":"v1","kind":"Scale"},"verbs":["get","update","patch"]}]},
+      {"resource":"replicasets","responseKind":{"group":"apps","version":"v1","kind":"ReplicaSet"},"scope":"Namespaced","singularResource":"replicaset","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["rs"],"subresources":[{"subresource":"scale","responseKind":{"group":"autoscaling","version":"v1","kind":"Scale"},"verbs":["get","update","patch"]}]},
+      {"resource":"statefulsets","responseKind":{"group":"apps","version":"v1","kind":"StatefulSet"},"scope":"Namespaced","singularResource":"statefulset","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["sts"],"subresources":[{"subresource":"scale","responseKind":{"group":"autoscaling","version":"v1","kind":"Scale"},"verbs":["get","update","patch"]}]},
+      {"resource":"daemonsets","responseKind":{"group":"apps","version":"v1","kind":"DaemonSet"},"scope":"Namespaced","singularResource":"daemonset","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["ds"]}
+    ]}]},
+    {"metadata":{"name":"batch"},"versions":[{"version":"v1","freshness":"Current","resources":[
+      {"resource":"jobs","responseKind":{"group":"batch","version":"v1","kind":"Job"},"scope":"Namespaced","singularResource":"job","verbs":["get","list","watch","create","update","patch","delete"]},
+      {"resource":"cronjobs","responseKind":{"group":"batch","version":"v1","kind":"CronJob"},"scope":"Namespaced","singularResource":"cronjob","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["cj"]}
+    ]}]},
+    {"metadata":{"name":"apiextensions.k8s.io"},"versions":[{"version":"v1","freshness":"Current","resources":[
+      {"resource":"customresourcedefinitions","responseKind":{"group":"apiextensions.k8s.io","version":"v1","kind":"CustomResourceDefinition"},"scope":"Cluster","singularResource":"customresourcedefinition","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["crd","crds"]}
+    ]}]},
+    {"metadata":{"name":"storage.k8s.io"},"versions":[{"version":"v1","freshness":"Current","resources":[
+      {"resource":"storageclasses","responseKind":{"group":"storage.k8s.io","version":"v1","kind":"StorageClass"},"scope":"Cluster","singularResource":"storageclass","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["sc"]}
+    ]}]},
+    {"metadata":{"name":"k10s.example.com"},"versions":[{"version":"v1alpha1","freshness":"Current","resources":[
+      {"resource":"gadgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Gadget"},"scope":"Namespaced","singularResource":"gadget","verbs":["get","list","watch","create","update","patch","delete"],"subresources":[{"subresource":"status","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Gadget"},"verbs":["get","update","patch"]}]}
+    ]}]}
+  ]
+}"#;
+
+/// Aggregated discovery for the core group in the standard fake world.
+const API_AGGREGATED_DISCOVERY_V2: &str = r#"{
+  "kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+    {"metadata":{"name":""},"versions":[{"version":"v1","freshness":"Current","resources":[
+      {"resource":"pods","responseKind":{"group":"","version":"v1","kind":"Pod"},"scope":"Namespaced","singularResource":"pod","verbs":["get","list","watch","create","update","patch","delete"]},
+      {"resource":"nodes","responseKind":{"group":"","version":"v1","kind":"Node"},"scope":"Cluster","singularResource":"node","verbs":["get","list","watch","update","patch"]},
+      {"resource":"services","responseKind":{"group":"","version":"v1","kind":"Service"},"scope":"Namespaced","singularResource":"service","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["svc"]},
+      {"resource":"configmaps","responseKind":{"group":"","version":"v1","kind":"ConfigMap"},"scope":"Namespaced","singularResource":"configmap","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["cm"]},
+      {"resource":"namespaces","responseKind":{"group":"","version":"v1","kind":"Namespace"},"scope":"Cluster","singularResource":"namespace","verbs":["get","list","watch","create","update","patch","delete"],"shortNames":["ns"]},
+      {"resource":"persistentvolumeclaims","responseKind":{"group":"","version":"v1","kind":"PersistentVolumeClaim"},"scope":"Namespaced","singularResource":"persistentvolumeclaim","verbs":["get","list","watch","create","update","patch","delete"]},
+      {"resource":"persistentvolumes","responseKind":{"group":"","version":"v1","kind":"PersistentVolume"},"scope":"Cluster","singularResource":"persistentvolume","verbs":["get","list","watch","create","update","patch","delete"]},
+      {"resource":"tokenreviews","responseKind":{"group":"","version":"v1","kind":"TokenReview"},"scope":"Cluster","singularResource":"tokenreview","verbs":["create"]}
+    ]}]}
+  ]
+}"#;

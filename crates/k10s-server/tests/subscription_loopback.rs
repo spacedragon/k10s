@@ -4,10 +4,17 @@
 //! bootstrap/resubscribe/resync while preserving windows, filters, and the
 //! retained applied list.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use k10s_backend::{BackendKernel, FakeKubernetes};
+use k10s_backend::{
+    BackendError, BackendKernel, Command as BackendCommand, FakeKubernetes, KubernetesAccess,
+    OperationId, Query as BackendQuery, QueryResult as BackendQueryResult, StreamInput, Subscribe,
+    SubscriptionHandle,
+};
 use k10s_protocol::{
     ClientFrame, ClientKind, ClientPayload, GroupVersionKind, ServerFrame, ServerKind,
     SnapshotBegin, SnapshotChunk,
@@ -18,6 +25,78 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Backend seam that holds the first two resource snapshots until both
+/// forwarders exist, then releases them together. Without the per-session
+/// snapshot permit, the server's cancellation yield between pages makes the
+/// two lifecycle streams deterministically overlap instead of relying on
+/// incidental Fake scheduler timing.
+#[derive(Debug, Clone)]
+struct InterleavingFake {
+    inner: FakeKubernetes,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+impl InterleavingFake {
+    fn new() -> Self {
+        Self {
+            inner: FakeKubernetes::with_capacity(12_000, 0),
+            release: Arc::new(tokio::sync::Barrier::new(2)),
+        }
+    }
+}
+
+impl KubernetesAccess for InterleavingFake {
+    fn query<'a>(
+        &'a self,
+        req: BackendQuery,
+    ) -> Pin<Box<dyn Future<Output = Result<BackendQueryResult, BackendError>> + Send + 'a>> {
+        self.inner.query(req)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        cmd: BackendCommand,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationId, BackendError>> + Send + 'a>> {
+        self.inner.execute(cmd)
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        req: Subscribe,
+    ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let is_resource = matches!(&req, Subscribe::ResourceWatch { .. });
+            let mut handle = self.inner.subscribe(req).await?;
+            if !is_resource {
+                return Ok(handle);
+            }
+            let mut source = handle.take_events().expect("resource watch events");
+            let initial = source.recv().await.expect("initial snapshot");
+            let (sender, receiver) = tokio::sync::broadcast::channel(4);
+            let release = Arc::clone(&self.release);
+            tokio::spawn(async move {
+                release.wait().await;
+                let _ = sender.send(initial);
+                while let Ok(event) = source.recv().await {
+                    let _ = sender.send(event);
+                }
+            });
+            Ok(SubscriptionHandle::with_events(
+                "interleaving-watch",
+                receiver,
+            ))
+        })
+    }
+
+    fn stream_input<'a>(
+        &'a self,
+        ticket_id: &'a str,
+        input: StreamInput,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
+        self.inner.stream_input(ticket_id, input)
+    }
+}
 
 fn deployments() -> GroupVersionKind {
     GroupVersionKind {
@@ -323,5 +402,99 @@ async fn empty_snapshots_still_complete_into_an_empty_client_list() {
     let list = client.resource_list(subscription.id()).unwrap();
     assert!(list.rows().next().is_none());
 
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_initial_snapshots_are_serialized_per_session() {
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(InterleavingFake::new()),
+    )
+    .await
+    .unwrap();
+    let (mut ws, mut client) = ready_client(&server).await;
+    client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    client
+        .subscribe_resource("dev-local", "apps", "v1", "Deployment", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+
+    let mut active = None;
+    let mut completed = 0;
+    let mut last_sequence = None;
+    while completed < 2 {
+        let frame = recv_frame(&mut ws).await;
+        if let Some(sequence) = frame.sequence {
+            if let Some(previous) = last_sequence {
+                assert_eq!(sequence, previous + 1);
+            }
+            last_sequence = Some(sequence);
+        }
+        match frame.kind {
+            ServerKind::SnapshotBegin => {
+                assert!(active.is_none(), "snapshot lifecycles interleaved");
+                active = frame.subscription_id.clone();
+            }
+            ServerKind::SnapshotChunk => assert_eq!(frame.subscription_id, active),
+            ServerKind::SnapshotEnd => {
+                assert_eq!(frame.subscription_id, active);
+                active = None;
+                completed += 1;
+            }
+            _ => {}
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_snapshot_releases_permit_for_the_next_subscription() {
+    let fake = FakeKubernetes::with_capacity(12_000, 64);
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(fake),
+    )
+    .await
+    .unwrap();
+    let (mut ws, mut client) = ready_client(&server).await;
+    let pods = client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+    loop {
+        let frame = recv_frame(&mut ws).await;
+        let first_chunk = frame.subscription_id.as_ref() == Some(pods.id())
+            && frame.kind == ServerKind::SnapshotChunk;
+        client.apply(frame).unwrap();
+        flush_outbound(&mut ws, &mut client).await;
+        if first_chunk {
+            break;
+        }
+    }
+    client.unsubscribe(&pods).unwrap();
+    let nodes = client
+        .subscribe_resource("dev-local", "", "v1", "Node", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+
+    let mut pod_end = false;
+    let mut node_end = false;
+    while !node_end {
+        let frame = recv_frame(&mut ws).await;
+        pod_end |= frame.subscription_id.as_ref() == Some(pods.id())
+            && frame.kind == ServerKind::SnapshotEnd;
+        node_end = frame.subscription_id.as_ref() == Some(nodes.id())
+            && frame.kind == ServerKind::SnapshotEnd;
+    }
+    assert!(!pod_end, "cancelled partial snapshot emitted snapshotEnd");
     server.shutdown().await.unwrap();
 }

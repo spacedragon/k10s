@@ -5,7 +5,7 @@
 //! confined to this module: only normalized [`ResourceTypesData`] or typed,
 //! sanitized [`BackendError`]s cross the seam — never raw API server text.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kube::discovery::{Discovery, Scope, verbs};
 
@@ -19,8 +19,9 @@ pub const DISCOVERY_TTL: Duration = Duration::from_secs(300);
 /// catalogs stay in memory; overflow evicts the oldest entry (see `KubeAdapter`).
 pub const MAX_CACHED_CONTEXTS: usize = 8;
 
-/// Run full API discovery for one context client and normalize it into a
-/// sorted resource catalog.
+/// Prefer two-request aggregated API discovery for one context client, fall
+/// back to legacy discovery only for known compatibility failures, and
+/// normalize the result into a sorted resource catalog.
 ///
 /// Fails closed: every cluster or transport failure maps to a typed
 /// [`BackendError`] instead of serving an empty or fabricated catalog.
@@ -28,11 +29,113 @@ pub(crate) async fn discover_resource_types(
     client: &kube::Client,
     context: &str,
 ) -> Result<ResourceTypesData, BackendError> {
-    let discovery = Discovery::new(client.clone())
-        .run()
-        .await
-        .map_err(|error| sanitize_discovery_error(context, error))?;
+    let (discovery, mode) = execute_discovery(client, context).await?;
+    let data = normalize_discovery(&discovery, context);
+    tracing::debug!(
+        context,
+        mode,
+        outcome = "normalized",
+        "kubernetes discovery completed"
+    );
+    Ok(data)
+}
 
+async fn execute_discovery(
+    client: &kube::Client,
+    context: &str,
+) -> Result<(Discovery, &'static str), BackendError> {
+    let started = Instant::now();
+    match Discovery::new(client.clone()).run_aggregated().await {
+        Ok(discovery) if has_usable_aggregated_catalog(&discovery) => {
+            trace_attempt(context, "aggregated", started, "usable");
+            Ok((discovery, "aggregated"))
+        }
+        Ok(_) => {
+            trace_attempt(
+                context,
+                "aggregated",
+                started,
+                "compatibility_incomplete_catalog",
+            );
+            execute_legacy_discovery(client, context).await
+        }
+        Err(error) if aggregated_error_allows_fallback(&error) => {
+            trace_attempt(context, "aggregated", started, "compatibility_error");
+            execute_legacy_discovery(client, context).await
+        }
+        Err(error) => {
+            trace_attempt(context, "aggregated", started, "failed_closed");
+            Err(sanitize_discovery_error(context, error))
+        }
+    }
+}
+
+async fn execute_legacy_discovery(
+    client: &kube::Client,
+    context: &str,
+) -> Result<(Discovery, &'static str), BackendError> {
+    let started = Instant::now();
+    match Discovery::new(client.clone()).run().await {
+        Ok(discovery) => {
+            trace_attempt(context, "legacy", started, "usable");
+            Ok((discovery, "legacy"))
+        }
+        Err(error) => {
+            trace_attempt(context, "legacy", started, "failed_closed");
+            Err(sanitize_discovery_error(context, error))
+        }
+    }
+}
+
+fn trace_attempt(context: &str, mode: &str, started: Instant, outcome: &str) {
+    tracing::debug!(
+        context,
+        mode,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        outcome,
+        "kubernetes discovery attempt completed"
+    );
+}
+
+fn has_usable_aggregated_catalog(discovery: &Discovery) -> bool {
+    let usable_core = discovery
+        .get("")
+        .is_some_and(|core| core.name().is_empty() && group_has_usable_list_resource(core));
+
+    // kube-rs no longer exposes which wire document contributed each parsed
+    // group. Requiring one usable non-core group catches a legacy/default-empty
+    // /apis response paired with valid aggregated /api data. A genuinely
+    // core-only cluster safely takes the legacy path instead.
+    let usable_non_core = discovery
+        .groups()
+        .any(|group| !group.name().is_empty() && group_has_usable_list_resource(group));
+
+    usable_core && usable_non_core
+}
+
+fn group_has_usable_list_resource(group: &kube::discovery::ApiGroup) -> bool {
+    group.versions().any(|version| {
+        !version.is_empty()
+            && group
+                .versioned_resources(version)
+                .into_iter()
+                .any(|(resource, capabilities)| {
+                    !resource.kind.is_empty()
+                        && !resource.plural.is_empty()
+                        && capabilities.supports_operation(verbs::LIST)
+                })
+    })
+}
+
+fn aggregated_error_allows_fallback(error: &kube::Error) -> bool {
+    match error {
+        kube::Error::Api(status) => matches!(status.code, 404 | 406 | 415),
+        kube::Error::SerdeError(_) | kube::Error::Discovery(_) => true,
+        _ => false,
+    }
+}
+
+fn normalize_discovery(discovery: &Discovery, context: &str) -> ResourceTypesData {
     let mut types = Vec::new();
     for group in discovery.groups().collect::<Vec<_>>() {
         // Cover every version the cluster advertises: built-ins and CRDs alike.
@@ -68,10 +171,10 @@ pub(crate) async fn discover_resource_types(
     }
 
     types.sort_by(|left, right| left.gvk.cmp(&right.gvk));
-    Ok(ResourceTypesData {
+    ResourceTypesData {
         context: context.to_owned(),
         types,
-    })
+    }
 }
 
 /// Map kube-rs discovery failures to bounded operator-facing details.

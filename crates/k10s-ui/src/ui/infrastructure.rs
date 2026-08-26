@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use egui::{ProgressBar, RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{CapacityUsage, InfrastructureResponse, NodeRow};
 
-use super::{ConnectionState, theme};
+use super::{ConnectionState, InfrastructureLoad, theme};
 
 const GIB: f64 = 1_073_741_824.0;
 const MISSING_TOOLTIP: &str = "Metric was not reported; — does not mean zero.";
@@ -54,8 +54,13 @@ pub(super) fn show_nodes(
     ui: &mut egui::Ui,
     state: &mut InfrastructureUiState,
     response: Option<&InfrastructureResponse>,
+    load: InfrastructureLoad,
     connection: ConnectionState,
 ) {
+    if load == InfrastructureLoad::Unavailable {
+        ui.label("Cluster infrastructure is not available in this build");
+        return;
+    }
     let Some(response) = response else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());
@@ -173,8 +178,13 @@ pub(super) fn show_storage(
     ui: &mut egui::Ui,
     state: &mut InfrastructureUiState,
     response: Option<&InfrastructureResponse>,
+    load: InfrastructureLoad,
     connection: ConnectionState,
 ) {
+    if load == InfrastructureLoad::Unavailable {
+        ui.label("Cluster infrastructure is not available in this build");
+        return;
+    }
     let Some(response) = response else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());

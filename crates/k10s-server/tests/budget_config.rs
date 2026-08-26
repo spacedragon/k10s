@@ -101,5 +101,7 @@ async fn invalid_budget_refuses_startup_before_serving() {
 
 #[test]
 fn production_defaults_form_one_valid_budget_set() {
-    ServerConfig::default().validate().unwrap();
+    let config = ServerConfig::default();
+    config.validate().unwrap();
+    assert_eq!(config.snapshot_rows_per_chunk, 128);
 }

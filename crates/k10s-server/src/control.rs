@@ -374,6 +374,10 @@ pub(crate) async fn serve_socket(
     let mut request_tasks = JoinSet::new();
     let last_sent_sequence: Arc<AtomicU64> = Arc::new(AtomicU64::new(journal_last_sequence));
     let subscription_cancel = child.child_token();
+    // Initial resource snapshots are serialized per authenticated session so
+    // one large list cannot interleave its begin/chunks/end lifecycle with
+    // another subscription's initial list.
+    let snapshot_permit = Arc::new(tokio::sync::Semaphore::new(1));
     let watch_recovery = WatchRecovery::new();
     let mut watch_subscriptions: HashMap<SubscriptionId, ActiveWatchSubscription> = HashMap::new();
     let (forwarder_done_tx, mut forwarder_done_rx) =
@@ -1072,6 +1076,7 @@ pub(crate) async fn serve_socket(
                             let task_cancel = task_cancel.expect("resource watch has cancellation");
                             let task_counter = Arc::clone(&last_sent_sequence);
                             let task_snapshot_rows = config.snapshot_rows_per_chunk;
+                            let task_snapshot_permit = Arc::clone(&snapshot_permit);
                             let task_generation =
                                 task_generation.expect("resource watch has a generation");
                             let task_id = task_id.expect("resource watch has a task ID");
@@ -1092,6 +1097,7 @@ pub(crate) async fn serve_socket(
                                         handle.take_events(),
                                         &task_counter,
                                         task_snapshot_rows,
+                                        task_snapshot_permit,
                                         &task_cancel,
                                         task_generation,
                                     )
@@ -1739,6 +1745,7 @@ async fn stream_backend_events(
     events: Option<tokio::sync::broadcast::Receiver<BackendEvent>>,
     sequence_counter: &AtomicU64,
     snapshot_rows_per_chunk: usize,
+    snapshot_permit: Arc<tokio::sync::Semaphore>,
     cancel: &CancellationToken,
     generation: WatchGeneration,
 ) {
@@ -1776,19 +1783,54 @@ async fn stream_backend_events(
                 }
             }
             Ok(BackendEvent::Snapshot(data)) => {
-                if stream_snapshot(
+                let permit = tokio::select! {
+                    biased;
+                    () = generation.cancel.cancelled() => break,
+                    () = cancel.cancelled() => break,
+                    permit = Arc::clone(&snapshot_permit).acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    },
+                };
+                let started = std::time::Instant::now();
+                let row_count = data.rows.len();
+                let chunk_count = row_count.div_ceil(snapshot_rows_per_chunk).max(1);
+                let outcome = stream_snapshot(
                     outbound,
                     kernel,
                     subscription_id,
                     data,
                     sequence_counter,
                     snapshot_rows_per_chunk,
+                    cancel,
+                    &generation.cancel,
                 )
-                .await
-                .is_err()
-                {
-                    overload_close(outbound);
-                    break;
+                .await;
+                drop(permit);
+                match outcome {
+                    Ok(SnapshotOutcome::Completed) => tracing::info!(
+                        subscription_id = %subscription_id.as_str(),
+                        row_count,
+                        chunk_count,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        outcome = "completed",
+                        "initial resource snapshot streamed"
+                    ),
+                    Ok(SnapshotOutcome::Cancelled) => {
+                        tracing::info!(
+                            subscription_id = %subscription_id.as_str(),
+                            row_count,
+                            chunk_count,
+                            elapsed_ms = started.elapsed().as_millis(),
+                            outcome = "cancelled",
+                            "initial resource snapshot stopped"
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        overload_close(outbound);
+                        break;
+                    }
                 }
             }
             Ok(BackendEvent::Changed(record)) => {
@@ -1891,6 +1933,7 @@ async fn stream_backend_events(
 /// Stream a snapshot as bounded `snapshotBegin`/`snapshotChunk`/
 /// `snapshotEnd` frames with contiguous connection sequences and a
 /// deterministic checksum over the chunk pages.
+#[allow(clippy::too_many_arguments)]
 async fn stream_snapshot(
     outbound: &Scheduler,
     kernel: &BackendKernel,
@@ -1898,12 +1941,17 @@ async fn stream_snapshot(
     data: k10s_backend::ResourceListData,
     sequence_counter: &AtomicU64,
     rows_per_chunk: usize,
-) -> Result<(), EnqueueError> {
+    cancel: &CancellationToken,
+    generation_cancel: &CancellationToken,
+) -> Result<SnapshotOutcome, EnqueueError> {
     debug_assert!(rows_per_chunk > 0, "ServerConfig validation rejects zero");
     let total_chunks = data.rows.len().div_ceil(rows_per_chunk).max(1);
     let begin_payload = SnapshotBegin {
         total_chunks: total_chunks as u32,
     };
+    if snapshot_cancelled(cancel, generation_cancel) {
+        return Ok(SnapshotOutcome::Cancelled);
+    }
     send_sequenced(
         outbound,
         subscription_id,
@@ -1922,6 +1970,12 @@ async fn stream_snapshot(
     };
     let mut checksum: u64 = FNV_OFFSET_BASIS;
     for (index, chunk) in pages.into_iter().enumerate() {
+        // Give the control loop a chance to observe an unsubscribe while a
+        // large snapshot is in flight, then stop without emitting its end.
+        tokio::task::yield_now().await;
+        if snapshot_cancelled(cancel, generation_cancel) {
+            return Ok(SnapshotOutcome::Cancelled);
+        }
         let page = kernel.snapshot_page(data.revision, chunk);
         let page_bytes = serde_json::to_vec(&page).expect("snapshot page serializes");
         for byte in &page_bytes {
@@ -1941,6 +1995,9 @@ async fn stream_snapshot(
         .await?;
     }
 
+    if snapshot_cancelled(cancel, generation_cancel) {
+        return Ok(SnapshotOutcome::Cancelled);
+    }
     let end_payload = SnapshotEnd {
         checksum: format!("fnv-64:{checksum:016x}"),
     };
@@ -1951,7 +2008,18 @@ async fn stream_snapshot(
         serde_json::to_value(end_payload).expect("end payload serializes"),
         sequence_counter,
     )
-    .await
+    .await?;
+    Ok(SnapshotOutcome::Completed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotOutcome {
+    Completed,
+    Cancelled,
+}
+
+fn snapshot_cancelled(cancel: &CancellationToken, generation_cancel: &CancellationToken) -> bool {
+    cancel.is_cancelled() || generation_cancel.is_cancelled()
 }
 
 /// Why a delta could not be admitted to the bounded scheduler.
@@ -2598,6 +2666,7 @@ mod tests {
             Some(receiver),
             &counter,
             16,
+            Arc::new(tokio::sync::Semaphore::new(1)),
             &cancel,
             generation,
         )
@@ -2661,6 +2730,7 @@ mod tests {
             Some(receiver),
             &counter,
             16,
+            Arc::new(tokio::sync::Semaphore::new(1)),
             &cancel,
             generation,
         )
@@ -2713,6 +2783,7 @@ mod tests {
             Some(receiver),
             &counter,
             16,
+            Arc::new(tokio::sync::Semaphore::new(1)),
             &cancel,
             generation,
         )
@@ -2920,6 +2991,7 @@ mod tests {
             Some(receiver),
             &counter,
             16,
+            Arc::new(tokio::sync::Semaphore::new(1)),
             &cancel,
             generation,
         )

@@ -29,6 +29,9 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
+
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
 use crate::port::{
@@ -106,6 +109,9 @@ pub struct KubeAdapter {
     kubeconfig_source: Option<kube::config::Kubeconfig>,
     /// Bounded per-context discovery catalog cache (LRU eviction, TTL refresh).
     catalogs: StdMutex<CatalogCache>,
+    /// One immutable live discovery generation per context. Callers clone the
+    /// shared future under this short-held lock, then await it without locks.
+    catalog_flights: Arc<StdMutex<CatalogFlights>>,
     /// Supervised demand-driven watch runtime: one task per selection with
     /// atomic summary caches and lingered teardown.
     watches: ClusterWatches,
@@ -170,6 +176,7 @@ impl KubeAdapter {
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
+            catalog_flights: Arc::new(StdMutex::new(CatalogFlights::default())),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             availability_events,
@@ -225,6 +232,7 @@ impl KubeAdapter {
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
+            catalog_flights: Arc::new(StdMutex::new(CatalogFlights::default())),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
             availability_events,
@@ -297,6 +305,21 @@ impl KubeAdapter {
     #[must_use]
     pub fn operation_engine(&self) -> crate::operation::OperationEngine {
         self.operations.clone()
+    }
+
+    /// Number of active request guards joined to one catalog generation.
+    ///
+    /// Test-only synchronization seam for cancellation and panic assertions;
+    /// registry ownership of the shared future is deliberately not counted.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn catalog_waiter_count(&self, context: &str) -> usize {
+        self.catalog_flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .get(context)
+            .map_or(0, |flight| flight.active_waiters)
     }
 }
 
@@ -732,7 +755,7 @@ impl KubeAdapter {
             .prepare_switch(&to)?;
         // Prepare (cluster): validate the destination read path with live
         // traffic — a fresh cached catalog proves nothing about right now.
-        self.discover_catalog(&to).await?;
+        self.resolve_catalog(&to, CatalogPolicy::ForceLive).await?;
         // Commit: install the new current marker as one atomic swap.
         let previous = {
             let mut registry = self
@@ -780,6 +803,17 @@ impl KubeAdapter {
 
     /// Resolve one context's discovery catalog through the bounded cache.
     async fn catalog_for(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
+        self.resolve_catalog(context, CatalogPolicy::UseFreshCache)
+            .await
+    }
+
+    /// Resolve one context's catalog according to the caller's freshness
+    /// policy while sharing any already-running live discovery generation.
+    async fn resolve_catalog(
+        &self,
+        context: &str,
+        policy: CatalogPolicy,
+    ) -> Result<ResourceTypesData, BackendError> {
         if !self.knows_context(context) {
             return Err(BackendError::NotFound);
         }
@@ -799,40 +833,127 @@ impl KubeAdapter {
             });
         }
 
-        // Fast path: a fresh catalog already cached for this context.
-        let cached = {
-            let mut catalogs = self
-                .catalogs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            catalogs.fresh(context).cloned()
-        };
-        if let Some(data) = cached {
-            return Ok(data);
+        if policy == CatalogPolicy::UseFreshCache {
+            // Fast path: a fresh catalog already cached for this context.
+            let cached = {
+                let mut catalogs = self
+                    .catalogs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                catalogs.fresh(context).cloned()
+            };
+            if let Some(data) = cached {
+                return Ok(data);
+            }
         }
 
-        // Slow path: discover live, then publish under the bounds.
-        self.discover_catalog(context).await
-    }
+        let started = std::time::Instant::now();
+        let running = {
+            let mut flights = self
+                .catalog_flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flights.active.get_mut(context).map(|flight| {
+                flight.active_waiters = flight
+                    .active_waiters
+                    .checked_add(1)
+                    .expect("catalog discovery waiter count overflow");
+                (flight.generation, flight.future.clone())
+            })
+        };
+        let (generation, future, joined) = if let Some((generation, future)) = running {
+            (generation, future, true)
+        } else {
+            let client = self.cluster_client(context).await?;
+            let mut flights = self
+                .catalog_flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(flight) = flights.active.get_mut(context) {
+                flight.active_waiters = flight
+                    .active_waiters
+                    .checked_add(1)
+                    .expect("catalog discovery waiter count overflow");
+                (flight.generation, flight.future.clone(), true)
+            } else {
+                // A previous generation may have filled the cache while this
+                // caller was resolving its client. Recheck while holding the
+                // same lock publishers use around insert-and-retire so a
+                // cache user cannot accidentally create a redundant flight.
+                if policy == CatalogPolicy::UseFreshCache {
+                    let cached = self
+                        .catalogs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .fresh(context)
+                        .cloned();
+                    if let Some(data) = cached {
+                        return Ok(data);
+                    }
+                }
+                let generation = flights.generations.entry(context.to_owned()).or_default();
+                *generation += 1;
+                let generation = *generation;
+                let discovery_context = context.to_owned();
+                let future = std::panic::AssertUnwindSafe(async move {
+                    discovery::discover_resource_types(&client, &discovery_context).await
+                })
+                .catch_unwind()
+                .map(|outcome| match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(BackendError::Internal(
+                        "Kubernetes catalog discovery failed unexpectedly".into(),
+                    )),
+                })
+                .boxed()
+                .shared();
+                flights.active.insert(
+                    context.to_owned(),
+                    CatalogFlight {
+                        generation,
+                        future: future.clone(),
+                        active_waiters: 1,
+                    },
+                );
+                (generation, future, false)
+            }
+        };
 
-    /// Discover one context's catalog with live traffic and publish it under
-    /// the cache bounds, bypassing any fresh cached entry.
-    ///
-    /// This is the switch-validation path: a success here proves the
-    /// destination's read path works right now, not merely that it worked
-    /// within the TTL. What was just observed is authoritative — the live
-    /// result always replaces whatever a concurrent query may have refreshed,
-    /// so post-switch availability reflects this discovery, not stale cache.
-    async fn discover_catalog(&self, context: &str) -> Result<ResourceTypesData, BackendError> {
-        let client = self.cluster_client(context).await?;
-        let data = discovery::discover_resource_types(&client, context).await?;
-
-        let mut catalogs = self
-            .catalogs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        catalogs.insert(context.to_owned(), data.clone());
-        Ok(data)
+        let mut waiter = CatalogWaiter::new(
+            Arc::clone(&self.catalog_flights),
+            context.to_owned(),
+            generation,
+        );
+        let result = future.await;
+        {
+            let mut flights = self
+                .catalog_flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owns_generation = flights
+                .active
+                .get(context)
+                .is_some_and(|flight| flight.generation == generation);
+            if owns_generation {
+                if let Ok(data) = &result {
+                    self.catalogs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(context.to_owned(), data.clone());
+                }
+                flights.active.remove(context);
+            }
+        }
+        waiter.disarm();
+        tracing::debug!(
+            context,
+            generation,
+            joined,
+            duration_ms = started.elapsed().as_millis(),
+            outcome = catalog_outcome(&result),
+            "Kubernetes catalog discovery generation resolved"
+        );
+        result
     }
 
     /// Invalidate one context's cached discovery catalog so its next query
@@ -1083,6 +1204,87 @@ impl KubeAdapter {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogPolicy {
+    UseFreshCache,
+    ForceLive,
+}
+
+type CatalogFuture = Shared<BoxFuture<'static, Result<ResourceTypesData, BackendError>>>;
+
+struct CatalogFlight {
+    generation: u64,
+    future: CatalogFuture,
+    active_waiters: usize,
+}
+
+#[derive(Default)]
+struct CatalogFlights {
+    generations: HashMap<String, u64>,
+    active: HashMap<String, CatalogFlight>,
+}
+
+struct CatalogWaiter {
+    flights: Arc<StdMutex<CatalogFlights>>,
+    context: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl CatalogWaiter {
+    fn new(flights: Arc<StdMutex<CatalogFlights>>, context: String, generation: u64) -> Self {
+        Self {
+            flights,
+            context,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CatalogWaiter {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut flights = self
+            .flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let final_waiter = flights
+            .active
+            .get_mut(&self.context)
+            .filter(|flight| flight.generation == self.generation)
+            .is_some_and(|flight| {
+                debug_assert!(flight.active_waiters > 0);
+                flight.active_waiters = flight.active_waiters.saturating_sub(1);
+                flight.active_waiters == 0
+            });
+        if final_waiter {
+            flights.active.remove(&self.context);
+        }
+    }
+}
+
+fn catalog_outcome(result: &Result<ResourceTypesData, BackendError>) -> &'static str {
+    match result {
+        Ok(_) => "success",
+        Err(BackendError::Unsupported { .. }) => "unsupported",
+        Err(BackendError::NotFound) => "not_found",
+        Err(BackendError::Conflict(_)) => "conflict",
+        Err(BackendError::ContextUnavailable { .. }) => "context_unavailable",
+        Err(BackendError::Forbidden) => "forbidden",
+        Err(BackendError::Timeout) => "timeout",
+        Err(BackendError::Cancelled) => "cancelled",
+        Err(BackendError::Internal(_)) => "internal",
+        Err(BackendError::PortForward { .. }) => "port_forward",
+    }
+}
+
 /// One cached discovery catalog with its creation time for TTL checks.
 #[derive(Debug)]
 struct CatalogEntry {
@@ -1173,7 +1375,12 @@ impl KubeAdapter {
 
 #[cfg(test)]
 mod client_build_lock_tests {
-    use super::ClientBuildLocks;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use futures_util::FutureExt;
+
+    use super::{CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks};
+    use crate::port::{BackendError, ResourceTypesData};
 
     #[tokio::test]
     async fn one_context_build_never_blocks_another_context() {
@@ -1187,6 +1394,44 @@ mod client_build_lock_tests {
         assert!(
             independent.try_lock().is_ok(),
             "a hung helper cannot block an unrelated context"
+        );
+    }
+
+    #[test]
+    fn panic_unwind_retires_the_final_catalog_waiter() {
+        let flights = Arc::new(StdMutex::new(CatalogFlights::default()));
+        let future = std::future::pending::<Result<ResourceTypesData, BackendError>>()
+            .boxed()
+            .shared();
+        flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .insert(
+                "panic-context".into(),
+                CatalogFlight {
+                    generation: 7,
+                    future,
+                    active_waiters: 1,
+                },
+            );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let flights = Arc::clone(&flights);
+            move || {
+                let _waiter = CatalogWaiter::new(flights, "panic-context".into(), 7);
+                panic!("synthetic waiter panic");
+            }
+        }));
+
+        assert!(unwind.is_err());
+        assert!(
+            !flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active
+                .contains_key("panic-context"),
+            "unwind drops the guard and retires the final matching waiter"
         );
     }
 }

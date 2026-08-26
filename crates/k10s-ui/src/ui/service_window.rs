@@ -195,6 +195,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     state: &mut ServiceWindowState<I>,
     feed: &ResourceFeed,
+    context_namespace: Option<&str>,
     connection: ConnectionState,
     yaml: &mut super::tools::YamlEditors,
     streams: &mut super::tools::StreamStores,
@@ -209,12 +210,15 @@ where
         ui.separator();
     }
 
+    let compact_controls = ui.ctx().content_rect().width() < 700.0;
+    // Keep search, scope, and detail controls reachable in narrow windows.
+    // Concise labels preserve every action without collapsing editors.
     ui.horizontal(|ui| {
         let mut search = state.search.clone();
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
                 .hint_text("Search services")
-                .desired_width(200.0),
+                .desired_width(if compact_controls { 100.0 } else { 200.0 }),
         );
         search_edit.widget_info(|| {
             WidgetInfo::labeled(WidgetType::TextEdit, true, "Search services".to_owned())
@@ -223,27 +227,68 @@ where
             queued.push(WorkspaceCommand::SetSearch(window_id, search));
         }
 
-        let mut namespace = state.namespace.clone().unwrap_or_default();
+        ui.label(match (&state.namespace_scope, compact_controls) {
+            (crate::workspace::NamespaceScope::ContextDefault, true) => {
+                format!("Default: {}", context_namespace.unwrap_or("default"))
+            }
+            (crate::workspace::NamespaceScope::ContextDefault, false) => format!(
+                "Context default ({})",
+                context_namespace.unwrap_or("default")
+            ),
+            (crate::workspace::NamespaceScope::Namespace(value), true) => {
+                format!("NS: {value}")
+            }
+            (crate::workspace::NamespaceScope::Namespace(value), false) => {
+                format!("Namespace: {value}")
+            }
+            (crate::workspace::NamespaceScope::AllNamespaces, _) => "All namespaces".to_owned(),
+        });
+        let mut namespace = match &state.namespace_scope {
+            crate::workspace::NamespaceScope::Namespace(value) => value.clone(),
+            _ => String::new(),
+        };
         let namespace_edit = ui.add(
             TextEdit::singleline(&mut namespace)
                 .hint_text("Namespace filter")
-                .desired_width(140.0),
+                .desired_width(if compact_controls { 70.0 } else { 140.0 }),
         );
         namespace_edit.widget_info(|| {
             WidgetInfo::labeled(WidgetType::TextEdit, true, "Namespace filter".to_owned())
         });
         if namespace_edit.changed() {
             let parsed = namespace.trim().to_owned();
-            queued.push(WorkspaceCommand::SetNamespace(
+            let scope = if parsed.is_empty() {
+                crate::workspace::NamespaceScope::ContextDefault
+            } else {
+                crate::workspace::NamespaceScope::Namespace(parsed)
+            };
+            queued.push(WorkspaceCommand::SetNamespaceScope(window_id, scope));
+        }
+        let all_namespaces_label = if compact_controls {
+            "All"
+        } else {
+            "All namespaces"
+        };
+        if ui.button(all_namespaces_label).clicked() {
+            queued.push(WorkspaceCommand::SetNamespaceScope(
                 window_id,
-                (!parsed.is_empty()).then_some(parsed),
+                crate::workspace::NamespaceScope::AllNamespaces,
             ));
         }
 
-        let filters_active = !state.search.is_empty() || state.namespace.is_some();
-        if filters_active && ui.button("Clear filters").clicked() {
+        let filters_active = !state.search.is_empty()
+            || state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault;
+        let clear_label = if compact_controls {
+            "Clear"
+        } else {
+            "Clear filters"
+        };
+        if filters_active && ui.button(clear_label).clicked() {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespace(window_id, None));
+            queued.push(WorkspaceCommand::SetNamespaceScope(
+                window_id,
+                crate::workspace::NamespaceScope::ContextDefault,
+            ));
         }
 
         let toggle_label = if state.detail_visible {
@@ -257,7 +302,11 @@ where
     });
     ui.separator();
 
-    let Some(rows) = &feed.services else {
+    let Some(rows) = feed
+        .window_services
+        .get(&window_id)
+        .or(feed.services.as_ref())
+    else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());
             ui.label("Loading services");
@@ -272,8 +321,8 @@ where
         .iter()
         .filter(|row| {
             state
-                .namespace
-                .as_deref()
+                .namespace_scope
+                .resolve(context_namespace)
                 .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref())
                 && search_matches(row, &needle)
         })
@@ -308,7 +357,8 @@ where
             show_table(
                 ui,
                 window_id,
-                !state.search.is_empty() || state.namespace.is_some(),
+                !state.search.is_empty()
+                    || state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault,
                 state.sort.as_ref(),
                 &filtered,
                 |row| {

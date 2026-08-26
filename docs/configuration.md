@@ -41,14 +41,14 @@ contradictory hard bounds.
 | `startup_readiness_delay` | 0 | Intentional starting interval. |
 | `probe_drain_grace` | 0 | Minimum observable probe-draining interval. |
 | `hello_timeout` | 5 s | Control authentication deadline. |
-| `graceful_flush_timeout` | 250 ms | Best-effort writer flush limit. |
+| `graceful_flush_timeout` | 250 ms | Best-effort writer flush and overload close-handshake limit. |
 | `max_frame_size` | 1 MiB | Control WebSocket frame bound. |
 | `max_message_size` | 4 MiB | Assembled control-message bound. |
 | `max_unauthenticated_connections` | 32 | Pre-auth socket cap. |
 | `max_authenticated_connections` | 128 | Authenticated control socket cap. |
 | `outbound_queue_capacity` | 64 | Per-control-socket outbound queue. |
 | `max_resource_subscriptions_per_session` | 64 | Live resource watches per session. |
-| `snapshot_rows_per_chunk` | 16 | Normalized rows per snapshot chunk. |
+| `snapshot_rows_per_chunk` | 128 | Normalized rows per snapshot chunk. |
 | `drain_grace_timeout` | 250 ms | Read-only status window after shutdown notice. |
 | `drain_timeout` | 10 s | Absolute tracked-task drain deadline. |
 | `capabilities` | logs.tail, exec.attach | Advertised wire capability identifiers. |

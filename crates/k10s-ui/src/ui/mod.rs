@@ -31,6 +31,14 @@ pub enum ConnectionState {
     Failed,
 }
 
+/// Capability-local infrastructure presentation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfrastructureLoad {
+    Loading,
+    Available,
+    Unavailable,
+}
+
 impl ConnectionState {
     fn label(self) -> &'static str {
         match self {
@@ -217,8 +225,41 @@ where
         selected_context: &mut Option<String>,
         response: Option<&k10s_protocol::InfrastructureResponse>,
     ) -> bool {
+        let load = if response.is_some() {
+            InfrastructureLoad::Available
+        } else {
+            InfrastructureLoad::Loading
+        };
+        self.show_with_infrastructure_load(
+            ui,
+            connection,
+            contexts,
+            selected_context,
+            response,
+            load,
+        )
+    }
+
+    /// Render one frame with an explicit infrastructure capability state.
+    pub fn show_with_infrastructure_load(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[String],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+        load: InfrastructureLoad,
+    ) -> bool {
         let feed = resource_window::ResourceFeed::default();
-        self.show_with_resources(ui, connection, contexts, selected_context, response, &feed)
+        self.show_with_resources_load(
+            ui,
+            connection,
+            contexts,
+            selected_context,
+            response,
+            &feed,
+            load,
+        )
     }
 
     /// Render one frame with a protocol-owned infrastructure response and
@@ -233,6 +274,33 @@ where
         response: Option<&k10s_protocol::InfrastructureResponse>,
         feed: &resource_window::ResourceFeed,
     ) -> bool {
+        let load = if response.is_some() {
+            InfrastructureLoad::Available
+        } else {
+            InfrastructureLoad::Loading
+        };
+        self.show_with_resources_load(
+            ui,
+            connection,
+            contexts,
+            selected_context,
+            response,
+            feed,
+            load,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn show_with_resources_load(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[String],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+        feed: &resource_window::ResourceFeed,
+        load: InfrastructureLoad,
+    ) -> bool {
         let contexts = contexts
             .iter()
             .map(|name| k10s_protocol::Context {
@@ -244,13 +312,14 @@ where
                 unavailable_reason: None,
             })
             .collect::<Vec<_>>();
-        self.show_with_contexts_and_resources(
+        self.show_with_contexts_and_resources_load(
             ui,
             connection,
             &contexts,
             selected_context,
             response,
             feed,
+            load,
         )
     }
 
@@ -263,6 +332,34 @@ where
         selected_context: &mut Option<String>,
         response: Option<&k10s_protocol::InfrastructureResponse>,
         feed: &resource_window::ResourceFeed,
+    ) -> bool {
+        let load = if response.is_some() {
+            InfrastructureLoad::Available
+        } else {
+            InfrastructureLoad::Loading
+        };
+        self.show_with_contexts_and_resources_load(
+            ui,
+            connection,
+            contexts,
+            selected_context,
+            response,
+            feed,
+            load,
+        )
+    }
+
+    /// Render with authoritative contexts and explicit infrastructure state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_with_contexts_and_resources_load(
+        &mut self,
+        ui: &mut egui::Ui,
+        connection: ConnectionState,
+        contexts: &[k10s_protocol::Context],
+        selected_context: &mut Option<String>,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+        feed: &resource_window::ResourceFeed,
+        load: InfrastructureLoad,
     ) -> bool {
         theme::apply(ui.ctx());
 
@@ -288,6 +385,12 @@ where
             .map(str::to_owned);
 
         let mut context_change = None;
+        let selected_namespace = selected.as_deref().and_then(|name| {
+            contexts
+                .iter()
+                .find(|context| context.name == name)
+                .and_then(|context| context.namespace.as_deref())
+        });
         let mut refresh_requested = false;
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
@@ -317,7 +420,9 @@ where
                 &mut self.streams,
                 &mut self.dialogs,
                 response,
+                load,
                 feed,
+                selected_namespace,
                 connection,
                 &mut queued,
             );

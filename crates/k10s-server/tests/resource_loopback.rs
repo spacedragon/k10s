@@ -94,13 +94,17 @@ fn backend_gvk(gvk: &GroupVersionKind) -> k10s_backend::Gvk {
     }
 }
 
+fn fake_server_config() -> ServerConfig {
+    ServerConfig {
+        access_token: "secret".into(),
+        ..ServerConfig::default()
+    }
+}
+
 async fn spawn_server_with_fake() -> (k10s_server::ServerHandle, FakeKubernetes) {
     let fake = FakeKubernetes::standard();
     let handle = spawn_loopback(
-        ServerConfig {
-            access_token: "secret".into(),
-            ..ServerConfig::default()
-        },
+        fake_server_config(),
         BackendKernel::new_with_instance_id(fake.clone(), "resource-server"),
     )
     .await
@@ -295,6 +299,9 @@ async fn resource_list_detail_and_metrics_flow_through_the_real_socket() {
 
 #[tokio::test]
 async fn resource_watch_streams_chunked_snapshot_then_deltas() {
+    const SNAPSHOT_ROWS: usize = 22;
+    let rows_per_chunk = fake_server_config().snapshot_rows_per_chunk;
+    let expected_chunks = SNAPSHOT_ROWS.div_ceil(rows_per_chunk);
     let (server, fake) = spawn_server_with_fake().await;
     let mut ws = connect_authenticated(&server).await;
 
@@ -330,8 +337,8 @@ async fn resource_watch_streams_chunked_snapshot_then_deltas() {
     );
     let begin_payload: SnapshotBegin = serde_json::from_value(begin.payload).unwrap();
     assert_eq!(
-        begin_payload.total_chunks, 2,
-        "22 pods chunk into two bounded pages"
+        begin_payload.total_chunks as usize, expected_chunks,
+        "the snapshot lifecycle uses the configured page bound"
     );
 
     let mut rows = Vec::new();
@@ -342,6 +349,7 @@ async fn resource_watch_streams_chunked_snapshot_then_deltas() {
         let chunk_payload: SnapshotChunk = serde_json::from_value(chunk.payload).unwrap();
         assert_eq!(chunk_payload.chunk_index, expected_chunk);
         let page: ResourceSnapshotPage = serde_json::from_value(chunk_payload.data).unwrap();
+        assert!(page.rows.len() <= rows_per_chunk);
         snapshot_revision = snapshot_revision.max(page.revision.get());
         rows.extend(page.rows);
     }
@@ -352,7 +360,11 @@ async fn resource_watch_streams_chunked_snapshot_then_deltas() {
     let end_payload: SnapshotEnd = serde_json::from_value(end.payload).unwrap();
     assert!(!end_payload.checksum.is_empty());
 
-    assert_eq!(rows.len(), 22, "fake dev-local serves every default pod");
+    assert_eq!(
+        rows.len(),
+        SNAPSHOT_ROWS,
+        "fake dev-local serves every default pod"
+    );
     assert!(
         rows.windows(2).all(|pair| pair[0] <= pair[1]),
         "snapshot rows arrive sorted"
