@@ -20,14 +20,27 @@ struct GatedRecordedApiServer {
     path: Arc<str>,
     entered: Arc<tokio::sync::Semaphore>,
     releases: Arc<tokio::sync::Semaphore>,
-    completed: Arc<tokio::sync::Semaphore>,
+    cancelled: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone)]
 struct DiscoveryGate {
     entered: Arc<tokio::sync::Semaphore>,
     releases: Arc<tokio::sync::Semaphore>,
-    completed: Arc<tokio::sync::Semaphore>,
+    cancelled: Arc<tokio::sync::Semaphore>,
+}
+
+struct PendingRequestDrop {
+    cancelled: Arc<tokio::sync::Semaphore>,
+    armed: bool,
+}
+
+impl Drop for PendingRequestDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.add_permits(1);
+        }
+    }
 }
 
 impl DiscoveryGate {
@@ -43,11 +56,11 @@ impl DiscoveryGate {
         self.releases.add_permits(1);
     }
 
-    async fn wait_until_completed(&self) {
-        self.completed
+    async fn wait_until_cancelled(&self) {
+        self.cancelled
             .acquire()
             .await
-            .expect("discovery completion gate remains open")
+            .expect("discovery cancellation gate remains open")
             .forget();
     }
 }
@@ -55,19 +68,19 @@ impl DiscoveryGate {
 fn gate_path(inner: RecordedApiServer, path: &str) -> (GatedRecordedApiServer, DiscoveryGate) {
     let entered = Arc::new(tokio::sync::Semaphore::new(0));
     let releases = Arc::new(tokio::sync::Semaphore::new(0));
-    let completed = Arc::new(tokio::sync::Semaphore::new(0));
+    let cancelled = Arc::new(tokio::sync::Semaphore::new(0));
     (
         GatedRecordedApiServer {
             inner,
             path: Arc::from(path),
             entered: Arc::clone(&entered),
             releases: Arc::clone(&releases),
-            completed: Arc::clone(&completed),
+            cancelled: Arc::clone(&cancelled),
         },
         DiscoveryGate {
             entered,
             releases,
-            completed,
+            cancelled,
         },
     )
 }
@@ -87,18 +100,22 @@ impl Service<Request<kube::client::Body>> for GatedRecordedApiServer {
         let gated = request.uri().path() == self.path.as_ref();
         let entered = Arc::clone(&self.entered);
         let releases = Arc::clone(&self.releases);
-        let completed = Arc::clone(&self.completed);
+        let cancelled = Arc::clone(&self.cancelled);
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let response = inner.call(request).await?;
             if gated {
+                let mut pending = PendingRequestDrop {
+                    cancelled,
+                    armed: true,
+                };
                 entered.add_permits(1);
                 releases
                     .acquire()
                     .await
                     .expect("discovery release gate remains open")
                     .forget();
-                completed.add_permits(1);
+                pending.armed = false;
             }
             Ok(response)
         })
@@ -546,8 +563,12 @@ async fn cancelled_waiters_do_not_orphan_discovery_generation() {
         );
     }
 
-    // Generation one already buffered the old Gadget response. Updating the
-    // route now affects only a genuinely new live generation.
+    tokio::time::timeout(Duration::from_secs(1), gate_b.wait_until_cancelled())
+        .await
+        .expect("dropping the final waiter cancels generation one's live request");
+
+    // Generation one was cancelled with the old Gadget response buffered.
+    // Updating the route now affects a genuinely new live generation.
     server_b.set_accept_response(
         "GET",
         "/apis",
@@ -559,11 +580,6 @@ async fn cancelled_waiters_do_not_orphan_discovery_generation() {
           ]}]}
         ]}"#,
     );
-    gate_b.release_one();
-    tokio::time::timeout(Duration::from_secs(1), gate_b.wait_until_completed())
-        .await
-        .expect("adapter-owned generation one keeps progressing without request waiters");
-
     let release_generation_two = async {
         gate_b.wait_until_entered().await;
         assert_eq!(
@@ -593,7 +609,7 @@ async fn cancelled_waiters_do_not_orphan_discovery_generation() {
     assert!(refreshed.find_kind("Widget").is_some());
     assert!(refreshed.find_kind("Gadget").is_none());
     assert_eq!(server_b.hit_count("/apis"), 2);
-    assert_eq!(server_b.hit_count("/api"), 2);
+    assert_eq!(server_b.hit_count("/api"), 1);
 }
 
 #[tokio::test]

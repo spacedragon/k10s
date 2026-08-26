@@ -108,7 +108,7 @@ pub struct KubeAdapter {
     /// testkit pre-injected every context's client instead.
     kubeconfig_source: Option<kube::config::Kubeconfig>,
     /// Bounded per-context discovery catalog cache (LRU eviction, TTL refresh).
-    catalogs: Arc<StdMutex<CatalogCache>>,
+    catalogs: StdMutex<CatalogCache>,
     /// One immutable live discovery generation per context. Callers clone the
     /// shared future under this short-held lock, then await it without locks.
     catalog_flights: Arc<StdMutex<CatalogFlights>>,
@@ -175,7 +175,7 @@ impl KubeAdapter {
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: Some(kubeconfig),
-            catalogs: Arc::new(StdMutex::new(CatalogCache::new())),
+            catalogs: StdMutex::new(CatalogCache::new()),
             catalog_flights: Arc::new(StdMutex::new(CatalogFlights::default())),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
@@ -231,7 +231,7 @@ impl KubeAdapter {
             clients: Arc::new(tokio::sync::Mutex::new(client_map)),
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: None,
-            catalogs: Arc::new(StdMutex::new(CatalogCache::new())),
+            catalogs: StdMutex::new(CatalogCache::new()),
             catalog_flights: Arc::new(StdMutex::new(CatalogFlights::default())),
             watches: ClusterWatches::default(),
             metrics: ClusterMetrics::default(),
@@ -833,23 +833,33 @@ impl KubeAdapter {
         }
 
         let started = std::time::Instant::now();
-        let running = self
-            .catalog_flights
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active
-            .get(context)
-            .cloned();
-        let (generation, future, joined, owner) = if let Some(flight) = running {
-            (flight.generation, flight.future, true, None)
+        let running = {
+            let mut flights = self
+                .catalog_flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flights.active.get_mut(context).map(|flight| {
+                flight.active_waiters = flight
+                    .active_waiters
+                    .checked_add(1)
+                    .expect("catalog discovery waiter count overflow");
+                (flight.generation, flight.future.clone())
+            })
+        };
+        let (generation, future, joined) = if let Some((generation, future)) = running {
+            (generation, future, true)
         } else {
             let client = self.cluster_client(context).await?;
             let mut flights = self
                 .catalog_flights
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(flight) = flights.active.get(context) {
-                (flight.generation, flight.future.clone(), true, None)
+            if let Some(flight) = flights.active.get_mut(context) {
+                flight.active_waiters = flight
+                    .active_waiters
+                    .checked_add(1)
+                    .expect("catalog discovery waiter count overflow");
+                (flight.generation, flight.future.clone(), true)
             } else {
                 // A previous generation may have filled the cache while this
                 // caller was resolving its client. Recheck while holding the
@@ -870,81 +880,57 @@ impl KubeAdapter {
                 *generation += 1;
                 let generation = *generation;
                 let discovery_context = context.to_owned();
-                let completion_context = discovery_context.clone();
-                let catalog_flights = Arc::clone(&self.catalog_flights);
-                let catalogs = Arc::clone(&self.catalogs);
-                let generation_started = std::time::Instant::now();
-                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
                 let future = async move {
-                    completion_rx.await.unwrap_or_else(|_| {
-                        Err(BackendError::Internal(
-                            "Kubernetes catalog discovery generation ended unexpectedly".into(),
-                        ))
-                    })
+                    discovery::discover_resource_types(&client, &discovery_context).await
                 }
                 .boxed()
                 .shared();
-                let owner = async move {
-                    let result =
-                        discovery::discover_resource_types(&client, &discovery_context).await;
-                    {
-                        let mut flights = catalog_flights
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let owns_generation = flights
-                            .active
-                            .get(&completion_context)
-                            .is_some_and(|flight| flight.generation == generation);
-                        if owns_generation {
-                            if let Ok(data) = &result {
-                                catalogs
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .insert(completion_context.clone(), data.clone());
-                            }
-                            flights.active.remove(&completion_context);
-                        }
-                    }
-                    tracing::debug!(
-                        context = completion_context,
-                        generation,
-                        joined = false,
-                        duration_ms = generation_started.elapsed().as_millis(),
-                        outcome = catalog_outcome(&result),
-                        "Kubernetes catalog discovery generation resolved"
-                    );
-                    let _ = completion_tx.send(result);
-                }
-                .boxed();
                 flights.active.insert(
                     context.to_owned(),
                     CatalogFlight {
                         generation,
                         future: future.clone(),
+                        active_waiters: 1,
                     },
                 );
-                (generation, future, false, Some(owner))
+                (generation, future, false)
             }
         };
 
-        if let Some(owner) = owner {
-            // Dropping a Tokio JoinHandle detaches rather than cancels the
-            // task. This adapter-owned poller guarantees the generation keeps
-            // progressing and retires itself even if every request disappears.
-            let owner_task = tokio::spawn(owner);
-            drop(owner_task);
-        }
+        let mut waiter = CatalogWaiter::new(
+            Arc::clone(&self.catalog_flights),
+            context.to_owned(),
+            generation,
+        );
         let result = future.await;
-        if joined {
-            tracing::debug!(
-                context,
-                generation,
-                joined,
-                duration_ms = started.elapsed().as_millis(),
-                outcome = catalog_outcome(&result),
-                "Kubernetes catalog discovery generation resolved"
-            );
+        {
+            let mut flights = self
+                .catalog_flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owns_generation = flights
+                .active
+                .get(context)
+                .is_some_and(|flight| flight.generation == generation);
+            if owns_generation {
+                if let Ok(data) = &result {
+                    self.catalogs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(context.to_owned(), data.clone());
+                }
+                flights.active.remove(context);
+            }
         }
+        waiter.disarm();
+        tracing::debug!(
+            context,
+            generation,
+            joined,
+            duration_ms = started.elapsed().as_millis(),
+            outcome = catalog_outcome(&result),
+            "Kubernetes catalog discovery generation resolved"
+        );
         result
     }
 
@@ -1204,16 +1190,62 @@ enum CatalogPolicy {
 
 type CatalogFuture = Shared<BoxFuture<'static, Result<ResourceTypesData, BackendError>>>;
 
-#[derive(Clone)]
 struct CatalogFlight {
     generation: u64,
     future: CatalogFuture,
+    active_waiters: usize,
 }
 
 #[derive(Default)]
 struct CatalogFlights {
     generations: HashMap<String, u64>,
     active: HashMap<String, CatalogFlight>,
+}
+
+struct CatalogWaiter {
+    flights: Arc<StdMutex<CatalogFlights>>,
+    context: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl CatalogWaiter {
+    fn new(flights: Arc<StdMutex<CatalogFlights>>, context: String, generation: u64) -> Self {
+        Self {
+            flights,
+            context,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CatalogWaiter {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut flights = self
+            .flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let final_waiter = flights
+            .active
+            .get_mut(&self.context)
+            .filter(|flight| flight.generation == self.generation)
+            .is_some_and(|flight| {
+                debug_assert!(flight.active_waiters > 0);
+                flight.active_waiters = flight.active_waiters.saturating_sub(1);
+                flight.active_waiters == 0
+            });
+        if final_waiter {
+            flights.active.remove(&self.context);
+        }
+    }
 }
 
 fn catalog_outcome(result: &Result<ResourceTypesData, BackendError>) -> &'static str {
@@ -1321,7 +1353,12 @@ impl KubeAdapter {
 
 #[cfg(test)]
 mod client_build_lock_tests {
-    use super::ClientBuildLocks;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use futures_util::FutureExt;
+
+    use super::{CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks};
+    use crate::port::{BackendError, ResourceTypesData};
 
     #[tokio::test]
     async fn one_context_build_never_blocks_another_context() {
@@ -1335,6 +1372,44 @@ mod client_build_lock_tests {
         assert!(
             independent.try_lock().is_ok(),
             "a hung helper cannot block an unrelated context"
+        );
+    }
+
+    #[test]
+    fn panic_unwind_retires_the_final_catalog_waiter() {
+        let flights = Arc::new(StdMutex::new(CatalogFlights::default()));
+        let future = std::future::pending::<Result<ResourceTypesData, BackendError>>()
+            .boxed()
+            .shared();
+        flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .insert(
+                "panic-context".into(),
+                CatalogFlight {
+                    generation: 7,
+                    future,
+                    active_waiters: 1,
+                },
+            );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let flights = Arc::clone(&flights);
+            move || {
+                let _waiter = CatalogWaiter::new(flights, "panic-context".into(), 7);
+                panic!("synthetic waiter panic");
+            }
+        }));
+
+        assert!(unwind.is_err());
+        assert!(
+            !flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active
+                .contains_key("panic-context"),
+            "unwind drops the guard and retires the final matching waiter"
         );
     }
 }
