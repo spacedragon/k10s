@@ -97,34 +97,54 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
-                Label value="2 nodes"
-                  TextRun value="2 nodes"
-                Label value="3 pods"
-                  TextRun value="3 pods"
-                Label value="2 workloads"
-                  TextRun value="2 workloads"
-                Label value="20 GiB persistent storage"
-                  TextRun value="20 GiB persistent storage"
-              ProgressIndicator label="CPU 0.5 / 4.0 cores"
-              ProgressIndicator label="Memory 2.0 / 16.0 GiB"
-              ProgressIndicator label="Pod capacity 3 / 110 pods"
+                Button label="Refresh overview"
+                GenericContainer
+                  Label value="Last updated: 2026-08-21T01:05:00Z"
+                    TextRun value="Last updated: 2026-08-21T01:05:00Z"
               GenericContainer
-              Label value="Needs attention"
-                TextRun value="Needs attention"
-              Label value="No unhealthy or pending resources"
-                TextRun value="No unhealthy or pending resources"
+                GenericContainer
+                  Label value="2 nodes"
+                    TextRun value="2 nodes"
+              GenericContainer
+                GenericContainer
+                  Label value="3 pods"
+                    TextRun value="3 pods"
+              GenericContainer
+                GenericContainer
+                  Label value="2 workloads"
+                    TextRun value="2 workloads"
+              GenericContainer
+                GenericContainer
+                  Label value="20 GiB persistent storage"
+                    TextRun value="20 GiB persistent "
+                    TextRun value="storage"
+              GenericContainer
+                GenericContainer
+                  Label value="Cluster capacity"
+                    TextRun value="Cluster capacity"
+                  ProgressIndicator label="CPU 0.5 / 4.0 cores"
+                  ProgressIndicator label="Memory 2.0 / 16.0 GiB"
+                  ProgressIndicator label="Pod capacity 3 / 110 pods"
+              GenericContainer
+                GenericContainer
+                  Label value="Workload health"
+                    TextRun value="Workload health"
+                  Label value="No workload health data"
+                    TextRun value="No workload health data"
+              GenericContainer
+                Label value="Needs attention"
+                  TextRun value="Needs attention"
+                Label value="No unhealthy or pending resources"
+                  TextRun value="No unhealthy or pending resources"
               Label value="Metrics: Unavailable · stale"
                 TextRun value="Metrics: Unavailable · stale"
-              Label value="Last sample is outside the freshness window"
-                TextRun value="Last sample is outside the freshness window"
-              Label value="Source: metrics.k8s.io"
-                TextRun value="Source: metrics.k8s.io"
-              Label value="Source updated: —"
-                TextRun value="Source updated: —"
               GenericContainer
-                Button label="Refresh overview"
-                Label value="Last updated: 2026-08-21T01:05:00Z"
-                  TextRun value="Last updated: 2026-08-21T01:05:00Z"
+                Label value="Last sample is outside the freshness window"
+                  TextRun value="Last sample is outside the freshness window"
+                Label value="Source: metrics.k8s.io"
+                  TextRun value="Source: metrics.k8s.io"
+                Label value="Source updated: —"
+                  TextRun value="Source updated: —"
     Splitter
     Splitter
     Splitter

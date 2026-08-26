@@ -99,9 +99,10 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
-                ProgressIndicator
-                Label value="Loading cluster overview"
-                  TextRun value="Loading cluster overview"
+                GenericContainer
+                  ProgressIndicator
+                  Label value="Loading cluster overview"
+                    TextRun value="Loading cluster overview"
     Splitter
     Splitter
     Splitter
