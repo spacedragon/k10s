@@ -325,3 +325,98 @@ async fn empty_snapshots_still_complete_into_an_empty_client_list() {
 
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_initial_snapshots_are_serialized_per_session() {
+    let fake = FakeKubernetes::with_capacity(12_000, 256);
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(fake),
+    )
+    .await
+    .unwrap();
+    let (mut ws, mut client) = ready_client(&server).await;
+    client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    client
+        .subscribe_resource("dev-local", "", "v1", "Node", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+
+    let mut active = None;
+    let mut completed = 0;
+    let mut last_sequence = None;
+    while completed < 2 {
+        let frame = recv_frame(&mut ws).await;
+        if let Some(sequence) = frame.sequence {
+            if let Some(previous) = last_sequence {
+                assert_eq!(sequence, previous + 1);
+            }
+            last_sequence = Some(sequence);
+        }
+        match frame.kind {
+            ServerKind::SnapshotBegin => {
+                assert!(active.is_none(), "snapshot lifecycles interleaved");
+                active = frame.subscription_id.clone();
+            }
+            ServerKind::SnapshotChunk => assert_eq!(frame.subscription_id, active),
+            ServerKind::SnapshotEnd => {
+                assert_eq!(frame.subscription_id, active);
+                active = None;
+                completed += 1;
+            }
+            _ => {}
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_snapshot_releases_permit_for_the_next_subscription() {
+    let fake = FakeKubernetes::with_capacity(12_000, 64);
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        BackendKernel::new(fake),
+    )
+    .await
+    .unwrap();
+    let (mut ws, mut client) = ready_client(&server).await;
+    let pods = client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+    loop {
+        let frame = recv_frame(&mut ws).await;
+        let first_chunk = frame.subscription_id.as_ref() == Some(pods.id())
+            && frame.kind == ServerKind::SnapshotChunk;
+        client.apply(frame).unwrap();
+        flush_outbound(&mut ws, &mut client).await;
+        if first_chunk {
+            break;
+        }
+    }
+    client.unsubscribe(&pods).unwrap();
+    let nodes = client
+        .subscribe_resource("dev-local", "", "v1", "Node", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+
+    let mut pod_end = false;
+    let mut node_end = false;
+    while !node_end {
+        let frame = recv_frame(&mut ws).await;
+        pod_end |= frame.subscription_id.as_ref() == Some(pods.id())
+            && frame.kind == ServerKind::SnapshotEnd;
+        node_end = frame.subscription_id.as_ref() == Some(nodes.id())
+            && frame.kind == ServerKind::SnapshotEnd;
+    }
+    assert!(!pod_end, "cancelled partial snapshot emitted snapshotEnd");
+    server.shutdown().await.unwrap();
+}

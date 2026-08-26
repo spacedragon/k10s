@@ -166,3 +166,45 @@ async fn fifty_thousand_object_dataset_streams_in_bounded_pages() {
 
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn default_4300_row_snapshot_uses_exact_default_chunk_count() {
+    const OBJECTS: usize = 12_000;
+    let expected_rows = OBJECTS * 3 / 8;
+    assert!(expected_rows >= 4_300);
+    let server = spawn_loopback(
+        ServerConfig {
+            access_token: "secret".into(),
+            ..ServerConfig::default()
+        },
+        k10s_backend::BackendKernel::new(FakeKubernetes::with_capacity(OBJECTS, 0)),
+    )
+    .await
+    .unwrap();
+    let url = format!("ws://{}{}", server.addr(), k10s_protocol::CONTROL_PATH);
+    let mut client = ClientState::new(ClientConfig::default());
+    client
+        .connect(ConnectTarget::new(url.clone(), "secret"))
+        .unwrap();
+    let mut ws = connect_async(url.as_str()).await.unwrap().0;
+    flush_outbound(&mut ws, &mut client).await;
+    loop {
+        let frame = recv_frame(&mut ws).await;
+        let ready = frame.kind == ServerKind::Welcome;
+        apply_and_ack(&mut ws, &mut client, frame).await;
+        if ready {
+            break;
+        }
+    }
+    client
+        .subscribe_resource("dev-local", "", "v1", "Pod", None)
+        .unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+    assert_eq!(recv_frame(&mut ws).await.kind, ServerKind::Subscribed);
+    let begin = recv_frame(&mut ws).await;
+    let chunks = serde_json::from_value::<SnapshotBegin>(begin.payload)
+        .unwrap()
+        .total_chunks as usize;
+    assert_eq!(chunks, expected_rows.div_ceil(128));
+    server.shutdown().await.unwrap();
+}

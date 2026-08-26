@@ -180,7 +180,7 @@ impl Default for ServerConfig {
             max_authenticated_connections: 128,
             outbound_queue_capacity: 64,
             max_resource_subscriptions_per_session: 64,
-            snapshot_rows_per_chunk: 16,
+            snapshot_rows_per_chunk: 128,
             drain_grace_timeout: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(10),
             capabilities: vec!["logs.tail".into(), "exec.attach".into()],

@@ -25,6 +25,10 @@ use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
 };
 
+/// Bounded production control-event inbox sized to absorb one large
+/// default snapshot page burst while the native frame loop drains it.
+const CONTROL_INBOX_CAPACITY: usize = 256;
+
 trait AppConnection: std::fmt::Debug {
     fn try_recv(&mut self) -> Option<WsEvent>;
     fn overflowed(&self) -> bool;
@@ -47,7 +51,8 @@ struct RealConnection {
 
 impl ConnectionFactory for RealConnectionFactory {
     fn connect(&mut self, url: &str) -> Result<Box<dyn AppConnection>, TransportError> {
-        let (transport, inbox) = WebSocketTransport::connect(url, Options::default(), 64)?;
+        let (transport, inbox) =
+            WebSocketTransport::connect(url, Options::default(), CONTROL_INBOX_CAPACITY)?;
         Ok(Box::new(RealConnection { transport, inbox }))
     }
 }
@@ -644,6 +649,22 @@ impl K10sApp {
             .filter(|window| window.kind == crate::workspace::WindowKind::Workload(kind))
             .max_by_key(|window| window.z)
             .map(|window| window.id)
+    }
+
+    /// Change one open namespaced workload window through the same command
+    /// path used by native controls, then reconcile its live watch.
+    pub fn web_set_namespace_scope(
+        &mut self,
+        window: WindowId,
+        scope: crate::workspace::NamespaceScope,
+    ) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(window, scope))
+        {
+            self.handle_workspace_event(event);
+        }
+        self.reconcile_selected_resource_streams();
     }
 
     /// Open/focus the singleton Services window through the shared
@@ -2355,6 +2376,11 @@ mod tests {
     use crate::workspace::{
         NamespaceScope, WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
+
+    #[test]
+    fn production_control_inbox_holds_a_large_default_snapshot_burst() {
+        assert_eq!(super::CONTROL_INBOX_CAPACITY, 256);
+    }
 
     #[derive(Debug, Default)]
     pub(super) struct FactoryState {
