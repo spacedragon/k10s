@@ -483,6 +483,7 @@ jobs:
           cargo install cargo-dist --version "$CARGO_DIST_VERSION" --locked
           trunk build --release
           cargo build --locked --release --workspace
+          cargo build --locked --release -p k10s-desktop --bin k10s-desktop --target aarch64-apple-darwin
           cargo packager --release --target aarch64-apple-darwin
           dist build --artifacts=local --target aarch64-apple-darwin --allow-dirty
           K10S_PACKAGE_DIR="${GITHUB_WORKSPACE}/target/release/packages" K10S_SERVER_BINARY="${GITHUB_WORKSPACE}/target/release/k10s-server" cargo test --locked -p k10s-desktop --test packaging_desktop
