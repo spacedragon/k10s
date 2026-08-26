@@ -1081,6 +1081,8 @@ impl K10sApp {
                             if server_error.code
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
                                 && server_error.scope == k10s_protocol::ErrorScope::Request
+                                && server_error.retryability
+                                    != k10s_protocol::Retryability::AfterReconnect
                                 && stream_request_id.as_ref().is_some_and(|id| {
                                     self.infrastructure_request
                                         .as_ref()
@@ -1091,6 +1093,8 @@ impl K10sApp {
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
                                 && server_error.scope
                                     == k10s_protocol::ErrorScope::Subscription
+                                && server_error.retryability
+                                    != k10s_protocol::Retryability::AfterReconnect
                                 && stream_subscription_id.as_ref().is_some_and(|id| {
                                     self.infrastructure_subscription
                                         .as_ref()
@@ -3322,6 +3326,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             resource_keys
         );
+    }
+
+    #[test]
+    fn reconnectable_unsupported_infrastructure_request_uses_transport_recovery() {
+        let (mut app, _) = ready_app();
+        let request_id = app
+            .infrastructure_request
+            .as_ref()
+            .expect("overview request exists")
+            .id()
+            .clone();
+        let reconnect = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "server requires reconnect",
+                Retryability::AfterReconnect,
+                ErrorScope::Request,
+                "infrastructure-request",
+            ))
+            .unwrap(),
+        };
+        assert!(matches!(
+            app.handle_event(server_message(&reconnect), 100, 200),
+            Err(super::AppEventError::Transient)
+        ));
+        app.transient_loss(100, 200);
+
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(app.connection.is_none());
+        assert!(app.infrastructure_request.is_none());
+        assert_ne!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert!(app.client.retry_schedule().is_some());
+    }
+
+    #[test]
+    fn reconnectable_unsupported_infrastructure_subscription_uses_transport_recovery() {
+        let (mut app, _) = ready_app();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        let reconnect = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "server requires reconnect",
+                Retryability::AfterReconnect,
+                ErrorScope::Subscription,
+                "infrastructure-subscription",
+            ))
+            .unwrap(),
+        };
+        assert!(matches!(
+            app.handle_event(server_message(&reconnect), 100, 200),
+            Err(super::AppEventError::Transient)
+        ));
+        app.transient_loss(100, 200);
+
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        assert_eq!(app.view(), &AppView::Connecting);
+        assert!(app.connection.is_none());
+        assert!(app.infrastructure_request.is_none());
+        assert!(
+            app.infrastructure_subscription.is_some(),
+            "desired watch survives for reconnect reconstruction"
+        );
+        assert_ne!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert!(app.client.retry_schedule().is_some());
     }
 
     #[test]
