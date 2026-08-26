@@ -1080,6 +1080,7 @@ impl K10sApp {
                         ClientError::Server(ref server_error)
                             if server_error.code
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && server_error.scope == k10s_protocol::ErrorScope::Request
                                 && stream_request_id.as_ref().is_some_and(|id| {
                                     self.infrastructure_request
                                         .as_ref()
@@ -1088,6 +1089,8 @@ impl K10sApp {
                         ClientError::Server(ref server_error)
                             if server_error.code
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && server_error.scope
+                                    == k10s_protocol::ErrorScope::Subscription
                                 && stream_subscription_id.as_ref().is_some_and(|id| {
                                     self.infrastructure_subscription
                                         .as_ref()
@@ -1095,9 +1098,7 @@ impl K10sApp {
                                 }) =>
                         {
                             if let Some(subscription) = self.infrastructure_subscription.take() {
-                                self.client
-                                    .unsubscribe(&subscription)
-                                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                                let _ = self.client.retire_rejected_subscription(&subscription);
                             }
                             self.infrastructure_load = InfrastructureLoad::Unavailable;
                         }
@@ -1484,7 +1485,8 @@ impl K10sApp {
             if self.client.is_pending(&request) {
                 self.client.cancel(&request)?;
             } else {
-                let _ = self.client.take(request);
+                let _ = self.client.take(request.clone());
+                let _ = self.client.take_failure(request);
             }
         }
         self.infrastructure_request = Some(self.client.begin(Query::Infrastructure(
@@ -3099,6 +3101,72 @@ mod tests {
     }
 
     #[test]
+    fn subscription_scoped_error_cannot_impersonate_an_infrastructure_request() {
+        let (mut app, _) = ready_app();
+        let request_id = app
+            .infrastructure_request
+            .as_ref()
+            .expect("overview request is pending")
+            .id()
+            .clone();
+        let wrong_scope = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id),
+            subscription_id: Some(SubscriptionId::new("unrelated-subscription")),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "wrong scope",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "wrong-scope-request",
+            ))
+            .unwrap(),
+        };
+
+        assert!(
+            app.handle_event(server_message(&wrong_scope), 110, 0)
+                .is_err(),
+            "malformed scope follows the existing safe error policy"
+        );
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert!(app.infrastructure_request.is_some());
+    }
+
+    #[test]
+    fn request_scoped_error_cannot_impersonate_an_infrastructure_subscription() {
+        let (mut app, _) = ready_app();
+        let unrelated = app.client.begin(Query::Bootstrap).unwrap();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        let wrong_scope = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(unrelated.id().clone()),
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "wrong scope",
+                Retryability::Never,
+                ErrorScope::Request,
+                "wrong-scope-subscription",
+            ))
+            .unwrap(),
+        };
+
+        assert!(
+            app.handle_event(server_message(&wrong_scope), 110, 0)
+                .is_err()
+        );
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert!(app.infrastructure_subscription.is_some());
+    }
+
+    #[test]
     fn unsupported_infrastructure_subscription_does_not_end_the_control_session() {
         let (mut app, state) = ready_app();
         app.web_activate_workload(WorkloadKind::Pods);
@@ -3166,6 +3234,93 @@ mod tests {
                 .count(),
             2,
             "only an explicit refresh retries the panel request"
+        );
+    }
+
+    #[test]
+    fn replacing_a_completed_infrastructure_failure_retires_its_old_outcome() {
+        let (mut app, _) = ready_app();
+        let old = app
+            .infrastructure_request
+            .clone()
+            .expect("initial overview request is pending");
+        let failure = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(old.id().clone()),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsupported",
+                Retryability::Never,
+                ErrorScope::Request,
+                "overview",
+            ))
+            .unwrap(),
+        };
+        let _ = app.client.apply(failure);
+
+        app.refresh_infrastructure("dev-local").unwrap();
+
+        assert!(app.client.take_failure(old).is_none());
+    }
+
+    #[test]
+    fn unsupported_infrastructure_subscription_retires_locally_when_outbound_is_full() {
+        let (mut app, _) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let resource_keys = app
+            .resource_subscriptions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let infrastructure = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("overview watch exists")
+            .id()
+            .clone();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        let _filler = app.client.subscribe_bootstrap_status().unwrap();
+        assert_eq!(app.client.outbound_len(), 256);
+        let desired_before = app.client.live_subscription_count();
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(infrastructure),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsupported",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "infrastructure-watch",
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&unsupported), 120, 0)
+            .expect("server rejection needs no outbound unsubscribe");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert_eq!(
+            app.client.live_subscription_count(),
+            desired_before - 1,
+            "the rejected infrastructure desire is retired without touching other watches"
+        );
+        assert!(app.infrastructure_subscription.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            app.resource_subscriptions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            resource_keys
         );
     }
 

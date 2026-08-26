@@ -205,6 +205,98 @@ fn unsupported_infrastructure_request_completes_with_a_typed_local_failure() {
 }
 
 #[test]
+fn completed_infrastructure_failure_is_cleared_by_cancel() {
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+    let _ = client.apply(request_error_frame(
+        request.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    assert!(!client.cancel(&request).unwrap());
+    assert!(
+        client.take_failure(request).is_none(),
+        "cancel retires an already-completed failure just like its request handle"
+    );
+}
+
+#[test]
+fn completed_infrastructure_failures_share_the_exact_request_retention_bound() {
+    let mut client = ClientState::new(ClientConfig {
+        request_capacity: 1,
+        ..ClientConfig::default()
+    });
+    client
+        .connect(ConnectTarget::new("ws://127.0.0.1/control", "secret"))
+        .unwrap();
+    let _hello = client.take_outbound().unwrap();
+    client.apply(welcome()).unwrap();
+    let failed = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+    let _ = client.apply(request_error_frame(
+        failed.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    assert_eq!(
+        client.begin(Query::Bootstrap).unwrap_err(),
+        ClientError::RequestRetentionLimit { limit: 1 }
+    );
+    assert!(client.take_failure(failed).is_some());
+    assert!(client.begin(Query::Bootstrap).is_ok());
+}
+
+#[test]
+fn close_discards_completed_infrastructure_failures() {
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+    let _ = client.apply(request_error_frame(
+        request.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    client.user_close();
+    assert!(client.take_failure(request).is_none());
+}
+
+#[test]
+fn resync_rebuild_discards_completed_infrastructure_failures() {
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+    let _ = client.apply(request_error_frame(
+        request.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    client.apply(resync_required(1)).unwrap();
+
+    assert!(client.take_failure(request).is_none());
+}
+
+#[test]
 fn contiguous_sequences_advance_ack_and_a_gap_requests_resync() {
     let mut client = ready_client();
     let subscription = client.subscribe_bootstrap_status().unwrap();

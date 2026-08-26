@@ -1180,6 +1180,20 @@ impl ClientState {
             payload: serde_json::to_value(Unsubscribe)
                 .expect("unit unsubscribe payload always serializes"),
         })?;
+        Ok(self.retire_subscription_state(subscription))
+    }
+
+    /// Forget a subscription the server has already rejected. No
+    /// `unsubscribe` is emitted because there is no remote subscription left
+    /// to cancel; this path remains valid even when the outbound queue is full.
+    pub fn retire_rejected_subscription(&mut self, subscription: &LiveSubscription) -> bool {
+        self.retire_subscription_state(subscription)
+    }
+
+    fn retire_subscription_state(&mut self, subscription: &LiveSubscription) -> bool {
+        if !self.live_subscriptions.contains_key(subscription.id()) {
+            return false;
+        }
         self.live_subscriptions.remove(subscription.id());
         self.active_subscriptions.remove(subscription.id());
         self.resource_specs.remove(subscription.id());
@@ -1187,7 +1201,7 @@ impl ClientState {
         self.completed_snapshots.remove(subscription.id());
         self.resource_lists.remove(subscription.id());
         self.refresh_server_validity();
-        Ok(true)
+        true
     }
 
     /// Latest response or telemetry update for a context. The response is
@@ -1544,6 +1558,7 @@ impl ClientState {
             .get(request.id())
             .is_none_or(|entry| entry.cancelled)
         {
+            self.completed_failures.remove(request.id());
             return Ok(false);
         }
         self.queue_cancel(request.id().clone())?;
