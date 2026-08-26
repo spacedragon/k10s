@@ -371,6 +371,14 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         &mut harness,
         LauncherItem::Workload(WorkspaceWorkload::CustomResources),
     );
+    let custom_id = workload_id(harness.state(), WorkspaceWorkload::CustomResources);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            custom_id,
+            k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
+        ));
 
     let picker = harness.get_by_role_and_label(Role::Window, "Custom Resources");
     picker.get_by_role_and_label(Role::Button, "monitoring.example.com/v1 Dashboard");
@@ -405,6 +413,18 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         window
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
+    );
+    assert!(window.query_by_label("Clear filters").is_none());
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(custom_id)
+            .unwrap()
+            .namespace_scope,
+        k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
+        "ignored cluster scope intent is preserved for a later namespaced GVK"
     );
     window.get_by_label("dashboards.monitoring.example.com");
     window.get_by_label("Established");

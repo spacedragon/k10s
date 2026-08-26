@@ -227,13 +227,16 @@ pub(super) fn show<I>(
             "Show details"
         };
         let filters_active = !state.search.is_empty()
-            || state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault;
+            || (namespaced
+                && state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault);
         if filters_active && ui.button("Clear filters").clicked() {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespaceScope(
-                window_id,
-                crate::workspace::NamespaceScope::ContextDefault,
-            ));
+            if namespaced {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
+                    window_id,
+                    crate::workspace::NamespaceScope::ContextDefault,
+                ));
+            }
         }
 
         if ui.button(toggle_label).clicked() {
@@ -335,10 +338,12 @@ pub(super) fn show<I>(
     if let Some(actions) = list_actions {
         if actions.cleared {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            queued.push(WorkspaceCommand::SetNamespaceScope(
-                window_id,
-                crate::workspace::NamespaceScope::ContextDefault,
-            ));
+            if namespaced {
+                queued.push(WorkspaceCommand::SetNamespaceScope(
+                    window_id,
+                    crate::workspace::NamespaceScope::ContextDefault,
+                ));
+            }
         }
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));

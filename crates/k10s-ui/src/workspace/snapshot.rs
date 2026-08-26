@@ -175,27 +175,62 @@ pub struct LoadedWorkspaceSnapshot {
 }
 
 #[derive(Deserialize)]
-struct RawSnapshot {
+struct VersionEnvelope {
     version: u32,
-    next_id: u64,
-    next_z: u64,
-    windows: Vec<RawWindow>,
 }
 
 #[derive(Deserialize)]
-struct RawWindow {
+struct V1Snapshot {
+    next_id: u64,
+    next_z: u64,
+    windows: Vec<V1Window>,
+}
+
+#[derive(Deserialize)]
+struct V1Window {
     kind: PersistedWindowKind,
     title: String,
     geometry: WindowGeom,
     #[serde(default)]
     z: u64,
-    view: Option<RawListView>,
+    view: Option<V1ListView>,
 }
 
 #[derive(Deserialize)]
-struct RawListView {
-    #[serde(default, alias = "namespace")]
-    namespace_scope: serde_json::Value,
+#[serde(deny_unknown_fields)]
+struct V1ListView {
+    namespace: Option<String>,
+    search: String,
+    filters: BTreeMap<String, String>,
+    sort: Option<SortSpec>,
+    #[serde(default = "default_split_ratio")]
+    split_ratio: f32,
+    #[serde(default = "default_true")]
+    detail_visible: bool,
+    custom_kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct V2Snapshot {
+    next_id: u64,
+    next_z: u64,
+    windows: Vec<V2Window>,
+}
+
+#[derive(Deserialize)]
+struct V2Window {
+    kind: PersistedWindowKind,
+    title: String,
+    geometry: WindowGeom,
+    #[serde(default)]
+    z: u64,
+    view: Option<V2ListView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2ListView {
+    namespace_scope: NamespaceScope,
     search: String,
     filters: BTreeMap<String, String>,
     sort: Option<SortSpec>,
@@ -208,57 +243,72 @@ struct RawListView {
 
 impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = RawSnapshot::deserialize(deserializer)?;
-        if raw.version != 1 && raw.version != SNAPSHOT_VERSION {
-            return Err(serde::de::Error::custom(format!(
-                "unsupported workspace snapshot version {}",
-                raw.version
-            )));
-        }
-        let migrated_from = (raw.version == 1).then_some(1);
-        let windows = raw
-            .windows
-            .into_iter()
-            .map(|window| {
-                let view = window
-                    .view
-                    .map(|view| {
-                        let namespace_scope = if raw.version == 1 {
-                            match serde_json::from_value::<Option<String>>(view.namespace_scope)
-                                .map_err(serde::de::Error::custom)?
-                            {
-                                Some(value) => NamespaceScope::Namespace(value),
-                                None => NamespaceScope::ContextDefault,
-                            }
-                        } else {
-                            serde_json::from_value(view.namespace_scope)
-                                .map_err(serde::de::Error::custom)?
-                        };
-                        Ok(PersistedListView {
-                            namespace_scope,
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let envelope: VersionEnvelope =
+            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
+        let (next_id, next_z, windows, migrated_from) = match envelope.version {
+            1 => {
+                let raw: V1Snapshot =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let windows = raw
+                    .windows
+                    .into_iter()
+                    .map(|window| PersistedWindow {
+                        kind: window.kind,
+                        title: window.title,
+                        geometry: window.geometry,
+                        z: window.z,
+                        view: window.view.map(|view| PersistedListView {
+                            namespace_scope: view
+                                .namespace
+                                .map(NamespaceScope::Namespace)
+                                .unwrap_or_default(),
                             search: view.search,
                             filters: view.filters,
                             sort: view.sort,
                             split_ratio: view.split_ratio,
                             detail_visible: view.detail_visible,
                             custom_kind: view.custom_kind,
-                        })
+                        }),
                     })
-                    .transpose()?;
-                Ok(PersistedWindow {
-                    kind: window.kind,
-                    title: window.title,
-                    geometry: window.geometry,
-                    z: window.z,
-                    view,
-                })
-            })
-            .collect::<Result<Vec<_>, D::Error>>()?;
+                    .collect();
+                (raw.next_id, raw.next_z, windows, Some(1))
+            }
+            SNAPSHOT_VERSION => {
+                let raw: V2Snapshot =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let windows = raw
+                    .windows
+                    .into_iter()
+                    .map(|window| PersistedWindow {
+                        kind: window.kind,
+                        title: window.title,
+                        geometry: window.geometry,
+                        z: window.z,
+                        view: window.view.map(|view| PersistedListView {
+                            namespace_scope: view.namespace_scope,
+                            search: view.search,
+                            filters: view.filters,
+                            sort: view.sort,
+                            split_ratio: view.split_ratio,
+                            detail_visible: view.detail_visible,
+                            custom_kind: view.custom_kind,
+                        }),
+                    })
+                    .collect();
+                (raw.next_id, raw.next_z, windows, None)
+            }
+            version => {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported workspace snapshot version {version}"
+                )));
+            }
+        };
         Ok(Self {
             snapshot: WorkspaceSnapshot {
                 version: SNAPSHOT_VERSION,
-                next_id: raw.next_id,
-                next_z: raw.next_z,
+                next_id,
+                next_z,
                 windows,
             },
             migrated_from,

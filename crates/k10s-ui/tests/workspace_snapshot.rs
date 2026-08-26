@@ -50,6 +50,27 @@ fn v1_literal_migrates_namespace_without_inventing_all_namespaces() {
     assert_eq!(view.custom_kind.as_deref(), Some("g/v/K"));
 }
 
+#[test]
+fn versioned_snapshot_schemas_reject_cross_version_namespace_fields() {
+    let v1_wrong = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":"prod","search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    assert!(serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v1_wrong).is_err());
+
+    let v2_wrong = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":{"kind":"namespace","value":"prod"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    assert!(serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v2_wrong).is_err());
+}
+
+#[test]
+fn v2_rejects_malformed_scope_tags_and_unsupported_versions() {
+    let malformed = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":{"kind":"somewhere_else"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(malformed).is_err()
+    );
+    let unsupported = malformed.replace("\"version\":2", "\"version\":99");
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(&unsupported).is_err()
+    );
+}
+
 /// Stand-in for the protocol `ResourceIdentity`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TestIdentity {
