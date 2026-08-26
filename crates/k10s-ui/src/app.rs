@@ -20,7 +20,7 @@ use crate::ui::ResourceFeed;
 use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
-use crate::ui::{ConnectionState as ShellConnectionState, UiShell};
+use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
 };
@@ -111,6 +111,7 @@ pub struct K10sApp {
     bootstrap: Option<PendingRequest>,
     bootstrap_subscription: Option<LiveSubscription>,
     infrastructure_request: Option<PendingRequest>,
+    infrastructure_load: InfrastructureLoad,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
@@ -268,6 +269,7 @@ impl K10sApp {
             bootstrap: None,
             bootstrap_subscription: None,
             infrastructure_request: None,
+            infrastructure_load: InfrastructureLoad::Loading,
             infrastructure_subscription: None,
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
@@ -399,13 +401,14 @@ impl K10sApp {
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
         let feed = self.build_resource_feed();
-        let refresh = self.shell.show_with_contexts_and_resources(
+        let refresh = self.shell.show_with_contexts_and_resources_load(
             ui,
             connection,
             contexts,
             &mut self.client.local_ui_mut().selected_context,
             response.as_ref(),
             &feed,
+            self.infrastructure_load,
         );
         if let Some(context) = selected_before.as_deref()
             && let Err(error) = self.reconcile_resource_streams(context)
@@ -1074,6 +1077,30 @@ impl K10sApp {
                                 self.detail_requests.remove(&identity);
                             }
                         }
+                        ClientError::Server(ref server_error)
+                            if server_error.code
+                                == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && stream_request_id.as_ref().is_some_and(|id| {
+                                    self.infrastructure_request
+                                        .as_ref()
+                                        .is_some_and(|request| request.id() == id)
+                                }) => {}
+                        ClientError::Server(ref server_error)
+                            if server_error.code
+                                == k10s_protocol::ErrorCode::UnsupportedMessage
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.infrastructure_subscription
+                                        .as_ref()
+                                        .is_some_and(|subscription| subscription.id() == id)
+                                }) =>
+                        {
+                            if let Some(subscription) = self.infrastructure_subscription.take() {
+                                self.client
+                                    .unsubscribe(&subscription)
+                                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                            }
+                            self.infrastructure_load = InfrastructureLoad::Unavailable;
+                        }
                         // A request-scoped stream-ticket denial is projected
                         // into the requesting tool; it never kills the
                         // control connection or any other stream.
@@ -1418,8 +1445,16 @@ impl K10sApp {
         if self.client.is_pending(&request) {
             return;
         }
-        if let Some(QueryResult::Infrastructure(_)) = self.client.take(request) {
+        if let Some(QueryResult::Infrastructure(_)) = self.client.take(request.clone()) {
             self.infrastructure_request = None;
+            self.infrastructure_load = InfrastructureLoad::Available;
+        } else if self
+            .client
+            .take_failure(request)
+            .is_some_and(|failure| failure.code == k10s_protocol::ErrorCode::UnsupportedMessage)
+        {
+            self.infrastructure_request = None;
+            self.infrastructure_load = InfrastructureLoad::Unavailable;
         }
     }
 
@@ -1457,6 +1492,7 @@ impl K10sApp {
                 context: context.to_owned(),
             },
         ))?);
+        self.infrastructure_load = InfrastructureLoad::Loading;
         Ok(())
     }
 
@@ -3014,6 +3050,126 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_infrastructure_request_is_panel_local_and_ends_loading() {
+        let bootstrap =
+            ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(RequestId::from_u128(2)),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "unsafe backend-specific detail",
+                Retryability::Never,
+                ErrorScope::Request,
+                "infrastructure",
+            ))
+            .unwrap(),
+        };
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+                server_message(&unsupported),
+            ]),
+            overflowed: false,
+        }]);
+
+        app.poll_at(100, 0);
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.infrastructure_request.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| request_kind(frame).as_deref() == Some("infrastructure.get"))
+                .count(),
+            1,
+            "render/poll does not retry unsupported infrastructure automatically"
+        );
+    }
+
+    #[test]
+    fn unsupported_infrastructure_subscription_does_not_end_the_control_session() {
+        let (mut app, state) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let resource_subscriptions = app
+            .resource_subscriptions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let subscription_id = app
+            .infrastructure_subscription
+            .as_ref()
+            .expect("ready overview has one infrastructure watch")
+            .id()
+            .clone();
+        let unsupported = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription_id),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::UnsupportedMessage,
+                "backend implementation detail",
+                Retryability::Never,
+                ErrorScope::Subscription,
+                "infrastructure-watch",
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&unsupported), 120, 0)
+            .expect("unsupported capability remains panel-local");
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.infrastructure_subscription.is_none());
+        assert_eq!(
+            app.infrastructure_load,
+            super::InfrastructureLoad::Unavailable
+        );
+        assert_eq!(
+            app.resource_subscriptions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            resource_subscriptions,
+            "an infrastructure capability failure cannot disturb resource watches"
+        );
+        let before = state.borrow().sent.len();
+        app.poll_at(130, 0);
+        assert_eq!(
+            state.borrow().sent.len(),
+            before,
+            "polling does not resubscribe"
+        );
+
+        app.refresh_infrastructure("dev-local").unwrap();
+        app.flush_outbound().unwrap();
+        assert_eq!(app.infrastructure_load, super::InfrastructureLoad::Loading);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter(|frame| request_kind(frame).as_deref() == Some("infrastructure.get"))
+                .count(),
+            2,
+            "only an explicit refresh retries the panel request"
+        );
+    }
+
+    #[test]
     fn sequence_gap_flushes_resync_on_the_existing_connection() {
         let initial_bootstrap =
             ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
@@ -3229,10 +3385,7 @@ mod tests {
         ));
         assert_eq!(app.resource_subscriptions.len(), 1);
         assert!(
-            app.build_resource_feed()
-                .window_lists
-                .get(&window)
-                .is_none(),
+            !app.build_resource_feed().window_lists.contains_key(&window),
             "the replaced watch has no stale rows projected under the window"
         );
     }

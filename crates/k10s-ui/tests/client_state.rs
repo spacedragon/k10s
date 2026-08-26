@@ -179,6 +179,32 @@ fn late_infrastructure_response_cannot_regress_newer_telemetry() {
 }
 
 #[test]
+fn unsupported_infrastructure_request_completes_with_a_typed_local_failure() {
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::Infrastructure(InfrastructureRequest {
+            context: "dev-local".into(),
+        }))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+
+    let applied = client.apply(request_error_frame(
+        request.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    assert!(matches!(applied, Err(ClientError::Server(_))));
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert!(!client.is_pending(&request));
+    let failure = client
+        .take_failure(request)
+        .expect("the owning panel can consume the completed typed failure");
+    assert_eq!(failure.code, ErrorCode::UnsupportedMessage);
+    assert!(client.infrastructure("dev-local").is_none());
+}
+
+#[test]
 fn contiguous_sequences_advance_ack_and_a_gap_requests_resync() {
     let mut client = ready_client();
     let subscription = client.subscribe_bootstrap_status().unwrap();

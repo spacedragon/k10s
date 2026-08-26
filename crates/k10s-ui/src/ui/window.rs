@@ -6,7 +6,9 @@ use crate::workspace::{
     Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
 };
 
-use super::{ConnectionState, infrastructure::InfrastructureUiState, resource_window};
+use super::{
+    ConnectionState, InfrastructureLoad, infrastructure::InfrastructureUiState, resource_window,
+};
 
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
@@ -22,6 +24,7 @@ pub(super) fn show_canvas<I>(
     streams: &mut super::tools::StreamStores,
     dialogs: &mut super::dialogs::OperationDialogs,
     response: Option<&k10s_protocol::InfrastructureResponse>,
+    load: InfrastructureLoad,
     feed: &resource_window::ResourceFeed,
     context_namespace: Option<&str>,
     connection: ConnectionState,
@@ -55,6 +58,7 @@ where
             dialogs,
             feed,
             response,
+            load,
             context_namespace,
             connection,
             queued,
@@ -90,6 +94,7 @@ fn show_window<I>(
     dialogs: &mut super::dialogs::OperationDialogs,
     feed: &resource_window::ResourceFeed,
     response: Option<&k10s_protocol::InfrastructureResponse>,
+    load: InfrastructureLoad,
     context_namespace: Option<&str>,
     connection: ConnectionState,
     queued: &mut Vec<WorkspaceCommand<I>>,
@@ -152,9 +157,15 @@ where
                 false
             } else {
                 match state.kind {
-                    WindowKind::Overview => super::overview::show(ui, response, connection),
+                    WindowKind::Overview => super::overview::show(ui, response, load, connection),
                     WindowKind::Nodes => {
-                        super::infrastructure::show_nodes(ui, infrastructure, response, connection);
+                        super::infrastructure::show_nodes(
+                            ui,
+                            infrastructure,
+                            response,
+                            load,
+                            connection,
+                        );
                         false
                     }
                     WindowKind::Storage => {
@@ -162,6 +173,7 @@ where
                             ui,
                             infrastructure,
                             response,
+                            load,
                             connection,
                         );
                         false

@@ -4,7 +4,7 @@ use egui::{Color32, RichText, Spinner, WidgetInfo, WidgetType};
 use k10s_protocol::{HealthLevel, InfrastructureResponse, MetricsCondition};
 
 use super::{
-    ConnectionState,
+    ConnectionState, InfrastructureLoad,
     infrastructure::{Quantity, usage},
     theme,
 };
@@ -12,8 +12,15 @@ use super::{
 pub(super) fn show(
     ui: &mut egui::Ui,
     response: Option<&InfrastructureResponse>,
+    load: InfrastructureLoad,
     connection: ConnectionState,
 ) -> bool {
+    if load == InfrastructureLoad::Unavailable {
+        ui.label("Cluster overview is not available in this build");
+        let refresh = ui.button("Refresh");
+        refresh.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Refresh overview"));
+        return refresh.clicked();
+    }
     let Some(response) = response else {
         ui.horizontal(|ui| {
             ui.add(Spinner::new());

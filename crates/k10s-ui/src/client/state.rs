@@ -686,6 +686,10 @@ pub struct ClientState {
     next_request_id: u128,
     pending: BTreeMap<RequestId, PendingEntry>,
     completed: BTreeMap<RequestId, QueryResult>,
+    /// Typed terminal request failures retained for the owning feature to
+    /// consume once. Server details stay inside protocol state and are never
+    /// projected directly into UI copy.
+    completed_failures: BTreeMap<RequestId, ErrorFrame>,
     rebuilt_bootstrap: Option<PendingRequest>,
     target: Option<ConnectTarget>,
     retry_attempt: u32,
@@ -744,6 +748,7 @@ impl std::fmt::Debug for ClientState {
             .field("outbound_len", &self.outbound.len())
             .field("pending_len", &self.pending.len())
             .field("completed_len", &self.completed.len())
+            .field("completed_failures_len", &self.completed_failures.len())
             .field("rebuilt_bootstrap", &self.rebuilt_bootstrap)
             .field("target", &self.target)
             .field("retry_attempt", &self.retry_attempt)
@@ -785,6 +790,7 @@ impl ClientState {
             next_request_id: 1,
             pending: BTreeMap::new(),
             completed: BTreeMap::new(),
+            completed_failures: BTreeMap::new(),
             rebuilt_bootstrap: None,
             target: None,
             retry_attempt: 0,
@@ -1420,6 +1426,7 @@ impl ClientState {
         self.reconnecting = false;
         self.pending.clear();
         self.completed.clear();
+        self.completed_failures.clear();
         self.outbound.clear();
         self.target = None;
         // An explicit close ends this client generation entirely: retained
@@ -1467,7 +1474,13 @@ impl ClientState {
         if self.phase != ClientPhase::Ready {
             return Err(ClientError::InvalidState("client is not ready"));
         }
-        if self.pending.len().saturating_add(self.completed.len()) >= self.config.request_capacity {
+        if self
+            .pending
+            .len()
+            .saturating_add(self.completed.len())
+            .saturating_add(self.completed_failures.len())
+            >= self.config.request_capacity
+        {
             return Err(ClientError::RequestRetentionLimit {
                 limit: self.config.request_capacity,
             });
@@ -1512,6 +1525,11 @@ impl ClientState {
     /// Retrieve a completed result once.
     pub fn take(&mut self, request: PendingRequest) -> Option<QueryResult> {
         self.completed.remove(request.id())
+    }
+
+    /// Retrieve one completed request failure while preserving its typed code.
+    pub fn take_failure(&mut self, request: PendingRequest) -> Option<ErrorFrame> {
+        self.completed_failures.remove(request.id())
     }
 
     /// Take the bootstrap request created internally during recovery or resynchronization.
@@ -2027,27 +2045,43 @@ impl ClientState {
                 Ok(())
             }
             ServerPayload::Error(error) => {
-                let cancelled = if error.scope == ErrorScope::Request {
-                    let id = frame.request_id.clone().ok_or_else(|| {
-                        ClientError::Protocol("request error missing request ID".to_owned())
-                    })?;
+                let request_id = (error.scope == ErrorScope::Request)
+                    .then(|| {
+                        frame.request_id.clone().ok_or_else(|| {
+                            ClientError::Protocol("request error missing request ID".to_owned())
+                        })
+                    })
+                    .transpose()?;
+                let mut retain_failure = false;
+                let cancelled = if let Some(id) = request_id.as_ref() {
                     // A failed authoritative target read does not grant retry
                     // authority. Remove its in-flight marker while retaining
                     // the guarded key as blocked.
-                    self.target_refreshes.remove(&id);
-                    self.pending
-                        .remove(&id)
-                        .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?
-                        .cancelled
+                    self.target_refreshes.remove(id);
+                    let pending = self
+                        .pending
+                        .remove(id)
+                        .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
+                    retain_failure = matches!(
+                        pending.action,
+                        PendingAction::Query(Query::Infrastructure(_))
+                    );
+                    pending.cancelled
                 } else {
                     false
                 };
                 if cancelled {
                     Ok(())
                 } else if error.retryability == Retryability::AfterReconnect {
+                    if retain_failure && let Some(id) = request_id {
+                        self.completed_failures.insert(id, error.clone());
+                    }
                     self.transport_lost(now_ms, entropy);
                     Err(ClientError::Server(error))
                 } else {
+                    if retain_failure && let Some(id) = request_id {
+                        self.completed_failures.insert(id, error.clone());
+                    }
                     Err(ClientError::Server(error))
                 }
             }
@@ -2098,6 +2132,7 @@ impl ClientState {
         self.resource_lists.clear();
         self.pending.clear();
         self.completed.clear();
+        self.completed_failures.clear();
         self.port_forward_sessions.clear();
         self.port_forward_revision = 0;
         self.rebuilt_bootstrap = None;
