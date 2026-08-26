@@ -68,30 +68,50 @@ async fn close_overloaded_stream<S, I, SendError, ReceiveError>(
     S: futures_util::Sink<Message, Error = SendError> + Unpin,
     I: futures_util::Stream<Item = Result<Message, ReceiveError>> + Unpin,
 {
-    let _ = sink.send(error_message(ErrorCode::Internal, error)).await;
-    let _ = sink
-        .send(Message::Close(Some(CloseFrame {
-            code: 1013,
-            reason: reason.into(),
-        })))
-        .await;
+    let deadline = tokio::time::Instant::now() + flush_timeout;
+    let close = async {
+        let _ = sink.send(error_message(ErrorCode::Internal, error)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let _ = sink
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: reason.into(),
+            })))
+            .await;
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
 
-    // A flooding peer can still have data in flight when the close frame is
-    // sent. Keep consuming it until the peer acknowledges the close so
-    // dropping the TCP socket cannot turn the explicit close into a reset.
-    let handshake = async {
+        // A flooding peer can still have data in flight when the close frame
+        // is sent. Keep consuming it until the peer acknowledges the close so
+        // dropping the TCP socket cannot turn the explicit close into a reset.
         loop {
-            match inbound.next().await {
-                Some(Ok(Message::Close(_))) => {
-                    let _ = sink.close().await;
-                    return;
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => return,
+                frame = inbound.next() => match frame {
+                    Some(Ok(Message::Close(_))) => {
+                        if tokio::time::Instant::now() < deadline {
+                            let _ = sink.close().await;
+                        }
+                        return;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => return,
                 }
-                Some(Ok(_)) => continue,
-                Some(Err(_)) | None => return,
             }
         }
     };
-    let _ = tokio::time::timeout(flush_timeout, handshake).await;
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => {}
+        () = close => {}
+    }
 }
 
 /// Serialize one JSON status frame.
@@ -464,6 +484,70 @@ fn admit_rate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn overload_close_deadline_covers_a_blocked_sink() {
+        let mut sink = Box::pin(futures_util::sink::unfold(
+            (),
+            |(), _message: Message| async move {
+                std::future::pending::<Result<(), std::convert::Infallible>>().await
+            },
+        ));
+        let mut inbound =
+            futures_util::stream::empty::<Result<Message, std::convert::Infallible>>();
+
+        let completed = tokio::time::timeout(
+            Duration::from_millis(100),
+            close_overloaded_stream(
+                &mut sink,
+                &mut inbound,
+                "stream rate budget exceeded",
+                "rate budget exceeded",
+                Duration::from_millis(1),
+            ),
+        )
+        .await;
+
+        assert!(
+            completed.is_ok(),
+            "the helper's own deadline must bound a sink that never becomes writable"
+        );
+    }
+
+    #[tokio::test]
+    async fn overload_close_deadline_preempts_a_continuously_ready_flood() {
+        let mut sink = futures_util::sink::drain::<Message>();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream_polls = polls.clone();
+        let mut inbound = futures_util::stream::poll_fn(move |_| {
+            let poll = stream_polls.fetch_add(1, Ordering::AcqRel);
+            if poll == 0 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if poll < 8 {
+                std::task::Poll::Ready(Some(Ok::<_, std::convert::Infallible>(Message::Binary(
+                    vec![1].into(),
+                ))))
+            } else {
+                std::task::Poll::Pending
+            }
+        });
+
+        close_overloaded_stream(
+            &mut sink,
+            &mut inbound,
+            "stream rate budget exceeded",
+            "rate budget exceeded",
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(
+            polls.load(Ordering::Acquire) <= 2,
+            "the deadline must win before a continuously-ready stream is drained unchecked"
+        );
+    }
 
     #[tokio::test]
     async fn overload_close_emits_error_and_1013_then_drains_through_peer_close() {

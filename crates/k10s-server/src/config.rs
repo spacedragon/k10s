@@ -122,7 +122,7 @@ pub struct ServerConfig {
     pub probe_drain_grace: Duration,
     /// Maximum time allowed for the first frame.
     pub hello_timeout: Duration,
-    /// Maximum best-effort writer flush period before cancellation.
+    /// Maximum period for best-effort writer flushes and overload close handshakes.
     pub graceful_flush_timeout: Duration,
     /// Maximum WebSocket frame size.
     pub max_frame_size: usize,
