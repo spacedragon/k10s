@@ -9,18 +9,22 @@ use k10s_backend::{
 /// Build an adapter whose single context is backed by a recorded API server.
 fn adapter_with_recorded_context() -> (KubeAdapter, RecordedApiServer) {
     let server = RecordedApiServer::standard();
+    let adapter = adapter_for_server(&server, "mock-cluster");
+    (adapter, server)
+}
+
+fn adapter_for_server(server: &RecordedApiServer, context: &str) -> KubeAdapter {
     let client = server.clone().into_client("default");
     let contexts = vec![ContextInfo {
-        name: "mock-cluster".into(),
+        name: context.into(),
         cluster: "recorded-apiserver".into(),
         namespace: Some("default".into()),
         is_current: true,
         availability: k10s_protocol::ContextAvailability::Available,
         unavailable_reason: None,
     }];
-    let adapter = KubeAdapter::with_cluster_clients(contexts, [("mock-cluster", client)])
-        .expect("adapter builds around recorded clients");
-    (adapter, server)
+    KubeAdapter::with_cluster_clients(contexts, [(context, client)])
+        .expect("adapter builds around recorded clients")
 }
 
 async fn types_for(adapter: &KubeAdapter, context: &str) -> QueryResult {
@@ -30,6 +34,204 @@ async fn types_for(adapter: &KubeAdapter, context: &str) -> QueryResult {
         })
         .await
         .expect("discovery succeeds against the recorded server")
+}
+
+fn assert_normalized_catalog(data: &ResourceTypesData) {
+    for (kind, group, version) in [
+        ("Pod", "", "v1"),
+        ("Deployment", "apps", "v1"),
+        ("Gadget", "k10s.example.com", "v1alpha1"),
+    ] {
+        let resource = data.find_kind(kind).expect("resource remains normalized");
+        assert_eq!(resource.gvk.group, group);
+        assert_eq!(resource.gvk.version, version);
+    }
+}
+
+const LEGACY_GROUP_VERSION_PATHS: &[&str] = &[
+    "/api/v1",
+    "/apis/apps/v1",
+    "/apis/batch/v1",
+    "/apis/storage.k8s.io/v1",
+    "/apis/apiextensions.k8s.io/v1",
+    "/apis/k10s.example.com/v1alpha1",
+];
+
+#[tokio::test]
+async fn supported_cluster_uses_two_aggregated_requests() {
+    let (adapter, server) = adapter_with_recorded_context();
+    let data = resource_types(types_for(&adapter, "mock-cluster").await);
+
+    assert_normalized_catalog(&data);
+
+    assert_eq!(server.hit_count("/apis"), 1);
+    assert_eq!(server.hit_count("/api"), 1);
+    for path in LEGACY_GROUP_VERSION_PATHS {
+        assert_eq!(
+            server.hit_count(path),
+            0,
+            "legacy endpoint {path} stays unused"
+        );
+    }
+    for path in ["/apis", "/api"] {
+        let accepts = server.request_accepts(path);
+        assert_eq!(accepts.len(), 1);
+        assert!(
+            accepts[0].contains("apidiscovery.k8s.io"),
+            "{path} advertises aggregated discovery: {accepts:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn aggregated_fallback_runs_legacy_discovery_once() {
+    enum AggregatedFailure {
+        Http(u16),
+        Serde,
+        Discovery,
+        CompatibilityEmpty,
+    }
+
+    let cases = [
+        ("not-found", AggregatedFailure::Http(404)),
+        ("not-acceptable", AggregatedFailure::Http(406)),
+        ("unsupported-media-type", AggregatedFailure::Http(415)),
+        ("malformed-v2", AggregatedFailure::Serde),
+        ("invalid-v2-group", AggregatedFailure::Discovery),
+        (
+            "legacy-success-shape",
+            AggregatedFailure::CompatibilityEmpty,
+        ),
+    ];
+
+    for (name, failure) in cases {
+        let server = RecordedApiServer::legacy();
+        let compatibility_empty = matches!(&failure, AggregatedFailure::CompatibilityEmpty);
+        match failure {
+            AggregatedFailure::Http(status) => server.set_accept_response(
+                "GET",
+                "/apis",
+                "apidiscovery.k8s.io",
+                status,
+                &format!(
+                    r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"private aggregated failure","reason":"Failure","code":{status}}}"#
+                ),
+            ),
+            AggregatedFailure::Serde => server.set_accept_response(
+                "GET",
+                "/apis",
+                "apidiscovery.k8s.io",
+                200,
+                r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":"not-an-array"}"#,
+            ),
+            AggregatedFailure::Discovery => server.set_accept_response(
+                "GET",
+                "/apis",
+                "apidiscovery.k8s.io",
+                200,
+                r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":[{"metadata":{"name":"broken.example.com"},"versions":[]}]}"#,
+            ),
+            AggregatedFailure::CompatibilityEmpty => {}
+        }
+
+        let context = format!("fallback-{name}");
+        let adapter = adapter_for_server(&server, &context);
+        let data = resource_types(types_for(&adapter, &context).await);
+        assert_normalized_catalog(&data);
+
+        assert_eq!(
+            server.hit_count("/apis"),
+            2,
+            "{name}: aggregated then legacy"
+        );
+        assert_eq!(
+            server.hit_count("/api"),
+            if compatibility_empty { 2 } else { 1 },
+            "{name}: aggregated reaches /api only for the successful legacy shape"
+        );
+        for path in LEGACY_GROUP_VERSION_PATHS {
+            assert_eq!(
+                server.hit_count(path),
+                1,
+                "{name}: one legacy hit for {path}"
+            );
+        }
+
+        let accepts = server.request_accepts("/apis");
+        assert_eq!(accepts.len(), 2, "{name}: both requests were recorded");
+        assert!(
+            accepts[0].contains("apidiscovery.k8s.io"),
+            "{name}: first /apis request is aggregated: {accepts:?}"
+        );
+        assert!(
+            !accepts[1].contains("apidiscovery.k8s.io"),
+            "{name}: later /apis request is legacy: {accepts:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn aggregated_failure_does_not_fallback() {
+    for status in [401, 403, 429, 500] {
+        let server = RecordedApiServer::legacy();
+        server.set_accept_response(
+            "GET",
+            "/apis",
+            "apidiscovery.k8s.io",
+            status,
+            &format!(
+                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"private status payload {status}","reason":"Failure","code":{status}}}"#
+            ),
+        );
+        let context = format!("failure-{status}");
+        let adapter = adapter_for_server(&server, &context);
+        let error = adapter
+            .query(Query::ResourceTypes {
+                context: context.clone(),
+            })
+            .await
+            .expect_err("non-compatibility status must fail closed");
+        match error {
+            BackendError::Internal(detail) => {
+                assert!(detail.contains(&format!("HTTP {status}")), "{detail}");
+                assert!(!detail.contains("private status payload"), "{detail}");
+                assert!(detail.len() < 200, "{detail}");
+            }
+            other => panic!("expected sanitized internal error, got {other:?}"),
+        }
+        assert_eq!(server.hit_count("/apis"), 1);
+        assert_eq!(server.hit_count("/api"), 0);
+        for path in LEGACY_GROUP_VERSION_PATHS {
+            assert_eq!(
+                server.hit_count(path),
+                0,
+                "status {status}: no legacy {path}"
+            );
+        }
+    }
+
+    let server = RecordedApiServer::legacy();
+    server.set_transport_error("GET", "/apis");
+    let adapter = adapter_for_server(&server, "transport-failure");
+    let error = adapter
+        .query(Query::ResourceTypes {
+            context: "transport-failure".into(),
+        })
+        .await
+        .expect_err("transport failure must fail closed");
+    match error {
+        BackendError::Internal(detail) => {
+            assert!(detail.contains("kubernetes api unreachable"), "{detail}");
+            assert!(!detail.contains("recorded transport failure"), "{detail}");
+            assert!(detail.len() < 200, "{detail}");
+        }
+        other => panic!("expected sanitized internal error, got {other:?}"),
+    }
+    assert_eq!(server.hit_count("/apis"), 1);
+    assert_eq!(server.hit_count("/api"), 0);
+    for path in LEGACY_GROUP_VERSION_PATHS {
+        assert_eq!(server.hit_count(path), 0, "transport: no legacy {path}");
+    }
 }
 
 fn resource_types(result: QueryResult) -> ResourceTypesData {
@@ -153,7 +355,13 @@ async fn api_server_rejections_stay_typed_and_never_empty_catalog() {
         .expect("adapter builds");
 
     // The recorded API server denies discovery with a 403 Status body.
-    server.set_response("/apis", 403, r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"discovery denied by policy","reason":"Forbidden","code":403}"#);
+    server.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        403,
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"discovery denied by policy","reason":"Forbidden","code":403}"#,
+    );
 
     let error = adapter
         .query(Query::ResourceTypes {
@@ -188,12 +396,16 @@ async fn discovery_is_cached_until_invalidated() {
     );
 
     // Invalidation forces a re-discovery that sees updated responses.
-    server.set_response(
-        "/apis/k10s.example.com/v1alpha1",
+    server.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
         200,
-        r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"k10s.example.com/v1alpha1","resources":[
-          {"name":"gadgets","singularName":"gadget","namespaced":true,"kind":"Gadget","verbs":["get","list","watch","create","update","patch","delete"]},
-          {"name":"widgets","singularName":"widget","namespaced":false,"kind":"Widget","verbs":["get","list"]}
+        r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","items":[
+          {"metadata":{"name":"k10s.example.com"},"versions":[{"version":"v1alpha1","resources":[
+            {"resource":"gadgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Gadget"},"scope":"Namespaced","verbs":["get","list","watch","create","update","patch","delete"]},
+            {"resource":"widgets","responseKind":{"group":"k10s.example.com","version":"v1alpha1","kind":"Widget"},"scope":"Cluster","verbs":["get","list"]}
+          ]}]}
         ]}"#,
     );
     assert!(adapter.invalidate_discovery("mock-cluster"));
