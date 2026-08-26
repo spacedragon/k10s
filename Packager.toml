@@ -8,7 +8,6 @@ category = "DeveloperTool"
 homepage = "https://github.com/spacedragon/k10s"
 formats = ["all"]
 out-dir = "target/release/packages"
-binaries-dir = "target/release"
 binaries = [{ path = "k10s-desktop", main = true }]
 icons = ["packaging/icons/32x32.png", "packaging/icons/128x128.png", "packaging/icons/256x256.png"]
 
