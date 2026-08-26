@@ -156,9 +156,26 @@ Namespaced resource windows gain an explicit scope:
 - `All namespaces` is an explicit user selection.
 - Cluster-scoped resources do not render this control.
 
-The selected scope is part of workspace persistence and the resource
-subscription key. Changing it replaces the old subscription through the normal
-navigation guard and stale-state behavior.
+The live and persisted model uses an explicit `NamespaceScope` enum with
+`ContextDefault`, `Namespace(String)`, and `AllNamespaces`; `Option<String>` is
+not used for scope. The selected scope is part of workspace persistence and
+the resource subscription key. Changing it replaces the old subscription
+through the normal navigation guard and stale-state behavior.
+
+The workspace snapshot format advances from version 1 to version 2. The loader
+accepts version 1 only through a one-way migration:
+
+- Legacy `namespace: Some(value)` becomes `Namespace(value)`.
+- Legacy `namespace: None` becomes `ContextDefault`, never `AllNamespaces`.
+- Other compatible window settings and geometry are preserved.
+- The normalized snapshot is later written as version 2 by the existing
+  debounced state store. Unknown versions remain rejected.
+
+On a context switch, `ContextDefault` re-resolves against the destination's
+kubeconfig namespace (or `default`), while `Namespace(value)` and
+`AllNamespaces` preserve the user's explicit selection. This prevents a
+restored legacy window or a context switch from silently widening access to a
+cluster-wide subscription.
 
 ## Snapshot and transport design
 
@@ -219,7 +236,9 @@ Implementation follows red-green TDD in this order:
    context namespace is the default selector. Two same-kind windows with
    different namespace scopes and two Custom Resource GVKs remain independent.
 4. Workspace tests cover persistence and restoration of namespace versus All
-   namespaces scope.
+   namespaces scope. Migration tests prove a version-1 `namespace: null`
+   becomes `ContextDefault`, an explicit legacy namespace is preserved, and a
+   context switch re-resolves only `ContextDefault` against the destination.
 5. A loopback capacity test transfers at least 4,300 normalized rows with
    default production bounds and proves the socket stays connected and the
    complete snapshot is applied.
