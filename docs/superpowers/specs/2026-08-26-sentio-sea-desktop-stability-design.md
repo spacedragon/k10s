@@ -78,52 +78,71 @@ retaining the existing control protocol.
 
 ### Per-context catalog single-flight
 
-`KubeAdapter` will own a per-context asynchronous discovery gate. The gate
-registry is bounded by the kubeconfig context set and shared by adapter users.
+`KubeAdapter` will own a per-context asynchronous discovery flight registry.
+The registry is bounded by the kubeconfig context set and shared by adapter
+users. A flight is an immutable, cloneable future identified by a generation;
+all callers that observe the same running generation await the same result.
 
 `catalog_for(context)` will:
 
 1. Validate context existence and availability.
 2. Return a fresh cached catalog immediately.
-3. Acquire that context's discovery gate.
-4. Re-check the cache after acquiring the gate.
-5. Run discovery only if the cache is still absent or expired.
-6. Publish one result before releasing the gate.
+3. Under the short-held flight-registry lock, join the current flight or
+   install one new flight generation.
+4. Await the shared flight without holding the registry or catalog lock.
+5. Publish a successful result to the cache.
+6. Remove the flight only when its generation still matches the registry.
 
-Waiters receive the published cache result. A failed run is not cached; one
-subsequent caller may retry. Different contexts remain independent.
+Every caller that joined one flight generation receives the same success or
+the same cloned, sanitized failure. A failed result is not cached, but it
+remains the result of that generation for its existing waiters. Only a caller
+arriving after the failed generation has been removed may install the next
+attempt. Different contexts remain independent.
 
-Forced discovery used by context switching acquires the same gate but skips
-the fresh-cache return. This prevents a forced switch validation and a normal
-cold lookup from racing to publish conflicting catalogs.
+Forced discovery used by context switching joins an already-running flight or
+installs a new generation while skipping the fresh-cache return. This prevents
+a forced switch validation and a normal cold lookup from racing to publish
+conflicting catalogs.
 
 ### Aggregated discovery and fallback
 
 Discovery first calls kube-rs `run_aggregated()`, which uses `/api` and `/apis`
 with aggregated discovery media types. The legacy `run()` path is used only
-when the response demonstrates that aggregated discovery is unsupported or
-structurally incompatible.
+for this explicit compatibility set:
 
-Authentication, context-unavailable, and transport failures do not silently
-fall back and double the traffic. They retain the existing sanitized error
-mapping. If the classified fallback runs, its final failure is normalized by
-the same boundary.
+- HTTP 404, 406, or 415 from an aggregated discovery request.
+- A JSON shape mismatch (`SerdeError`) caused by a server returning legacy
+  discovery despite content negotiation.
+- A kube-rs `DiscoveryError` while converting the aggregated v2 document.
+- A nominally successful aggregated result that contains no usable core API
+  version/resources. This detects legacy `/api` and `/apis` documents that
+  deserialize into the v2 type's default-empty fields.
+
+HTTP 401, 403, 429, and 5xx responses; auth errors; TLS/proxy/service/hyper
+errors; cancellation; and timeouts do not fall back and double the traffic.
+They retain the existing sanitized error mapping. If the classified fallback
+runs, its final failure is normalized by the same boundary.
 
 ## UI subscription design
 
 ### Workspace-driven streams
 
-The app will derive a desired subscription set from open workspace windows:
+The app will derive a desired subscription set from open workspace windows.
+The canonical subscription identity is `(context, GVK, namespace scope)`:
 
-- One workload subscription for each workload kind with at least one open
-  list window.
+- One subscription for each distinct canonical identity required by an open
+  workload, Service, or Custom Resource list window.
 - One Service subscription only while the Service window is open.
 - One `resource.types` request only while the Custom Resources picker/window
   needs the catalog.
 
-Multiple windows for the same kind share one subscription. Closing the last
-window unsubscribes it. Reconnect and context-switch recovery reconstruct the
-same desired set from persisted workspace state.
+Windows with the same canonical identity share one reference-counted
+subscription. Same-kind windows with different namespace scopes do not share.
+Custom Resource windows with different GVKs do not share. Changing one
+window's scope replaces only that window's reference; it cannot retarget or
+interrupt another window. Closing the last reference unsubscribes the
+canonical identity. Reconnect and context-switch recovery reconstruct the same
+desired set from persisted workspace state.
 
 Launcher count badges for unopened resources display an unknown/not-loaded
 state rather than causing hidden background subscriptions.
@@ -147,8 +166,11 @@ navigation guard and stale-state behavior.
   4,300-row list then needs about 34 chunks rather than about 270.
 - Raise the native/web control inbox bound from 64 to 256 frames. The inbox
   remains bounded and preserves explicit overflow handling.
-- Serialize initial snapshot emission per control session so several restored
-  windows cannot enqueue their complete initial snapshots concurrently.
+- Serialize each complete initial snapshot emission per control session. One
+  permit covers its contiguous lifecycle from `snapshotBegin` through every
+  `snapshotChunk` and `snapshotEnd`; cancellation releases the permit without
+  emitting an end frame for an incomplete snapshot. Several restored windows
+  therefore cannot enqueue complete initial snapshots concurrently.
 - Preserve the existing 1 MiB frame and 4 MiB message limits. Snapshot pages
   still contain normalized list rows rather than manifests or secret payloads.
 - Preserve P2 delta coalescing and resync behavior after the initial snapshot.
@@ -187,12 +209,15 @@ Implementation follows red-green TDD in this order:
 
 1. A recorded-server concurrency test starts eight cold same-context catalog
    requests and expects one aggregated `/apis` hit and one `/api` hit.
+   A failing-flight variant proves every caller in one generation receives the
+   same failure and that only a later caller starts generation two.
 2. Aggregated-discovery compatibility tests prove supported clusters use two
    requests, unsupported clusters perform one shared legacy fallback, and
    auth/transport failures do not trigger fallback traffic.
 3. UI client tests prove bootstrap subscribes only open windows, duplicate
    windows share a stream, closing the last window unsubscribes it, and the
-   context namespace is the default selector.
+   context namespace is the default selector. Two same-kind windows with
+   different namespace scopes and two Custom Resource GVKs remain independent.
 4. Workspace tests cover persistence and restoration of namespace versus All
    namespaces scope.
 5. A loopback capacity test transfers at least 4,300 normalized rows with
@@ -217,4 +242,3 @@ Implementation follows red-green TDD in this order:
 - The top-level connection remains ready when a panel receives an unsupported
   capability error.
 - All existing and new tests pass with no fake fallback on production paths.
-
