@@ -2,6 +2,7 @@
 //! adapter, driven by a recorded tower Service (no live cluster).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -122,6 +123,93 @@ impl Service<Request<kube::client::Body>> for GatedRecordedApiServer {
     }
 }
 
+#[derive(Clone)]
+struct PanickingRecordedApiServer {
+    inner: RecordedApiServer,
+    path: Arc<str>,
+    entered: Arc<tokio::sync::Semaphore>,
+    releases: Arc<tokio::sync::Semaphore>,
+    enabled: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct PanicGate {
+    entered: Arc<tokio::sync::Semaphore>,
+    releases: Arc<tokio::sync::Semaphore>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl PanicGate {
+    async fn wait_until_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("panic gate remains open")
+            .forget();
+    }
+
+    fn release_one(&self) {
+        self.releases.add_permits(1);
+    }
+
+    fn disable(&self) {
+        self.enabled.store(false, Ordering::SeqCst);
+    }
+}
+
+fn panic_path(inner: RecordedApiServer, path: &str) -> (PanickingRecordedApiServer, PanicGate) {
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let releases = Arc::new(tokio::sync::Semaphore::new(0));
+    let enabled = Arc::new(AtomicBool::new(true));
+    (
+        PanickingRecordedApiServer {
+            inner,
+            path: Arc::from(path),
+            entered: Arc::clone(&entered),
+            releases: Arc::clone(&releases),
+            enabled: Arc::clone(&enabled),
+        },
+        PanicGate {
+            entered,
+            releases,
+            enabled,
+        },
+    )
+}
+
+impl Service<Request<kube::client::Body>> for PanickingRecordedApiServer {
+    type Response = Response<Full<Bytes>>;
+    type Error = BoxError;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>,
+    >;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request<kube::client::Body>) -> Self::Future {
+        let panics = request.uri().path() == self.path.as_ref();
+        let entered = Arc::clone(&self.entered);
+        let releases = Arc::clone(&self.releases);
+        let enabled = Arc::clone(&self.enabled);
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let response = inner.call(request).await?;
+            if panics && enabled.load(Ordering::SeqCst) {
+                entered.add_permits(1);
+                releases
+                    .acquire()
+                    .await
+                    .expect("panic release gate remains open")
+                    .forget();
+                panic!("private panic payload must never escape");
+            }
+            Ok(response)
+        })
+    }
+}
+
 /// Build an adapter whose single context is backed by a recorded API server.
 fn adapter_with_recorded_context() -> (KubeAdapter, RecordedApiServer) {
     let server = RecordedApiServer::aggregated();
@@ -150,6 +238,16 @@ async fn types_for(adapter: &KubeAdapter, context: &str) -> QueryResult {
         })
         .await
         .expect("discovery succeeds against the recorded server")
+}
+
+async fn wait_for_catalog_waiters(adapter: &KubeAdapter, context: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while adapter.catalog_waiter_count(context) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all catalog waiter guards install deterministically");
 }
 
 fn assert_normalized_catalog(data: &ResourceTypesData) {
@@ -411,6 +509,75 @@ async fn all_waiters_share_one_failed_generation() {
     assert_eq!(server.hit_count("/api"), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn all_waiters_share_one_sanitized_panicking_generation() {
+    const CALLERS: usize = 8;
+    const CONTEXT: &str = "shared-panic";
+
+    let server = RecordedApiServer::aggregated();
+    let (panicking, panic_gate) = panic_path(server.clone(), "/apis");
+    let client = kube::client::ClientBuilder::new(panicking, "default").build();
+    let adapter = Arc::new(
+        KubeAdapter::with_cluster_clients(
+            vec![ContextInfo::available(
+                CONTEXT,
+                "recorded-panic",
+                Some("default".into()),
+                true,
+            )],
+            [(CONTEXT, client)],
+        )
+        .expect("adapter builds around the panicking client"),
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+    let mut callers = Vec::with_capacity(CALLERS);
+    for _ in 0..CALLERS {
+        let adapter = Arc::clone(&adapter);
+        let barrier = Arc::clone(&barrier);
+        callers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            adapter
+                .query(Query::ResourceTypes {
+                    context: CONTEXT.into(),
+                })
+                .await
+                .expect_err("the panicking generation becomes a typed failure")
+        }));
+    }
+
+    panic_gate.wait_until_entered().await;
+    wait_for_catalog_waiters(&adapter, CONTEXT, CALLERS).await;
+    panic_gate.release_one();
+
+    let mut failures = Vec::with_capacity(CALLERS);
+    for caller in callers {
+        failures.push(
+            tokio::time::timeout(Duration::from_secs(1), caller)
+                .await
+                .expect("every panicking-generation waiter wakes")
+                .expect("the panic is contained inside BackendError"),
+        );
+    }
+    assert!(failures.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(matches!(
+        &failures[0],
+        BackendError::Internal(detail)
+            if detail == "Kubernetes catalog discovery failed unexpectedly"
+                && !detail.contains("private panic payload")
+    ));
+    assert_eq!(server.hit_count("/apis"), 1);
+
+    panic_gate.disable();
+    let retry = adapter
+        .query(Query::ResourceTypes {
+            context: CONTEXT.into(),
+        })
+        .await
+        .expect("a later caller starts successful generation two");
+    assert!(matches!(retry, QueryResult::ResourceTypes(_)));
+    assert_eq!(server.hit_count("/apis"), 2);
+}
+
 #[tokio::test]
 async fn forced_refresh_joins_running_generation_and_bypasses_fresh_cache() {
     const CONTEXT_A: &str = "switch-source";
@@ -546,7 +713,7 @@ async fn cancelled_waiters_do_not_orphan_discovery_generation() {
     }
 
     gate_b.wait_until_entered().await;
-    tokio::task::yield_now().await;
+    wait_for_catalog_waiters(&adapter, CONTEXT_B, WAITERS).await;
     for waiter in &waiters {
         assert!(
             !waiter.is_finished(),

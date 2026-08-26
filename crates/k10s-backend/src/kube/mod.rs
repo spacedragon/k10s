@@ -306,6 +306,21 @@ impl KubeAdapter {
     pub fn operation_engine(&self) -> crate::operation::OperationEngine {
         self.operations.clone()
     }
+
+    /// Number of active request guards joined to one catalog generation.
+    ///
+    /// Test-only synchronization seam for cancellation and panic assertions;
+    /// registry ownership of the shared future is deliberately not counted.
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn catalog_waiter_count(&self, context: &str) -> usize {
+        self.catalog_flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .get(context)
+            .map_or(0, |flight| flight.active_waiters)
+    }
 }
 
 impl KubernetesAccess for KubeAdapter {
@@ -880,9 +895,16 @@ impl KubeAdapter {
                 *generation += 1;
                 let generation = *generation;
                 let discovery_context = context.to_owned();
-                let future = async move {
+                let future = std::panic::AssertUnwindSafe(async move {
                     discovery::discover_resource_types(&client, &discovery_context).await
-                }
+                })
+                .catch_unwind()
+                .map(|outcome| match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(BackendError::Internal(
+                        "Kubernetes catalog discovery failed unexpectedly".into(),
+                    )),
+                })
                 .boxed()
                 .shared();
                 flights.active.insert(
