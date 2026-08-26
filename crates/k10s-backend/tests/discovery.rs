@@ -102,6 +102,47 @@ async fn supported_cluster_uses_two_aggregated_requests() {
 }
 
 #[tokio::test]
+async fn asymmetric_legacy_apis_response_falls_back_to_complete_catalog() {
+    let server = RecordedApiServer::aggregated();
+    server.set_accept_response(
+        "GET",
+        "/apis",
+        "apidiscovery.k8s.io",
+        200,
+        r#"{"kind":"APIGroupList","apiVersion":"v1","groups":[]}"#,
+    );
+    let adapter = adapter_for_server(&server, "asymmetric-discovery");
+    let actual = resource_types(types_for(&adapter, "asymmetric-discovery").await);
+
+    let legacy = RecordedApiServer::legacy();
+    let legacy_adapter = adapter_for_server(&legacy, "asymmetric-discovery");
+    let expected = resource_types(types_for(&legacy_adapter, "asymmetric-discovery").await);
+
+    assert_eq!(
+        actual, expected,
+        "fallback returns the complete legacy catalog"
+    );
+    assert_eq!(server.hit_count("/apis"), 2);
+    assert_eq!(server.hit_count("/api"), 2);
+    for path in LEGACY_GROUP_VERSION_PATHS {
+        assert_eq!(server.hit_count(path), 1, "one legacy hit for {path}");
+    }
+}
+
+#[tokio::test]
+async fn aggregated_and_legacy_catalogs_are_completely_equal() {
+    let aggregated = RecordedApiServer::aggregated();
+    let aggregated_adapter = adapter_for_server(&aggregated, "catalog-equality");
+    let aggregated_data = resource_types(types_for(&aggregated_adapter, "catalog-equality").await);
+
+    let legacy = RecordedApiServer::legacy();
+    let legacy_adapter = adapter_for_server(&legacy, "catalog-equality");
+    let legacy_data = resource_types(types_for(&legacy_adapter, "catalog-equality").await);
+
+    assert_eq!(aggregated_data, legacy_data);
+}
+
+#[tokio::test]
 async fn aggregated_non_core_api_item_falls_back_to_legacy() {
     let server = RecordedApiServer::aggregated();
     server.set_accept_response(

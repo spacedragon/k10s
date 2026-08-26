@@ -46,12 +46,17 @@ async fn execute_discovery(
 ) -> Result<(Discovery, &'static str), BackendError> {
     let started = Instant::now();
     match Discovery::new(client.clone()).run_aggregated().await {
-        Ok(discovery) if has_usable_core(&discovery) => {
+        Ok(discovery) if has_usable_aggregated_catalog(&discovery) => {
             trace_attempt(context, "aggregated", started, "usable");
             Ok((discovery, "aggregated"))
         }
         Ok(_) => {
-            trace_attempt(context, "aggregated", started, "compatibility_empty_core");
+            trace_attempt(
+                context,
+                "aggregated",
+                started,
+                "compatibility_incomplete_catalog",
+            );
             execute_legacy_discovery(client, context).await
         }
         Err(error) if aggregated_error_allows_fallback(&error) => {
@@ -92,19 +97,33 @@ fn trace_attempt(context: &str, mode: &str, started: Instant, outcome: &str) {
     );
 }
 
-fn has_usable_core(discovery: &Discovery) -> bool {
-    discovery.get("").is_some_and(|core| {
-        core.name().is_empty()
-            && core.versions().any(|version| {
-                !version.is_empty()
-                    && core.versioned_resources(version).into_iter().any(
-                        |(resource, capabilities)| {
-                            !resource.kind.is_empty()
-                                && !resource.plural.is_empty()
-                                && capabilities.supports_operation(verbs::LIST)
-                        },
-                    )
-            })
+fn has_usable_aggregated_catalog(discovery: &Discovery) -> bool {
+    let usable_core = discovery
+        .get("")
+        .is_some_and(|core| core.name().is_empty() && group_has_usable_list_resource(core));
+
+    // kube-rs no longer exposes which wire document contributed each parsed
+    // group. Requiring one usable non-core group catches a legacy/default-empty
+    // /apis response paired with valid aggregated /api data. A genuinely
+    // core-only cluster safely takes the legacy path instead.
+    let usable_non_core = discovery
+        .groups()
+        .any(|group| !group.name().is_empty() && group_has_usable_list_resource(group));
+
+    usable_core && usable_non_core
+}
+
+fn group_has_usable_list_resource(group: &kube::discovery::ApiGroup) -> bool {
+    group.versions().any(|version| {
+        !version.is_empty()
+            && group
+                .versioned_resources(version)
+                .into_iter()
+                .any(|(resource, capabilities)| {
+                    !resource.kind.is_empty()
+                        && !resource.plural.is_empty()
+                        && capabilities.supports_operation(verbs::LIST)
+                })
     })
 }
 
