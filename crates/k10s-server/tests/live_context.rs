@@ -61,19 +61,11 @@ async fn selected_live_context_completes_a_pod_snapshot_and_stays_stable() {
         .await
         .unwrap_or_else(|_| Err("live smoke exceeded its 120-second hard deadline".to_owned()));
 
-    // Spawn shutdown so a timeout can abort the waiting task. `shutdown`
-    // signals cancellation before awaiting the server join; aborting the
-    // waiter therefore cannot leave an accepting loopback listener behind.
-    let mut shutdown = tokio::spawn(server.shutdown());
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut shutdown).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(_))) => panic!("the live-smoke loopback server failed to shut down"),
-        Ok(Err(_)) => panic!("the live-smoke shutdown task failed"),
-        Err(_) => {
-            shutdown.abort();
-            let _ = shutdown.await;
+    if let Err(error) = server.shutdown_timeout(SHUTDOWN_TIMEOUT).await {
+        if error.kind() == std::io::ErrorKind::TimedOut {
             panic!("the live-smoke loopback server exceeded its shutdown deadline");
         }
+        panic!("the live-smoke loopback server failed to shut down");
     }
     if let Err(reason) = outcome {
         panic!("live context stability smoke failed: {reason}");
