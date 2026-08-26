@@ -207,43 +207,45 @@ async fn subscribe(ws: &mut Ws, subscription_id: &str) {
 
 #[tokio::test]
 async fn bounded_snapshots_and_deltas_flow_over_the_control_socket() {
-    let (kernel, state) = scripted_kernel(40);
-    let server = spawn_loopback(
-        ServerConfig {
-            access_token: "secret".into(),
-            ..ServerConfig::default()
-        },
-        kernel,
-    )
-    .await
-    .unwrap();
+    const SNAPSHOT_ROWS: usize = 40;
+    let (kernel, state) = scripted_kernel(SNAPSHOT_ROWS);
+    let config = ServerConfig {
+        access_token: "secret".into(),
+        ..ServerConfig::default()
+    };
+    let rows_per_chunk = config.snapshot_rows_per_chunk;
+    let expected_chunks = SNAPSHOT_ROWS.div_ceil(rows_per_chunk);
+    let server = spawn_loopback(config, kernel).await.unwrap();
     let mut ws = connect_authenticated(&server).await;
 
     subscribe(&mut ws, "resource-1").await;
     let subscribed = receive_frame(&mut ws).await;
     assert_eq!(subscribed.kind, ServerKind::Subscribed);
 
-    // Bounded snapshot chunks: 40 rows at 16 rows per chunk = 3 pages.
+    // The wire lifecycle follows the configured production page bound.
     let begin = receive_frame(&mut ws).await;
     assert_eq!(begin.kind, ServerKind::SnapshotBegin);
-    assert_eq!(begin.payload["totalChunks"], 3);
+    assert_eq!(begin.payload["totalChunks"], expected_chunks);
 
     let mut total_rows = 0_usize;
     let mut last_revision = String::new();
-    for chunk_index in 0..3 {
+    for chunk_index in 0..expected_chunks {
         let chunk = receive_frame(&mut ws).await;
         assert_eq!(chunk.kind, ServerKind::SnapshotChunk);
         assert_eq!(chunk.payload["chunkIndex"], chunk_index);
         let page: ResourceSnapshotPage =
             serde_json::from_value(chunk.payload["data"].clone()).unwrap();
         assert!(
-            page.rows.len() <= 16,
+            page.rows.len() <= rows_per_chunk,
             "snapshot pages stay within the bound"
         );
         total_rows += page.rows.len();
         last_revision = page.revision.to_string();
     }
-    assert_eq!(total_rows, 40, "the full cut arrives across the pages");
+    assert_eq!(
+        total_rows, SNAPSHOT_ROWS,
+        "the full cut arrives across the pages"
+    );
 
     let end = receive_frame(&mut ws).await;
     assert_eq!(end.kind, ServerKind::SnapshotEnd);
