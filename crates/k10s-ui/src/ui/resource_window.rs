@@ -10,12 +10,48 @@ use std::collections::HashMap;
 
 use egui::{RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
-    GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+    GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    ResourceRelationsResponse, ResourceTypeEntry,
 };
 
 use crate::workspace::{ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
 use super::{ConnectionState, theme};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeUiError(String);
+
+impl SafeUiError {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Public projection intentionally mirrors the protocol value.
+pub enum PrimaryDetailState {
+    Loading,
+    Loaded(ResourceDetailResponse),
+    Failed(SafeUiError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationState {
+    NotRequested,
+    Loading,
+    Loaded {
+        response: ResourceRelationsResponse,
+        loaded_at_ms: u64,
+        refreshing: bool,
+    },
+    Failed(SafeUiError),
+}
 
 /// Protocol rows and selectable types for one rendered frame.
 ///
@@ -38,6 +74,11 @@ pub struct ResourceFeed {
     /// Backend-resolved detail responses keyed by stable identity. Both the
     /// integrated pane and dedicated windows look their view up here.
     pub details: HashMap<ResourceIdentity, ResourceDetailResponse>,
+    /// Explicit primary-detail lifecycle. New production projections use
+    /// this map; `details` remains a compatibility input for static fixtures.
+    pub primary_details: HashMap<ResourceIdentity, PrimaryDetailState>,
+    /// Independently loaded controller relations, keyed by exact identity.
+    pub relations: HashMap<ResourceIdentity, RelationState>,
     pub port_forward_available: bool,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
     pub port_forward_error: Option<String>,
@@ -142,6 +183,7 @@ pub(super) fn show<I>(
     feed: &ResourceFeed,
     context_namespace: Option<&str>,
     connection: ConnectionState,
+    resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -316,11 +358,12 @@ pub(super) fn show<I>(
 
     // The integrated pane renders the pinned detail state; the backend
     // response is looked up by that identity alone.
-    let detail_view = state
+    let detail_identity = state
         .detail
         .as_ref()
-        .and_then(|detail| detail.identity.as_row_identity())
-        .and_then(|identity| feed.details.get(identity));
+        .and_then(|detail| detail.identity.as_row_identity());
+    let primary_state = detail_identity.and_then(|identity| feed.primary_details.get(identity));
+    let detail_view = detail_identity.and_then(|identity| feed.details.get(identity));
 
     let (list_actions, _) = super::split::show_vertical(
         ui,
@@ -351,6 +394,7 @@ pub(super) fn show<I>(
                     ui,
                     window_id,
                     detail,
+                    primary_state,
                     detail_view,
                     gone,
                     yaml,
@@ -358,6 +402,7 @@ pub(super) fn show<I>(
                     dialogs,
                     feed,
                     None,
+                    resource_actions,
                     queued,
                 );
             }

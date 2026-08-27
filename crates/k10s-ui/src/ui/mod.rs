@@ -14,7 +14,9 @@ pub mod tools;
 mod top_bar;
 mod window;
 
-pub use resource_window::{ResourceFeed, RowIdentity};
+pub use resource_window::{
+    PrimaryDetailState, RelationState, ResourceFeed, RowIdentity, SafeUiError,
+};
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
 };
@@ -85,6 +87,14 @@ pub struct UiShell<I> {
     /// user action from passive mismatch reconciliation.
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_actions: Vec<PortForwardAction<I>>,
+    resource_actions: Vec<ResourceAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceAction {
+    RetryPrimary(k10s_protocol::ResourceIdentity),
+    RetryRelations(k10s_protocol::ResourceIdentity),
+    RetryNamespaceCatalog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +131,7 @@ where
             dialogs: dialogs::OperationDialogs::default(),
             requested_context: None,
             port_forward_actions: Vec::new(),
+            resource_actions: Vec::new(),
         }
     }
 
@@ -148,6 +159,10 @@ where
 
     pub fn drain_port_forward_actions(&mut self) -> Vec<PortForwardAction<I>> {
         std::mem::take(&mut self.port_forward_actions)
+    }
+
+    pub fn drain_resource_actions(&mut self) -> Vec<ResourceAction> {
+        std::mem::take(&mut self.resource_actions)
     }
 
     /// Drain the protocol actions queued by YAML editors during rendering.
@@ -424,6 +439,7 @@ where
                 feed,
                 selected_namespace,
                 connection,
+                &mut self.resource_actions,
                 &mut queued,
             );
         });

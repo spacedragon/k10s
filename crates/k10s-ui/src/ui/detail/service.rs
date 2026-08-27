@@ -111,7 +111,9 @@ pub(super) fn show<I>(
             port_drafts,
             queued,
         ),
-        DetailTab::Events => super::events::show(ui, window_id, &view.events),
+        DetailTab::Events => {
+            super::events::show(ui, window_id, view.events_condition, &view.events)
+        }
         DetailTab::Yaml => {
             if !view.capabilities.can_edit_yaml {
                 ui.label("This kind cannot be edited");

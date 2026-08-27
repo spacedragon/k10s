@@ -200,6 +200,7 @@ pub(super) fn show<I>(
     yaml: &mut super::tools::YamlEditors,
     streams: &mut super::tools::StreamStores,
     dialogs: &mut super::dialogs::OperationDialogs,
+    resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
 where
@@ -343,11 +344,12 @@ where
     // merely "loading".
     let gone = state.detail.is_some() && detail_row.is_none();
     let detail_shown = state.detail_visible && state.detail.is_some();
-    let detail_view = state
+    let detail_identity = state
         .detail
         .as_ref()
-        .and_then(|detail| detail.identity.as_row_identity())
-        .and_then(|identity| feed.details.get(identity));
+        .and_then(|detail| detail.identity.as_row_identity());
+    let primary_state = detail_identity.and_then(|identity| feed.primary_details.get(identity));
+    let detail_view = detail_identity.and_then(|identity| feed.details.get(identity));
 
     let (list_actions, _) = super::split::show_vertical(
         ui,
@@ -377,6 +379,7 @@ where
                     ui,
                     window_id,
                     detail,
+                    primary_state,
                     detail_view,
                     gone,
                     yaml,
@@ -384,6 +387,7 @@ where
                     dialogs,
                     feed,
                     Some(&state.port_drafts),
+                    resource_actions,
                     queued,
                 );
             }

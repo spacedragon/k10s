@@ -86,6 +86,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     detail: &DetailState<I>,
+    primary_state: Option<&crate::ui::PrimaryDetailState>,
     view: Option<&ResourceDetailResponse>,
     gone: bool,
     yaml: &mut tools::YamlEditors,
@@ -93,6 +94,7 @@ pub(super) fn show<I>(
     dialogs: &mut dialogs::OperationDialogs,
     feed: &crate::ui::ResourceFeed,
     service_port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -154,11 +156,28 @@ pub(super) fn show<I>(
     };
     show_header(ui, identity, view);
 
+    let view = match primary_state {
+        Some(crate::ui::PrimaryDetailState::Loaded(view)) => Some(view),
+        Some(crate::ui::PrimaryDetailState::Failed(error)) => {
+            ui.label(format!("Details unavailable: {}", error.message()));
+            if ui.button("Retry details").clicked() {
+                resource_actions.push(crate::ui::ResourceAction::RetryPrimary(identity.clone()));
+            }
+            None
+        }
+        Some(crate::ui::PrimaryDetailState::Loading) => None,
+        None => view,
+    };
     let Some(view) = view else {
-        ui.horizontal(|ui| {
-            ui.add(Spinner::new());
-            ui.label("Loading details");
-        });
+        if !matches!(
+            primary_state,
+            Some(crate::ui::PrimaryDetailState::Failed(_))
+        ) {
+            ui.horizontal(|ui| {
+                ui.add(Spinner::new());
+                ui.label("Loading details");
+            });
+        }
         return;
     };
 
@@ -213,8 +232,15 @@ pub(super) fn show<I>(
 
     match detail.active_tab {
         DetailTab::Overview => overview::show(ui, window_id, &view.sections),
-        DetailTab::Pods => related::show(ui, window_id, &view.related, queued),
-        DetailTab::Events => events::show(ui, window_id, &view.events),
+        DetailTab::Pods => related::show(
+            ui,
+            window_id,
+            identity,
+            feed.relations.get(identity),
+            resource_actions,
+            queued,
+        ),
+        DetailTab::Events => events::show(ui, window_id, view.events_condition, &view.events),
         // Only Service details expose Ports; the generic body renders
         // nothing for it rather than falling back to another tab.
         DetailTab::Ports => {}
