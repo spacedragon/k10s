@@ -11,7 +11,7 @@ use k10s_protocol::{
     TargetPort, TransportProtocol,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell},
     workspace::{WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
@@ -390,6 +390,42 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     // Accessible names exist for every port row.
     window.get_by_role_and_label(Role::Label, "Port http · 80 → 8080 · TCP");
+}
+
+#[test]
+fn failed_service_detail_is_safe_and_retries_the_exact_identity_once() {
+    let mut harness = harness();
+    let identity = service_identity("web-frontend");
+    harness.state_mut().feed.primary_details.insert(
+        identity.clone(),
+        PrimaryDetailState::Failed(SafeUiError::new("service detail denied")),
+    );
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("Details unavailable: service detail denied");
+    assert!(window.query_by_label("Loading details").is_none());
+    window
+        .get_by_role_and_label(Role::Button, "Retry details")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryPrimary(identity)]
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_resource_actions()
+            .is_empty()
+    );
 }
 
 #[test]

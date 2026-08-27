@@ -106,11 +106,13 @@ pub(super) fn show<I>(
             ui,
             window_id,
             detail,
+            primary_state,
             view,
             gone,
             yaml,
             feed,
             service_port_drafts,
+            resource_actions,
             queued,
         );
         return;

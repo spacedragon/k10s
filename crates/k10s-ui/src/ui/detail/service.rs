@@ -21,11 +21,13 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     detail: &DetailState<I>,
+    primary_state: Option<&crate::ui::PrimaryDetailState>,
     view: Option<&ResourceDetailResponse>,
     gone: bool,
     yaml: &mut tools::YamlEditors,
     feed: &crate::ui::ResourceFeed,
     port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
@@ -77,11 +79,28 @@ pub(super) fn show<I>(
     };
     show_header(ui, identity, view);
 
+    let view = match primary_state {
+        Some(crate::ui::PrimaryDetailState::Loaded(view)) => Some(view),
+        Some(crate::ui::PrimaryDetailState::Failed(error)) => {
+            ui.label(format!("Details unavailable: {}", error.message()));
+            if ui.button("Retry details").clicked() {
+                resource_actions.push(crate::ui::ResourceAction::RetryPrimary(identity.clone()));
+            }
+            None
+        }
+        Some(crate::ui::PrimaryDetailState::Loading) => None,
+        None => view,
+    };
     let Some(view) = view else {
-        ui.horizontal(|ui| {
-            ui.add(Spinner::new());
-            ui.label("Loading details");
-        });
+        if !matches!(
+            primary_state,
+            Some(crate::ui::PrimaryDetailState::Failed(_))
+        ) {
+            ui.horizontal(|ui| {
+                ui.add(Spinner::new());
+                ui.label("Loading details");
+            });
+        }
         return;
     };
 

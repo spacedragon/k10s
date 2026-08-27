@@ -59,6 +59,10 @@ pub enum RelationState {
 ///
 /// The application builds this from its client state; windows render it
 /// read-only. An absent list entry means the window is still loading.
+/// External fixtures should construct it through [`ResourceFeed::default`]
+/// (or struct update syntax with that default) and set only the public
+/// projections they need. This is the intentional construction boundary as
+/// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so

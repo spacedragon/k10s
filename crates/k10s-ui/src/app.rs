@@ -1096,14 +1096,18 @@ impl K10sApp {
                                     .find(|(_, pending)| pending.request.id() == id)
                                     .map(|(identity, _)| identity.clone())
                             {
-                                self.detail_requests.remove(&identity);
+                                if let Some(pending) = self.detail_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
                                 self.details.remove(&identity);
-                                self.primary_details.insert(
-                                    identity,
-                                    PrimaryDetailState::Failed(SafeUiError::new(
-                                        server_error.safe_message.clone(),
-                                    )),
-                                );
+                                if self.is_resource_pinned(&identity) {
+                                    self.primary_details.insert(
+                                        identity,
+                                        PrimaryDetailState::Failed(SafeUiError::new(
+                                            server_error.safe_message.clone(),
+                                        )),
+                                    );
+                                }
                             }
                         }
                         ClientError::Server(ref server_error)
@@ -1120,21 +1124,27 @@ impl K10sApp {
                                     .find(|(_, pending)| pending.request.id() == id)
                                     .map(|(identity, _)| identity.clone())
                             {
-                                self.relation_requests.remove(&identity);
-                                let error = SafeUiError::new(server_error.safe_message.clone());
-                                match self.relations.get_mut(&identity) {
-                                    Some(RelationState::Loaded {
-                                        refreshing,
-                                        refresh_error,
-                                        ..
-                                    }) => {
-                                        *refreshing = false;
-                                        *refresh_error = Some(error);
+                                if let Some(pending) = self.relation_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
+                                if self.is_resource_pinned(&identity) {
+                                    let error = SafeUiError::new(server_error.safe_message.clone());
+                                    match self.relations.get_mut(&identity) {
+                                        Some(RelationState::Loaded {
+                                            refreshing,
+                                            refresh_error,
+                                            ..
+                                        }) => {
+                                            *refreshing = false;
+                                            *refresh_error = Some(error);
+                                        }
+                                        _ => {
+                                            self.relations
+                                                .insert(identity, RelationState::Failed(error));
+                                        }
                                     }
-                                    _ => {
-                                        self.relations
-                                            .insert(identity, RelationState::Failed(error));
-                                    }
+                                } else {
+                                    self.relations.remove(&identity);
                                 }
                             }
                         }
@@ -1931,15 +1941,15 @@ impl K10sApp {
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
             ResourceAction::RetryPrimary(identity) => {
-                if let Some(pending) = self.detail_requests.remove(&identity) {
-                    let _ = self.client.cancel(&pending.request);
+                if !self.cancel_detail_request(&identity) {
+                    return;
                 }
                 self.details.remove(&identity);
                 self.primary_details.remove(&identity);
             }
             ResourceAction::RetryRelations(identity) => {
-                if let Some(pending) = self.relation_requests.remove(&identity) {
-                    let _ = self.client.cancel(&pending.request);
+                if !self.cancel_relation_request(&identity) {
+                    return;
                 }
                 match self.relations.get_mut(&identity) {
                     Some(RelationState::Loaded { refresh_error, .. }) => {
@@ -1956,6 +1966,62 @@ impl K10sApp {
             // already-stable shell action variant there.
             ResourceAction::RetryNamespaceCatalog => {}
         }
+    }
+
+    fn is_resource_pinned(&self, wanted: &ResourceIdentity) -> bool {
+        self.shell.workspace().windows().iter().any(|window| {
+            let identity = match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::Services(service) => service
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+            };
+            identity == Some(wanted)
+        })
+    }
+
+    /// Cancel one correlated primary request without orphaning it when the
+    /// bounded outbound queue cannot accept the cancellation frame.
+    fn cancel_detail_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .detail_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.detail_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
+    }
+
+    /// Relation equivalent of [`Self::cancel_detail_request`].
+    fn cancel_relation_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .relation_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.relation_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
     }
 
     fn refresh_details_at(&mut self, now_ms: u64) {
@@ -1996,9 +2062,7 @@ impl K10sApp {
             .cloned()
             .collect::<Vec<_>>()
         {
-            if let Some(pending) = self.detail_requests.remove(&identity) {
-                let _ = self.client.cancel(&pending.request);
-            }
+            self.cancel_detail_request(&identity);
         }
         for identity in self
             .relation_requests
@@ -2007,9 +2071,7 @@ impl K10sApp {
             .cloned()
             .collect::<Vec<_>>()
         {
-            if let Some(pending) = self.relation_requests.remove(&identity) {
-                let _ = self.client.cancel(&pending.request);
-            }
+            self.cancel_relation_request(&identity);
         }
         self.details
             .retain(|identity, _| pinned_set.contains(identity));
@@ -2330,11 +2392,11 @@ impl K10sApp {
     }
 
     fn retire_resource_context(&mut self) {
-        for (_, pending) in std::mem::take(&mut self.detail_requests) {
-            let _ = self.client.cancel(&pending.request);
+        for identity in self.detail_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_detail_request(&identity);
         }
-        for (_, pending) in std::mem::take(&mut self.relation_requests) {
-            let _ = self.client.cancel(&pending.request);
+        for identity in self.relation_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_relation_request(&identity);
         }
         self.details.clear();
         self.primary_details.clear();
@@ -3921,6 +3983,22 @@ mod tests {
         panic!("client request capacity did not exhaust");
     }
 
+    fn saturate_cancel_outbound(app: &mut K10sApp) {
+        let mut requests = Vec::new();
+        for _ in 0..1_000 {
+            match app.client.begin(Query::Bootstrap) {
+                Ok(request) => requests.push(request),
+                Err(_) => break,
+            }
+        }
+        for request in requests {
+            if app.client.cancel(&request).is_err() {
+                return;
+            }
+        }
+        panic!("client cancellation capacity did not saturate");
+    }
+
     #[test]
     fn primary_begin_failure_is_explicitly_failed_without_pending_loading() {
         let (mut app, _) = ready_app();
@@ -4008,6 +4086,69 @@ mod tests {
                 if error.message() == "could not request related resources"
         ));
         assert!(!app.relation_requests.contains_key(&identity));
+    }
+
+    #[test]
+    fn saturated_unpin_retains_correlations_until_terminal_frames_are_consumed() {
+        let (mut app, _) = ready_app();
+        let old = deployment_identity("old-selection");
+        let new = deployment_identity("new-selection");
+        let window = pin_deployment_without_request(&mut app, &old);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.refresh_details_at(1);
+        let primary = app
+            .detail_requests
+            .get(&old)
+            .expect("primary pending")
+            .request
+            .clone();
+        let relations = app
+            .relation_requests
+            .get(&old)
+            .expect("relations pending")
+            .request
+            .clone();
+        saturate_cancel_outbound(&mut app);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, new));
+
+        app.refresh_details_at(2);
+
+        assert!(app.detail_requests.contains_key(&old));
+        assert!(app.relation_requests.contains_key(&old));
+        let feed = app.build_resource_feed();
+        assert!(!feed.primary_details.contains_key(&old));
+        assert!(!feed.relations.contains_key(&old));
+
+        for request in [&primary, &relations] {
+            let rejection = ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(request.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Cancelled,
+                    "retired request",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    request.id().as_str(),
+                ))
+                .unwrap(),
+            };
+            app.handle_event(server_message(&rejection), 3, 0).unwrap();
+        }
+
+        assert!(!app.detail_requests.contains_key(&old));
+        assert!(!app.relation_requests.contains_key(&old));
+        assert!(app.client.take_failure(primary).is_none());
+        assert!(app.client.take_failure(relations).is_none());
+        let feed = app.build_resource_feed();
+        assert!(!feed.primary_details.contains_key(&old));
+        assert!(!feed.relations.contains_key(&old));
     }
 
     #[test]
