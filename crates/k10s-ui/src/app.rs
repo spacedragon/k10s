@@ -2453,7 +2453,11 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: "app".to_owned(),
+            container: self
+                .details
+                .get(identity)
+                .and_then(|view| crate::ui::pod_container(&view.manifest))
+                .unwrap_or_else(|| "app".to_owned()),
         })
     }
 
@@ -6240,7 +6244,10 @@ mod stream_lifecycle_tests {
     use std::sync::mpsc;
 
     use ewebsock::{WsEvent, WsMessage};
-    use k10s_protocol::{GroupVersionKind, ResourceIdentity, StreamTarget, StreamType};
+    use k10s_protocol::{
+        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+        ResourceIdentity, StreamTarget, StreamType,
+    };
 
     use super::K10sApp;
     use super::tests::test_app;
@@ -6272,12 +6279,40 @@ mod stream_lifecycle_tests {
     }
 
     pub(super) fn target_for(pod_name: &str) -> StreamTarget {
+        target_for_container(pod_name, "app")
+    }
+
+    fn target_for_container(pod_name: &str, container: &str) -> StreamTarget {
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: pod_name.into(),
             uid: format!("uid-{pod_name}"),
-            container: "app".into(),
+            container: container.into(),
+        }
+    }
+
+    fn detail_with_container(
+        identity: &ResourceIdentity,
+        container: &str,
+    ) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_exec: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: format!(
+                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
+            ),
+            projection: None,
         }
     }
 
@@ -6333,6 +6368,43 @@ mod stream_lifecycle_tests {
         app.stream_sessions
             .insert((window, StreamRoute::Exec), session);
         tx
+    }
+
+    #[test]
+    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("database");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "postgres"));
+        let target = target_for_container(&pod.name, "postgres");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .shells
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Exec, target, true);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Exec), session);
+
+        ready_signal(&tx, "postgres");
+        app.poll_stream_sessions();
+
+        assert!(app.shell_guard_connected(window));
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
+        );
     }
 
     /// Ready attaches the terminal and engages the guard; resolving the

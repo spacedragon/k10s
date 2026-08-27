@@ -14,6 +14,7 @@ mod service;
 
 use egui::{RichText, Spinner};
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
+use serde::Deserialize;
 
 use crate::ui::dialogs;
 use crate::ui::tools;
@@ -261,10 +262,20 @@ pub(super) fn show<I>(
             }
         }
         DetailTab::Logs => {
-            tools::logs::show(ui, window_id, &mut streams.logs, stream_target(detail));
+            tools::logs::show(
+                ui,
+                window_id,
+                &mut streams.logs,
+                stream_target(detail, view),
+            );
         }
         DetailTab::Shell => {
-            tools::shell::show(ui, window_id, &mut streams.shells, stream_target(detail));
+            tools::shell::show(
+                ui,
+                window_id,
+                &mut streams.shells,
+                stream_target(detail, view),
+            );
         }
     }
 }
@@ -295,7 +306,10 @@ fn status_summary(view: &ResourceDetailResponse) -> Option<&str> {
 
 /// Resolve a pod/container stream target from the pinned identity. Only pod
 /// identities can stream; anything else yields no target.
-fn stream_target<I>(detail: &DetailState<I>) -> Option<k10s_protocol::StreamTarget>
+fn stream_target<I>(
+    detail: &DetailState<I>,
+    view: &ResourceDetailResponse,
+) -> Option<k10s_protocol::StreamTarget>
 where
     I: RowIdentity,
 {
@@ -308,8 +322,37 @@ where
             .unwrap_or_else(|| "default".to_owned()),
         pod: identity.name.clone(),
         uid: identity.uid.clone(),
-        container: DEFAULT_CONTAINER.to_owned(),
+        container: pod_container(&view.manifest).unwrap_or_else(|| DEFAULT_CONTAINER.to_owned()),
     })
+}
+
+/// Resolve the default exec/logs container from the authoritative Pod
+/// manifest. Kubernetes does not prescribe an `app` container name, so the
+/// first regular container is the only generally valid implicit selection.
+pub(crate) fn pod_container(manifest: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Manifest {
+        spec: Spec,
+    }
+
+    #[derive(Deserialize)]
+    struct Spec {
+        containers: Vec<Container>,
+    }
+
+    #[derive(Deserialize)]
+    struct Container {
+        name: String,
+    }
+
+    serde_yaml::from_str::<Manifest>(manifest)
+        .ok()?
+        .spec
+        .containers
+        .into_iter()
+        .next()
+        .map(|container| container.name)
+        .filter(|name| !name.is_empty())
 }
 
 fn detail_identity_gvk<I>(detail: &DetailState<I>) -> GroupVersionKind
@@ -353,4 +396,32 @@ fn action_button(ui: &mut egui::Ui, label: &str, accessible: &str) {
     button.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessible.to_owned())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pod_container;
+
+    #[test]
+    fn pod_container_reads_first_regular_container_from_yaml_manifest() {
+        let manifest = r#"
+spec:
+  initContainers:
+    - name: setup
+  containers:
+    - name: postgres
+    - name: metrics
+"#;
+
+        assert_eq!(pod_container(manifest).as_deref(), Some("postgres"));
+    }
+
+    #[test]
+    fn pod_container_rejects_missing_or_empty_container_names() {
+        assert_eq!(pod_container("spec:\n  containers: []\n"), None);
+        assert_eq!(
+            pod_container("spec:\n  containers:\n    - name: ''\n"),
+            None
+        );
+    }
 }
