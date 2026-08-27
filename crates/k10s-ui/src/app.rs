@@ -16,11 +16,14 @@ use crate::client::{
     LiveSubscription, PendingRequest, Query, QueryResult, StreamRoute, StreamSession, StreamSignal,
     TransportError, WebSocketTransport,
 };
-use crate::ui::ResourceFeed;
 use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
+use crate::ui::{
+    NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
+    SafeUiError,
+};
 use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
 };
@@ -122,6 +125,11 @@ pub struct K10sApp {
     /// Deterministic projection from every open list window to its shared
     /// canonical subscription.
     window_subscriptions: BTreeMap<WindowId, SubscriptionKey>,
+    /// One cluster-scoped core/v1 Namespace watch shared by all namespaced
+    /// list windows. It is deliberately not represented as a fake window.
+    namespace_subscription: Option<(String, LiveSubscription)>,
+    namespace_catalog: NamespaceCatalogState,
+    namespace_rejected_context: Option<String>,
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
@@ -146,8 +154,12 @@ pub struct K10sApp {
     /// Backend-resolved details for every identity a window pinned, keyed by
     /// stable identity; rebuilt from `operation.status`-style queries.
     details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
+    primary_details: BTreeMap<ResourceIdentity, PrimaryDetailState>,
     /// In-flight detail requests per identity.
-    detail_requests: BTreeMap<ResourceIdentity, PendingRequest>,
+    detail_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
+    relations: BTreeMap<ResourceIdentity, RelationState>,
+    relation_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
+    resource_generation: u64,
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
@@ -177,6 +189,13 @@ struct PendingSwitch {
     to: String,
 }
 
+#[derive(Debug)]
+struct PendingResourceRequest {
+    request: PendingRequest,
+    context: String,
+    generation: u64,
+}
+
 /// Namespace part of a canonical watch identity. Cluster-scoped resources
 /// deliberately do not reuse `AllNamespaces`: that is namespaced user intent,
 /// while this variant is descriptor-derived wire behavior.
@@ -191,8 +210,8 @@ struct SubscriptionKey {
     context: String,
     gvk: k10s_protocol::GroupVersionKind,
     scope: SubscriptionScope,
-    /// Effective selector sent on the wire. Kept beside namespace intent so
-    /// a Bootstrap default-namespace change replaces ContextDefault watches.
+    /// Effective namespace selector sent on the wire and included in the
+    /// canonical identity used to share equivalent subscriptions.
     protocol_namespace: Option<String>,
 }
 
@@ -276,6 +295,9 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
+            namespace_subscription: None,
+            namespace_catalog: NamespaceCatalogState::NotDemanded,
+            namespace_rejected_context: None,
             port_forward_list: None,
             pending_port_forwards: Vec::new(),
             port_forward_error: None,
@@ -288,7 +310,11 @@ impl K10sApp {
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
+            primary_details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
+            relations: BTreeMap::new(),
+            relation_requests: BTreeMap::new(),
+            resource_generation: 0,
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
@@ -410,6 +436,12 @@ impl K10sApp {
             &feed,
             self.infrastructure_load,
         );
+        for action in self.shell.drain_resource_actions() {
+            self.handle_resource_action(action);
+        }
+        let resource_now_ms =
+            u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.refresh_details_at(resource_now_ms);
         if let Some(context) = selected_before.as_deref()
             && let Err(error) = self.reconcile_resource_streams(context)
         {
@@ -824,6 +856,7 @@ impl K10sApp {
         {
             self.handle_workspace_event(event);
         }
+        self.refresh_details();
     }
 
     /// Resolve the currently pinned identity and backend detail for a window.
@@ -1024,8 +1057,28 @@ impl K10sApp {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.shell.yaml_editors_mut().connection_lost();
+                            self.enter_resource_recovery();
+                            self.recovering = true;
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
+                        }
+                        ClientError::Server(ref server_error)
+                            if server_error.scope == k10s_protocol::ErrorScope::Subscription
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.namespace_subscription
+                                        .as_ref()
+                                        .is_some_and(|(_, subscription)| subscription.id() == id)
+                                }) =>
+                        {
+                            let (context, subscription) = self
+                                .namespace_subscription
+                                .take()
+                                .expect("matched namespace subscription exists");
+                            self.client.retire_rejected_subscription(&subscription);
+                            self.namespace_catalog = NamespaceCatalogState::Unavailable(
+                                SafeUiError::new(server_error.safe_message.clone()),
+                            );
+                            self.namespace_rejected_context = Some(context);
                         }
                         // A request-scoped mutation denial is projected into
                         // the originating dialog for a corrected retry; it
@@ -1064,17 +1117,66 @@ impl K10sApp {
                             if stream_request_id.as_ref().is_some_and(|id| {
                                 self.detail_requests
                                     .values()
-                                    .any(|request| request.id() == id)
+                                    .any(|pending| pending.request.id() == id)
                             }) =>
                         {
                             if let Some(id) = stream_request_id.as_ref()
                                 && let Some(identity) = self
                                     .detail_requests
                                     .iter()
-                                    .find(|(_, request)| request.id() == id)
+                                    .find(|(_, pending)| pending.request.id() == id)
                                     .map(|(identity, _)| identity.clone())
                             {
-                                self.detail_requests.remove(&identity);
+                                if let Some(pending) = self.detail_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
+                                self.details.remove(&identity);
+                                if self.is_resource_pinned(&identity) {
+                                    self.primary_details.insert(
+                                        identity,
+                                        PrimaryDetailState::Failed(SafeUiError::new(
+                                            server_error.safe_message.clone(),
+                                        )),
+                                    );
+                                }
+                            }
+                        }
+                        ClientError::Server(ref server_error)
+                            if stream_request_id.as_ref().is_some_and(|id| {
+                                self.relation_requests
+                                    .values()
+                                    .any(|pending| pending.request.id() == id)
+                            }) =>
+                        {
+                            if let Some(id) = stream_request_id.as_ref()
+                                && let Some(identity) = self
+                                    .relation_requests
+                                    .iter()
+                                    .find(|(_, pending)| pending.request.id() == id)
+                                    .map(|(identity, _)| identity.clone())
+                            {
+                                if let Some(pending) = self.relation_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
+                                if self.is_resource_pinned(&identity) {
+                                    let error = SafeUiError::new(server_error.safe_message.clone());
+                                    match self.relations.get_mut(&identity) {
+                                        Some(RelationState::Loaded {
+                                            refreshing,
+                                            refresh_error,
+                                            ..
+                                        }) => {
+                                            *refreshing = false;
+                                            *refresh_error = Some(error);
+                                        }
+                                        _ => {
+                                            self.relations
+                                                .insert(identity, RelationState::Failed(error));
+                                        }
+                                    }
+                                } else {
+                                    self.relations.remove(&identity);
+                                }
                             }
                         }
                         ClientError::Server(ref server_error)
@@ -1197,6 +1299,11 @@ impl K10sApp {
                     // Revoke server-issued authority at the accepted begin;
                     // connection_lost deliberately preserves dirty buffers.
                     self.shell.yaml_editors_mut().connection_lost();
+                }
+                if applied && server_rebuild_requested {
+                    self.enter_resource_recovery();
+                    self.recovering = true;
+                    self.view = AppView::Connecting;
                 }
                 self.finish_infrastructure_request();
                 self.finish_context_switch()?;
@@ -1545,8 +1652,7 @@ impl K10sApp {
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
         // retry (the backend deduplicates by idempotency key).
-        self.details.clear();
-        self.detail_requests.clear();
+        self.enter_resource_recovery();
         let mut failed_windows: Vec<WindowId> = Vec::new();
         for (_, entry) in std::mem::take(&mut self.pending_mutations) {
             failed_windows.push(entry.window);
@@ -1558,6 +1664,19 @@ impl K10sApp {
         }
         self.recovering = true;
         self.view = AppView::Connecting;
+    }
+
+    fn enter_resource_recovery(&mut self) {
+        self.details.clear();
+        self.primary_details.clear();
+        self.detail_requests.clear();
+        self.relations.clear();
+        self.relation_requests.clear();
+        self.resource_generation = self.resource_generation.wrapping_add(1);
+        if !matches!(self.namespace_catalog, NamespaceCatalogState::NotDemanded) {
+            self.namespace_catalog = NamespaceCatalogState::Loading;
+        }
+        self.namespace_rejected_context = None;
     }
 
     /// Assemble the connected resource projection for one rendered frame:
@@ -1580,13 +1699,30 @@ impl K10sApp {
                 }
             }
         }
+        let namespace_catalog = match (&self.namespace_catalog, &self.namespace_subscription) {
+            (NamespaceCatalogState::Loading, Some((_, subscription))) => self
+                .client
+                .resource_list(subscription.id())
+                .map(|state| {
+                    let mut names: Vec<_> =
+                        state.rows().map(|row| row.identity.name.clone()).collect();
+                    names.sort();
+                    names.dedup();
+                    NamespaceCatalogState::Ready(names)
+                })
+                .unwrap_or(NamespaceCatalogState::Loading),
+            (state, _) => state.clone(),
+        };
         ResourceFeed {
+            namespace_catalog,
             lists: std::collections::HashMap::new(),
             window_lists,
             services: None,
             window_services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
+            primary_details: self.primary_details.clone().into_iter().collect(),
+            relations: self.relations.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
             port_forward_sessions: self
                 .client
@@ -1604,6 +1740,13 @@ impl K10sApp {
     fn reconcile_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
         use crate::workspace::{WindowContent, WindowKind};
 
+        if self
+            .namespace_rejected_context
+            .as_deref()
+            .is_some_and(|rejected| rejected != context)
+        {
+            self.namespace_rejected_context = None;
+        }
         let context_namespace = match &self.view {
             AppView::Ready { contexts, .. } => contexts
                 .iter()
@@ -1615,6 +1758,7 @@ impl K10sApp {
             BTreeMap::new();
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
+        let mut namespace_demanded = false;
         for window in self.shell.workspace().windows() {
             let (gvk, scope) = match (&window.kind, &window.content) {
                 (WindowKind::Services, WindowContent::Services(state)) => (
@@ -1673,6 +1817,7 @@ impl K10sApp {
                 },
                 scope,
             };
+            namespace_demanded |= matches!(key.scope, SubscriptionScope::Namespaced(_));
             desired.entry(key.clone()).or_default().insert(window.id);
             window_subscriptions.insert(window.id, key);
         }
@@ -1687,9 +1832,28 @@ impl K10sApp {
             .keys()
             .filter(|key| !self.resource_subscriptions.contains_key(*key))
             .count();
+        let namespace_removed = usize::from(self.namespace_subscription.as_ref().is_some_and(
+            |(subscribed_context, _)| !namespace_demanded || subscribed_context != context,
+        ));
+        let namespace_added = usize::from(
+            namespace_demanded
+                && self.namespace_rejected_context.as_deref() != Some(context)
+                && self
+                    .namespace_subscription
+                    .as_ref()
+                    .is_none_or(|(subscribed_context, _)| subscribed_context != context),
+        );
         if self.client.phase() == ClientPhase::Ready {
-            self.client
-                .preflight_subscription_changes(removed.len(), additions)?;
+            self.client.preflight_subscription_changes(
+                removed.len() + namespace_removed,
+                additions + namespace_added,
+            )?;
+        }
+        if namespace_removed == 1
+            && let Some((_, subscription)) = self.namespace_subscription.take()
+        {
+            self.client.unsubscribe(&subscription)?;
+            self.namespace_rejected_context = None;
         }
         for key in removed {
             if let Some(entry) = self.resource_subscriptions.get(&key) {
@@ -1703,6 +1867,16 @@ impl K10sApp {
             self.types_context = None;
             self.types_request = None;
             return Ok(());
+        }
+        if namespace_added == 1 {
+            let live = self
+                .client
+                .subscribe_resource(context, "", "v1", "Namespace", None)?;
+            self.namespace_subscription = Some((context.to_owned(), live));
+            self.namespace_catalog = NamespaceCatalogState::Loading;
+        } else if !namespace_demanded {
+            self.namespace_catalog = NamespaceCatalogState::NotDemanded;
+            self.namespace_rejected_context = None;
         }
         for (key, windows) in desired {
             if let Some(entry) = self.resource_subscriptions.get_mut(&key) {
@@ -1857,6 +2031,101 @@ impl K10sApp {
     /// rendered feed carries backend-resolved views. Identities already
     /// resolved keep their cached response until transport loss.
     fn refresh_details(&mut self) {
+        let now_ms = u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.refresh_details_at(now_ms);
+    }
+
+    fn handle_resource_action(&mut self, action: ResourceAction) {
+        match action {
+            ResourceAction::RetryPrimary(identity) => {
+                if !self.cancel_detail_request(&identity) {
+                    return;
+                }
+                self.details.remove(&identity);
+                self.primary_details.remove(&identity);
+            }
+            ResourceAction::RetryRelations(identity) => {
+                if !self.cancel_relation_request(&identity) {
+                    return;
+                }
+                match self.relations.get_mut(&identity) {
+                    Some(RelationState::Loaded { refresh_error, .. }) => {
+                        // Clearing only the failure marker re-arms the stale
+                        // entry; its response remains visible until replaced.
+                        *refresh_error = None;
+                    }
+                    _ => {
+                        self.relations.insert(identity, RelationState::NotRequested);
+                    }
+                }
+            }
+            // Task 6 owns namespace-catalog lifecycle and consumes this
+            // already-stable shell action variant there.
+            ResourceAction::RetryNamespaceCatalog => {
+                self.namespace_rejected_context = None;
+                self.namespace_catalog = NamespaceCatalogState::Loading;
+                self.reconcile_selected_resource_streams();
+            }
+        }
+    }
+
+    fn is_resource_pinned(&self, wanted: &ResourceIdentity) -> bool {
+        self.shell.workspace().windows().iter().any(|window| {
+            let identity = match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::Services(service) => service
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+            };
+            identity == Some(wanted)
+        })
+    }
+
+    /// Cancel one correlated primary request without orphaning it when the
+    /// bounded outbound queue cannot accept the cancellation frame.
+    fn cancel_detail_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .detail_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.detail_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
+    }
+
+    /// Relation equivalent of [`Self::cancel_detail_request`].
+    fn cancel_relation_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .relation_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.relation_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
+    }
+
+    fn refresh_details_at(&mut self, now_ms: u64) {
         // Until bootstrap identifies the server's authoritative context, the
         // workspace may still contain selections from the lost generation.
         // Do not issue a detail read against that stale context; bootstrap
@@ -1865,7 +2134,7 @@ impl K10sApp {
         if self.recovering {
             return;
         }
-        let mut desired: Vec<ResourceIdentity> = Vec::new();
+        let mut pinned: Vec<ResourceIdentity> = Vec::new();
         for window in self.shell.workspace().windows() {
             let identity = match &window.content {
                 crate::workspace::WindowContent::Detail(detail) => {
@@ -1881,40 +2150,257 @@ impl K10sApp {
                     .and_then(|d| d.identity.as_row_identity()),
             };
             if let Some(identity) = identity
-                && !self.details.contains_key(identity)
-                && !desired.iter().any(|known| known == identity)
+                && !pinned.iter().any(|known| known == identity)
             {
-                desired.push(identity.clone());
+                pinned.push(identity.clone());
             }
         }
+        let pinned_set: std::collections::BTreeSet<_> = pinned.iter().cloned().collect();
+        for identity in self
+            .detail_requests
+            .keys()
+            .filter(|identity| !pinned_set.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.cancel_detail_request(&identity);
+        }
+        for identity in self
+            .relation_requests
+            .keys()
+            .filter(|identity| !pinned_set.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.cancel_relation_request(&identity);
+        }
+        self.details
+            .retain(|identity, _| pinned_set.contains(identity));
+        self.primary_details
+            .retain(|identity, _| pinned_set.contains(identity));
+        self.relations
+            .retain(|identity, _| pinned_set.contains(identity));
+        let desired = pinned
+            .into_iter()
+            .filter(|identity| {
+                self.client.local_ui().selected_context.as_deref()
+                    == Some(identity.context.as_str())
+                    && !self.primary_details.contains_key(identity)
+            })
+            .collect::<Vec<_>>();
         for identity in desired {
             if self.detail_requests.contains_key(&identity) {
                 continue;
             }
             match self.client.begin(Query::ResourceDetail(identity.clone())) {
                 Ok(request) => {
-                    self.detail_requests.insert(identity, request);
+                    self.primary_details
+                        .insert(identity.clone(), PrimaryDetailState::Loading);
+                    self.detail_requests.insert(
+                        identity.clone(),
+                        PendingResourceRequest {
+                            request,
+                            context: identity.context,
+                            generation: self.resource_generation,
+                        },
+                    );
                 }
-                Err(_) => return,
+                Err(_) => {
+                    self.primary_details.insert(
+                        identity,
+                        PrimaryDetailState::Failed(SafeUiError::new("could not request details")),
+                    );
+                    continue;
+                }
             }
         }
         // Collect completed detail responses.
         let completed: Vec<ResourceIdentity> = self
             .detail_requests
             .iter()
-            .filter(|(_, request)| !self.client.is_pending(request))
+            .filter(|(_, pending)| !self.client.is_pending(&pending.request))
             .map(|(identity, _)| identity.clone())
             .collect();
         for identity in completed {
-            if let Some(request) = self.detail_requests.remove(&identity)
-                && let Some(QueryResult::ResourceDetail(response)) = self.client.take(request)
-            {
-                self.details.insert(identity, *response);
+            if let Some(pending) = self.detail_requests.remove(&identity) {
+                let current_context = self.client.local_ui().selected_context.as_deref();
+                if pending.generation != self.resource_generation
+                    || current_context != Some(pending.context.as_str())
+                {
+                    let _ = self.client.take(pending.request);
+                    self.details.remove(&identity);
+                    self.primary_details.remove(&identity);
+                    continue;
+                }
+                if let Some(QueryResult::ResourceDetail(response)) =
+                    self.client.take(pending.request.clone())
+                {
+                    let response = *response;
+                    if response.identity == identity {
+                        self.details.insert(identity.clone(), response.clone());
+                        self.primary_details
+                            .insert(identity, PrimaryDetailState::Loaded(response));
+                    }
+                } else if let Some(failure) = self.client.take_failure(pending.request) {
+                    self.primary_details.insert(
+                        identity,
+                        PrimaryDetailState::Failed(SafeUiError::new(failure.safe_message)),
+                    );
+                }
             }
         }
+
+        self.refresh_relations(now_ms);
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
             .ok();
+    }
+
+    fn refresh_relations(&mut self, now_ms: u64) {
+        const RELATIONS_TTL_MS: u64 = 30_000;
+        let current_context = self.client.local_ui().selected_context.as_deref();
+        let desired: Vec<ResourceIdentity> = self
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter_map(|window| match &window.content {
+                crate::workspace::WindowContent::Detail(detail)
+                    if detail.active_tab == crate::workspace::DetailTab::Pods =>
+                {
+                    detail.identity.as_row_identity().cloned()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .filter(|detail| detail.active_tab == crate::workspace::DetailTab::Pods)
+                    .and_then(|detail| detail.identity.as_row_identity())
+                    .cloned(),
+                _ => None,
+            })
+            .filter(|identity| current_context == Some(identity.context.as_str()))
+            .collect();
+
+        for identity in desired {
+            if self.relation_requests.contains_key(&identity) {
+                continue;
+            }
+            let needs_request = match self.relations.get(&identity) {
+                None | Some(RelationState::NotRequested) => true,
+                Some(RelationState::Loaded {
+                    loaded_at_ms,
+                    refresh_error,
+                    ..
+                }) => {
+                    refresh_error.is_none()
+                        && now_ms.saturating_sub(*loaded_at_ms) >= RELATIONS_TTL_MS
+                }
+                Some(RelationState::Loading | RelationState::Failed(_)) => false,
+            };
+            if !needs_request {
+                continue;
+            }
+            let refreshing_stale = matches!(
+                self.relations.get(&identity),
+                Some(RelationState::Loaded { .. })
+            );
+            if let Some(RelationState::Loaded {
+                refreshing,
+                refresh_error,
+                ..
+            }) = self.relations.get_mut(&identity)
+            {
+                *refreshing = true;
+                *refresh_error = None;
+            } else {
+                self.relations
+                    .insert(identity.clone(), RelationState::Loading);
+            }
+            let request = match self
+                .client
+                .begin(Query::ResourceRelations(identity.clone()))
+            {
+                Ok(request) => request,
+                Err(_) => {
+                    let error = SafeUiError::new("could not request related resources");
+                    if refreshing_stale {
+                        if let Some(RelationState::Loaded {
+                            refreshing,
+                            refresh_error,
+                            ..
+                        }) = self.relations.get_mut(&identity)
+                        {
+                            *refreshing = false;
+                            *refresh_error = Some(error);
+                        }
+                    } else {
+                        self.relations
+                            .insert(identity, RelationState::Failed(error));
+                    }
+                    continue;
+                }
+            };
+            self.relation_requests.insert(
+                identity.clone(),
+                PendingResourceRequest {
+                    request,
+                    context: identity.context,
+                    generation: self.resource_generation,
+                },
+            );
+        }
+
+        let completed: Vec<_> = self
+            .relation_requests
+            .iter()
+            .filter(|(_, pending)| !self.client.is_pending(&pending.request))
+            .map(|(identity, _)| identity.clone())
+            .collect();
+        for identity in completed {
+            let Some(pending) = self.relation_requests.remove(&identity) else {
+                continue;
+            };
+            if pending.generation != self.resource_generation
+                || self.client.local_ui().selected_context.as_deref()
+                    != Some(pending.context.as_str())
+            {
+                let _ = self.client.take(pending.request);
+                self.relations.remove(&identity);
+                continue;
+            }
+            if let Some(QueryResult::ResourceRelations(response)) =
+                self.client.take(pending.request.clone())
+            {
+                let response = *response;
+                if response.identity == identity {
+                    self.relations.insert(
+                        identity,
+                        RelationState::Loaded {
+                            response: std::sync::Arc::new(response),
+                            loaded_at_ms: now_ms,
+                            refreshing: false,
+                            refresh_error: None,
+                        },
+                    );
+                }
+            } else if let Some(failure) = self.client.take_failure(pending.request) {
+                let error = SafeUiError::new(failure.safe_message);
+                match self.relations.get_mut(&identity) {
+                    Some(RelationState::Loaded {
+                        refreshing,
+                        refresh_error,
+                        ..
+                    }) => {
+                        *refreshing = false;
+                        *refresh_error = Some(error);
+                    }
+                    _ => {
+                        self.relations
+                            .insert(identity, RelationState::Failed(error));
+                    }
+                }
+            }
+        }
     }
 
     fn reconnect_if_due(&mut self, now_ms: u64, entropy: u64) {
@@ -2004,11 +2490,28 @@ impl K10sApp {
     /// focus-raising events matter at this layer, and guard-resolved switch
     /// requests are staged toward the backend as explicit user actions.
     fn handle_workspace_event(&mut self, event: WorkspaceEvent<ResourceIdentity>) {
-        if let WorkspaceEvent::ContextSwitchRequested { to } = event
-            && let Err(error) = self.stage_context_switch(&to, true)
-        {
-            self.terminal_failure(error.to_string());
+        match event {
+            WorkspaceEvent::ContextSwitchRequested { to } => {
+                if let Err(error) = self.stage_context_switch(&to, true) {
+                    self.terminal_failure(error.to_string());
+                }
+            }
+            WorkspaceEvent::ContextSwitched { .. } => self.retire_resource_context(),
+            _ => {}
         }
+    }
+
+    fn retire_resource_context(&mut self) {
+        for identity in self.detail_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_detail_request(&identity);
+        }
+        for identity in self.relation_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_relation_request(&identity);
+        }
+        self.details.clear();
+        self.primary_details.clear();
+        self.relations.clear();
+        self.resource_generation = self.resource_generation.wrapping_add(1);
     }
 
     /// Close every dedicated stream session, release any connected-shell
@@ -2407,16 +2910,19 @@ mod tests {
     use k10s_protocol::{
         BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
         ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
-        ResourceChanged, ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus,
-        Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk,
-        SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome,
-        YamlOutcome, buffer_hash,
+        ResourceChanged, ResourceGone, ResourceIdentity, ResourceListRow, ResourceSnapshotPage,
+        ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin,
+        SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
+        ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
-    use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
-    use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
+    use super::{
+        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
+    };
+    use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
     use crate::workspace::{
-        NamespaceScope, WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
+        NamespaceScope, WindowContent, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
 
     #[test]
@@ -2511,6 +3017,15 @@ mod tests {
     }
 
     fn resource_watches(
+        state: &Rc<RefCell<FactoryState>>,
+    ) -> Vec<k10s_protocol::ResourceWatchSpec> {
+        all_resource_watches(state)
+            .into_iter()
+            .filter(|watch| watch.gvk != GroupVersionKind::core("v1", "Namespace"))
+            .collect()
+    }
+
+    fn all_resource_watches(
         state: &Rc<RefCell<FactoryState>>,
     ) -> Vec<k10s_protocol::ResourceWatchSpec> {
         state
@@ -3428,17 +3943,42 @@ mod tests {
                 WsEvent::Opened,
                 server_message(&welcome()),
                 server_message(&initial_bootstrap),
-                server_message(&gapped_event),
             ]),
             overflowed: false,
         }]);
 
         app.poll_at(100, 0);
+        let identity = deployment_identity("sequence-gap");
+        start_relation_request(&mut app, &identity);
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                }),
+                loaded_at_ms: 0,
+                refreshing: true,
+                refresh_error: None,
+            },
+        );
+        let generation = app.resource_generation;
+
+        app.handle_event(server_message(&gapped_event), 101, 0)
+            .unwrap();
 
         assert!(!matches!(app.view(), AppView::Failed { .. }));
         assert_eq!(app.client.phase(), ClientPhase::Ready);
         assert!(app.connection.is_some(), "existing connection remains live");
         assert_eq!(state.borrow().connect_count, 1);
+        assert!(app.recovering);
+        assert!(matches!(app.view(), AppView::Connecting));
+        assert_eq!(app.resource_generation, generation.wrapping_add(1));
+        assert!(app.detail_requests.is_empty());
+        assert!(app.relation_requests.is_empty());
+        assert!(app.primary_details.is_empty());
+        assert!(app.relations.is_empty());
         let request_kinds: Vec<_> = state
             .borrow()
             .sent
@@ -3447,9 +3987,12 @@ mod tests {
             .filter_map(request_kind)
             .collect();
         assert_eq!(
-            request_kinds,
-            ["bootstrap", "infrastructure.get", "bootstrap"],
-            "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
+            request_kinds
+                .iter()
+                .filter(|kind| kind.as_str() == "bootstrap")
+                .count(),
+            2,
+            "the gap adds one resync bootstrap: {request_kinds:?}"
         );
         assert_eq!(app.client.outbound_len(), 0);
     }
@@ -3555,6 +4098,667 @@ mod tests {
         (app, state)
     }
 
+    fn namespace_row(name: &str, revision: u64) -> ResourceListRow {
+        ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind::core("v1", "Namespace"),
+                namespace: None,
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: String::new(),
+            created_at: String::new(),
+            projection: None,
+        }
+    }
+
+    fn namespace_frame(
+        subscription: &SubscriptionId,
+        kind: ServerKind,
+        sequence: u64,
+        payload: serde_json::Value,
+    ) -> ServerFrame {
+        ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription.clone()),
+            sequence: Some(sequence),
+            payload,
+        }
+    }
+
+    fn complete_namespace_snapshot(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        sequence: u64,
+        rows: Vec<ResourceListRow>,
+    ) {
+        for frame in [
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotBegin,
+                sequence,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotChunk,
+                sequence + 1,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(sequence + 1),
+                        rows,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotEnd,
+                sequence + 2,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "test".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.handle_event(server_message(&frame), 0, 0).unwrap();
+        }
+    }
+
+    fn deployment_identity(name: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        }
+    }
+
+    fn pin_deployment_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
+        window
+    }
+
+    fn exhaust_request_capacity(app: &mut K10sApp) {
+        for _ in 0..1_000 {
+            if app.client.begin(Query::Bootstrap).is_err() {
+                return;
+            }
+        }
+        panic!("client request capacity did not exhaust");
+    }
+
+    fn saturate_cancel_outbound(app: &mut K10sApp) {
+        let mut requests = Vec::new();
+        for _ in 0..1_000 {
+            match app.client.begin(Query::Bootstrap) {
+                Ok(request) => requests.push(request),
+                Err(_) => break,
+            }
+        }
+        for request in requests {
+            if app.client.cancel(&request).is_err() {
+                return;
+            }
+        }
+        panic!("client cancellation capacity did not saturate");
+    }
+
+    #[test]
+    fn primary_begin_failure_is_explicitly_failed_without_pending_loading() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("begin-fails");
+        pin_deployment_without_request(&mut app, &identity);
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(1);
+
+        assert!(matches!(
+            app.primary_details.get(&identity),
+            Some(PrimaryDetailState::Failed(error))
+                if error.message() == "could not request details"
+        ));
+        assert!(!app.detail_requests.contains_key(&identity));
+        app.refresh_details_at(2);
+        assert!(matches!(
+            app.primary_details.get(&identity),
+            Some(PrimaryDetailState::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn one_retry_action_starts_exactly_one_replacement_request() {
+        let (mut app, state) = ready_app();
+        let identity = deployment_identity("retry-once");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.primary_details.insert(
+            identity.clone(),
+            PrimaryDetailState::Failed(SafeUiError::new("failed")),
+        );
+        let before_primary = state.borrow().sent.len();
+        app.handle_resource_action(ResourceAction::RetryPrimary(identity.clone()));
+        app.refresh_details_at(1);
+        app.refresh_details_at(2);
+        assert_eq!(
+            state.borrow().sent[before_primary..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.detail")
+                .count(),
+            1
+        );
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Failed(SafeUiError::new("failed")),
+        );
+        let before_relations = state.borrow().sent.len();
+        app.handle_resource_action(ResourceAction::RetryRelations(identity));
+        app.refresh_details_at(3);
+        app.refresh_details_at(4);
+        assert_eq!(
+            state.borrow().sent[before_relations..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn initial_relation_begin_failure_never_leaves_loading_without_pending() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("relations-begin-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(1);
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Failed(error))
+                if error.message() == "could not request related resources"
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+    }
+
+    #[test]
+    fn saturated_unpin_retains_correlations_until_terminal_frames_are_consumed() {
+        let (mut app, _) = ready_app();
+        let old = deployment_identity("old-selection");
+        let new = deployment_identity("new-selection");
+        let window = pin_deployment_without_request(&mut app, &old);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.refresh_details_at(1);
+        let primary = app
+            .detail_requests
+            .get(&old)
+            .expect("primary pending")
+            .request
+            .clone();
+        let relations = app
+            .relation_requests
+            .get(&old)
+            .expect("relations pending")
+            .request
+            .clone();
+        saturate_cancel_outbound(&mut app);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, new));
+
+        app.refresh_details_at(2);
+
+        assert!(app.detail_requests.contains_key(&old));
+        assert!(app.relation_requests.contains_key(&old));
+        let feed = app.build_resource_feed();
+        assert!(!feed.primary_details.contains_key(&old));
+        assert!(!feed.relations.contains_key(&old));
+
+        for request in [&primary, &relations] {
+            let rejection = ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(request.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Cancelled,
+                    "retired request",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    request.id().as_str(),
+                ))
+                .unwrap(),
+            };
+            app.handle_event(server_message(&rejection), 3, 0).unwrap();
+        }
+
+        assert!(!app.detail_requests.contains_key(&old));
+        assert!(!app.relation_requests.contains_key(&old));
+        assert!(app.client.take_failure(primary).is_none());
+        assert!(app.client.take_failure(relations).is_none());
+        let feed = app.build_resource_feed();
+        assert!(!feed.primary_details.contains_key(&old));
+        assert!(!feed.relations.contains_key(&old));
+    }
+
+    #[test]
+    fn stale_relation_begin_failure_retains_rows_and_exposes_refresh_error() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("refresh-begin-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                }),
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(30_000);
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: false,
+                refresh_error: Some(error),
+                response,
+                ..
+            }) if error.message() == "could not request related resources"
+                && response.identity == identity
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+    }
+
+    #[test]
+    fn stale_relation_server_failure_retains_rows_and_safe_message() {
+        let (mut app, state) = ready_app();
+        let identity = deployment_identity("refresh-server-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                }),
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        app.refresh_details_at(30_000);
+        let request_id = app
+            .relation_requests
+            .get(&identity)
+            .expect("refresh is pending")
+            .request
+            .id()
+            .clone();
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id.clone()),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Unauthorized,
+                "relations forbidden",
+                Retryability::AfterRefresh,
+                ErrorScope::Request,
+                request_id.as_str(),
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 30_001, 0)
+            .unwrap();
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: false,
+                refresh_error: Some(error),
+                response,
+                ..
+            }) if error.message() == "relations forbidden" && response.identity == identity
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+
+        let after_failure = state.borrow().sent.len();
+        app.refresh_details_at(30_002);
+        app.refresh_details_at(60_000);
+        assert_eq!(
+            state.borrow().sent.len(),
+            after_failure,
+            "passive frames must not retry a recorded refresh failure"
+        );
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refresh_error: Some(error),
+                ..
+            }) if error.message() == "relations forbidden"
+        ));
+
+        app.handle_resource_action(ResourceAction::RetryRelations(identity.clone()));
+        app.refresh_details_at(60_001);
+        app.refresh_details_at(60_002);
+        assert_eq!(
+            state.borrow().sent[after_failure..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1,
+            "one explicit retry starts one replacement"
+        );
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: true,
+                refresh_error: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn controller_pods_demand_is_lazy_and_deduplicated() {
+        let (mut app, state) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let identity = deployment_identity("api");
+        app.web_select_resource(window, identity.clone());
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            0,
+            "primary selection must not eagerly request relations"
+        );
+        app.web_set_detail_tab(window, crate::workspace::DetailTab::Pods);
+        app.refresh_details_at(1);
+        app.refresh_details_at(2);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1,
+            "repeated frames share one pending relations request"
+        );
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(crate::ui::RelationState::Loading)
+        ));
+    }
+
+    #[test]
+    fn relations_refresh_at_exactly_thirty_seconds_and_keep_stale_rows() {
+        let (mut app, state) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let identity = deployment_identity("api");
+        app.web_select_resource(window, identity.clone());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            crate::ui::RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                }),
+                loaded_at_ms: 10,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        let before = state.borrow().sent.len();
+        app.refresh_details_at(30_009);
+        assert_eq!(state.borrow().sent.len(), before);
+        app.refresh_details_at(30_010);
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(crate::ui::RelationState::Loaded {
+                refreshing: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            state.borrow().sent[before..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource_feed_relation_projection_shares_large_response_storage() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("large-controller");
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: vec![k10s_protocol::RelatedGroup {
+                        title: "Pods".into(),
+                        gvk: GroupVersionKind::core("v1", "Pod"),
+                        rows: (0..5_000)
+                            .map(|index| namespace_row(&format!("related-{index}"), index))
+                            .collect(),
+                    }],
+                }),
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        let original = match app.relations.get(&identity).unwrap() {
+            RelationState::Loaded { response, .. } => std::sync::Arc::as_ptr(response),
+            _ => unreachable!(),
+        };
+
+        let feed = app.build_resource_feed();
+        let projected = match feed.relations.get(&identity).unwrap() {
+            RelationState::Loaded { response, .. } => std::sync::Arc::as_ptr(response),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            original, projected,
+            "frame projection must share model data"
+        );
+    }
+
+    fn start_relation_request(app: &mut K10sApp, identity: &ResourceIdentity) -> PendingRequest {
+        let window = pin_deployment_without_request(app, identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.refresh_details_at(1);
+        app.relation_requests
+            .get(identity)
+            .expect("relation request starts")
+            .request
+            .clone()
+    }
+
+    fn relation_response_frame(
+        request: &PendingRequest,
+        identity: ResourceIdentity,
+    ) -> ServerFrame {
+        ServerFrame::response(
+            request.id().clone(),
+            k10s_protocol::ResourceRelationsResponse {
+                identity,
+                revision: BackendRevision::new(2),
+                groups: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn same_name_different_uid_relation_response_never_enters_app_cache() {
+        let (mut app, _) = ready_app();
+        let expected = deployment_identity("same-name");
+        let primary: k10s_protocol::ResourceDetailResponse =
+            serde_json::from_value(serde_json::json!({
+            "identity": expected,
+            "revision": 1,
+            "createdAt": "2026-08-21T00:00:00Z",
+            "ownerReferences": [],
+            "sections": [],
+            "events": [],
+            "capabilities": {
+                "canEditYaml": true,
+                "canDelete": true,
+                "canScale": true,
+                "canViewLogs": false,
+                "canExec": false
+            },
+            "manifest": "kind: Deployment"
+            }))
+            .unwrap();
+        app.details.insert(expected.clone(), primary.clone());
+        let request = start_relation_request(&mut app, &expected);
+        let mut wrong = expected.clone();
+        wrong.uid = "replacement-uid".into();
+
+        app.handle_event(
+            server_message(&relation_response_frame(&request, wrong)),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(!app.client.is_pending(&request));
+        assert_eq!(app.details.get(&expected), Some(&primary));
+        assert!(matches!(
+            app.relations.get(&expected),
+            Some(RelationState::Failed(_))
+        ));
+        assert!(!matches!(
+            app.relations.get(&expected),
+            Some(RelationState::Loaded { .. })
+        ));
+        app.handle_resource_action(ResourceAction::RetryRelations(expected.clone()));
+        app.refresh_details_at(3);
+        assert!(app.relation_requests.contains_key(&expected));
+        assert!(!matches!(
+            app.build_resource_feed().relations.get(&expected),
+            Some(RelationState::Loaded { .. })
+        ));
+    }
+
+    #[test]
+    fn old_generation_relation_response_is_consumed_without_cache_insertion() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("old-generation");
+        let request = start_relation_request(&mut app, &identity);
+        app.resource_generation = app.resource_generation.wrapping_add(1);
+
+        app.handle_event(
+            server_message(&relation_response_frame(&request, identity.clone())),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+
+        assert!(!app.relation_requests.contains_key(&identity));
+        assert!(!app.relations.contains_key(&identity));
+        assert!(!app.build_resource_feed().relations.contains_key(&identity));
+    }
+
+    #[test]
+    fn retired_context_relation_response_is_consumed_without_cache_insertion() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("retired-context");
+        let request = start_relation_request(&mut app, &identity);
+        app.client.local_ui_mut().selected_context = Some("other-context".into());
+
+        app.handle_event(
+            server_message(&relation_response_frame(&request, identity.clone())),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+        app.refresh_details_at(3);
+
+        assert!(!app.relation_requests.contains_key(&identity));
+        assert!(!app.relations.contains_key(&identity));
+        assert!(!app.build_resource_feed().relations.contains_key(&identity));
+    }
+
     #[test]
     fn opening_visible_lists_subscribes_only_their_demand() {
         let (mut app, state) = ready_app();
@@ -3564,7 +4768,7 @@ mod tests {
         let watches = resource_watches(&state);
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].gvk, GroupVersionKind::core("v1", "Pod"));
-        assert_eq!(watches[0].namespace.as_deref(), Some("default"));
+        assert_eq!(watches[0].namespace.as_deref(), None);
 
         app.web_activate_services();
         let watches = resource_watches(&state);
@@ -3591,13 +4795,500 @@ mod tests {
     }
 
     #[test]
-    fn context_default_replaces_watch_when_same_context_namespace_changes() {
+    fn namespaced_windows_share_one_dedicated_namespace_catalog_watch() {
+        let (mut app, state) = ready_app();
+        let pod = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        app.web_activate_services();
+
+        let namespaces: Vec<_> = all_resource_watches(&state)
+            .into_iter()
+            .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+            .collect();
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(app.window_subscriptions.len(), 2);
+        assert!(!app.window_subscriptions.contains_key(&WindowId(0)));
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(pod));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_some());
+        let service = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| matches!(window.kind, crate::workspace::WindowKind::Services))
+            .unwrap()
+            .id;
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(service));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_none());
+    }
+
+    #[test]
+    fn cluster_scoped_or_unselected_custom_windows_do_not_demand_namespace_catalog() {
+        let (mut app, state) = ready_app();
+        app.types_context = Some("dev-local".to_owned());
+        app.resource_types = vec![k10s_protocol::ResourceTypeEntry {
+            gvk: GroupVersionKind {
+                group: "example.io".to_owned(),
+                version: "v1".to_owned(),
+                kind: "ClusterThing".to_owned(),
+            },
+            namespaced: false,
+        }];
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        assert!(app.namespace_subscription.is_none());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                window,
+                Some("example.io/v1/ClusterThing".to_owned()),
+            ));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_none());
+        assert!(
+            resource_watches(&state)
+                .iter()
+                .all(|watch| watch.gvk.kind != "Namespace")
+        );
+    }
+
+    #[test]
+    fn selected_custom_scope_switches_add_and_remove_namespace_catalog_demand() {
+        let (mut app, state) = ready_app();
+        app.types_context = Some("dev-local".to_owned());
+        app.resource_types = vec![
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".into(),
+                    version: "v1".into(),
+                    kind: "ClusterThing".into(),
+                },
+                namespaced: false,
+            },
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".into(),
+                    version: "v1".into(),
+                    kind: "Widget".into(),
+                },
+                namespaced: true,
+            },
+        ];
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        for (selected, demanded) in [
+            ("example.io/v1/ClusterThing", false),
+            ("example.io/v1/Widget", true),
+            ("example.io/v1/ClusterThing", false),
+        ] {
+            app.shell
+                .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                    window,
+                    Some(selected.to_owned()),
+                ));
+            app.reconcile_selected_resource_streams();
+            assert_eq!(app.namespace_subscription.is_some(), demanded);
+        }
+        assert_eq!(
+            all_resource_watches(&state)
+                .iter()
+                .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+                .count(),
+            1,
+            "the namespaced selection creates exactly one catalog watch"
+        );
+    }
+
+    #[test]
+    fn namespace_watch_deltas_update_ready_names_without_changing_explicit_scope() {
+        let (mut app, _) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let explicit = NamespaceScope::Namespace("team-a".to_owned());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                window,
+                explicit.clone(),
+            ));
+        app.reconcile_selected_resource_streams();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("alpha", 1)]);
+
+        let beta = namespace_row("beta", 4);
+        app.handle_event(
+            server_message(&namespace_frame(
+                &subscription,
+                ServerKind::Event,
+                4,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("4".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: beta.identity.clone(),
+                        row: beta.clone(),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["alpha".into(), "beta".into()])
+        );
+        app.handle_event(
+            server_message(&namespace_frame(
+                &subscription,
+                ServerKind::Event,
+                5,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                    revision: Some("5".into()),
+                    payload: serde_json::to_value(ResourceGone {
+                        identity: beta.identity,
+                        revision: BackendRevision::new(5),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["alpha".into()])
+        );
+        let scope = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|candidate| candidate.id == window)
+            .and_then(|candidate| match &candidate.content {
+                WindowContent::Resource(state) => Some(state.namespace_scope.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(scope, explicit);
+    }
+
+    #[test]
+    fn resync_and_transport_loss_clear_ready_namespace_catalog() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("alpha", 1)]);
+        assert!(matches!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(_)
+        ));
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(4),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Loading
+        );
+
+        complete_namespace_snapshot(&mut app, &subscription, 5, vec![namespace_row("beta", 5)]);
+        app.transient_loss(100, 0);
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Loading
+        );
+    }
+
+    #[test]
+    fn accepted_resync_enters_resource_recovery_and_retires_detail_requests() {
+        let (mut app, state) = ready_app();
+        let identity = deployment_identity("resync-detail");
+        start_relation_request(&mut app, &identity);
+        let generation = app.resource_generation;
+        let sent_before_resync = state.borrow().sent.len();
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(1),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.recovering);
+        assert!(matches!(app.view, AppView::Connecting));
+        assert_eq!(app.resource_generation, generation.wrapping_add(1));
+        assert!(app.detail_requests.is_empty());
+        assert!(app.relation_requests.is_empty());
+        assert!(app.primary_details.is_empty());
+        assert!(app.relations.is_empty());
+
+        app.refresh_details_at(2);
+        assert_eq!(
+            state.borrow().sent[sent_before_resync..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.detail" || kind == "resource.relations")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn reconnect_resubscribes_namespace_once_and_waits_for_snapshot_end() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("old", 1)]);
+
+        app.transient_loss(100, 0);
+        assert!(app.client.retry_if_due(100).unwrap());
+        app.client.apply(welcome()).unwrap();
+        let mut rebuilt = Vec::new();
+        while let Some(frame) = app.client.take_outbound() {
+            rebuilt.push(frame);
+        }
+        let namespace_rebuilds =
+            rebuilt
+                .iter()
+                .filter(|frame| {
+                    let Ok(k10s_protocol::ClientPayload::Subscribe(k10s_protocol::Subscribe(
+                        selector,
+                    ))) = frame.decode_payload()
+                    else {
+                        return false;
+                    };
+                    matches!(
+                        serde_json::from_value(selector),
+                        Ok(SubscriptionSelector::Resource(ref spec))
+                            if spec.gvk == GroupVersionKind::core("v1", "Namespace")
+                    )
+                })
+                .count();
+        assert_eq!(namespace_rebuilds, 1, "rebuilt frames: {rebuilt:?}");
+        for frame in [
+            namespace_frame(
+                &subscription,
+                ServerKind::SnapshotBegin,
+                1,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            namespace_frame(
+                &subscription,
+                ServerKind::SnapshotChunk,
+                2,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(2),
+                        rows: vec![namespace_row("new", 2)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.client.apply(frame).unwrap();
+            assert_eq!(
+                app.build_resource_feed().namespace_catalog,
+                NamespaceCatalogState::Loading
+            );
+        }
+        app.client
+            .apply(namespace_frame(
+                &subscription,
+                ServerKind::SnapshotEnd,
+                3,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "test".into(),
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["new".into()])
+        );
+    }
+
+    #[test]
+    fn namespace_catalog_waits_for_snapshot_end_and_sorts_deduplicates_names() {
+        let (mut app, _) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let namespace_row = |name: &str, uid: &str| ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind::core("v1", "Namespace"),
+                namespace: None,
+                name: name.into(),
+                uid: uid.into(),
+            },
+            revision: BackendRevision::new(1),
+            labels: Default::default(),
+            summary: String::new(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let frame = |kind, sequence, payload| ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotBegin,
+                1,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotChunk,
+                2,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(1),
+                        rows: vec![
+                            namespace_row("zeta", "z"),
+                            namespace_row("alpha", "a"),
+                            namespace_row("alpha", "a2"),
+                        ],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Loading
+        );
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotEnd,
+                3,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "ok".into(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Ready(vec!["alpha".into(), "zeta".into()])
+        );
+    }
+
+    #[test]
+    fn exact_namespace_rejection_is_safe_guarded_and_explicitly_retryable_once() {
+        let (mut app, state) = ready_app();
+        app.web_activate_services();
+        let rejected = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let mut error = ErrorFrame::new(
+            ErrorCode::Unauthorized,
+            "namespaces are forbidden",
+            Retryability::UserAction,
+            ErrorScope::Subscription,
+            "namespace-watch",
+        );
+        error.details = Some(serde_json::json!({"status": "backend raw details"}));
+        let frame = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(rejected),
+            sequence: Some(1),
+            payload: serde_json::to_value(error).unwrap(),
+        };
+
+        app.handle_event(server_message(&frame), 0, 0).unwrap();
+        assert!(app.namespace_subscription.is_none());
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Unavailable(SafeUiError::new(
+                "namespaces are forbidden"
+            ))
+        );
+        let before = all_resource_watches(&state).len();
+        app.reconcile_selected_resource_streams();
+        app.reconcile_selected_resource_streams();
+        assert_eq!(all_resource_watches(&state).len(), before);
+
+        app.handle_resource_action(ResourceAction::RetryNamespaceCatalog);
+        app.reconcile_selected_resource_streams();
+        assert_eq!(all_resource_watches(&state).len(), before + 1);
+    }
+
+    #[test]
+    fn transport_loss_clears_rejected_namespace_catalog_when_still_demanded() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let rejected = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let frame = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(rejected),
+            sequence: Some(1),
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Unauthorized,
+                "namespaces are forbidden",
+                Retryability::UserAction,
+                ErrorScope::Subscription,
+                "namespace-watch",
+            ))
+            .unwrap(),
+        };
+        app.handle_event(server_message(&frame), 0, 0).unwrap();
+        assert!(app.namespace_subscription.is_none());
+        assert!(matches!(
+            app.namespace_catalog,
+            NamespaceCatalogState::Unavailable(_)
+        ));
+
+        app.transient_loss(100, 0);
+
+        assert_eq!(app.namespace_catalog, NamespaceCatalogState::Loading);
+        assert!(app.namespace_rejected_context.is_none());
+    }
+
+    #[test]
+    fn all_namespaces_keeps_watch_when_context_namespace_changes() {
         let (mut app, state) = ready_app();
         let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
-        assert_eq!(
-            resource_watches(&state)[0].namespace.as_deref(),
-            Some("default")
-        );
+        assert_eq!(resource_watches(&state)[0].namespace.as_deref(), None);
 
         let AppView::Ready { contexts, .. } = &mut app.view else {
             panic!("ready")
@@ -3610,8 +5301,8 @@ mod tests {
         app.reconcile_selected_resource_streams();
 
         let watches = resource_watches(&state);
-        assert_eq!(watches.len(), 2);
-        assert_eq!(watches.last().unwrap().namespace.as_deref(), Some("team-b"));
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].namespace.as_deref(), None);
         assert_eq!(
             state
                 .borrow()
@@ -3619,18 +5310,14 @@ mod tests {
                 .iter()
                 .filter(|frame| frame.kind == ClientKind::Unsubscribe)
                 .count(),
-            1
+            0
         );
         let key = app.window_subscriptions.get(&window).unwrap();
         assert!(matches!(
             key.scope,
-            super::SubscriptionScope::Namespaced(NamespaceScope::ContextDefault)
+            super::SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces)
         ));
         assert_eq!(app.resource_subscriptions.len(), 1);
-        assert!(
-            !app.build_resource_feed().window_lists.contains_key(&window),
-            "the replaced watch has no stale rows projected under the window"
-        );
     }
 
     #[test]
@@ -3720,7 +5407,7 @@ mod tests {
                 .iter()
                 .filter(|frame| frame.kind == ClientKind::Unsubscribe)
                 .count(),
-            1
+            2
         );
     }
 

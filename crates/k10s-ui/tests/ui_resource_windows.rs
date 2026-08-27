@@ -9,7 +9,9 @@ use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{
+        ConnectionState, NamespaceCatalogState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
+    },
     workspace::{
         LauncherItem, WindowGeom, WindowId, WindowKind, WorkloadKind as WorkspaceWorkload,
         WorkspaceCommand,
@@ -55,64 +57,195 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 #[test]
-fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
-    let mut fixture = Fixture {
-        context_namespace: Some("sea-team".into()),
-        ..Fixture::default()
-    };
-    fixture.feed.lists.insert(
-        WorkspaceWorkload::Deployments,
-        vec![
-            list_row(
-                "apps",
-                "v1",
-                "Deployment",
-                Some("sea-team"),
-                "sea-api",
-                "1/1 ready",
-                "2026-08-21T00:00:00Z",
-            ),
-            list_row(
-                "apps",
-                "v1",
-                "Deployment",
-                Some("other"),
-                "other-api",
-                "1/1 ready",
-                "2026-08-21T00:00:00Z",
-            ),
-        ],
-    );
-    fixture
+fn workload_namespace_combobox_searches_authoritative_options_and_selects() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Ready(vec!["default".into(), "Sea-Team".into(), "other".into()]);
+    let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            window,
+            k10s_ui::workspace::NamespaceScope::AllNamespaces,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Context default (sea-team)");
-    window.get_by_label("sea-api");
-    assert!(window.query_by_label("other-api").is_none());
+    let window_node = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(
+        window_node
+            .query_by_role_and_label(Role::TextInput, "Namespace filter")
+            .is_none()
+    );
+    window_node
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(3);
+    let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    search.type_text("SEA");
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "other")
+            .is_none()
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Sea-Team")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), window).as_deref(),
+        Some("Sea-Team")
+    );
 }
 
 #[test]
-fn context_default_falls_back_to_default_when_selected_context_has_no_namespace() {
+fn missing_workload_namespace_stays_narrow_until_explicitly_cleared() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog = NamespaceCatalogState::Ready(vec!["default".into()]);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            id,
+            k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into()),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    assert_eq!(
+        selector.value().as_deref(),
+        Some("deleted-team · namespace no longer exists")
+    );
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id).as_deref(),
+        Some("deleted-team")
+    );
+    selector.click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "All namespaces")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id),
+        None
+    );
+}
+
+#[test]
+fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Unavailable(SafeUiError::new("namespace access denied"));
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Namespaces unavailable: namespace access denied");
+    assert!(window.query_by_label("backend raw details").is_none());
+    window
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none(),
+        "an unavailable catalog must keep the namespace selector closed"
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "default")
+            .is_none()
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Retry namespaces")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryNamespaceCatalog]
+    );
+}
+
+#[test]
+fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_empty() {
     let mut fixture = Fixture::default();
     fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
-            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Context default (default)");
-    window.get_by_label("api-server");
+    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    assert_eq!(
+        selector.value().as_deref(),
+        Some("Namespace catalog not requested")
+    );
+    selector.click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none()
+    );
+
+    harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Loading;
+    harness.run_steps(2);
+    harness.get_by_label("Loading namespaces");
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none()
+    );
+
+    harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Ready(Vec::new());
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    harness.get_by_label("No namespaces found");
+    harness.get_by_role_and_label(Role::Button, "All namespaces");
 }
 
 fn harness() -> Harness<'static, Fixture> {
@@ -405,9 +538,10 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         ));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    for header in ["Namespace", "Name", "Status", "Created"] {
+    for header in ["Name", "Status", "Created"] {
         window.get_by_label(header);
     }
+    window.get_by_role_and_label(Role::ComboBox, "Namespace");
     window.get_by_label("traffic-overview");
 }
 
@@ -466,6 +600,11 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(
+        window
+            .query_by_role_and_label(Role::ComboBox, "Namespace")
+            .is_none()
+    );
     // Cluster-scoped: no namespace column and no namespace filter control.
     assert!(window.query_by_label("Namespace").is_none());
     assert!(
@@ -495,6 +634,113 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     harness
         .get_by_role_and_label(Role::Window, "Custom Resources")
         .get_by_role_and_label(Role::TextInput, "Search resource types");
+}
+
+#[test]
+fn namespace_search_scratch_is_per_window() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Ready(vec!["default".into(), "sea-team".into(), "other".into()]);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let ids: Vec<_> = fixture
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .filter(|window| matches!(window.kind, WindowKind::Workload(_)))
+        .map(|window| window.id)
+        .collect();
+    for (id, x) in ids.into_iter().zip([0.0, 680.0]) {
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 30.0],
+                    size: [640.0, 520.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 700.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    search.type_text("sea");
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Search namespaces")
+            .value()
+            .as_deref(),
+        Some("sea")
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Search namespaces")
+            .value()
+            .as_deref(),
+        Some("")
+    );
+    harness.get_by_role_and_label(Role::Button, "other");
+}
+
+#[test]
+fn namespace_combobox_remains_reachable_in_compact_viewport() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog = NamespaceCatalogState::Ready(vec!["default".into()]);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(680.0, 700.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "default")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id).as_deref(),
+        Some("default")
+    );
 }
 
 #[test]

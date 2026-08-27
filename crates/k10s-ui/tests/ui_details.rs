@@ -8,9 +8,13 @@ use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
     BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind, RelatedGroup,
     ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    ResourceRelationsResponse,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{
+        ConnectionState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
+        SafeUiError, UiShell,
+    },
     workspace::{
         DetailTab as WorkspaceDetailTab, LauncherItem, WindowContent, WindowKind, WorkloadKind,
         WorkspaceCommand, WorkspaceState,
@@ -22,6 +26,99 @@ const CONTEXT: &str = "dev-local";
 struct Fixture {
     shell: UiShell<ResourceIdentity>,
     feed: ResourceFeed,
+}
+
+#[test]
+fn primary_failure_and_relation_states_render_independently() {
+    let mut harness = harness();
+    let deployment = identity("Deployment", "web-frontend");
+    harness.state_mut().feed.primary_details.insert(
+        deployment.clone(),
+        PrimaryDetailState::Failed(SafeUiError::new("details are temporarily unavailable")),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Details unavailable: details are temporarily unavailable");
+    window
+        .get_by_role_and_label(Role::Button, "Retry details")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryPrimary(deployment.clone())]
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_resource_actions()
+            .is_empty()
+    );
+
+    harness.state_mut().feed.primary_details.insert(
+        deployment.clone(),
+        PrimaryDetailState::Loaded(deployment_detail("web-frontend")),
+    );
+    harness.state_mut().feed.relations.insert(
+        deployment.clone(),
+        RelationState::Failed(SafeUiError::new("relations are temporarily unavailable")),
+    );
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "Tab Pods")
+        .click();
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("Related resources unavailable: relations are temporarily unavailable");
+    window
+        .get_by_role_and_label(Role::Button, "Retry related resources")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryRelations(deployment)]
+    );
+}
+
+#[test]
+fn unavailable_events_are_explicitly_safe() {
+    let mut harness = harness();
+    let mut detail = pod_detail("db-postgres-0");
+    detail.events.clear();
+    detail.events_condition = k10s_protocol::EventsCondition::Unavailable;
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(detail.identity.clone(), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Pods),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Tab Events")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_label("Events unavailable");
 }
 
 impl Default for Fixture {
@@ -132,6 +229,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
             ("Name", name),
             ("Status", "20/20 ready"),
         ])],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: vec![EventRow {
             reason: "Started".into(),
             message: format!("{name} reached 20/20 ready"),
@@ -182,6 +280,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
         created_at: "2026-08-21T00:50:10Z".to_owned(),
         owner_references: Vec::new(),
         sections: vec![overview_section(&[("Status", "Running")])],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: vec![EventRow {
             reason: "Started".into(),
             message: "container started".into(),
@@ -362,6 +461,20 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         identity("Deployment", "web-frontend"),
         deployment_detail("web-frontend"),
     );
+    let detail = deployment_detail("web-frontend");
+    harness.state_mut().feed.relations.insert(
+        identity("Deployment", "web-frontend"),
+        RelationState::Loaded {
+            response: std::sync::Arc::new(ResourceRelationsResponse {
+                identity: identity("Deployment", "web-frontend"),
+                revision: BackendRevision::new(1_010),
+                groups: detail.related,
+            }),
+            loaded_at_ms: 0,
+            refreshing: false,
+            refresh_error: None,
+        },
+    );
     open(
         &mut harness,
         LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
@@ -415,6 +528,64 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         pinned,
         vec![identity("Pod", "web-frontend-7d9f8-00001")],
         "a related row click opens exactly one dedicated window for it"
+    );
+}
+
+#[test]
+fn failed_relation_refresh_keeps_stale_rows_and_retries_once() {
+    let mut harness = harness();
+    let deployment = identity("Deployment", "web-frontend");
+    let detail = deployment_detail("web-frontend");
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(deployment.clone(), detail.clone());
+    harness.state_mut().feed.relations.insert(
+        deployment.clone(),
+        RelationState::Loaded {
+            response: std::sync::Arc::new(ResourceRelationsResponse {
+                identity: deployment.clone(),
+                revision: BackendRevision::new(1_010),
+                groups: detail.related,
+            }),
+            loaded_at_ms: 0,
+            refreshing: false,
+            refresh_error: Some(SafeUiError::new("refresh denied")),
+        },
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "Tab Pods")
+        .click();
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("web-frontend-7d9f8-00001 · Running");
+    window.get_by_label("Refresh failed: refresh denied");
+    window
+        .get_by_role_and_label(Role::Button, "Retry related resources")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryRelations(deployment)]
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_resource_actions()
+            .is_empty()
     );
 }
 

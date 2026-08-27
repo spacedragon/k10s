@@ -4,7 +4,7 @@
 //! identity; the UI never re-resolves relations itself.
 
 use egui::{ScrollArea, WidgetInfo, WidgetType};
-use k10s_protocol::RelatedGroup;
+use k10s_protocol::ResourceIdentity;
 
 use crate::workspace::{WindowId, WorkspaceCommand};
 
@@ -13,11 +13,54 @@ use crate::ui::resource_window::RowIdentity;
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
-    groups: &[RelatedGroup],
+    identity: &ResourceIdentity,
+    state: Option<&crate::ui::RelationState>,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
 {
+    let groups = match state {
+        None | Some(crate::ui::RelationState::NotRequested) => {
+            ui.label("Related resources not requested");
+            return;
+        }
+        Some(crate::ui::RelationState::Loading) => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label("Loading related resources");
+            });
+            return;
+        }
+        Some(crate::ui::RelationState::Failed(error)) => {
+            ui.label(format!(
+                "Related resources unavailable: {}",
+                error.message()
+            ));
+            if ui.button("Retry related resources").clicked() {
+                resource_actions.push(crate::ui::ResourceAction::RetryRelations(identity.clone()));
+            }
+            return;
+        }
+        Some(crate::ui::RelationState::Loaded {
+            response,
+            refreshing,
+            refresh_error,
+            ..
+        }) => {
+            if *refreshing {
+                ui.label("Refreshing related resources");
+            }
+            if let Some(error) = refresh_error {
+                ui.label(format!("Refresh failed: {}", error.message()));
+                if ui.button("Retry related resources").clicked() {
+                    resource_actions
+                        .push(crate::ui::ResourceAction::RetryRelations(identity.clone()));
+                }
+            }
+            response.groups.as_slice()
+        }
+    };
     if groups.iter().all(|group| group.rows.is_empty()) {
         ui.label("No related resources");
         return;
