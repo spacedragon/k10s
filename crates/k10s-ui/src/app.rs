@@ -1941,11 +1941,15 @@ impl K10sApp {
                 if let Some(pending) = self.relation_requests.remove(&identity) {
                     let _ = self.client.cancel(&pending.request);
                 }
-                if !matches!(
-                    self.relations.get(&identity),
-                    Some(RelationState::Loaded { .. })
-                ) {
-                    self.relations.insert(identity, RelationState::NotRequested);
+                match self.relations.get_mut(&identity) {
+                    Some(RelationState::Loaded { refresh_error, .. }) => {
+                        // Clearing only the failure marker re-arms the stale
+                        // entry; its response remains visible until replaced.
+                        *refresh_error = None;
+                    }
+                    _ => {
+                        self.relations.insert(identity, RelationState::NotRequested);
+                    }
                 }
             }
             // Task 6 owns namespace-catalog lifecycle and consumes this
@@ -2117,8 +2121,8 @@ impl K10sApp {
                     refresh_error,
                     ..
                 }) => {
-                    refresh_error.is_some()
-                        || now_ms.saturating_sub(*loaded_at_ms) >= RELATIONS_TTL_MS
+                    refresh_error.is_none()
+                        && now_ms.saturating_sub(*loaded_at_ms) >= RELATIONS_TTL_MS
                 }
                 Some(RelationState::Loading | RelationState::Failed(_)) => false,
             };
@@ -4048,7 +4052,7 @@ mod tests {
 
     #[test]
     fn stale_relation_server_failure_retains_rows_and_safe_message() {
-        let (mut app, _) = ready_app();
+        let (mut app, state) = ready_app();
         let identity = deployment_identity("refresh-server-fails");
         let window = pin_deployment_without_request(&mut app, &identity);
         app.shell
@@ -4105,6 +4109,43 @@ mod tests {
             }) if error.message() == "relations forbidden" && response.identity == identity
         ));
         assert!(!app.relation_requests.contains_key(&identity));
+
+        let after_failure = state.borrow().sent.len();
+        app.refresh_details_at(30_002);
+        app.refresh_details_at(60_000);
+        assert_eq!(
+            state.borrow().sent.len(),
+            after_failure,
+            "passive frames must not retry a recorded refresh failure"
+        );
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refresh_error: Some(error),
+                ..
+            }) if error.message() == "relations forbidden"
+        ));
+
+        app.handle_resource_action(ResourceAction::RetryRelations(identity.clone()));
+        app.refresh_details_at(60_001);
+        app.refresh_details_at(60_002);
+        assert_eq!(
+            state.borrow().sent[after_failure..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1,
+            "one explicit retry starts one replacement"
+        );
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: true,
+                refresh_error: None,
+                ..
+            })
+        ));
     }
 
     #[test]
