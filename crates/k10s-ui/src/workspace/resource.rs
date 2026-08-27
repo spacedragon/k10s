@@ -10,7 +10,12 @@ use super::detail::DetailState;
 /// Namespace intent for a namespaced list. `ContextDefault` remains solely
 /// for decoding legacy snapshots and is normalized before entering live state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum NamespaceScope {
     ContextDefault,
     Namespace(String),
