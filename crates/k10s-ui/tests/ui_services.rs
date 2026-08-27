@@ -124,10 +124,22 @@ fn context_default_uses_selected_context_namespace_for_service_filtering() {
     rows[0].identity.name = "sea-service".into();
     rows[1].identity.namespace = Some("other".into());
     rows[1].identity.name = "other-service".into();
-    fixture
+    let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             k10s_ui::workspace::LauncherItem::Services,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            window,
+            k10s_ui::workspace::NamespaceScope::ContextDefault,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
@@ -274,13 +286,20 @@ fn loading_empty_and_filtered_states_are_distinct() {
 
     // Zero authoritative rows: a plain empty state.
     harness.state_mut().feed.services = Some(Vec::new());
+    let id = services_window_id(harness.state());
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            id,
+            k10s_ui::workspace::NamespaceScope::ContextDefault,
+        ));
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_label("No services");
 
     // Rows that exist but are filtered away by the namespace filter.
-    let id = services_window_id(harness.state());
     harness
         .state_mut()
         .shell

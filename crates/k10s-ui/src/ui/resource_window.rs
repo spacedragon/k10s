@@ -33,6 +33,40 @@ impl SafeUiError {
     }
 }
 
+/// Authoritative lifecycle of the shared core/v1 Namespace catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum NamespaceCatalogState {
+    #[default]
+    NotDemanded,
+    Loading,
+    Ready(Vec<String>),
+    Unavailable(SafeUiError),
+}
+
+pub(super) fn show_namespace_catalog_status(
+    ui: &mut egui::Ui,
+    state: &NamespaceCatalogState,
+    resource_actions: &mut Vec<super::ResourceAction>,
+) {
+    match state {
+        NamespaceCatalogState::Loading => {
+            ui.horizontal(|ui| {
+                ui.add(Spinner::new());
+                ui.label("Loading namespaces");
+            });
+        }
+        NamespaceCatalogState::Unavailable(error) => {
+            ui.horizontal(|ui| {
+                ui.label(format!("Namespaces unavailable: {}", error.message()));
+                if ui.button("Retry namespaces").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryNamespaceCatalog);
+                }
+            });
+        }
+        NamespaceCatalogState::NotDemanded | NamespaceCatalogState::Ready(_) => {}
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)] // Public projection intentionally mirrors the protocol value.
 pub enum PrimaryDetailState {
@@ -65,6 +99,8 @@ pub enum RelationState {
 /// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
+    /// Shared Namespace candidates for every namespaced list window.
+    pub namespace_catalog: NamespaceCatalogState,
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so
     /// same-kind windows with different scopes never collapse.
     pub lists: HashMap<WorkloadKind, Vec<ResourceListRow>>,
@@ -316,6 +352,9 @@ pub(super) fn show<I>(
             queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     });
+    if namespaced {
+        show_namespace_catalog_status(ui, &feed.namespace_catalog, resource_actions);
+    }
     ui.separator();
 
     let Some(rows) = feed

@@ -20,7 +20,10 @@ use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
-use crate::ui::{PrimaryDetailState, RelationState, ResourceAction, ResourceFeed, SafeUiError};
+use crate::ui::{
+    NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
+    SafeUiError,
+};
 use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
 };
@@ -122,6 +125,11 @@ pub struct K10sApp {
     /// Deterministic projection from every open list window to its shared
     /// canonical subscription.
     window_subscriptions: BTreeMap<WindowId, SubscriptionKey>,
+    /// One cluster-scoped core/v1 Namespace watch shared by all namespaced
+    /// list windows. It is deliberately not represented as a fake window.
+    namespace_subscription: Option<(String, LiveSubscription)>,
+    namespace_catalog: NamespaceCatalogState,
+    namespace_rejected_context: Option<String>,
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
@@ -287,6 +295,9 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
+            namespace_subscription: None,
+            namespace_catalog: NamespaceCatalogState::NotDemanded,
+            namespace_rejected_context: None,
             port_forward_list: None,
             pending_port_forwards: Vec::new(),
             port_forward_error: None,
@@ -1049,6 +1060,24 @@ impl K10sApp {
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
                         }
+                        ClientError::Server(ref server_error)
+                            if server_error.scope == k10s_protocol::ErrorScope::Subscription
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.namespace_subscription
+                                        .as_ref()
+                                        .is_some_and(|(_, subscription)| subscription.id() == id)
+                                }) =>
+                        {
+                            let (context, subscription) = self
+                                .namespace_subscription
+                                .take()
+                                .expect("matched namespace subscription exists");
+                            self.client.retire_rejected_subscription(&subscription);
+                            self.namespace_catalog = NamespaceCatalogState::Unavailable(
+                                SafeUiError::new(server_error.safe_message.clone()),
+                            );
+                            self.namespace_rejected_context = Some(context);
+                        }
                         // A request-scoped mutation denial is projected into
                         // the originating dialog for a corrected retry; it
                         // never kills the control connection.
@@ -1622,6 +1651,10 @@ impl K10sApp {
         self.relations.clear();
         self.relation_requests.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
+        if self.namespace_subscription.is_some() {
+            self.namespace_catalog = NamespaceCatalogState::Loading;
+        }
+        self.namespace_rejected_context = None;
         let mut failed_windows: Vec<WindowId> = Vec::new();
         for (_, entry) in std::mem::take(&mut self.pending_mutations) {
             failed_windows.push(entry.window);
@@ -1655,7 +1688,22 @@ impl K10sApp {
                 }
             }
         }
+        let namespace_catalog = match (&self.namespace_catalog, &self.namespace_subscription) {
+            (NamespaceCatalogState::Loading, Some((_, subscription))) => self
+                .client
+                .resource_list(subscription.id())
+                .map(|state| {
+                    let mut names: Vec<_> =
+                        state.rows().map(|row| row.identity.name.clone()).collect();
+                    names.sort();
+                    names.dedup();
+                    NamespaceCatalogState::Ready(names)
+                })
+                .unwrap_or(NamespaceCatalogState::Loading),
+            (state, _) => state.clone(),
+        };
         ResourceFeed {
+            namespace_catalog,
             lists: std::collections::HashMap::new(),
             window_lists,
             services: None,
@@ -1681,6 +1729,13 @@ impl K10sApp {
     fn reconcile_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
         use crate::workspace::{WindowContent, WindowKind};
 
+        if self
+            .namespace_rejected_context
+            .as_deref()
+            .is_some_and(|rejected| rejected != context)
+        {
+            self.namespace_rejected_context = None;
+        }
         let context_namespace = match &self.view {
             AppView::Ready { contexts, .. } => contexts
                 .iter()
@@ -1692,6 +1747,7 @@ impl K10sApp {
             BTreeMap::new();
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
+        let mut namespace_demanded = false;
         for window in self.shell.workspace().windows() {
             let (gvk, scope) = match (&window.kind, &window.content) {
                 (WindowKind::Services, WindowContent::Services(state)) => (
@@ -1750,6 +1806,7 @@ impl K10sApp {
                 },
                 scope,
             };
+            namespace_demanded |= matches!(key.scope, SubscriptionScope::Namespaced(_));
             desired.entry(key.clone()).or_default().insert(window.id);
             window_subscriptions.insert(window.id, key);
         }
@@ -1764,9 +1821,28 @@ impl K10sApp {
             .keys()
             .filter(|key| !self.resource_subscriptions.contains_key(*key))
             .count();
+        let namespace_removed = usize::from(self.namespace_subscription.as_ref().is_some_and(
+            |(subscribed_context, _)| !namespace_demanded || subscribed_context != context,
+        ));
+        let namespace_added = usize::from(
+            namespace_demanded
+                && self.namespace_rejected_context.as_deref() != Some(context)
+                && self
+                    .namespace_subscription
+                    .as_ref()
+                    .is_none_or(|(subscribed_context, _)| subscribed_context != context),
+        );
         if self.client.phase() == ClientPhase::Ready {
-            self.client
-                .preflight_subscription_changes(removed.len(), additions)?;
+            self.client.preflight_subscription_changes(
+                removed.len() + namespace_removed,
+                additions + namespace_added,
+            )?;
+        }
+        if namespace_removed == 1
+            && let Some((_, subscription)) = self.namespace_subscription.take()
+        {
+            self.client.unsubscribe(&subscription)?;
+            self.namespace_rejected_context = None;
         }
         for key in removed {
             if let Some(entry) = self.resource_subscriptions.get(&key) {
@@ -1780,6 +1856,16 @@ impl K10sApp {
             self.types_context = None;
             self.types_request = None;
             return Ok(());
+        }
+        if namespace_added == 1 {
+            let live = self
+                .client
+                .subscribe_resource(context, "", "v1", "Namespace", None)?;
+            self.namespace_subscription = Some((context.to_owned(), live));
+            self.namespace_catalog = NamespaceCatalogState::Loading;
+        } else if !namespace_demanded {
+            self.namespace_catalog = NamespaceCatalogState::NotDemanded;
+            self.namespace_rejected_context = None;
         }
         for (key, windows) in desired {
             if let Some(entry) = self.resource_subscriptions.get_mut(&key) {
@@ -1964,7 +2050,11 @@ impl K10sApp {
             }
             // Task 6 owns namespace-catalog lifecycle and consumes this
             // already-stable shell action variant there.
-            ResourceAction::RetryNamespaceCatalog => {}
+            ResourceAction::RetryNamespaceCatalog => {
+                self.namespace_rejected_context = None;
+                self.namespace_catalog = NamespaceCatalogState::Loading;
+                self.reconcile_selected_resource_streams();
+            }
         }
     }
 
@@ -2907,6 +2997,15 @@ mod tests {
     }
 
     fn resource_watches(
+        state: &Rc<RefCell<FactoryState>>,
+    ) -> Vec<k10s_protocol::ResourceWatchSpec> {
+        all_resource_watches(state)
+            .into_iter()
+            .filter(|watch| watch.gvk != GroupVersionKind::core("v1", "Namespace"))
+            .collect()
+    }
+
+    fn all_resource_watches(
         state: &Rc<RefCell<FactoryState>>,
     ) -> Vec<k10s_protocol::ResourceWatchSpec> {
         state
@@ -4411,6 +4510,187 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_windows_share_one_dedicated_namespace_catalog_watch() {
+        let (mut app, state) = ready_app();
+        let pod = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        app.web_activate_services();
+
+        let namespaces: Vec<_> = all_resource_watches(&state)
+            .into_iter()
+            .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+            .collect();
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(app.window_subscriptions.len(), 2);
+        assert!(!app.window_subscriptions.contains_key(&WindowId(0)));
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(pod));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_some());
+        let service = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| matches!(window.kind, crate::workspace::WindowKind::Services))
+            .unwrap()
+            .id;
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(service));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_none());
+    }
+
+    #[test]
+    fn cluster_scoped_or_unselected_custom_windows_do_not_demand_namespace_catalog() {
+        let (mut app, state) = ready_app();
+        app.types_context = Some("dev-local".to_owned());
+        app.resource_types = vec![k10s_protocol::ResourceTypeEntry {
+            gvk: GroupVersionKind {
+                group: "example.io".to_owned(),
+                version: "v1".to_owned(),
+                kind: "ClusterThing".to_owned(),
+            },
+            namespaced: false,
+        }];
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        assert!(app.namespace_subscription.is_none());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                window,
+                Some("example.io/v1/ClusterThing".to_owned()),
+            ));
+        app.reconcile_selected_resource_streams();
+        assert!(app.namespace_subscription.is_none());
+        assert!(
+            resource_watches(&state)
+                .iter()
+                .all(|watch| watch.gvk.kind != "Namespace")
+        );
+    }
+
+    #[test]
+    fn namespace_catalog_waits_for_snapshot_end_and_sorts_deduplicates_names() {
+        let (mut app, _) = ready_app();
+        app.web_activate_workload(WorkloadKind::Pods);
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let namespace_row = |name: &str, uid: &str| ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind::core("v1", "Namespace"),
+                namespace: None,
+                name: name.into(),
+                uid: uid.into(),
+            },
+            revision: BackendRevision::new(1),
+            labels: Default::default(),
+            summary: String::new(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let frame = |kind, sequence, payload| ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotBegin,
+                1,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotChunk,
+                2,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(1),
+                        rows: vec![
+                            namespace_row("zeta", "z"),
+                            namespace_row("alpha", "a"),
+                            namespace_row("alpha", "a2"),
+                        ],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Loading
+        );
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::SnapshotEnd,
+                3,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "ok".into(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Ready(vec!["alpha".into(), "zeta".into()])
+        );
+    }
+
+    #[test]
+    fn exact_namespace_rejection_is_safe_guarded_and_explicitly_retryable_once() {
+        let (mut app, state) = ready_app();
+        app.web_activate_services();
+        let rejected = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let mut error = ErrorFrame::new(
+            ErrorCode::Unauthorized,
+            "namespaces are forbidden",
+            Retryability::UserAction,
+            ErrorScope::Subscription,
+            "namespace-watch",
+        );
+        error.details = Some(serde_json::json!({"status": "backend raw details"}));
+        let frame = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(rejected),
+            sequence: Some(1),
+            payload: serde_json::to_value(error).unwrap(),
+        };
+
+        app.handle_event(server_message(&frame), 0, 0).unwrap();
+        assert!(app.namespace_subscription.is_none());
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            crate::ui::NamespaceCatalogState::Unavailable(SafeUiError::new(
+                "namespaces are forbidden"
+            ))
+        );
+        let before = all_resource_watches(&state).len();
+        app.reconcile_selected_resource_streams();
+        app.reconcile_selected_resource_streams();
+        assert_eq!(all_resource_watches(&state).len(), before);
+
+        app.handle_resource_action(ResourceAction::RetryNamespaceCatalog);
+        app.reconcile_selected_resource_streams();
+        assert_eq!(all_resource_watches(&state).len(), before + 1);
+    }
+
+    #[test]
     fn all_namespaces_keeps_watch_when_context_namespace_changes() {
         let (mut app, state) = ready_app();
         let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
@@ -4533,7 +4813,7 @@ mod tests {
                 .iter()
                 .filter(|frame| frame.kind == ClientKind::Unsubscribe)
                 .count(),
-            1
+            2
         );
     }
 

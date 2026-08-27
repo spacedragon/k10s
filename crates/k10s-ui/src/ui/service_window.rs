@@ -301,6 +301,11 @@ where
             queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     });
+    super::resource_window::show_namespace_catalog_status(
+        ui,
+        &feed.namespace_catalog,
+        resource_actions,
+    );
     ui.separator();
 
     let Some(rows) = feed

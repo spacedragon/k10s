@@ -15,7 +15,8 @@ mod top_bar;
 mod window;
 
 pub use resource_window::{
-    PrimaryDetailState, RelationState, ResourceFeed, RowIdentity, SafeUiError,
+    NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed, RowIdentity,
+    SafeUiError,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,

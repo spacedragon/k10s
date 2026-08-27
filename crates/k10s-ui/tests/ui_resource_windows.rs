@@ -9,7 +9,9 @@ use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{
+        ConnectionState, NamespaceCatalogState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
+    },
     workspace::{
         LauncherItem, WindowGeom, WindowId, WindowKind, WorkloadKind as WorkspaceWorkload,
         WorkspaceCommand,
@@ -83,10 +85,22 @@ fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
             ),
         ],
     );
-    fixture
+    let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            window,
+            k10s_ui::workspace::NamespaceScope::ContextDefault,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
@@ -101,10 +115,22 @@ fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
 #[test]
 fn context_default_falls_back_to_default_when_selected_context_has_no_namespace() {
     let mut fixture = Fixture::default();
-    fixture
+    let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            window,
+            k10s_ui::workspace::NamespaceScope::ContextDefault,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
@@ -113,6 +139,33 @@ fn context_default_falls_back_to_default_when_selected_context_has_no_namespace(
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
     window.get_by_label("Context default (default)");
     window.get_by_label("api-server");
+}
+
+#[test]
+fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Unavailable(SafeUiError::new("namespace access denied"));
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Namespaces unavailable: namespace access denied");
+    assert!(window.query_by_label("backend raw details").is_none());
+    window
+        .get_by_role_and_label(Role::Button, "Retry namespaces")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryNamespaceCatalog]
+    );
 }
 
 fn harness() -> Harness<'static, Fixture> {

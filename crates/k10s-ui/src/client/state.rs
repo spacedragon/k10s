@@ -2013,11 +2013,6 @@ impl ClientState {
                             rows: rows.clone(),
                         },
                     );
-                    // The completed snapshot starts — or after a resync
-                    // fully replaces — the retained applied view.
-                    let mut state = ResourceListState::default();
-                    state.apply_snapshot(revision, rows);
-                    self.resource_lists.insert(id, state);
                 }
                 Ok(())
             }
@@ -2028,6 +2023,11 @@ impl ClientState {
                 match self.snapshot_assemblies.remove(&id) {
                     Some(assembly) if assembly.received_chunks == assembly.total_chunks => {
                         debug_assert!(self.completed_snapshots.contains_key(&id));
+                        if let Some(snapshot) = self.completed_snapshots.get(&id) {
+                            let mut state = ResourceListState::default();
+                            state.apply_snapshot(snapshot.revision, snapshot.rows.clone());
+                            self.resource_lists.insert(id, state);
+                        }
                         Ok(())
                     }
                     Some(_) | None => Err(ClientError::Protocol(
