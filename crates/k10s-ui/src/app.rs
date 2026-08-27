@@ -2188,7 +2188,7 @@ impl K10sApp {
                 window,
             } = entry;
             if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && session_open(
+                && let Err(error) = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
@@ -2196,9 +2196,9 @@ impl K10sApp {
                     &self.connection_url,
                     &self.access_token,
                 )
-                .is_ok()
             {
-                // The session is now live and polling.
+                let reason = format!("could not open stream socket: {error}");
+                fail_stream_tool(&mut self.shell, window, route, &reason);
             }
         }
     }
@@ -2372,13 +2372,33 @@ fn session_open(
     granted: k10s_protocol::StreamTicketResponse,
     connection_url: &str,
     access_token: &str,
-) -> Result<(), ()> {
+) -> Result<(), TransportError> {
     let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
-    session
-        .open_with_ticket(connection_url, access_token, &granted.ticket_id)
-        .map_err(|_| ())?;
+    session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
+}
+
+/// Return one failed dedicated-socket open to the tool that requested it.
+/// The control connection remains healthy and the tool stays reconnectable.
+fn fail_stream_tool(
+    shell: &mut UiShell<ResourceIdentity>,
+    window: WindowId,
+    route: StreamRoute,
+    reason: &str,
+) {
+    match route {
+        StreamRoute::Logs => {
+            if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
+                view.fail(reason);
+            }
+        }
+        StreamRoute::Exec => {
+            if let Some(tool) = shell.stream_stores_mut().shells.get_mut(window) {
+                tool.fail(reason);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -4550,15 +4570,18 @@ mod tests {
 
 #[cfg(test)]
 mod stream_lifecycle_tests {
+    use std::collections::BTreeMap;
     use std::sync::mpsc;
 
     use ewebsock::{WsEvent, WsMessage};
-    use k10s_protocol::{GroupVersionKind, ResourceIdentity, StreamTarget, StreamType};
+    use k10s_protocol::{
+        GroupVersionKind, ResourceIdentity, StreamTarget, StreamTicketResponse, StreamType,
+    };
 
-    use super::K10sApp;
     use super::tests::test_app;
+    use super::{K10sApp, fail_stream_tool, session_open};
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::ShellPhase;
+    use crate::ui::tools::{LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -4646,6 +4669,85 @@ mod stream_lifecycle_tests {
         app.stream_sessions
             .insert((window, StreamRoute::Exec), session);
         tx
+    }
+
+    #[test]
+    fn socket_open_failure_is_preserved_and_returned_to_the_log_view() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("pod-a");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for("pod-a");
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, target.clone())
+            .connect();
+
+        let error = session_open(
+            &mut BTreeMap::new(),
+            window,
+            StreamRoute::Logs,
+            StreamTicketResponse {
+                ticket_id: "ticket-logs".into(),
+                target,
+                stream_type: StreamType::Logs,
+                tty: false,
+            },
+            "ws://127.0.0.1:1234/not-the-control-route",
+            "secret",
+        )
+        .expect_err("an invalid control endpoint cannot derive a stream URL");
+        let reason = format!("could not open stream socket: {error}");
+        fail_stream_tool(&mut app.shell, window, StreamRoute::Logs, &reason);
+
+        let view = app
+            .shell
+            .stream_stores()
+            .logs
+            .get(window)
+            .expect("log view remains available for retry");
+        assert_eq!(view.phase(), LogsPhase::Disconnected);
+        assert_eq!(view.last_error(), Some(reason.as_str()));
+        assert!(reason.contains("control URL must end"));
+    }
+
+    #[test]
+    fn socket_open_failure_is_preserved_and_returned_to_the_exec_tool() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("pod-a");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for("pod-a");
+        app.shell
+            .stream_stores_mut()
+            .shells
+            .ensure(window, target.clone())
+            .connect();
+
+        let error = session_open(
+            &mut BTreeMap::new(),
+            window,
+            StreamRoute::Exec,
+            StreamTicketResponse {
+                ticket_id: "ticket-exec".into(),
+                target,
+                stream_type: StreamType::Exec,
+                tty: true,
+            },
+            "ws://127.0.0.1:1234/not-the-control-route",
+            "secret",
+        )
+        .expect_err("an invalid control endpoint cannot derive a stream URL");
+        let reason = format!("could not open stream socket: {error}");
+        fail_stream_tool(&mut app.shell, window, StreamRoute::Exec, &reason);
+
+        let tool = app
+            .shell
+            .stream_stores()
+            .shells
+            .get(window)
+            .expect("exec tool remains available for retry");
+        assert_eq!(tool.phase(), &ShellPhase::Failed(reason.clone()));
+        assert!(reason.contains("control URL must end"));
     }
 
     /// Ready attaches the terminal and engages the guard; resolving the
