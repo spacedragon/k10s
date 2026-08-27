@@ -1298,6 +1298,11 @@ impl K10sApp {
                     // connection_lost deliberately preserves dirty buffers.
                     self.shell.yaml_editors_mut().connection_lost();
                 }
+                if applied && server_rebuild_requested {
+                    self.enter_resource_recovery();
+                    self.recovering = true;
+                    self.view = AppView::Connecting;
+                }
                 self.finish_infrastructure_request();
                 self.finish_context_switch()?;
                 if self.bootstrap.is_none() {
@@ -1645,16 +1650,7 @@ impl K10sApp {
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
         // retry (the backend deduplicates by idempotency key).
-        self.details.clear();
-        self.primary_details.clear();
-        self.detail_requests.clear();
-        self.relations.clear();
-        self.relation_requests.clear();
-        self.resource_generation = self.resource_generation.wrapping_add(1);
-        if self.namespace_subscription.is_some() {
-            self.namespace_catalog = NamespaceCatalogState::Loading;
-        }
-        self.namespace_rejected_context = None;
+        self.enter_resource_recovery();
         let mut failed_windows: Vec<WindowId> = Vec::new();
         for (_, entry) in std::mem::take(&mut self.pending_mutations) {
             failed_windows.push(entry.window);
@@ -1666,6 +1662,19 @@ impl K10sApp {
         }
         self.recovering = true;
         self.view = AppView::Connecting;
+    }
+
+    fn enter_resource_recovery(&mut self) {
+        self.details.clear();
+        self.primary_details.clear();
+        self.detail_requests.clear();
+        self.relations.clear();
+        self.relation_requests.clear();
+        self.resource_generation = self.resource_generation.wrapping_add(1);
+        if !matches!(self.namespace_catalog, NamespaceCatalogState::NotDemanded) {
+            self.namespace_catalog = NamespaceCatalogState::Loading;
+        }
+        self.namespace_rejected_context = None;
     }
 
     /// Assemble the connected resource projection for one rendered frame:
@@ -4977,6 +4986,46 @@ mod tests {
     }
 
     #[test]
+    fn accepted_resync_enters_resource_recovery_and_retires_detail_requests() {
+        let (mut app, state) = ready_app();
+        let identity = deployment_identity("resync-detail");
+        start_relation_request(&mut app, &identity);
+        let generation = app.resource_generation;
+        let sent_before_resync = state.borrow().sent.len();
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(1),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.recovering);
+        assert!(matches!(app.view, AppView::Connecting));
+        assert_eq!(app.resource_generation, generation.wrapping_add(1));
+        assert!(app.detail_requests.is_empty());
+        assert!(app.relation_requests.is_empty());
+        assert!(app.primary_details.is_empty());
+        assert!(app.relations.is_empty());
+
+        app.refresh_details_at(2);
+        assert_eq!(
+            state.borrow().sent[sent_before_resync..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.detail" || kind == "resource.relations")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn reconnect_resubscribes_namespace_once_and_waits_for_snapshot_end() {
         let (mut app, _) = ready_app();
         app.web_activate_services();
@@ -5171,6 +5220,38 @@ mod tests {
         app.handle_resource_action(ResourceAction::RetryNamespaceCatalog);
         app.reconcile_selected_resource_streams();
         assert_eq!(all_resource_watches(&state).len(), before + 1);
+    }
+
+    #[test]
+    fn transport_loss_clears_rejected_namespace_catalog_when_still_demanded() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let rejected = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let frame = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(rejected),
+            sequence: Some(1),
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Unauthorized,
+                "namespaces are forbidden",
+                Retryability::UserAction,
+                ErrorScope::Subscription,
+                "namespace-watch",
+            ))
+            .unwrap(),
+        };
+        app.handle_event(server_message(&frame), 0, 0).unwrap();
+        assert!(app.namespace_subscription.is_none());
+        assert!(matches!(
+            app.namespace_catalog,
+            NamespaceCatalogState::Unavailable(_)
+        ));
+
+        app.transient_loss(100, 0);
+
+        assert_eq!(app.namespace_catalog, NamespaceCatalogState::Loading);
+        assert!(app.namespace_rejected_context.is_none());
     }
 
     #[test]
