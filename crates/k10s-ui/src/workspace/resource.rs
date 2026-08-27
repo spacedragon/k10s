@@ -38,6 +38,7 @@ impl NamespaceScope {
 
 /// List sorting specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SortSpec {
     pub column: String,
     pub ascending: bool,

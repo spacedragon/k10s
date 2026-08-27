@@ -80,6 +80,7 @@ impl WindowKind {
 /// relative to the workspace canvas origin so a restored layout stays
 /// correct across different outer window sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WindowGeom {
     /// Top-left corner, `[x, y]`.
     pub position: [f32; 2],

@@ -173,6 +173,18 @@ fn versioned_snapshot_schemas_reject_unknown_fields_even_when_required_fields_ex
         serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_with_window_typo)
             .is_err()
     );
+
+    let v3_with_geometry_typo = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"postion":[9.0,9.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":null}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_with_geometry_typo)
+            .is_err()
+    );
+
+    let v3_with_sort_typo = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":{"kind":"all_namespaces"},"search":"","filters":{},"sort":{"column":"NAME","ascending":true,"direction":"asc"},"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_with_sort_typo)
+            .is_err()
+    );
 }
 
 #[test]
