@@ -27,7 +27,10 @@ fn v1_literal_migrates_explicit_namespace_and_defaults_to_all_namespaces() {
     let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":"g/v/K"}},{"kind":"nodes","title":"Nodes","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace":null,"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
     assert_eq!(loaded.migrated_from, Some(1));
-    assert_eq!(loaded.snapshot.version, 2);
+    assert_eq!(loaded.snapshot.version, 3);
+    assert!(!loaded.snapshot.free_window_resizing);
+    assert_eq!(loaded.snapshot.windows[0].geometry.position, [1.0, 2.0]);
+    assert_eq!(loaded.snapshot.windows[0].geometry.size, [800.0, 600.0]);
     assert_eq!(
         loaded.snapshot.windows[0]
             .view
@@ -47,7 +50,38 @@ fn v1_literal_migrates_explicit_namespace_and_defaults_to_all_namespaces() {
     let view = loaded.snapshot.windows[0].view.as_ref().unwrap();
     assert_eq!(view.search, "web");
     assert_eq!(view.filters["phase"], "Running");
+    assert_eq!(view.split_ratio, 0.4);
+    assert!(!view.detail_visible);
     assert_eq!(view.custom_kind.as_deref(), Some("g/v/K"));
+}
+
+#[test]
+fn v2_literal_migrates_geometry_view_and_defaults_free_resize_off() {
+    let raw = r#"{"version":2,"next_id":4,"next_z":7,"windows":[{"kind":{"workload":"pods"},"title":"Pods","geometry":{"position":[23.0,41.0],"size":[910.0,630.0],"collapsed":true},"z":6,"view":{"namespace_scope":{"kind":"namespace","value":"prod"},"search":"api","filters":{"phase":"Running"},"sort":{"column":"NAME","ascending":false},"split_ratio":0.37,"detail_visible":false,"custom_kind":null}}]}"#;
+    let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+
+    assert_eq!(loaded.migrated_from, Some(2));
+    assert_eq!(loaded.snapshot.version, 3);
+    assert!(!loaded.snapshot.free_window_resizing);
+    let window = &loaded.snapshot.windows[0];
+    assert_eq!(window.geometry.position, [23.0, 41.0]);
+    assert_eq!(window.geometry.size, [910.0, 630.0]);
+    assert!(window.geometry.collapsed);
+    let view = window.view.as_ref().unwrap();
+    assert_eq!(
+        view.namespace_scope,
+        NamespaceScope::Namespace("prod".into())
+    );
+    assert_eq!(view.search, "api");
+    assert_eq!(view.filters["phase"], "Running");
+    assert_eq!(view.split_ratio, 0.37);
+    assert!(!view.detail_visible);
+}
+
+#[test]
+fn v3_requires_an_explicit_free_resize_boolean() {
+    let raw = r#"{"version":3,"next_id":2,"next_z":3,"windows":[]}"#;
+    assert!(serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(raw).is_err());
 }
 
 #[test]
@@ -175,6 +209,23 @@ fn snapshot_round_trips_through_json() {
     let back: k10s_ui::workspace::WorkspaceSnapshot =
         serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, snap);
+}
+
+#[test]
+fn current_snapshot_explicitly_serializes_free_resize_false() {
+    let json = serde_json::to_value(state().snapshot()).unwrap();
+    assert_eq!(json["free_window_resizing"], false);
+}
+
+#[test]
+fn toggled_free_resize_round_trips_true() {
+    let mut workspace = state();
+    workspace.apply(WorkspaceCommand::ToggleFreeWindowResizing);
+    let json = serde_json::to_string(&workspace.snapshot()).unwrap();
+    let snapshot: k10s_ui::workspace::WorkspaceSnapshot = serde_json::from_str(&json).unwrap();
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&snapshot).unwrap();
+    assert!(snapshot.free_window_resizing);
+    assert!(restored.free_window_resizing());
 }
 
 #[test]

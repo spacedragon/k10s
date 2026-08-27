@@ -17,7 +17,7 @@ use super::window::{WindowGeom, WindowKind, WorkloadKind};
 use super::{Window, WindowContent, WindowId, WorkspaceState};
 
 /// Snapshot format version written to and read from the desktop state file.
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 /// Upper bound for persisted allocation counters. Real workspaces hand out
 /// a handful of ids per session; values near this ceiling are corruption,
@@ -162,6 +162,8 @@ pub struct WorkspaceSnapshot {
     pub next_id: u64,
     /// Next z-order value to hand out above every restored window.
     pub next_z: u64,
+    /// Whether workspace windows may be resized without preserving aspect ratio.
+    pub free_window_resizing: bool,
     /// The restorable windows in their persisted order.
     pub windows: Vec<PersistedWindow>,
 }
@@ -218,6 +220,14 @@ struct V2Snapshot {
 }
 
 #[derive(Deserialize)]
+struct V3Snapshot {
+    next_id: u64,
+    next_z: u64,
+    free_window_resizing: bool,
+    windows: Vec<PersistedWindow>,
+}
+
+#[derive(Deserialize)]
 struct V2Window {
     kind: PersistedWindowKind,
     title: String,
@@ -246,7 +256,8 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
         let value = serde_json::Value::deserialize(deserializer)?;
         let envelope: VersionEnvelope =
             serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-        let (next_id, next_z, windows, migrated_from) = match envelope.version {
+        let (next_id, next_z, free_window_resizing, windows, migrated_from) = match envelope.version
+        {
             1 => {
                 let raw: V1Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -272,9 +283,9 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                         }),
                     })
                     .collect();
-                (raw.next_id, raw.next_z, windows, Some(1))
+                (raw.next_id, raw.next_z, false, windows, Some(1))
             }
-            SNAPSHOT_VERSION => {
+            2 => {
                 let raw: V2Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 let windows = raw
@@ -296,7 +307,18 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                         }),
                     })
                     .collect();
-                (raw.next_id, raw.next_z, windows, None)
+                (raw.next_id, raw.next_z, false, windows, Some(2))
+            }
+            SNAPSHOT_VERSION => {
+                let raw: V3Snapshot =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                (
+                    raw.next_id,
+                    raw.next_z,
+                    raw.free_window_resizing,
+                    raw.windows,
+                    None,
+                )
             }
             version => {
                 return Err(serde::de::Error::custom(format!(
@@ -309,6 +331,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                 version: SNAPSHOT_VERSION,
                 next_id,
                 next_z,
+                free_window_resizing,
                 windows,
             },
             migrated_from,
@@ -416,6 +439,7 @@ where
             version: SNAPSHOT_VERSION,
             next_id: self.next_id,
             next_z: self.next_z,
+            free_window_resizing: self.free_window_resizing,
             windows,
         }
     }
@@ -450,7 +474,7 @@ where
 
         let mut state = Self {
             windows: Vec::new(),
-            free_window_resizing: false,
+            free_window_resizing: snapshot.free_window_resizing,
             next_id: 1,
             next_z: 0,
             context: String::new(),
