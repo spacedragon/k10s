@@ -33,7 +33,7 @@ Pod and Deployment details therefore become usable after their primary object re
 
 The independent request kind is `resource.relations`. It uses `ResourceRefRequest { identity }` and returns `ResourceRelationsResponse { identity, revision, groups }`. The response echoes the complete identity. The client applies it only when its request ID, echoed context/GVK/namespace/name/UID, and connection generation match the pending entry; every mismatch is discarded without populating the cache.
 
-For wire compatibility, `ResourceDetailResponse.related` remains present and gains a deserialization default. New servers serialize it as an empty list; new clients ignore any eagerly populated legacy value and use `resource.relations`. An optional, defaulted `eventsCondition` distinguishes available events from bounded/unavailable enrichment without breaking legacy payloads. An older server that reports `unsupportedMessage` for the new request produces an isolated Related-tab unavailable state. Protocol fixtures and loopback tests cover old-client/new-server and new-client/old-server behavior.
+For wire compatibility, `ResourceDetailResponse.related` remains present and gains a deserialization default. New servers serialize it as an empty list; new clients ignore any eagerly populated legacy value and use `resource.relations`. `ResourceDetailResponse.events_condition` uses the exported, camel-case serialized enum `EventsCondition::{Available, Unavailable}` and defaults to `Available` when absent, preserving legacy response meaning. A forbidden, timed-out, or unavailable Event API produces `Unavailable` with an empty event list and exposes no raw backend error. An older server that reports `unsupportedMessage` for the new request produces an isolated Related-tab unavailable state. Protocol fixtures and loopback tests cover old-client/new-server and new-client/old-server behavior.
 
 ## Related Tab States
 
@@ -61,6 +61,8 @@ The control is a searchable egui combobox:
 - Clearing the selection sets `NamespaceScope::AllNamespaces`.
 - The closed control shows the selected namespace or an all-namespaces placeholder when empty.
 - Search text is UI scratch state scoped per window and is not persisted as workspace intent.
+
+If a restored explicit namespace is absent from a completed catalog, or a watch deletion removes the selected namespace, the explicit scope and its narrowly scoped resource subscription remain unchanged. The combobox renders that value as “namespace no longer exists” and offers Clear or another authoritative option. It never silently broadens the scope to all namespaces.
 
 The shared Namespace subscription is retired when no namespaced window needs it and is rebuilt for context changes and reconnects through the existing subscription reconciliation path.
 
@@ -90,6 +92,7 @@ Tests are added before implementation and cover:
 7. Namespace state and search scratch remain independent across multiple windows.
 8. Cluster-scoped resource windows do not demand or render the namespace control; Services do demand it, and custom-resource cluster/namespaced GVK changes reconcile demand correctly.
 9. Protocol compatibility fixtures cover defaulted legacy `related` data and unsupported `resource.relations` handling.
+10. A restored-missing or watch-deleted selected namespace remains explicitly scoped, renders invalid, and never silently changes to all namespaces.
 
 Targeted protocol, backend, server-loopback, client-state, workspace-state, and egui UI tests run alongside the existing workspace and detail suites.
 
