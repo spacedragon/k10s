@@ -146,6 +146,7 @@ impl CatalogSnapshot {
         revision: u64,
         generated_at: impl Into<String>,
         records: Vec<ResourceRecord>,
+        node_rows: Vec<NodeRow>,
     ) -> Self {
         let nodes = records
             .iter()
@@ -240,7 +241,28 @@ impl CatalogSnapshot {
             },
             workload_health,
             attention,
-            nodes: Vec::new(),
+            nodes: node_rows
+                .into_iter()
+                .map(|node| CatalogNode {
+                    name: node.name,
+                    status: node.status,
+                    roles: node.roles,
+                    kubernetes_version: node.kubernetes_version,
+                    cpu: CatalogUsage {
+                        used: node.cpu.used,
+                        capacity: node.cpu.capacity,
+                    },
+                    memory: CatalogUsage {
+                        used: node.memory.used,
+                        capacity: node.memory.capacity,
+                    },
+                    pods: CatalogUsage {
+                        used: node.pods.used,
+                        capacity: node.pods.capacity,
+                    },
+                    age: node.age,
+                })
+                .collect(),
             storage: CatalogStorage::default(),
         }
     }
@@ -658,6 +680,7 @@ mod tests {
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
             ],
+            Vec::new(),
         )
         .into_protocol();
 
