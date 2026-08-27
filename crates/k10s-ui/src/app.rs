@@ -2453,7 +2453,11 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: "app".to_owned(),
+            container: self
+                .details
+                .get(identity)
+                .and_then(|view| crate::ui::pod_container(&view.manifest))
+                .unwrap_or_else(|| "app".to_owned()),
         })
     }
 
@@ -6257,16 +6261,16 @@ mod tests {
 
 #[cfg(test)]
 mod stream_lifecycle_tests {
-    use std::collections::BTreeMap;
     use std::sync::mpsc;
 
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        GroupVersionKind, ResourceIdentity, StreamTarget, StreamTicketResponse, StreamType,
+        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+        ResourceIdentity, StreamTarget, StreamType,
     };
 
+    use super::K10sApp;
     use super::tests::test_app;
-    use super::{K10sApp, fail_stream_tool, session_open};
     use crate::client::{StreamIo, StreamRoute, StreamSession};
     use crate::ui::tools::{LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
@@ -6295,12 +6299,40 @@ mod stream_lifecycle_tests {
     }
 
     pub(super) fn target_for(pod_name: &str) -> StreamTarget {
+        target_for_container(pod_name, "app")
+    }
+
+    fn target_for_container(pod_name: &str, container: &str) -> StreamTarget {
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: pod_name.into(),
             uid: format!("uid-{pod_name}"),
-            container: "app".into(),
+            container: container.into(),
+        }
+    }
+
+    fn detail_with_container(
+        identity: &ResourceIdentity,
+        container: &str,
+    ) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_exec: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: format!(
+                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
+            ),
+            projection: None,
         }
     }
 
@@ -6359,82 +6391,90 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn socket_open_failure_is_preserved_and_returned_to_the_log_view() {
+    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
         let (mut app, _state) = test_app(Vec::new());
-        let pod = pod("pod-a");
+        let pod = pod("database");
         let window = open_pod_detail(&mut app, &pod);
-        let target = target_for("pod-a");
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "postgres"));
+        let target = target_for_container(&pod.name, "postgres");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .shells
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Exec, target, true);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Exec), session);
+
+        ready_signal(&tx, "postgres");
+        app.poll_stream_sessions();
+
+        assert!(app.shell_guard_connected(window));
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
+        );
+    }
+
+    #[test]
+    fn logs_for_manifest_container_attach_and_project_output() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("web");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "nginx"));
+        let target = target_for_container(&pod.name, "nginx");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
         app.shell
             .stream_stores_mut()
             .logs
             .ensure(window, target.clone())
             .connect();
+        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
 
-        let error = session_open(
-            &mut BTreeMap::new(),
-            window,
-            StreamRoute::Logs,
-            StreamTicketResponse {
-                ticket_id: "ticket-logs".into(),
-                target,
+        tx.send(WsEvent::Message(WsMessage::Text(
+            serde_json::to_string(&k10s_protocol::StreamServerMessage::Ready {
                 stream_type: StreamType::Logs,
                 tty: false,
-            },
-            "ws://127.0.0.1:1234/not-the-control-route",
-            "secret",
-        )
-        .expect_err("an invalid control endpoint cannot derive a stream URL");
-        let reason = format!("could not open stream socket: {error}");
-        fail_stream_tool(&mut app.shell, window, StreamRoute::Logs, &reason);
+                container: "nginx".to_owned(),
+            })
+            .unwrap(),
+        )))
+        .unwrap();
+        tx.send(WsEvent::Message(WsMessage::Binary(
+            k10s_protocol::encode_stream_payload(k10s_protocol::payload_kind::STDOUT, b"served"),
+        )))
+        .unwrap();
+        app.poll_stream_sessions();
 
         let view = app
             .shell
             .stream_stores()
             .logs
             .get(window)
-            .expect("log view remains available for retry");
-        assert_eq!(view.phase(), LogsPhase::Disconnected);
-        assert_eq!(view.last_error(), Some(reason.as_str()));
-        assert!(reason.contains("control URL must end"));
-    }
-
-    #[test]
-    fn socket_open_failure_is_preserved_and_returned_to_the_exec_tool() {
-        let (mut app, _state) = test_app(Vec::new());
-        let pod = pod("pod-a");
-        let window = open_pod_detail(&mut app, &pod);
-        let target = target_for("pod-a");
-        app.shell
-            .stream_stores_mut()
-            .shells
-            .ensure(window, target.clone())
-            .connect();
-
-        let error = session_open(
-            &mut BTreeMap::new(),
-            window,
-            StreamRoute::Exec,
-            StreamTicketResponse {
-                ticket_id: "ticket-exec".into(),
-                target,
-                stream_type: StreamType::Exec,
-                tty: true,
-            },
-            "ws://127.0.0.1:1234/not-the-control-route",
-            "secret",
-        )
-        .expect_err("an invalid control endpoint cannot derive a stream URL");
-        let reason = format!("could not open stream socket: {error}");
-        fail_stream_tool(&mut app.shell, window, StreamRoute::Exec, &reason);
-
-        let tool = app
-            .shell
-            .stream_stores()
-            .shells
-            .get(window)
-            .expect("exec tool remains available for retry");
-        assert_eq!(tool.phase(), &ShellPhase::Failed(reason.clone()));
-        assert!(reason.contains("control URL must end"));
+            .expect("log view exists");
+        assert_eq!(view.phase(), LogsPhase::Streaming);
+        assert_eq!(
+            view.visible_lines().map(String::as_str).collect::<Vec<_>>(),
+            vec!["served"]
+        );
     }
 
     /// Ready attaches the terminal and engages the guard; resolving the

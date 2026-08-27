@@ -8,6 +8,7 @@ egui = "=0.36.1"
 k10s-protocol = { path = "../k10s-protocol" }
 serde_json = "=1.0.151"
 serde = { version = "=1.0.229", features = ["derive"] }
+serde_yaml = "0.9"
 ewebsock = { version = "=0.8.0", default-features = false, features = ["tls"] }
 web-time = "=1.1.0"
 
