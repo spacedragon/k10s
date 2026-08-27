@@ -1329,12 +1329,7 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
     assert_eq!(response.totals.workloads, 1);
 
     for (path, _) in lists {
-        let expected_hits = if path == "/api/v1/nodes" { 2 } else { 1 };
-        assert_eq!(
-            server.hit_count(path),
-            expected_hits,
-            "overview must list {path}"
-        );
+        assert_eq!(server.hit_count(path), 1, "overview must list {path}");
     }
 
     kernel

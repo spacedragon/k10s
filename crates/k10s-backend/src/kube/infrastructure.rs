@@ -4,18 +4,34 @@ use k10s_protocol::{CapacityUsage, NodeRow};
 use kube::api::ListParams;
 
 use crate::port::{BackendError, Gvk};
+use crate::runtime::supervisor::WatchRow;
 
+use super::normalize::normalize_row;
 use super::watch::{dynamic_api, sanitize_list_error};
 
-pub(crate) async fn nodes(client: kube::Client) -> Result<Vec<NodeRow>, BackendError> {
-    let api = dynamic_api(client, Gvk::core("v1", "Node"), "nodes".into(), false, None);
+pub(crate) struct NodeInventory {
+    pub(crate) rows: Vec<WatchRow>,
+    pub(crate) nodes: Vec<NodeRow>,
+}
+
+pub(crate) async fn nodes(
+    client: kube::Client,
+    context: &str,
+) -> Result<NodeInventory, BackendError> {
+    let gvk = Gvk::core("v1", "Node");
+    let api = dynamic_api(client, gvk.clone(), "nodes".into(), false, None);
     let listed = api
         .list(&ListParams::default())
         .await
         .map_err(|error| BackendError::Internal(sanitize_list_error(error)))?;
     let mut nodes: Vec<_> = listed.items.iter().filter_map(normalize_node).collect();
     nodes.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(nodes)
+    let rows = listed
+        .items
+        .iter()
+        .map(|node| normalize_row(context, &gvk, false, None, node))
+        .collect();
+    Ok(NodeInventory { rows, nodes })
 }
 
 fn normalize_node(node: &kube::core::DynamicObject) -> Option<NodeRow> {

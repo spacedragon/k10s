@@ -89,13 +89,14 @@ async fn real_adapter_accepts_the_infrastructure_subscription_capability() {
     let server = RecordedApiServer::standard();
     let adapter = adapter(&server);
 
-    let handle = adapter
+    let mut handle = adapter
         .subscribe(Subscribe::Infrastructure {
             context: CONTEXT.into(),
         })
         .await
         .expect("supported subscription must not force the UI unavailable state");
     assert_eq!(handle.id, format!("infrastructure:{CONTEXT}"));
+    assert!(handle.take_events().is_some());
 }
 
 #[tokio::test]
