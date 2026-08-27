@@ -1057,6 +1057,8 @@ impl K10sApp {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.shell.yaml_editors_mut().connection_lost();
+                            self.enter_resource_recovery();
+                            self.recovering = true;
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
                             self.view = AppView::Connecting;
                         }
@@ -3941,17 +3943,42 @@ mod tests {
                 WsEvent::Opened,
                 server_message(&welcome()),
                 server_message(&initial_bootstrap),
-                server_message(&gapped_event),
             ]),
             overflowed: false,
         }]);
 
         app.poll_at(100, 0);
+        let identity = deployment_identity("sequence-gap");
+        start_relation_request(&mut app, &identity);
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                }),
+                loaded_at_ms: 0,
+                refreshing: true,
+                refresh_error: None,
+            },
+        );
+        let generation = app.resource_generation;
+
+        app.handle_event(server_message(&gapped_event), 101, 0)
+            .unwrap();
 
         assert!(!matches!(app.view(), AppView::Failed { .. }));
         assert_eq!(app.client.phase(), ClientPhase::Ready);
         assert!(app.connection.is_some(), "existing connection remains live");
         assert_eq!(state.borrow().connect_count, 1);
+        assert!(app.recovering);
+        assert!(matches!(app.view(), AppView::Connecting));
+        assert_eq!(app.resource_generation, generation.wrapping_add(1));
+        assert!(app.detail_requests.is_empty());
+        assert!(app.relation_requests.is_empty());
+        assert!(app.primary_details.is_empty());
+        assert!(app.relations.is_empty());
         let request_kinds: Vec<_> = state
             .borrow()
             .sent
@@ -3960,9 +3987,12 @@ mod tests {
             .filter_map(request_kind)
             .collect();
         assert_eq!(
-            request_kinds,
-            ["bootstrap", "infrastructure.get", "bootstrap"],
-            "initial bootstrap loads infrastructure; the gap adds one resync bootstrap"
+            request_kinds
+                .iter()
+                .filter(|kind| kind.as_str() == "bootstrap")
+                .count(),
+            2,
+            "the gap adds one resync bootstrap: {request_kinds:?}"
         );
         assert_eq!(app.client.outbound_len(), 0);
     }
