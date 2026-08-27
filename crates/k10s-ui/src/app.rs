@@ -2890,15 +2890,15 @@ mod tests {
     use k10s_protocol::{
         BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
         ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
-        ResourceChanged, ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus,
-        Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk,
-        SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome,
-        YamlOutcome, buffer_hash,
+        ResourceChanged, ResourceGone, ResourceIdentity, ResourceListRow, ResourceSnapshotPage,
+        ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin,
+        SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
+        ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
     use super::{
-        AppConnection, AppView, ConnectionFactory, K10sApp, PrimaryDetailState, RelationState,
-        ResourceAction, SafeUiError,
+        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
     };
     use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
     use crate::workspace::{
@@ -4050,6 +4050,79 @@ mod tests {
         (app, state)
     }
 
+    fn namespace_row(name: &str, revision: u64) -> ResourceListRow {
+        ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind::core("v1", "Namespace"),
+                namespace: None,
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: String::new(),
+            created_at: String::new(),
+            projection: None,
+        }
+    }
+
+    fn namespace_frame(
+        subscription: &SubscriptionId,
+        kind: ServerKind,
+        sequence: u64,
+        payload: serde_json::Value,
+    ) -> ServerFrame {
+        ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription.clone()),
+            sequence: Some(sequence),
+            payload,
+        }
+    }
+
+    fn complete_namespace_snapshot(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        sequence: u64,
+        rows: Vec<ResourceListRow>,
+    ) {
+        for frame in [
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotBegin,
+                sequence,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotChunk,
+                sequence + 1,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(sequence + 1),
+                        rows,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+            namespace_frame(
+                subscription,
+                ServerKind::SnapshotEnd,
+                sequence + 2,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "test".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.handle_event(server_message(&frame), 0, 0).unwrap();
+        }
+    }
+
     fn deployment_identity(name: &str) -> ResourceIdentity {
         ResourceIdentity {
             context: "dev-local".into(),
@@ -4567,6 +4640,243 @@ mod tests {
             resource_watches(&state)
                 .iter()
                 .all(|watch| watch.gvk.kind != "Namespace")
+        );
+    }
+
+    #[test]
+    fn selected_custom_scope_switches_add_and_remove_namespace_catalog_demand() {
+        let (mut app, state) = ready_app();
+        app.types_context = Some("dev-local".to_owned());
+        app.resource_types = vec![
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".into(),
+                    version: "v1".into(),
+                    kind: "ClusterThing".into(),
+                },
+                namespaced: false,
+            },
+            k10s_protocol::ResourceTypeEntry {
+                gvk: GroupVersionKind {
+                    group: "example.io".into(),
+                    version: "v1".into(),
+                    kind: "Widget".into(),
+                },
+                namespaced: true,
+            },
+        ];
+        let window = app
+            .web_activate_workload(WorkloadKind::CustomResources)
+            .unwrap();
+        for (selected, demanded) in [
+            ("example.io/v1/ClusterThing", false),
+            ("example.io/v1/Widget", true),
+            ("example.io/v1/ClusterThing", false),
+        ] {
+            app.shell
+                .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+                    window,
+                    Some(selected.to_owned()),
+                ));
+            app.reconcile_selected_resource_streams();
+            assert_eq!(app.namespace_subscription.is_some(), demanded);
+        }
+        assert_eq!(
+            all_resource_watches(&state)
+                .iter()
+                .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+                .count(),
+            1,
+            "the namespaced selection creates exactly one catalog watch"
+        );
+    }
+
+    #[test]
+    fn namespace_watch_deltas_update_ready_names_without_changing_explicit_scope() {
+        let (mut app, _) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let explicit = NamespaceScope::Namespace("team-a".to_owned());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                window,
+                explicit.clone(),
+            ));
+        app.reconcile_selected_resource_streams();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("alpha", 1)]);
+
+        let beta = namespace_row("beta", 4);
+        app.handle_event(
+            server_message(&namespace_frame(
+                &subscription,
+                ServerKind::Event,
+                4,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("4".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: beta.identity.clone(),
+                        row: beta.clone(),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["alpha".into(), "beta".into()])
+        );
+        app.handle_event(
+            server_message(&namespace_frame(
+                &subscription,
+                ServerKind::Event,
+                5,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                    revision: Some("5".into()),
+                    payload: serde_json::to_value(ResourceGone {
+                        identity: beta.identity,
+                        revision: BackendRevision::new(5),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["alpha".into()])
+        );
+        let scope = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|candidate| candidate.id == window)
+            .and_then(|candidate| match &candidate.content {
+                WindowContent::Resource(state) => Some(state.namespace_scope.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(scope, explicit);
+    }
+
+    #[test]
+    fn resync_and_transport_loss_clear_ready_namespace_catalog() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("alpha", 1)]);
+        assert!(matches!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(_)
+        ));
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(4),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Loading
+        );
+
+        complete_namespace_snapshot(&mut app, &subscription, 5, vec![namespace_row("beta", 5)]);
+        app.transient_loss(100, 0);
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Loading
+        );
+    }
+
+    #[test]
+    fn reconnect_resubscribes_namespace_once_and_waits_for_snapshot_end() {
+        let (mut app, _) = ready_app();
+        app.web_activate_services();
+        let subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &subscription, 1, vec![namespace_row("old", 1)]);
+
+        app.transient_loss(100, 0);
+        assert!(app.client.retry_if_due(100).unwrap());
+        app.client.apply(welcome()).unwrap();
+        let mut rebuilt = Vec::new();
+        while let Some(frame) = app.client.take_outbound() {
+            rebuilt.push(frame);
+        }
+        let namespace_rebuilds =
+            rebuilt
+                .iter()
+                .filter(|frame| {
+                    let Ok(k10s_protocol::ClientPayload::Subscribe(k10s_protocol::Subscribe(
+                        selector,
+                    ))) = frame.decode_payload()
+                    else {
+                        return false;
+                    };
+                    matches!(
+                        serde_json::from_value(selector),
+                        Ok(SubscriptionSelector::Resource(ref spec))
+                            if spec.gvk == GroupVersionKind::core("v1", "Namespace")
+                    )
+                })
+                .count();
+        assert_eq!(namespace_rebuilds, 1, "rebuilt frames: {rebuilt:?}");
+        for frame in [
+            namespace_frame(
+                &subscription,
+                ServerKind::SnapshotBegin,
+                1,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            namespace_frame(
+                &subscription,
+                ServerKind::SnapshotChunk,
+                2,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(2),
+                        rows: vec![namespace_row("new", 2)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.client.apply(frame).unwrap();
+            assert_eq!(
+                app.build_resource_feed().namespace_catalog,
+                NamespaceCatalogState::Loading
+            );
+        }
+        app.client
+            .apply(namespace_frame(
+                &subscription,
+                ServerKind::SnapshotEnd,
+                3,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "test".into(),
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["new".into()])
         );
     }
 
