@@ -182,13 +182,17 @@ struct VersionEnvelope {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
     next_id: u64,
     next_z: u64,
     windows: Vec<V1Window>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Window {
     kind: PersistedWindowKind,
     title: String,

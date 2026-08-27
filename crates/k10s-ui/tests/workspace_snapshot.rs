@@ -140,6 +140,19 @@ fn versioned_snapshot_schemas_reject_cross_version_namespace_fields() {
 
 #[test]
 fn versioned_snapshot_schemas_reject_unknown_fields_even_when_required_fields_exist() {
+    let v3_shape_mislabeled_v1 =
+        r#"{"version":1,"next_id":2,"next_z":3,"free_window_resizing":true,"windows":[]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_shape_mislabeled_v1)
+            .is_err()
+    );
+
+    let v1_with_window_typo = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"veiw":null,"view":null}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v1_with_window_typo)
+            .is_err()
+    );
+
     let v3_shape_mislabeled_v2 =
         r#"{"version":2,"next_id":2,"next_z":3,"free_window_resizing":true,"windows":[]}"#;
     assert!(
