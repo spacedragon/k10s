@@ -99,6 +99,44 @@ fn recorded_deployment() -> String {
     .to_string()
 }
 
+fn recorded_pod() -> String {
+    json!({
+        "kind": "Pod",
+        "apiVersion": "v1",
+        "metadata": {
+            "name": "web",
+            "namespace": NS,
+            "uid": "uid-pod",
+            "resourceVersion": "44",
+            "creationTimestamp": "2026-08-21T00:00:00Z",
+        },
+        "status": {"phase": "Running"},
+    })
+    .to_string()
+}
+
+fn empty_event_list(api_version: &str) -> String {
+    json!({
+        "kind": "EventList",
+        "apiVersion": api_version,
+        "metadata": {"resourceVersion": "45"},
+        "items": [],
+    })
+    .to_string()
+}
+
+fn status_failure(code: u16, reason: &str) -> String {
+    json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "message": "sensitive upstream diagnostic must not escape",
+        "reason": reason,
+        "code": code,
+    })
+    .to_string()
+}
+
 #[tokio::test]
 async fn exact_identity_get_returns_tailored_detail_fields() {
     let server = RecordedApiServer::standard();
@@ -659,6 +697,116 @@ async fn unavailable_event_api_is_bounded_and_keeps_primary_detail() {
         detail.events_condition,
         k10s_protocol::EventsCondition::Unavailable
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deployment_detail_is_bounded_when_both_event_apis_block() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/deployments/web",
+        200,
+        &recorded_deployment(),
+    );
+    server.set_hanging_path("/api/v1/namespaces/default/events");
+    server.set_hanging_path("/apis/events.k8s.io/v1/namespaces/default/events");
+
+    let response = tokio::time::timeout(
+        Duration::from_millis(1_100),
+        detail(
+            &kernel(&server),
+            reference(deployments_gvk(), "web", "uid-web"),
+        ),
+    )
+    .await
+    .expect("one total event budget bounds deployment detail")
+    .expect("blocked event decoration never fails the primary deployment");
+
+    assert!(response.events.is_empty());
+    assert_eq!(
+        response.events_condition,
+        k10s_protocol::EventsCondition::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn forbidden_and_failed_event_variants_degrade_for_pods_and_deployments() {
+    enum EventFailure {
+        Status(u16, &'static str),
+        Transport,
+    }
+
+    let cases = [
+        (
+            pods_gvk(),
+            "/api/v1/namespaces/default/pods/web",
+            recorded_pod(),
+            "uid-pod",
+            "/api/v1/namespaces/default/events",
+            EventFailure::Status(403, "Forbidden"),
+        ),
+        (
+            pods_gvk(),
+            "/api/v1/namespaces/default/pods/web",
+            recorded_pod(),
+            "uid-pod",
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            EventFailure::Status(500, "InternalError"),
+        ),
+        (
+            deployments_gvk(),
+            "/apis/apps/v1/namespaces/default/deployments/web",
+            recorded_deployment(),
+            "uid-web",
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            EventFailure::Status(403, "Forbidden"),
+        ),
+        (
+            deployments_gvk(),
+            "/apis/apps/v1/namespaces/default/deployments/web",
+            recorded_deployment(),
+            "uid-web",
+            "/api/v1/namespaces/default/events",
+            EventFailure::Transport,
+        ),
+    ];
+
+    for (gvk, resource_path, object, uid, failing_path, failure) in cases {
+        let server = RecordedApiServer::standard();
+        server.set_response(resource_path, 200, &object);
+        server.set_response(
+            "/api/v1/namespaces/default/events",
+            200,
+            &empty_event_list("v1"),
+        );
+        server.set_response(
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            200,
+            &empty_event_list("events.k8s.io/v1"),
+        );
+        match failure {
+            EventFailure::Status(code, reason) => {
+                server.set_response(failing_path, code, &status_failure(code, reason));
+            }
+            EventFailure::Transport => server.set_transport_error("GET", failing_path),
+        }
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            detail(&kernel(&server), reference(gvk, "web", uid)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("event failure at {failing_path} stayed bounded"))
+        .unwrap_or_else(|error| {
+            panic!("event failure at {failing_path} leaked into primary detail: {error}")
+        });
+
+        assert!(response.events.is_empty(), "failure at {failing_path}");
+        assert_eq!(
+            response.events_condition,
+            k10s_protocol::EventsCondition::Unavailable,
+            "failure at {failing_path}"
+        );
+    }
 }
 
 fn hit_once(server: &RecordedApiServer, path: &str) {
