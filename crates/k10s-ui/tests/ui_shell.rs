@@ -167,6 +167,38 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
 }
 
 #[test]
+fn top_bar_menus_expose_window_view_and_help_actions() {
+    let mut harness = shell_harness();
+
+    harness.get_by_role_and_label(Role::Button, "File").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Exit");
+
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Minimize");
+    harness.get_by_role_and_label(Role::Button, "Enter full screen");
+
+    harness.get_by_role_and_label(Role::Button, "Help").click();
+    harness.run_steps(2);
+    harness.get_by_label("Documentation");
+    let help_buttons = harness
+        .query_all_by_role(Role::Button)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect::<Vec<_>>();
+    assert!(
+        help_buttons
+            .iter()
+            .any(|label| label.starts_with("Keyboard shortcuts"))
+    );
+    assert!(
+        help_buttons
+            .iter()
+            .any(|label| label.starts_with("About k10s"))
+    );
+}
+
+#[test]
 fn unavailable_context_stays_visible_but_cannot_dispatch_and_shows_reason() {
     let mut harness = shell_harness();
     harness.state_mut().contexts[1].availability = ContextAvailability::Unavailable;
