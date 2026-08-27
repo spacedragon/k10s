@@ -213,21 +213,28 @@ struct V1ListView {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
     next_id: u64,
     next_z: u64,
     windows: Vec<V2Window>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V3Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
     next_id: u64,
     next_z: u64,
     free_window_resizing: bool,
-    windows: Vec<PersistedWindow>,
+    windows: Vec<V3Window>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2Window {
     kind: PersistedWindowKind,
     title: String,
@@ -239,7 +246,32 @@ struct V2Window {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct V3Window {
+    kind: PersistedWindowKind,
+    title: String,
+    geometry: WindowGeom,
+    #[serde(default)]
+    z: u64,
+    view: Option<V3ListView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2ListView {
+    namespace_scope: NamespaceScope,
+    search: String,
+    filters: BTreeMap<String, String>,
+    sort: Option<SortSpec>,
+    #[serde(default = "default_split_ratio")]
+    split_ratio: f32,
+    #[serde(default = "default_true")]
+    detail_visible: bool,
+    custom_kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3ListView {
     namespace_scope: NamespaceScope,
     search: String,
     filters: BTreeMap<String, String>,
@@ -312,11 +344,30 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
             SNAPSHOT_VERSION => {
                 let raw: V3Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let windows = raw
+                    .windows
+                    .into_iter()
+                    .map(|window| PersistedWindow {
+                        kind: window.kind,
+                        title: window.title,
+                        geometry: window.geometry,
+                        z: window.z,
+                        view: window.view.map(|view| PersistedListView {
+                            namespace_scope: view.namespace_scope,
+                            search: view.search,
+                            filters: view.filters,
+                            sort: view.sort,
+                            split_ratio: view.split_ratio,
+                            detail_visible: view.detail_visible,
+                            custom_kind: view.custom_kind,
+                        }),
+                    })
+                    .collect();
                 (
                     raw.next_id,
                     raw.next_z,
                     raw.free_window_resizing,
-                    raw.windows,
+                    windows,
                     None,
                 )
             }

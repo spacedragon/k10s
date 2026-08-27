@@ -139,6 +139,30 @@ fn versioned_snapshot_schemas_reject_cross_version_namespace_fields() {
 }
 
 #[test]
+fn versioned_snapshot_schemas_reject_unknown_fields_even_when_required_fields_exist() {
+    let v3_shape_mislabeled_v2 =
+        r#"{"version":2,"next_id":2,"next_z":3,"free_window_resizing":true,"windows":[]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_shape_mislabeled_v2)
+            .is_err()
+    );
+
+    let v3_with_legacy_view_field = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":{"kind":"all_namespaces"},"namespace":"legacy","search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(
+            v3_with_legacy_view_field
+        )
+        .is_err()
+    );
+
+    let v3_with_window_typo = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"veiw":null,"view":null}]}"#;
+    assert!(
+        serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v3_with_window_typo)
+            .is_err()
+    );
+}
+
+#[test]
 fn v2_rejects_malformed_scope_tags_and_unsupported_versions() {
     let malformed = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":{"kind":"somewhere_else"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     assert!(
