@@ -33,6 +33,39 @@ fn namespace_scope_default_is_all_namespaces() {
 }
 
 #[test]
+fn free_window_resizing_toggles_without_changing_windows() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let before: Vec<_> = state
+        .windows()
+        .iter()
+        .map(|window| (window.id, window.content.clone()))
+        .collect();
+
+    assert!(!state.free_window_resizing());
+    assert!(events(&mut state, WorkspaceCommand::ToggleFreeWindowResizing).is_empty());
+    assert!(state.free_window_resizing());
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|window| (window.id, window.content.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+
+    assert!(events(&mut state, WorkspaceCommand::ToggleFreeWindowResizing).is_empty());
+    assert!(!state.free_window_resizing());
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|window| (window.id, window.content.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
 fn namespace_scope_change_is_guarded_and_clears_stale_detail_on_commit() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);

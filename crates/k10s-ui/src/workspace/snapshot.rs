@@ -450,6 +450,7 @@ where
 
         let mut state = Self {
             windows: Vec::new(),
+            free_window_resizing: false,
             next_id: 1,
             next_z: 0,
             context: String::new(),

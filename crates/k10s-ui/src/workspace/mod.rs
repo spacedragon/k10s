@@ -56,6 +56,8 @@ pub enum WorkspaceCommand<I> {
     ActivateLauncherItem(LauncherItem),
     /// Launcher `+`: open another independent workload instance.
     AddWorkloadInstance(WorkloadKind),
+    /// Toggle whether workspace windows may be resized freely.
+    ToggleFreeWindowResizing,
     /// Raise a window above the others.
     FocusWindow(WindowId),
     CloseWindow(WindowId),
@@ -141,6 +143,7 @@ pub enum WorkspaceEvent<I> {
 #[derive(Debug, Clone)]
 pub struct WorkspaceState<I> {
     windows: Vec<Window<I>>,
+    free_window_resizing: bool,
     next_id: u64,
     next_z: u64,
     /// Active context; empty until the first switch commits.
@@ -168,6 +171,7 @@ where
     pub fn new() -> Self {
         let mut state = Self {
             windows: Vec::new(),
+            free_window_resizing: false,
             next_id: 1,
             next_z: 1,
             context: String::new(),
@@ -180,6 +184,12 @@ where
 
     pub fn windows(&self) -> &[Window<I>] {
         &self.windows
+    }
+
+    /// Whether workspace windows may be resized freely.
+    #[must_use]
+    pub fn free_window_resizing(&self) -> bool {
+        self.free_window_resizing
     }
 
     pub fn window(&self, id: WindowId) -> Option<&Window<I>> {
@@ -282,6 +292,10 @@ where
             WorkspaceCommand::AddWorkloadInstance(kind) => {
                 let id = self.open_workload(kind);
                 vec![WorkspaceEvent::Opened(id)]
+            }
+            WorkspaceCommand::ToggleFreeWindowResizing => {
+                self.free_window_resizing = !self.free_window_resizing;
+                Vec::new()
             }
             WorkspaceCommand::FocusWindow(id) => self.focus(id),
             WorkspaceCommand::CloseWindow(id) => self.close_window(id),
