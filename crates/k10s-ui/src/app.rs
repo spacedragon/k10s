@@ -426,22 +426,7 @@ impl K10sApp {
             self.infrastructure_load,
         );
         for action in self.shell.drain_resource_actions() {
-            match action {
-                ResourceAction::RetryPrimary(identity) => {
-                    if let Some(pending) = self.detail_requests.remove(&identity) {
-                        let _ = self.client.cancel(&pending.request);
-                    }
-                    self.details.remove(&identity);
-                    self.primary_details.remove(&identity);
-                }
-                ResourceAction::RetryRelations(identity) => {
-                    if let Some(pending) = self.relation_requests.remove(&identity) {
-                        let _ = self.client.cancel(&pending.request);
-                    }
-                    self.relations.insert(identity, RelationState::NotRequested);
-                }
-                ResourceAction::RetryNamespaceCatalog => {}
-            }
+            self.handle_resource_action(action);
         }
         let resource_now_ms =
             u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1136,12 +1121,21 @@ impl K10sApp {
                                     .map(|(identity, _)| identity.clone())
                             {
                                 self.relation_requests.remove(&identity);
-                                self.relations.insert(
-                                    identity,
-                                    RelationState::Failed(SafeUiError::new(
-                                        server_error.safe_message.clone(),
-                                    )),
-                                );
+                                let error = SafeUiError::new(server_error.safe_message.clone());
+                                match self.relations.get_mut(&identity) {
+                                    Some(RelationState::Loaded {
+                                        refreshing,
+                                        refresh_error,
+                                        ..
+                                    }) => {
+                                        *refreshing = false;
+                                        *refresh_error = Some(error);
+                                    }
+                                    _ => {
+                                        self.relations
+                                            .insert(identity, RelationState::Failed(error));
+                                    }
+                                }
                             }
                         }
                         ClientError::Server(ref server_error)
@@ -1934,6 +1928,32 @@ impl K10sApp {
         self.refresh_details_at(now_ms);
     }
 
+    fn handle_resource_action(&mut self, action: ResourceAction) {
+        match action {
+            ResourceAction::RetryPrimary(identity) => {
+                if let Some(pending) = self.detail_requests.remove(&identity) {
+                    let _ = self.client.cancel(&pending.request);
+                }
+                self.details.remove(&identity);
+                self.primary_details.remove(&identity);
+            }
+            ResourceAction::RetryRelations(identity) => {
+                if let Some(pending) = self.relation_requests.remove(&identity) {
+                    let _ = self.client.cancel(&pending.request);
+                }
+                if !matches!(
+                    self.relations.get(&identity),
+                    Some(RelationState::Loaded { .. })
+                ) {
+                    self.relations.insert(identity, RelationState::NotRequested);
+                }
+            }
+            // Task 6 owns namespace-catalog lifecycle and consumes this
+            // already-stable shell action variant there.
+            ResourceAction::RetryNamespaceCatalog => {}
+        }
+    }
+
     fn refresh_details_at(&mut self, now_ms: u64) {
         // Until bootstrap identifies the server's authoritative context, the
         // workspace may still contain selections from the lost generation.
@@ -2014,7 +2034,13 @@ impl K10sApp {
                         },
                     );
                 }
-                Err(_) => return,
+                Err(_) => {
+                    self.primary_details.insert(
+                        identity,
+                        PrimaryDetailState::Failed(SafeUiError::new("could not request details")),
+                    );
+                    continue;
+                }
             }
         }
         // Collect completed detail responses.
@@ -2086,27 +2112,58 @@ impl K10sApp {
             }
             let needs_request = match self.relations.get(&identity) {
                 None | Some(RelationState::NotRequested) => true,
-                Some(RelationState::Loaded { loaded_at_ms, .. }) => {
-                    now_ms.saturating_sub(*loaded_at_ms) >= RELATIONS_TTL_MS
+                Some(RelationState::Loaded {
+                    loaded_at_ms,
+                    refresh_error,
+                    ..
+                }) => {
+                    refresh_error.is_some()
+                        || now_ms.saturating_sub(*loaded_at_ms) >= RELATIONS_TTL_MS
                 }
                 Some(RelationState::Loading | RelationState::Failed(_)) => false,
             };
             if !needs_request {
                 continue;
             }
-            if let Some(RelationState::Loaded { refreshing, .. }) =
-                self.relations.get_mut(&identity)
+            let refreshing_stale = matches!(
+                self.relations.get(&identity),
+                Some(RelationState::Loaded { .. })
+            );
+            if let Some(RelationState::Loaded {
+                refreshing,
+                refresh_error,
+                ..
+            }) = self.relations.get_mut(&identity)
             {
                 *refreshing = true;
+                *refresh_error = None;
             } else {
                 self.relations
                     .insert(identity.clone(), RelationState::Loading);
             }
-            let Ok(request) = self
+            let request = match self
                 .client
                 .begin(Query::ResourceRelations(identity.clone()))
-            else {
-                return;
+            {
+                Ok(request) => request,
+                Err(_) => {
+                    let error = SafeUiError::new("could not request related resources");
+                    if refreshing_stale {
+                        if let Some(RelationState::Loaded {
+                            refreshing,
+                            refresh_error,
+                            ..
+                        }) = self.relations.get_mut(&identity)
+                        {
+                            *refreshing = false;
+                            *refresh_error = Some(error);
+                        }
+                    } else {
+                        self.relations
+                            .insert(identity, RelationState::Failed(error));
+                    }
+                    continue;
+                }
             };
             self.relation_requests.insert(
                 identity.clone(),
@@ -2146,14 +2203,26 @@ impl K10sApp {
                             response,
                             loaded_at_ms: now_ms,
                             refreshing: false,
+                            refresh_error: None,
                         },
                     );
                 }
             } else if let Some(failure) = self.client.take_failure(pending.request) {
-                self.relations.insert(
-                    identity,
-                    RelationState::Failed(SafeUiError::new(failure.safe_message)),
-                );
+                let error = SafeUiError::new(failure.safe_message);
+                match self.relations.get_mut(&identity) {
+                    Some(RelationState::Loaded {
+                        refreshing,
+                        refresh_error,
+                        ..
+                    }) => {
+                        *refreshing = false;
+                        *refresh_error = Some(error);
+                    }
+                    _ => {
+                        self.relations
+                            .insert(identity, RelationState::Failed(error));
+                    }
+                }
             }
         }
     }
@@ -2671,10 +2740,13 @@ mod tests {
         YamlOutcome, buffer_hash,
     };
 
-    use super::{AppConnection, AppView, ConnectionFactory, K10sApp};
+    use super::{
+        AppConnection, AppView, ConnectionFactory, K10sApp, PrimaryDetailState, RelationState,
+        ResourceAction, SafeUiError,
+    };
     use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
     use crate::workspace::{
-        NamespaceScope, WindowContent, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
+        NamespaceScope, WindowContent, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
 
     #[test]
@@ -3827,6 +3899,214 @@ mod tests {
         }
     }
 
+    fn pin_deployment_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
+        window
+    }
+
+    fn exhaust_request_capacity(app: &mut K10sApp) {
+        for _ in 0..1_000 {
+            if app.client.begin(Query::Bootstrap).is_err() {
+                return;
+            }
+        }
+        panic!("client request capacity did not exhaust");
+    }
+
+    #[test]
+    fn primary_begin_failure_is_explicitly_failed_without_pending_loading() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("begin-fails");
+        pin_deployment_without_request(&mut app, &identity);
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(1);
+
+        assert!(matches!(
+            app.primary_details.get(&identity),
+            Some(PrimaryDetailState::Failed(error))
+                if error.message() == "could not request details"
+        ));
+        assert!(!app.detail_requests.contains_key(&identity));
+        app.refresh_details_at(2);
+        assert!(matches!(
+            app.primary_details.get(&identity),
+            Some(PrimaryDetailState::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn one_retry_action_starts_exactly_one_replacement_request() {
+        let (mut app, state) = ready_app();
+        let identity = deployment_identity("retry-once");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.primary_details.insert(
+            identity.clone(),
+            PrimaryDetailState::Failed(SafeUiError::new("failed")),
+        );
+        let before_primary = state.borrow().sent.len();
+        app.handle_resource_action(ResourceAction::RetryPrimary(identity.clone()));
+        app.refresh_details_at(1);
+        app.refresh_details_at(2);
+        assert_eq!(
+            state.borrow().sent[before_primary..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.detail")
+                .count(),
+            1
+        );
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Failed(SafeUiError::new("failed")),
+        );
+        let before_relations = state.borrow().sent.len();
+        app.handle_resource_action(ResourceAction::RetryRelations(identity));
+        app.refresh_details_at(3);
+        app.refresh_details_at(4);
+        assert_eq!(
+            state.borrow().sent[before_relations..]
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn initial_relation_begin_failure_never_leaves_loading_without_pending() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("relations-begin-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(1);
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Failed(error))
+                if error.message() == "could not request related resources"
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+    }
+
+    #[test]
+    fn stale_relation_begin_failure_retains_rows_and_exposes_refresh_error() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("refresh-begin-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                },
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        exhaust_request_capacity(&mut app);
+
+        app.refresh_details_at(30_000);
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: false,
+                refresh_error: Some(error),
+                response,
+                ..
+            }) if error.message() == "could not request related resources"
+                && response.identity == identity
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+    }
+
+    #[test]
+    fn stale_relation_server_failure_retains_rows_and_safe_message() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("refresh-server-fails");
+        let window = pin_deployment_without_request(&mut app, &identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: Vec::new(),
+                },
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        app.refresh_details_at(30_000);
+        let request_id = app
+            .relation_requests
+            .get(&identity)
+            .expect("refresh is pending")
+            .request
+            .id()
+            .clone();
+        let rejection = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: Some(request_id.clone()),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Unauthorized,
+                "relations forbidden",
+                Retryability::AfterRefresh,
+                ErrorScope::Request,
+                request_id.as_str(),
+            ))
+            .unwrap(),
+        };
+
+        app.handle_event(server_message(&rejection), 30_001, 0)
+            .unwrap();
+
+        assert!(matches!(
+            app.relations.get(&identity),
+            Some(RelationState::Loaded {
+                refreshing: false,
+                refresh_error: Some(error),
+                response,
+                ..
+            }) if error.message() == "relations forbidden" && response.identity == identity
+        ));
+        assert!(!app.relation_requests.contains_key(&identity));
+    }
+
     #[test]
     fn controller_pods_demand_is_lazy_and_deduplicated() {
         let (mut app, state) = ready_app();
@@ -3889,6 +4169,7 @@ mod tests {
                 },
                 loaded_at_ms: 10,
                 refreshing: false,
+                refresh_error: None,
             },
         );
         let before = state.borrow().sent.len();

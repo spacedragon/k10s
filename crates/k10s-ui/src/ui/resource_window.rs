@@ -42,6 +42,7 @@ pub enum PrimaryDetailState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Public projection intentionally mirrors the protocol value.
 pub enum RelationState {
     NotRequested,
     Loading,
@@ -49,6 +50,7 @@ pub enum RelationState {
         response: ResourceRelationsResponse,
         loaded_at_ms: u64,
         refreshing: bool,
+        refresh_error: Option<SafeUiError>,
     },
     Failed(SafeUiError),
 }

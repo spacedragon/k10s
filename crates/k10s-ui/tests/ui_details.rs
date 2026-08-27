@@ -472,6 +472,7 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
             },
             loaded_at_ms: 0,
             refreshing: false,
+            refresh_error: None,
         },
     );
     open(
@@ -527,6 +528,64 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         pinned,
         vec![identity("Pod", "web-frontend-7d9f8-00001")],
         "a related row click opens exactly one dedicated window for it"
+    );
+}
+
+#[test]
+fn failed_relation_refresh_keeps_stale_rows_and_retries_once() {
+    let mut harness = harness();
+    let deployment = identity("Deployment", "web-frontend");
+    let detail = deployment_detail("web-frontend");
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(deployment.clone(), detail.clone());
+    harness.state_mut().feed.relations.insert(
+        deployment.clone(),
+        RelationState::Loaded {
+            response: ResourceRelationsResponse {
+                identity: deployment.clone(),
+                revision: BackendRevision::new(1_010),
+                groups: detail.related,
+            },
+            loaded_at_ms: 0,
+            refreshing: false,
+            refresh_error: Some(SafeUiError::new("refresh denied")),
+        },
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "Tab Pods")
+        .click();
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    window.get_by_label("web-frontend-7d9f8-00001 · Running");
+    window.get_by_label("Refresh failed: refresh denied");
+    window
+        .get_by_role_and_label(Role::Button, "Retry related resources")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryRelations(deployment)]
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_resource_actions()
+            .is_empty()
     );
 }
 

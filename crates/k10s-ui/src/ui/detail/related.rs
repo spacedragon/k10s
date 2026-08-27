@@ -45,10 +45,18 @@ pub(super) fn show<I>(
         Some(crate::ui::RelationState::Loaded {
             response,
             refreshing,
+            refresh_error,
             ..
         }) => {
             if *refreshing {
                 ui.label("Refreshing related resources");
+            }
+            if let Some(error) = refresh_error {
+                ui.label(format!("Refresh failed: {}", error.message()));
+                if ui.button("Retry related resources").clicked() {
+                    resource_actions
+                        .push(crate::ui::ResourceAction::RetryRelations(identity.clone()));
+                }
             }
             response.groups.as_slice()
         }
