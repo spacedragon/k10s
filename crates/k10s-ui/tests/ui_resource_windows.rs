@@ -174,6 +174,22 @@ fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
     window.get_by_label("Namespaces unavailable: namespace access denied");
     assert!(window.query_by_label("backend raw details").is_none());
     window
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none(),
+        "an unavailable catalog must keep the namespace selector closed"
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "default")
+            .is_none()
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Retry namespaces")
         .click();
     harness.run_steps(1);
