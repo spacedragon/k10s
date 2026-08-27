@@ -21,6 +21,26 @@ fn adapter(server: &RecordedApiServer) -> KubeAdapter {
 #[tokio::test]
 async fn real_adapter_projects_core_nodes_instead_of_rejecting_infrastructure() {
     let server = RecordedApiServer::standard();
+    for (path, kind, api_version) in [
+        ("/api/v1/pods", "PodList", "v1"),
+        ("/apis/apps/v1/deployments", "DeploymentList", "apps/v1"),
+        ("/apis/apps/v1/statefulsets", "StatefulSetList", "apps/v1"),
+        ("/apis/apps/v1/daemonsets", "DaemonSetList", "apps/v1"),
+        ("/apis/batch/v1/jobs", "JobList", "batch/v1"),
+        ("/apis/batch/v1/cronjobs", "CronJobList", "batch/v1"),
+    ] {
+        server.set_response(
+            path,
+            200,
+            &serde_json::json!({
+                "kind": kind,
+                "apiVersion": api_version,
+                "metadata": {"resourceVersion": "42"},
+                "items": []
+            })
+            .to_string(),
+        );
+    }
     server.set_response(
         "/api/v1/nodes",
         200,
@@ -75,7 +95,7 @@ async fn real_adapter_accepts_the_infrastructure_subscription_capability() {
         })
         .await
         .expect("supported subscription must not force the UI unavailable state");
-    assert_eq!(handle.id, "infrastructure-watch");
+    assert_eq!(handle.id, format!("infrastructure:{CONTEXT}"));
 }
 
 #[tokio::test]

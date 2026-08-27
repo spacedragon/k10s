@@ -3,17 +3,11 @@
 use k10s_protocol::{CapacityUsage, NodeRow};
 use kube::api::ListParams;
 
-use crate::catalog::CatalogSnapshot;
 use crate::port::{BackendError, Gvk};
-use crate::runtime::now_rfc3339;
 
 use super::watch::{dynamic_api, sanitize_list_error};
 
-pub(crate) async fn snapshot(
-    client: kube::Client,
-    context: String,
-    revision: u64,
-) -> Result<CatalogSnapshot, BackendError> {
+pub(crate) async fn nodes(client: kube::Client) -> Result<Vec<NodeRow>, BackendError> {
     let api = dynamic_api(client, Gvk::core("v1", "Node"), "nodes".into(), false, None);
     let listed = api
         .list(&ListParams::default())
@@ -21,12 +15,7 @@ pub(crate) async fn snapshot(
         .map_err(|error| BackendError::Internal(sanitize_list_error(error)))?;
     let mut nodes: Vec<_> = listed.items.iter().filter_map(normalize_node).collect();
     nodes.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(CatalogSnapshot::live_nodes(
-        context,
-        revision,
-        now_rfc3339(),
-        nodes,
-    ))
+    Ok(nodes)
 }
 
 fn normalize_node(node: &kube::core::DynamicObject) -> Option<NodeRow> {

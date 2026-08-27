@@ -360,7 +360,7 @@ impl KubernetesAccess for KubeAdapter {
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
-                Query::Infrastructure { context } => self.infrastructure(context).await,
+                Query::Infrastructure { context } => self.infrastructure(&context).await,
                 Query::OperationStatus { operation_ids } => Ok(QueryResult::OperationStatus(
                     self.operations.status(&operation_ids),
                 )),
@@ -393,11 +393,15 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_watch(context, gvk, namespace).await,
+                // Live infrastructure updates are refreshed explicitly by
+                // the client for now. Accepting the subscription keeps the
+                // capability available instead of replacing a successful
+                // snapshot with an unsupported-capability placeholder.
                 Subscribe::Infrastructure { context } => {
                     if !self.knows_context(&context) {
                         Err(BackendError::NotFound)
                     } else {
-                        Ok(SubscriptionHandle::new("infrastructure-watch"))
+                        Ok(SubscriptionHandle::new(format!("infrastructure:{context}")))
                     }
                 }
                 Subscribe::StreamRedeem { ticket_id, route } => {
@@ -421,15 +425,53 @@ impl KubernetesAccess for KubeAdapter {
 }
 
 impl KubeAdapter {
-    async fn infrastructure(&self, context: String) -> Result<QueryResult, BackendError> {
-        if !self.knows_context(&context) {
+    /// Assemble the desktop overview from fresh normalized resource lists.
+    /// Missing API kinds are skipped (clusters legitimately differ), while
+    /// authorization and transport failures remain visible to the caller.
+    async fn infrastructure(&self, context: &str) -> Result<QueryResult, BackendError> {
+        if !self.knows_context(context) {
             return Err(BackendError::NotFound);
         }
-        let client = self.cluster_client(&context).await?;
+        let catalog = self.catalog_for(context).await?;
+        let overview_kinds = [
+            "Node",
+            "Pod",
+            "Deployment",
+            "StatefulSet",
+            "DaemonSet",
+            "Job",
+            "CronJob",
+        ];
+        let descriptors = catalog
+            .types
+            .iter()
+            .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut records = Vec::new();
+        for descriptor in descriptors {
+            match self
+                .resource_list(context.to_owned(), descriptor.gvk, None)
+                .await
+            {
+                Ok(QueryResult::ResourceList(list)) => records.extend(list.rows),
+                Ok(_) => unreachable!("resource_list always returns a resource list"),
+                Err(BackendError::NotFound) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        let client = self.cluster_client(context).await?;
+        let nodes = infrastructure::nodes(client).await?;
         let revision = self.watches.next_revision();
-        infrastructure::snapshot(client, context, revision)
-            .await
-            .map(QueryResult::Infrastructure)
+        Ok(QueryResult::Infrastructure(
+            crate::catalog::CatalogSnapshot::live(
+                context,
+                revision,
+                crate::runtime::now_rfc3339(),
+                records,
+                nodes,
+            ),
+        ))
     }
 
     /// Open a supervised demand-driven resource watch for one selection.
