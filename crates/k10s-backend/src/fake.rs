@@ -839,6 +839,7 @@ impl FakeKubernetes {
                     created_at: rfc3339(FAKE_EPOCH_SECS),
                     owner_references: Vec::new(),
                     events: Vec::new(),
+                    events_condition: crate::port::RecordEventsCondition::Available,
                     manifest: String::new(),
                     projection: None,
                 };
@@ -850,6 +851,7 @@ impl FakeKubernetes {
                     created_at: rfc3339(FAKE_EPOCH_SECS),
                     owner_references: Vec::new(),
                     events: Vec::new(),
+                    events_condition: crate::port::RecordEventsCondition::Available,
                     manifest: String::new(),
                     projection: None,
                 };
@@ -1059,6 +1061,7 @@ impl FakeKubernetes {
             created_at: rfc3339(FAKE_EPOCH_SECS),
             owner_references: Vec::new(),
             events: Vec::new(),
+            events_condition: crate::port::RecordEventsCondition::Available,
             manifest: String::new(),
             projection: None,
         };
@@ -1378,13 +1381,24 @@ impl KubernetesAccess for FakeKubernetes {
                         .ok_or(BackendError::NotFound)
                 }
                 Query::ResourceRelations { reference } => {
-                    let state = self.lock();
+                    let mut state = self.lock();
                     if state.find_record(&reference).is_none() {
                         return Err(BackendError::NotFound);
                     }
                     let groups = state.find_related(&reference);
+                    let revision = state.advance_revision();
+                    let groups = groups
+                        .into_iter()
+                        .map(|mut group| {
+                            for record in &mut group.records {
+                                record.revision = revision;
+                            }
+                            group
+                        })
+                        .collect();
                     Ok(QueryResult::ResourceRelations(RelatedData {
                         reference,
+                        revision,
                         groups,
                     }))
                 }
@@ -1804,6 +1818,7 @@ fn record(seed: RecordSeed<'_>) -> ResourceRecord {
         created_at: rfc3339(FAKE_EPOCH_SECS + seed.offset_secs),
         owner_references: seed.owner_references,
         events,
+        events_condition: crate::port::RecordEventsCondition::Available,
         manifest: String::new(),
         projection: seed.projection,
     }

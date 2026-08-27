@@ -102,5 +102,9 @@ pub(crate) fn related_data(
             .sort_by(|left, right| left.reference.cmp(&right.reference));
     }
     groups.sort_by(|left, right| left.gvk.cmp(&right.gvk));
-    RelatedData { reference, groups }
+    RelatedData {
+        reference,
+        revision,
+        groups,
+    }
 }

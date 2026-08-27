@@ -138,6 +138,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
                 value: "2/2 ready".to_owned(),
             }],
         }],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: Vec::new(),
         related: Vec::new(),
         capabilities: ResourceCapabilities {
@@ -175,6 +176,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
                 value: "Running".to_owned(),
             }],
         }],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: Vec::new(),
         related: Vec::new(),
         capabilities: ResourceCapabilities {

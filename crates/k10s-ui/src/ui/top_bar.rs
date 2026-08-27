@@ -1,6 +1,8 @@
 //! Compact global menus, connection state, refresh, and context selection.
 
-use egui::{ComboBox, Label, Layout, MenuBar, RichText, Sense, WidgetInfo, WidgetType};
+use egui::{
+    ComboBox, Label, Layout, MenuBar, RichText, Sense, ViewportCommand, WidgetInfo, WidgetType,
+};
 use k10s_protocol::{Context, ContextAvailability};
 
 use super::{ConnectionState, theme};
@@ -21,9 +23,46 @@ pub(super) fn show(
 
     MenuBar::new().ui(ui, |ui| {
         ui.push_id("k10s.top_bar.menus", |ui| {
-            ui.menu_button("File", |_| {});
-            ui.menu_button("View", |_| {});
-            ui.menu_button("Help", |_| {});
+            ui.menu_button("File", |ui| {
+                if ui.button("Exit").clicked() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    ui.close();
+                }
+            });
+            ui.menu_button("View", |ui| {
+                if ui.button("Minimize").clicked() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
+                    ui.close();
+                }
+
+                let fullscreen = ui
+                    .ctx()
+                    .input(|input| input.viewport().fullscreen.unwrap_or(false));
+                let fullscreen_label = if fullscreen {
+                    "Exit full screen"
+                } else {
+                    "Enter full screen"
+                };
+                if ui.button(fullscreen_label).clicked() {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
+                    ui.close();
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                ui.hyperlink_to(
+                    "Documentation",
+                    "https://github.com/spacedragon/k10s#readme",
+                );
+                ui.menu_button("Keyboard shortcuts", |ui| {
+                    ui.label("Refresh resources: Ctrl+R");
+                    ui.label("Close window: use the window close button");
+                });
+                ui.menu_button("About k10s", |ui| {
+                    ui.label(format!("k10s {}", env!("CARGO_PKG_VERSION")));
+                    ui.label("A Kubernetes desktop dashboard");
+                });
+            });
         });
 
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {

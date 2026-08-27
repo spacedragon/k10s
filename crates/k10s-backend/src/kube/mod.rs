@@ -664,7 +664,10 @@ impl KubeAdapter {
 
         let revision = self.watches.next_revision();
         let mut record = crate::runtime::record_from_row(&read.row, revision);
-        record.events = events::events_for(&client, &reference, descriptor.namespaced).await?;
+        let (events, condition) =
+            events::events_for(&client, &reference, descriptor.namespaced).await;
+        record.events = events;
+        record.events_condition = condition;
         record.manifest = read.manifest;
         self.operations.refresh_scope(&reference.coalescing_key());
         Ok(QueryResult::ResourceDetail(record))

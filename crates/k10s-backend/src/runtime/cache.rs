@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::port::{ResourceListData, ResourceRecord, ResourceRef};
+use crate::port::{RecordEventsCondition, ResourceListData, ResourceRecord, ResourceRef};
 use crate::runtime::supervisor::WatchRow;
 use crate::watch::WatchSelector;
 
@@ -60,6 +60,7 @@ pub(crate) fn record_from_row(row: &WatchRow, revision: u64) -> ResourceRecord {
         created_at: row.created_at.clone(),
         owner_references: row.owner_references.clone(),
         events: Vec::new(),
+        events_condition: RecordEventsCondition::Available,
         manifest: String::new(),
         projection: row.projection.clone(),
     }
