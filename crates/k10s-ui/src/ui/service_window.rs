@@ -192,6 +192,7 @@ impl<I> Default for TableActions<I> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
+    scratch: &mut super::resource_window::ResourceUiState,
     window_id: WindowId,
     state: &mut ServiceWindowState<I>,
     feed: &ResourceFeed,
@@ -228,54 +229,14 @@ where
             queued.push(WorkspaceCommand::SetSearch(window_id, search));
         }
 
-        ui.label(match (&state.namespace_scope, compact_controls) {
-            (crate::workspace::NamespaceScope::ContextDefault, true) => {
-                format!("Default: {}", context_namespace.unwrap_or("default"))
-            }
-            (crate::workspace::NamespaceScope::ContextDefault, false) => format!(
-                "Context default ({})",
-                context_namespace.unwrap_or("default")
-            ),
-            (crate::workspace::NamespaceScope::Namespace(value), true) => {
-                format!("NS: {value}")
-            }
-            (crate::workspace::NamespaceScope::Namespace(value), false) => {
-                format!("Namespace: {value}")
-            }
-            (crate::workspace::NamespaceScope::AllNamespaces, _) => "All namespaces".to_owned(),
-        });
-        let mut namespace = match &state.namespace_scope {
-            crate::workspace::NamespaceScope::Namespace(value) => value.clone(),
-            _ => String::new(),
-        };
-        let namespace_edit = ui.add(
-            TextEdit::singleline(&mut namespace)
-                .hint_text("Namespace filter")
-                .desired_width(if compact_controls { 70.0 } else { 140.0 }),
+        super::resource_window::show_namespace_combobox(
+            ui,
+            scratch,
+            window_id,
+            &state.namespace_scope,
+            &feed.namespace_catalog,
+            queued,
         );
-        namespace_edit.widget_info(|| {
-            WidgetInfo::labeled(WidgetType::TextEdit, true, "Namespace filter".to_owned())
-        });
-        if namespace_edit.changed() {
-            let parsed = namespace.trim().to_owned();
-            let scope = if parsed.is_empty() {
-                crate::workspace::NamespaceScope::ContextDefault
-            } else {
-                crate::workspace::NamespaceScope::Namespace(parsed)
-            };
-            queued.push(WorkspaceCommand::SetNamespaceScope(window_id, scope));
-        }
-        let all_namespaces_label = if compact_controls {
-            "All"
-        } else {
-            "All namespaces"
-        };
-        if ui.button(all_namespaces_label).clicked() {
-            queued.push(WorkspaceCommand::SetNamespaceScope(
-                window_id,
-                crate::workspace::NamespaceScope::AllNamespaces,
-            ));
-        }
 
         let filters_active = !state.search.is_empty()
             || state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces;
@@ -365,7 +326,7 @@ where
                 ui,
                 window_id,
                 !state.search.is_empty()
-                    || state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault,
+                    || state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces,
                 state.sort.as_ref(),
                 &filtered,
                 |row| {

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use egui::{RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
+use egui::{ComboBox, RichText, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
     ResourceRelationsResponse, ResourceTypeEntry,
@@ -162,13 +162,95 @@ impl RowIdentity for () {
 #[derive(Debug, Default)]
 pub(super) struct ResourceUiState {
     picker_search: HashMap<WindowId, String>,
+    namespace_search: HashMap<WindowId, String>,
 }
 
 impl ResourceUiState {
     /// Drop scratch entries for closed windows.
     pub(super) fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
         self.picker_search.retain(|id, _| live(*id));
+        self.namespace_search.retain(|id, _| live(*id));
     }
+}
+
+/// Render the one shared namespace selector used by every namespaced list.
+pub(super) fn show_namespace_combobox<I>(
+    ui: &mut egui::Ui,
+    scratch: &mut ResourceUiState,
+    window_id: WindowId,
+    scope: &crate::workspace::NamespaceScope,
+    catalog: &NamespaceCatalogState,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    let selected = match scope {
+        crate::workspace::NamespaceScope::Namespace(value) => value.as_str(),
+        crate::workspace::NamespaceScope::ContextDefault
+        | crate::workspace::NamespaceScope::AllNamespaces => "All namespaces",
+    };
+    let missing = matches!(scope, crate::workspace::NamespaceScope::Namespace(value)
+        if matches!(catalog, NamespaceCatalogState::Ready(values) if !values.contains(value)));
+    let selected_text = if missing {
+        format!("{selected} · namespace no longer exists")
+    } else {
+        selected.to_owned()
+    };
+    let enabled = matches!(catalog, NamespaceCatalogState::Ready(_));
+    ui.add_enabled_ui(enabled, |ui| {
+        ComboBox::new(("namespace", window_id.0), "Namespace")
+            .selected_text(selected_text)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                let search = scratch.namespace_search.entry(window_id).or_default();
+                let response = ui.add(
+                    TextEdit::singleline(search)
+                        .hint_text("Search namespaces")
+                        .desired_width(150.0),
+                );
+                response.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::TextEdit, true, "Search namespaces")
+                });
+                if !response.has_focus() {
+                    response.request_focus();
+                }
+                let needle = search.to_lowercase();
+                if "all namespaces".contains(&needle)
+                    && ui
+                        .selectable_label(
+                            matches!(scope, crate::workspace::NamespaceScope::AllNamespaces),
+                            "All namespaces",
+                        )
+                        .clicked()
+                {
+                    queued.push(WorkspaceCommand::SetNamespaceScope(
+                        window_id,
+                        crate::workspace::NamespaceScope::AllNamespaces,
+                    ));
+                    search.clear();
+                    ui.close();
+                }
+                if let NamespaceCatalogState::Ready(values) = catalog {
+                    for namespace in values
+                        .iter()
+                        .filter(|value| value.to_lowercase().contains(&needle))
+                    {
+                        if ui
+                            .selectable_label(
+                                matches!(scope, crate::workspace::NamespaceScope::Namespace(value) if value == namespace),
+                                namespace,
+                            )
+                            .clicked()
+                        {
+                            queued.push(WorkspaceCommand::SetNamespaceScope(
+                                window_id,
+                                crate::workspace::NamespaceScope::Namespace(namespace.clone()),
+                            ));
+                            search.clear();
+                            ui.close();
+                        }
+                    }
+                }
+            });
+    });
 }
 
 /// Canonical key format shared by commands and picker entries.
@@ -271,54 +353,14 @@ pub(super) fn show<I>(
         }
 
         if namespaced {
-            ui.label(match (&state.namespace_scope, compact_controls) {
-                (crate::workspace::NamespaceScope::ContextDefault, true) => {
-                    format!("Default: {}", context_namespace.unwrap_or("default"))
-                }
-                (crate::workspace::NamespaceScope::ContextDefault, false) => format!(
-                    "Context default ({})",
-                    context_namespace.unwrap_or("default")
-                ),
-                (crate::workspace::NamespaceScope::Namespace(value), true) => {
-                    format!("NS: {value}")
-                }
-                (crate::workspace::NamespaceScope::Namespace(value), false) => {
-                    format!("Namespace: {value}")
-                }
-                (crate::workspace::NamespaceScope::AllNamespaces, _) => "All namespaces".to_owned(),
-            });
-            let mut namespace = match &state.namespace_scope {
-                crate::workspace::NamespaceScope::Namespace(value) => value.clone(),
-                _ => String::new(),
-            };
-            let namespace_edit = ui.add(
-                TextEdit::singleline(&mut namespace)
-                    .hint_text("Namespace filter")
-                    .desired_width(if compact_controls { 70.0 } else { 140.0 }),
+            show_namespace_combobox(
+                ui,
+                scratch,
+                window_id,
+                &state.namespace_scope,
+                &feed.namespace_catalog,
+                queued,
             );
-            namespace_edit.widget_info(|| {
-                WidgetInfo::labeled(WidgetType::TextEdit, true, "Namespace filter".to_owned())
-            });
-            if namespace_edit.changed() {
-                let parsed = namespace.trim().to_owned();
-                let scope = if parsed.is_empty() {
-                    crate::workspace::NamespaceScope::ContextDefault
-                } else {
-                    crate::workspace::NamespaceScope::Namespace(parsed)
-                };
-                queued.push(WorkspaceCommand::SetNamespaceScope(window_id, scope));
-            }
-            let all_namespaces_label = if compact_controls {
-                "All"
-            } else {
-                "All namespaces"
-            };
-            if ui.button(all_namespaces_label).clicked() {
-                queued.push(WorkspaceCommand::SetNamespaceScope(
-                    window_id,
-                    crate::workspace::NamespaceScope::AllNamespaces,
-                ));
-            }
         }
 
         if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked() {
@@ -460,7 +502,7 @@ pub(super) fn show<I>(
             if namespaced {
                 queued.push(WorkspaceCommand::SetNamespaceScope(
                     window_id,
-                    crate::workspace::NamespaceScope::ContextDefault,
+                    crate::workspace::NamespaceScope::AllNamespaces,
                 ));
             }
         }

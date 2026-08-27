@@ -186,6 +186,7 @@ where
                         if let Some(service) = service_state.as_mut() {
                             super::service_window::show(
                                 ui,
+                                resources,
                                 state.id,
                                 service,
                                 feed,

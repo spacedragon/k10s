@@ -57,34 +57,10 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 #[test]
-fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
-    let mut fixture = Fixture {
-        context_namespace: Some("sea-team".into()),
-        ..Fixture::default()
-    };
-    fixture.feed.lists.insert(
-        WorkspaceWorkload::Deployments,
-        vec![
-            list_row(
-                "apps",
-                "v1",
-                "Deployment",
-                Some("sea-team"),
-                "sea-api",
-                "1/1 ready",
-                "2026-08-21T00:00:00Z",
-            ),
-            list_row(
-                "apps",
-                "v1",
-                "Deployment",
-                Some("other"),
-                "other-api",
-                "1/1 ready",
-                "2026-08-21T00:00:00Z",
-            ),
-        ],
-    );
+fn workload_namespace_combobox_searches_authoritative_options_and_selects() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Ready(vec!["default".into(), "Sea-Team".into(), "other".into()]);
     let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
@@ -100,22 +76,45 @@ fn context_default_uses_selected_context_namespace_for_label_and_filtering() {
         .shell
         .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
             window,
-            k10s_ui::workspace::NamespaceScope::ContextDefault,
+            k10s_ui::workspace::NamespaceScope::AllNamespaces,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Context default (sea-team)");
-    window.get_by_label("sea-api");
-    assert!(window.query_by_label("other-api").is_none());
+    let window_node = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(
+        window_node
+            .query_by_role_and_label(Role::TextInput, "Namespace filter")
+            .is_none()
+    );
+    window_node
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(3);
+    let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    search.type_text("SEA");
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "other")
+            .is_none()
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Sea-Team")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), window).as_deref(),
+        Some("Sea-Team")
+    );
 }
 
 #[test]
-fn context_default_falls_back_to_default_when_selected_context_has_no_namespace() {
+fn missing_workload_namespace_stays_narrow_until_explicitly_cleared() {
     let mut fixture = Fixture::default();
-    let window = fixture
+    fixture.feed.namespace_catalog = NamespaceCatalogState::Ready(vec!["default".into()]);
+    let id = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             LauncherItem::Workload(WorkspaceWorkload::Deployments),
@@ -129,16 +128,32 @@ fn context_default_falls_back_to_default_when_selected_context_has_no_namespace(
     fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
-            window,
-            k10s_ui::workspace::NamespaceScope::ContextDefault,
+            id,
+            k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into()),
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Context default (default)");
-    window.get_by_label("api-server");
+    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    assert_eq!(
+        selector.value().as_deref(),
+        Some("deleted-team · namespace no longer exists")
+    );
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id).as_deref(),
+        Some("deleted-team")
+    );
+    selector.click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "All namespaces")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id),
+        None
+    );
 }
 
 #[test]
@@ -458,9 +473,10 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         ));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    for header in ["Namespace", "Name", "Status", "Created"] {
+    for header in ["Name", "Status", "Created"] {
         window.get_by_label(header);
     }
+    window.get_by_role_and_label(Role::ComboBox, "Namespace");
     window.get_by_label("traffic-overview");
 }
 
