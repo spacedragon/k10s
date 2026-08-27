@@ -7,15 +7,16 @@
 //! one row per persisted Event: the endpoints mirror one store, so rows are
 //! deduplicated by the Event object's own metadata UID. Events are
 //! matched by exact object UID, never by reused names or labels; unreadable
-//! or unavailable event APIs contribute nothing rather than failing the
-//! detail read they decorate.
+//! or unavailable event APIs make the complete event cut unavailable rather
+//! than failing the detail read they decorate.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
 
-use crate::port::{BackendError, Gvk, RecordEvent, ResourceRef};
+use crate::port::{BackendError, Gvk, RecordEvent, RecordEventsCondition, ResourceRef};
 
 use super::watch::dynamic_api;
 
@@ -23,10 +24,32 @@ use super::watch::dynamic_api;
 const CORE_EVENTS: (&str, &str) = ("", "v1");
 /// Group/version of the dedicated events.k8s.io API.
 const GROUPED_EVENTS: (&str, &str) = ("events.k8s.io", "v1");
+/// One production budget spans both sequential API variants.
+const EVENT_READ_BUDGET: Duration = Duration::from_secs(1);
 
 /// Collect the normalized, newest-first events observed for one exact
 /// object identity.
 pub(crate) async fn events_for(
+    client: &kube::Client,
+    reference: &ResourceRef,
+    namespaced: bool,
+) -> (Vec<RecordEvent>, RecordEventsCondition) {
+    events_for_with_budget(client, reference, namespaced, EVENT_READ_BUDGET).await
+}
+
+async fn events_for_with_budget(
+    client: &kube::Client,
+    reference: &ResourceRef,
+    namespaced: bool,
+    budget: Duration,
+) -> (Vec<RecordEvent>, RecordEventsCondition) {
+    match tokio::time::timeout(budget, collect_events(client, reference, namespaced)).await {
+        Ok(Ok(events)) => (events, RecordEventsCondition::Available),
+        Ok(Err(_)) | Err(_) => (Vec::new(), RecordEventsCondition::Unavailable),
+    }
+}
+
+async fn collect_events(
     client: &kube::Client,
     reference: &ResourceRef,
     namespaced: bool,
@@ -47,11 +70,7 @@ pub(crate) async fn events_for(
         } else {
             dynamic_api(client.clone(), gvk, "events".to_owned(), false, None)
         };
-        // An unavailable variant (missing RBAC, older server) contributes
-        // nothing instead of failing the detail it decorates.
-        if let Ok(items) = list_events(&api).await {
-            events.extend(items);
-        }
+        events.extend(list_events(&api).await?);
     }
     // The two endpoints mirror one persisted Event store: the same Event
     // object arrives through both, so its own metadata UID keeps it to

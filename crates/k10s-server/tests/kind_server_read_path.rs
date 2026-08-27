@@ -7,10 +7,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_protocol::{
     BootstrapResponse, ContextPermissionsRequest, ContextPermissionsResponse, GroupVersionKind,
-    MetricsAvailability, PermissionOutcome, PermissionProbe, ResourceDetailResponse,
-    ResourceListRequest, ResourceListResponse, ResourceMetricsResponse, ResourceRefRequest,
-    ResourceSnapshotPage, ResourceTypesRequest, ResourceTypesResponse, ServerFrame, ServerKind,
-    ServerPayload, SnapshotBegin, SnapshotChunk,
+    MetricsAvailability, PermissionOutcome, PermissionProbe, REQUEST_RESOURCE_RELATIONS,
+    ResourceDetailResponse, ResourceListRequest, ResourceListResponse, ResourceMetricsResponse,
+    ResourceRefRequest, ResourceRelationsResponse, ResourceSnapshotPage, ResourceTypesRequest,
+    ResourceTypesResponse, ServerFrame, ServerKind, ServerPayload, SnapshotBegin, SnapshotChunk,
 };
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -292,7 +292,7 @@ async fn standalone_control_socket_serves_live_kind_data_not_fake_fixtures() {
         "detail",
         "resource.detail",
         serde_json::to_value(ResourceRefRequest {
-            identity: deployment,
+            identity: deployment.clone(),
         })
         .unwrap(),
     )
@@ -305,7 +305,19 @@ async fn standalone_control_socket_serves_live_kind_data_not_fake_fixtures() {
             .iter()
             .any(|event| event.reason == "FixtureReady")
     );
-    assert!(detail.related.iter().any(|group| group.gvk.kind == "Pod"));
+
+    let relations = send_request(
+        &mut ws,
+        "relations",
+        REQUEST_RESOURCE_RELATIONS,
+        serde_json::to_value(ResourceRefRequest {
+            identity: deployment,
+        })
+        .unwrap(),
+    )
+    .await;
+    let relations: ResourceRelationsResponse = relations.decode_response_payload().unwrap();
+    assert!(relations.groups.iter().any(|group| group.gvk.kind == "Pod"));
 
     let permissions = send_request(
         &mut ws,

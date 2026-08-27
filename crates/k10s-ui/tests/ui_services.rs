@@ -11,7 +11,7 @@ use k10s_protocol::{
     TargetPort, TransportProtocol,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell},
     workspace::{WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
@@ -114,33 +114,106 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 #[test]
-fn context_default_uses_selected_context_namespace_for_service_filtering() {
-    let mut fixture = Fixture {
-        context_namespace: Some("sea-team".into()),
-        ..Fixture::default()
-    };
-    let rows = fixture.feed.services.as_mut().unwrap();
-    rows[0].identity.namespace = Some("sea-team".into());
-    rows[0].identity.name = "sea-service".into();
-    rows[1].identity.namespace = Some("other".into());
-    rows[1].identity.name = "other-service".into();
-    fixture
+fn service_namespace_combobox_only_selects_ready_catalog_values() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        k10s_ui::ui::NamespaceCatalogState::Ready(vec!["default".into(), "team-b".into()]);
+    let window = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
             k10s_ui::workspace::LauncherItem::Services,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            window,
+            k10s_ui::workspace::NamespaceScope::AllNamespaces,
         ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Services");
-    window.get_by_label("Context default (sea-team)");
-    window.get_by_label("Select service sea-service");
+    let window_node = harness.get_by_role_and_label(Role::Window, "Services");
     assert!(
-        window
-            .query_by_label("Select service other-service")
+        window_node
+            .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
     );
+    window_node
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(3);
+    let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    search.type_text("TEAM");
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "team-b")
+        .click();
+    harness.run_steps(2);
+    assert!(matches!(
+        &harness.state().shell.workspace().window(window).unwrap().content,
+        k10s_ui::workspace::WindowContent::Services(state)
+            if state.namespace_scope == k10s_ui::workspace::NamespaceScope::Namespace("team-b".into())
+    ));
+}
+
+#[test]
+fn missing_service_namespace_is_reported_without_broadening() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        k10s_ui::ui::NamespaceCatalogState::Ready(vec!["default".into()]);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            k10s_ui::workspace::LauncherItem::Services,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            id,
+            k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into()),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Namespace")
+            .value()
+            .as_deref(),
+        Some("deleted-team · namespace no longer exists")
+    );
+    assert!(matches!(
+        &harness.state().shell.workspace().window(id).unwrap().content,
+        k10s_ui::workspace::WindowContent::Services(state)
+            if state.namespace_scope == k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into())
+    ));
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "All namespaces")
+        .click();
+    harness.run_steps(2);
+    assert!(matches!(
+        &harness.state().shell.workspace().window(id).unwrap().content,
+        k10s_ui::workspace::WindowContent::Services(state)
+            if state.namespace_scope == k10s_ui::workspace::NamespaceScope::AllNamespaces
+    ));
 }
 
 fn harness() -> Harness<'static, Fixture> {
@@ -233,9 +306,10 @@ fn list_columns_render_strictly_from_projections() {
     open_via_launcher(&mut harness);
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
-    for header in ["Name", "Namespace", "Type", "Cluster IP", "Ports", "Age"] {
+    for header in ["Name", "Type", "Cluster IP", "Ports", "Age"] {
         window.get_by_label(header);
     }
+    window.get_by_role_and_label(Role::ComboBox, "Namespace");
     for key in ["name", "namespace", "type", "cluster_ip", "ports", "age"] {
         window.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
     }
@@ -274,13 +348,20 @@ fn loading_empty_and_filtered_states_are_distinct() {
 
     // Zero authoritative rows: a plain empty state.
     harness.state_mut().feed.services = Some(Vec::new());
+    let id = services_window_id(harness.state());
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+            id,
+            k10s_ui::workspace::NamespaceScope::AllNamespaces,
+        ));
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_label("No services");
 
     // Rows that exist but are filtered away by the namespace filter.
-    let id = services_window_id(harness.state());
     harness
         .state_mut()
         .shell
@@ -390,6 +471,42 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     // Accessible names exist for every port row.
     window.get_by_role_and_label(Role::Label, "Port http · 80 → 8080 · TCP");
+}
+
+#[test]
+fn failed_service_detail_is_safe_and_retries_the_exact_identity_once() {
+    let mut harness = harness();
+    let identity = service_identity("web-frontend");
+    harness.state_mut().feed.primary_details.insert(
+        identity.clone(),
+        PrimaryDetailState::Failed(SafeUiError::new("service detail denied")),
+    );
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("Details unavailable: service detail denied");
+    assert!(window.query_by_label("Loading details").is_none());
+    window
+        .get_by_role_and_label(Role::Button, "Retry details")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::RetryPrimary(identity)]
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_resource_actions()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -528,6 +645,7 @@ fn service_detail(name: &str, policies: bool) -> ResourceDetailResponse {
         created_at: "2026-08-21T00:00:00Z".to_owned(),
         owner_references: Vec::new(),
         sections: Vec::new(),
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: Vec::new(),
         related: Vec::new(),
         capabilities: ResourceCapabilities {

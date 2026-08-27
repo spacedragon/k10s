@@ -10,12 +10,13 @@ use k10s_protocol::{
     PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
     PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse,
     REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
-    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
-    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
-    ResourceRefRequest, ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability,
-    ScaleRequest, ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget,
-    StreamTicketRequest, StreamTicketResponse, StreamType, Subscribe, SubscriptionId,
-    SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
+    REQUEST_RESOURCE_RELATIONS, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
+    ResourceListRow, ResourceRefRequest, ResourceRelationsResponse, ResourceTypesRequest,
+    ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind,
+    ServerPayload, SessionId, StreamTarget, StreamTicketRequest, StreamTicketResponse, StreamType,
+    Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome,
+    YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -198,6 +199,8 @@ pub enum Query {
     ResourceList(ResourceListQuery),
     /// Retrieve normalized details for one resource identity.
     ResourceDetail(ResourceIdentity),
+    /// Resolve related resources independently of the primary detail.
+    ResourceRelations(ResourceIdentity),
     /// List the selectable resource types of one context.
     ResourceTypes(ResourceTypesRequest),
     /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
@@ -371,9 +374,10 @@ pub enum QueryResult {
     PortForwardList(Box<PortForwardListResponse>),
     /// Normalized resource list result.
     ResourceList(ResourceListResponse),
-    /// Normalized single-resource detail result with backend-resolved
-    /// events and related rows.
+    /// Normalized single-resource detail result with backend-resolved events.
     ResourceDetail(Box<ResourceDetailResponse>),
+    /// Independently resolved related resource groups.
+    ResourceRelations(Box<ResourceRelationsResponse>),
     /// Selectable resource types of one context (built-ins and CRDs).
     ResourceTypes(Box<ResourceTypesResponse>),
     /// Complete infrastructure projection.
@@ -519,6 +523,7 @@ impl PendingAction {
             Self::Query(Query::PortForwardList) => REQUEST_PORT_FORWARD_LIST,
             Self::Query(Query::ResourceList(_)) => "resource.list",
             Self::Query(Query::ResourceDetail(_)) => "resource.detail",
+            Self::Query(Query::ResourceRelations(_)) => REQUEST_RESOURCE_RELATIONS,
             Self::Query(Query::ResourceTypes(_)) => "resource.types",
             Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
             Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
@@ -560,6 +565,9 @@ impl PendingAction {
                 namespace: selector.namespace.clone(),
             }),
             Self::Query(Query::ResourceDetail(identity)) => encode(ResourceRefRequest {
+                identity: identity.clone(),
+            }),
+            Self::Query(Query::ResourceRelations(identity)) => encode(ResourceRefRequest {
                 identity: identity.clone(),
             }),
             Self::Query(Query::ResourceTypes(request)) => encode(request),
@@ -1696,6 +1704,26 @@ impl ClientState {
                     }
                     QueryResult::ResourceDetail(Box::new(detail))
                 }
+                PendingAction::Query(Query::ResourceRelations(identity)) => {
+                    let relations: ResourceRelationsResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    if relations.identity != *identity {
+                        self.pending.remove(&id);
+                        self.completed_failures.insert(
+                            id.clone(),
+                            ErrorFrame::new(
+                                ErrorCode::InvalidRequest,
+                                "resource relations response did not match request",
+                                Retryability::Never,
+                                ErrorScope::Request,
+                                id.as_str(),
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    QueryResult::ResourceRelations(Box::new(relations))
+                }
                 PendingAction::Query(Query::ResourceTypes(_)) => {
                     let types: ResourceTypesResponse = frame
                         .decode_response_payload()
@@ -1993,11 +2021,6 @@ impl ClientState {
                             rows: rows.clone(),
                         },
                     );
-                    // The completed snapshot starts — or after a resync
-                    // fully replaces — the retained applied view.
-                    let mut state = ResourceListState::default();
-                    state.apply_snapshot(revision, rows);
-                    self.resource_lists.insert(id, state);
                 }
                 Ok(())
             }
@@ -2008,6 +2031,11 @@ impl ClientState {
                 match self.snapshot_assemblies.remove(&id) {
                     Some(assembly) if assembly.received_chunks == assembly.total_chunks => {
                         debug_assert!(self.completed_snapshots.contains_key(&id));
+                        if let Some(snapshot) = self.completed_snapshots.get(&id) {
+                            let mut state = ResourceListState::default();
+                            state.apply_snapshot(snapshot.revision, snapshot.rows.clone());
+                            self.resource_lists.insert(id, state);
+                        }
                         Ok(())
                     }
                     Some(_) | None => Err(ClientError::Protocol(
@@ -2079,7 +2107,9 @@ impl ClientState {
                         .ok_or_else(|| ClientError::UnknownResponse(id.clone()))?;
                     retain_failure = matches!(
                         pending.action,
-                        PendingAction::Query(Query::Infrastructure(_))
+                        PendingAction::Query(
+                            Query::Infrastructure(_) | Query::ResourceRelations(_)
+                        )
                     );
                     pending.cancelled
                 } else {

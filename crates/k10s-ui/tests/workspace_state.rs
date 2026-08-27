@@ -28,6 +28,11 @@ fn namespace_scope_has_explicit_resolution_semantics() {
 }
 
 #[test]
+fn namespace_scope_default_is_all_namespaces() {
+    assert_eq!(NamespaceScope::default(), NamespaceScope::AllNamespaces);
+}
+
+#[test]
 fn namespace_scope_change_is_guarded_and_clears_stale_detail_on_commit() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);
@@ -36,18 +41,21 @@ fn namespace_scope_change_is_guarded_and_clears_stale_detail_on_commit() {
     events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
     let out = events(
         &mut state,
-        WorkspaceCommand::SetNamespaceScope(window, NamespaceScope::AllNamespaces),
+        WorkspaceCommand::SetNamespaceScope(window, NamespaceScope::Namespace("prod".into())),
     );
     assert!(matches!(out.as_slice(), [WorkspaceEvent::Blocked(_)]));
     let before = state.resource_state(window).unwrap();
-    assert_eq!(before.namespace_scope, NamespaceScope::ContextDefault);
+    assert_eq!(before.namespace_scope, NamespaceScope::AllNamespaces);
     assert_eq!(before.selection.as_ref(), Some(&identity));
     events(
         &mut state,
         WorkspaceCommand::ResolveBlock(BlockResolution::DiscardYaml { window }),
     );
     let after = state.resource_state(window).unwrap();
-    assert_eq!(after.namespace_scope, NamespaceScope::AllNamespaces);
+    assert_eq!(
+        after.namespace_scope,
+        NamespaceScope::Namespace("prod".into())
+    );
     assert!(after.selection.is_none());
     assert!(after.detail.is_none());
     assert!(state.pending().is_none());
@@ -194,7 +202,7 @@ fn services_window_opens_with_singleton_geometry_and_defaults() {
         WindowContent::Services(service) => service,
         other => panic!("expected a Services window, got {other:?}"),
     };
-    assert_eq!(service.namespace_scope, NamespaceScope::ContextDefault);
+    assert_eq!(service.namespace_scope, NamespaceScope::AllNamespaces);
     assert_eq!(service.search, "");
     assert_eq!(service.sort, None);
     assert_eq!(service.selection, None);
@@ -249,7 +257,7 @@ fn list_window_commands_drive_the_services_window_independently() {
 
     // The workload window keeps fully independent state.
     let resource = state.resource_state(pods).unwrap();
-    assert_eq!(resource.namespace_scope, NamespaceScope::ContextDefault);
+    assert_eq!(resource.namespace_scope, NamespaceScope::AllNamespaces);
     assert_eq!(resource.search, "");
     assert!(resource.sort.is_none());
     assert_eq!(resource.split_ratio, 0.5);
@@ -593,7 +601,7 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
         first_state.namespace_scope,
         NamespaceScope::Namespace("payments".into())
     );
-    assert_eq!(second_state.namespace_scope, NamespaceScope::ContextDefault);
+    assert_eq!(second_state.namespace_scope, NamespaceScope::AllNamespaces);
     assert_eq!(first_state.search, "");
     assert_eq!(second_state.search, "fluentd");
     assert!(first_state.filters.is_empty());

@@ -1,9 +1,9 @@
 use k10s_protocol::{
     BackendRevision, BootstrapResponse, CapacityUsage, ClientKind, ClusterTotals, ErrorCode,
-    ErrorFrame, ErrorScope, Event, InfrastructureRequest, InfrastructureResponse,
-    MetricsAvailability, MetricsCondition, MetricsStatus, ProtocolVersion, RequestId, ResumeStatus,
-    Retryability, ServerFrame, ServerKind, SessionId, StorageInventory, Subscribed, SubscriptionId,
-    Welcome,
+    ErrorFrame, ErrorScope, Event, GroupVersionKind, InfrastructureRequest, InfrastructureResponse,
+    MetricsAvailability, MetricsCondition, MetricsStatus, ProtocolVersion, RequestId,
+    ResourceIdentity, ResourceRefRequest, ResourceRelationsResponse, ResumeStatus, Retryability,
+    ServerFrame, ServerKind, SessionId, StorageInventory, Subscribed, SubscriptionId, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, Query, QueryResult,
@@ -53,6 +53,120 @@ fn bootstrap_response_completes_only_matching_request() {
         Some(QueryResult::Bootstrap(BootstrapResponse::fixture()))
     );
     assert!(client.is_pending(&first));
+}
+
+#[test]
+fn resource_relations_query_encodes_and_decodes_its_typed_payload() {
+    let mut client = ready_client();
+    let identity = relation_identity();
+    let request = client
+        .begin(Query::ResourceRelations(identity.clone()))
+        .unwrap();
+
+    let frame = client.take_outbound().unwrap();
+    let k10s_protocol::ClientPayload::Request(envelope) = frame.decode_payload().unwrap() else {
+        panic!("expected request");
+    };
+    assert_eq!(envelope.request_kind, "resource.relations");
+    assert_eq!(
+        serde_json::from_value::<ResourceRefRequest>(envelope.payload).unwrap(),
+        ResourceRefRequest {
+            identity: identity.clone()
+        }
+    );
+
+    let response = ResourceRelationsResponse {
+        identity,
+        revision: BackendRevision::new(9),
+        groups: vec![],
+    };
+    client
+        .apply(ServerFrame::response(
+            request.id().clone(),
+            response.clone(),
+        ))
+        .unwrap();
+    assert_eq!(
+        client.take(request),
+        Some(QueryResult::ResourceRelations(Box::new(response)))
+    );
+}
+
+#[test]
+fn resource_relations_response_must_echo_the_exact_requested_identity() {
+    let expected = relation_identity();
+    let mismatches = [
+        ResourceIdentity {
+            uid: "uid-from-an-older-object".into(),
+            ..expected.clone()
+        },
+        ResourceIdentity {
+            context: "production".into(),
+            ..expected.clone()
+        },
+        ResourceIdentity {
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            ..expected.clone()
+        },
+    ];
+
+    for echoed in mismatches {
+        let mut client = ready_client();
+        let request = client
+            .begin(Query::ResourceRelations(expected.clone()))
+            .unwrap();
+        let _outbound = client.take_outbound().unwrap();
+
+        client
+            .apply(ServerFrame::response(
+                request.id().clone(),
+                ResourceRelationsResponse {
+                    identity: echoed,
+                    revision: BackendRevision::new(9),
+                    groups: vec![],
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(client.phase(), ClientPhase::Ready);
+        assert!(!client.is_pending(&request));
+        assert!(client.take(request.clone()).is_none());
+        let failure = client.take_failure(request).expect("mismatch is isolated");
+        assert_eq!(failure.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            failure.safe_message,
+            "resource relations response did not match request"
+        );
+        assert!(!failure.safe_message.contains("uid-from-an-older-object"));
+        assert!(!failure.safe_message.contains("production"));
+    }
+}
+
+#[test]
+fn unsupported_resource_relations_is_retained_without_disturbing_detail() {
+    let mut client = ready_client();
+    let identity = relation_identity();
+    let detail = client
+        .begin(Query::ResourceDetail(identity.clone()))
+        .unwrap();
+    let _detail_frame = client.take_outbound().unwrap();
+    let relations = client.begin(Query::ResourceRelations(identity)).unwrap();
+    let _relations_frame = client.take_outbound().unwrap();
+
+    let applied = client.apply(request_error_frame(
+        relations.id(),
+        ErrorCode::UnsupportedMessage,
+        Retryability::Never,
+    ));
+
+    assert!(matches!(applied, Err(ClientError::Server(_))));
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert!(client.is_pending(&detail));
+    assert!(client.take(detail).is_none());
+    let failure = client
+        .take_failure(relations)
+        .expect("relations failure retained");
+    assert_eq!(failure.code, ErrorCode::UnsupportedMessage);
 }
 
 #[test]
@@ -978,6 +1092,20 @@ fn resync_clears_retained_results_before_allocating_recovery_bootstrap() {
 
 fn ready_client() -> ClientState {
     ready_client_with_config(ClientConfig::default())
+}
+
+fn relation_identity() -> ResourceIdentity {
+    ResourceIdentity {
+        context: "dev-local".into(),
+        gvk: GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "Deployment".into(),
+        },
+        namespace: Some("default".into()),
+        name: "web".into(),
+        uid: "uid-web".into(),
+    }
 }
 
 fn ready_client_with_config(config: ClientConfig) -> ClientState {

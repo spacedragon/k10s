@@ -28,6 +28,7 @@ pub(super) fn show_canvas<I>(
     feed: &resource_window::ResourceFeed,
     context_namespace: Option<&str>,
     connection: ConnectionState,
+    resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
 where
@@ -61,6 +62,7 @@ where
             load,
             context_namespace,
             connection,
+            resource_actions,
             queued,
         );
     }
@@ -97,6 +99,7 @@ fn show_window<I>(
     load: InfrastructureLoad,
     context_namespace: Option<&str>,
     connection: ConnectionState,
+    resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
 where
@@ -152,6 +155,7 @@ where
                     feed,
                     context_namespace,
                     connection,
+                    resource_actions,
                     queued,
                 );
                 false
@@ -182,6 +186,7 @@ where
                         if let Some(service) = service_state.as_mut() {
                             super::service_window::show(
                                 ui,
+                                resources,
                                 state.id,
                                 service,
                                 feed,
@@ -190,6 +195,7 @@ where
                                 yaml,
                                 streams,
                                 dialogs,
+                                resource_actions,
                                 queued,
                             )
                         } else {
@@ -204,13 +210,24 @@ where
                         // identity; they never read the integrated
                         // selection of any list window.
                         if let Some(detail) = detail_state.as_ref() {
-                            let view = detail
-                                .identity
-                                .as_row_identity()
-                                .and_then(|identity| feed.details.get(identity));
+                            let identity = detail.identity.as_row_identity();
+                            let primary_state =
+                                identity.and_then(|identity| feed.primary_details.get(identity));
+                            let view = identity.and_then(|identity| feed.details.get(identity));
                             super::detail::show(
-                                ui, state.id, detail, view, false, yaml, streams, dialogs, feed,
-                                None, queued,
+                                ui,
+                                state.id,
+                                detail,
+                                primary_state,
+                                view,
+                                false,
+                                yaml,
+                                streams,
+                                dialogs,
+                                feed,
+                                None,
+                                resource_actions,
+                                queued,
                             );
                         }
                         false

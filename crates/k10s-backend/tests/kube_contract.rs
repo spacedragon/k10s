@@ -496,6 +496,7 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
                 "capabilities",
                 "createdAt",
                 "events",
+                "eventsCondition",
                 "identity",
                 "manifest",
                 "ownerReferences",
@@ -563,12 +564,10 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
         assert!(text.contains("manifest"), "{label}: manifest missing");
     }
 
-    // The kube side resolves the traversal with honest recorded data.
-    let related = kube_payload["related"].as_array().unwrap();
-    assert!(
-        related.iter().any(|group| group["gvk"]["kind"] == "Pod"),
-        "the kube traversal reaches pods transitively"
-    );
+    // Relations are deliberately independent so detail shape never inherits
+    // the latency of a catalog-wide owner traversal.
+    assert!(fake_payload["related"].as_array().unwrap().is_empty());
+    assert!(kube_payload["related"].as_array().unwrap().is_empty());
 }
 
 /// Shared resource-metrics wire contract: the fake adapter's stored samples

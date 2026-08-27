@@ -21,7 +21,10 @@ pub mod testkit;
 
 pub use catalog::CatalogSnapshot;
 pub use fake::{FakeKubernetes, FakeMetricsScenario, FakePortForwardSeam};
-pub use kernel::{BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult};
+pub use kernel::{
+    BackendKernel, BootstrapResult, InfrastructureResult, KernelQueryResult,
+    ResourceRelationsResult,
+};
 pub use kube::{DISCOVERY_TTL, KubeAdapter, MAX_CACHED_CONTEXTS};
 pub use operation::{
     AcceptOutcome, OperationEngine, OperationEvent, OperationState, OperationStatusData,
@@ -31,10 +34,10 @@ pub use port::{
     AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextAvailability,
     ContextInfo, ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample,
     OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult,
-    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection,
-    ResourceRecord, ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamGrant,
-    StreamInput, StreamKind, StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort,
-    TransportProtocol,
+    RecordEvent, RecordEventsCondition, RelatedData, RelatedRecordGroup, ResourceListData,
+    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
+    ServiceProjection, StreamGrant, StreamInput, StreamKind, StreamRouteKind, Subscribe,
+    SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use port_forward::{
     PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,

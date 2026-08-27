@@ -193,6 +193,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
                 value: "Running".to_owned(),
             }],
         }],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: vec![EventRow {
             reason: "Started".into(),
             message: "container started".into(),

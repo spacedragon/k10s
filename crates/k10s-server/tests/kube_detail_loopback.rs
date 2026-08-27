@@ -9,7 +9,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{BackendKernel, ContextInfo, KubeAdapter};
-use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, ServerFrame, ServerKind};
+use k10s_protocol::{
+    EventsCondition, GroupVersionKind, REQUEST_RESOURCE_RELATIONS, ResourceDetailResponse,
+    ResourceRelationsResponse, ServerFrame, ServerKind,
+};
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::json;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -181,11 +184,15 @@ async fn receive_frame(ws: &mut Ws) -> ServerFrame {
 }
 
 async fn request_detail(ws: &mut Ws, request_id: &str, uid: &str) {
+    request_resource(ws, request_id, "resource.detail", uid).await;
+}
+
+async fn request_resource(ws: &mut Ws, request_id: &str, kind: &str, uid: &str) {
     ws.send(Message::Text(
         json!({
             "kind": "request",
             "requestId": request_id,
-            "payload": {"kind": "resource.detail", "payload": {
+            "payload": {"kind": kind, "payload": {
                 "identity": {
                     "context": CONTEXT,
                     "gvk": deployments_gvk(),
@@ -229,15 +236,31 @@ async fn kube_detail_serves_traversal_events_and_yaml_over_the_socket() {
         .unwrap_or_default();
     assert_eq!(status, "2/2 ready");
 
-    // Controller-UID traversal resolves the replicaset and its pod.
+    assert_eq!(detail.events_condition, EventsCondition::Unavailable);
+    assert!(detail.related.is_empty());
+    request_resource(
+        &mut ws,
+        "relations-kube",
+        REQUEST_RESOURCE_RELATIONS,
+        "uid-kube-web",
+    )
+    .await;
+    let frame = receive_frame(&mut ws).await;
+    assert_eq!(
+        frame.request_id.as_ref().unwrap().as_str(),
+        "relations-kube"
+    );
+    let relations: ResourceRelationsResponse = frame.decode_response_payload().unwrap();
+
+    // Controller-UID traversal independently resolves the replicaset and its pod.
     assert!(
-        detail
-            .related
+        relations
+            .groups
             .iter()
             .any(|group| group.gvk.kind == "ReplicaSet"
                 && group.rows.iter().any(|row| row.identity.name == "web-rs"))
     );
-    assert!(detail.related.iter().any(|group| {
+    assert!(relations.groups.iter().any(|group| {
         group.gvk.kind == "Pod"
             && group
                 .rows
@@ -245,13 +268,9 @@ async fn kube_detail_serves_traversal_events_and_yaml_over_the_socket() {
                 .any(|row| row.identity.name == "web-rs-aaaa1")
     }));
 
-    // Normalized events ride on the same response.
-    assert!(
-        detail
-            .events
-            .iter()
-            .any(|event| event.reason == "ScalingReplicaSet")
-    );
+    // The recorded event endpoint is unavailable, explicitly represented
+    // without making the otherwise useful detail fail.
+    assert!(detail.events.is_empty());
 
     // YAML is rendered by the backend and bound to the UID.
     assert!(detail.manifest.contains("uid-kube-web"));

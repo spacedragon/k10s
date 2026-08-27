@@ -12,15 +12,15 @@ use k10s_protocol::{
     BackendRevision, BootstrapResponse, Context, DetailRow, DetailSection, GroupVersionKind,
     InfrastructureResponse, MetricsAvailability, PodMetrics, ProtocolVersion, ResourceCapabilities,
     ResourceDetailResponse, ResourceIdentity, ResourceListResponse, ResourceListRow,
-    ResourceMetricsResponse, ResourceProjection as WireProjection, ServerInfo, TargetPort,
-    TransportProtocol, WorkloadKind,
+    ResourceMetricsResponse, ResourceProjection as WireProjection, ResourceRelationsResponse,
+    ServerInfo, TargetPort, TransportProtocol, WorkloadKind,
 };
 use uuid::Uuid;
 
 use crate::port::{
     BackendError, BootstrapInfo, Command, ContextInfo, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, Query, QueryResult, RelatedData, ResourceProjection, ResourceRecord, ResourceRef,
-    ServicePort, Subscribe, SubscriptionHandle,
+    OperationId, Query, QueryResult, RecordEventsCondition, RelatedData, ResourceProjection,
+    ResourceRecord, ResourceRef, ServicePort, Subscribe, SubscriptionHandle,
 };
 
 /// The backend kernel.
@@ -76,8 +76,7 @@ impl BackendKernel {
 
     /// Execute a behavior-level query with an optional deadline.
     ///
-    /// The deadline covers the whole composed operation: the adapter read,
-    /// any relation traversal composed onto detail responses, and mapping.
+    /// The deadline covers the adapter read and protocol mapping.
     /// If it elapses anywhere along that path, the remaining work is
     /// cancelled and a [`BackendError::Timeout`] is returned.
     pub async fn query_with_deadline(
@@ -89,12 +88,6 @@ impl BackendKernel {
             Query::ResourceMetrics { reference } => Some(reference.clone()),
             _ => None,
         };
-        let detail_reference = match &req {
-            Query::ResourceDetail { reference } => Some(reference.clone()),
-            _ => None,
-        };
-        // One budget spans the full composition: relation traversal after a
-        // successful read must never outlive the caller's deadline.
         let fut = async move {
             let result = self.adapter.query(req).await?;
             Ok(match result {
@@ -106,15 +99,7 @@ impl BackendKernel {
                     KernelQueryResult::ResourceList(ResourceListResult::new(data))
                 }
                 QueryResult::ResourceDetail(record) => {
-                    // Owner traversal belongs to the kernel: detail responses
-                    // always carry the backend-resolved related rows, so no
-                    // caller can forget them. Adapters without traversal keep a
-                    // detail-only response.
-                    let related = match detail_reference {
-                        Some(reference) => self.adapter_relations(reference).await,
-                        None => RelatedData::empty(record.reference.clone()),
-                    };
-                    KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record, related))
+                    KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record))
                 }
                 QueryResult::ResourceMetrics(sample) => {
                     KernelQueryResult::ResourceMetrics(ResourceMetricsResult::new(
@@ -145,10 +130,8 @@ impl BackendKernel {
                 QueryResult::OperationStatus(data) => KernelQueryResult::OperationStatus(
                     crate::operation::OperationStatusResult::new(data),
                 ),
-                QueryResult::ResourceRelations(_) => {
-                    // Relations are an internal composition of resource.detail
-                    // and are never exposed as a standalone kernel result.
-                    return Err(BackendError::unsupported("resource.relations"));
+                QueryResult::ResourceRelations(data) => {
+                    KernelQueryResult::ResourceRelations(ResourceRelationsResult::new(data))
                 }
             })
         };
@@ -157,25 +140,6 @@ impl BackendKernel {
                 .await
                 .map_err(|_| BackendError::Timeout)?,
             None => fut.await,
-        }
-    }
-
-    /// Resolve the related rows of one resource through the adapter.
-    ///
-    /// Adapters that do not implement traversal yield empty related data
-    /// instead of failing the detail query.
-    async fn adapter_relations(&self, reference: ResourceRef) -> RelatedData {
-        match self
-            .adapter
-            .query(Query::ResourceRelations {
-                reference: reference.clone(),
-            })
-            .await
-        {
-            Ok(QueryResult::ResourceRelations(data)) => data,
-            // Unsupported adapters and vanished objects keep the detail
-            // response usable; only the related tabs stay empty.
-            Ok(_) | Err(_) => RelatedData::empty(reference),
         }
     }
 
@@ -274,6 +238,8 @@ pub enum KernelQueryResult {
     ResourceList(ResourceListResult),
     /// Normalized single-resource detail result.
     ResourceDetail(ResourceDetailResult),
+    /// Independently resolved related-resource groups.
+    ResourceRelations(ResourceRelationsResult),
     /// Availability-gated pod metrics result.
     ResourceMetrics(ResourceMetricsResult),
     /// Selectable resource types for the GVK picker.
@@ -312,6 +278,7 @@ impl KernelQueryResult {
             Self::Bootstrap(b) => b.serialized(),
             Self::ResourceList(r) => r.serialized(),
             Self::ResourceDetail(r) => r.serialized(),
+            Self::ResourceRelations(r) => r.serialized(),
             Self::ResourceMetrics(r) => r.serialized(),
             Self::ResourceTypes(r) => r.serialized(),
             Self::ContextSwitch(r) => r.serialized(),
@@ -442,10 +409,10 @@ pub struct ResourceDetailResult {
 }
 
 impl ResourceDetailResult {
-    /// Map a backend record into detail sections, owner references, resolved
-    /// related rows, deterministic events, and capabilities.
+    /// Map a backend record into detail sections, owner references,
+    /// deterministic events, and capabilities. Relations load independently.
     #[must_use]
-    pub fn new(record: ResourceRecord, related: RelatedData) -> Self {
+    pub fn new(record: ResourceRecord) -> Self {
         let identity = map_identity(&record.reference);
         // Adapters that fetched the real object render its YAML themselves,
         // bound to UID/resourceVersion; others keep the synthesized header.
@@ -536,6 +503,12 @@ impl ResourceDetailResult {
                     })
                     .collect(),
                 sections,
+                events_condition: match record.events_condition {
+                    RecordEventsCondition::Available => k10s_protocol::EventsCondition::Available,
+                    RecordEventsCondition::Unavailable => {
+                        k10s_protocol::EventsCondition::Unavailable
+                    }
+                },
                 events: record
                     .events
                     .iter()
@@ -546,15 +519,7 @@ impl ResourceDetailResult {
                         last_seen: event.last_seen.clone(),
                     })
                     .collect(),
-                related: related
-                    .groups
-                    .iter()
-                    .map(|group| k10s_protocol::RelatedGroup {
-                        title: related_group_title(&group.gvk),
-                        gvk: map_gvk(&group.gvk),
-                        rows: group.records.iter().map(map_row).collect(),
-                    })
-                    .collect(),
+                related: Vec::new(),
                 capabilities,
                 manifest,
                 identity,
@@ -573,6 +538,43 @@ impl ResourceDetailResult {
     #[must_use]
     pub fn serialized(&self) -> String {
         serde_json::to_string(&self.payload).expect("ResourceDetailResponse must serialize")
+    }
+}
+
+/// Independently resolved resource relations mapped for the protocol.
+#[derive(Debug, Clone)]
+pub struct ResourceRelationsResult {
+    payload: ResourceRelationsResponse,
+}
+
+impl ResourceRelationsResult {
+    #[must_use]
+    pub fn new(data: RelatedData) -> Self {
+        Self {
+            payload: ResourceRelationsResponse {
+                identity: map_identity(&data.reference),
+                revision: BackendRevision::new(data.revision),
+                groups: data
+                    .groups
+                    .iter()
+                    .map(|group| k10s_protocol::RelatedGroup {
+                        title: related_group_title(&group.gvk),
+                        gvk: map_gvk(&group.gvk),
+                        rows: group.records.iter().map(map_row).collect(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn wire_payload(&self) -> ResourceRelationsResponse {
+        self.payload.clone()
+    }
+
+    #[must_use]
+    pub fn serialized(&self) -> String {
+        serde_json::to_string(&self.payload).expect("ResourceRelationsResponse must serialize")
     }
 }
 

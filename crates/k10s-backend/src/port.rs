@@ -493,6 +493,8 @@ pub struct ResourceRecord {
     pub owner_references: Vec<OwnerRef>,
     /// Deterministic events observed for this object.
     pub events: Vec<RecordEvent>,
+    /// Whether the authoritative event APIs were readable for this detail.
+    pub events_condition: RecordEventsCondition,
     /// Authoritative YAML of the fetched object, rendered by the adapter and
     /// bound to its UID/resourceVersion. Empty for watch rows; detail reads
     /// always carry it so guarded edits can detect drift.
@@ -500,6 +502,15 @@ pub struct ResourceRecord {
     /// Kind-specific structured projection; populated only for kinds with a
     /// designed projection and absent everywhere else.
     pub projection: Option<ResourceProjection>,
+}
+
+/// Availability of event decoration on an authoritative detail record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordEventsCondition {
+    /// Both Kubernetes event API variants were read successfully.
+    Available,
+    /// At least one event API was unavailable or exceeded the total budget.
+    Unavailable,
 }
 
 /// A kind-specific normalized projection carried by backend records.
@@ -618,6 +629,8 @@ pub struct RelatedRecordGroup {
 pub struct RelatedData {
     /// The resource whose relations were resolved.
     pub reference: ResourceRef,
+    /// Authoritative backend revision covering the complete relation cut.
+    pub revision: u64,
     /// Groups in deterministic type order.
     pub groups: Vec<RelatedRecordGroup>,
 }
@@ -625,9 +638,10 @@ pub struct RelatedData {
 impl RelatedData {
     /// Related data with no groups; used when an adapter cannot traverse.
     #[must_use]
-    pub fn empty(reference: ResourceRef) -> Self {
+    pub fn empty(reference: ResourceRef, revision: u64) -> Self {
         Self {
             reference,
+            revision,
             groups: Vec::new(),
         }
     }
