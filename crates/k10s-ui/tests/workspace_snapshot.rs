@@ -23,7 +23,7 @@ fn v2_namespace_scope_uses_the_documented_wire_shape() {
 }
 
 #[test]
-fn v1_literal_migrates_namespace_without_inventing_all_namespaces() {
+fn v1_literal_migrates_explicit_namespace_and_defaults_to_all_namespaces() {
     let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":"g/v/K"}},{"kind":"nodes","title":"Nodes","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace":null,"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
     assert_eq!(loaded.migrated_from, Some(1));
@@ -42,12 +42,57 @@ fn v1_literal_migrates_namespace_without_inventing_all_namespaces() {
             .as_ref()
             .unwrap()
             .namespace_scope,
-        NamespaceScope::ContextDefault
+        NamespaceScope::AllNamespaces
     );
     let view = loaded.snapshot.windows[0].view.as_ref().unwrap();
     assert_eq!(view.search, "web");
     assert_eq!(view.filters["phase"], "Running");
     assert_eq!(view.custom_kind.as_deref(), Some("g/v/K"));
+}
+
+#[test]
+fn legacy_context_default_is_normalized_before_workspace_is_observable() {
+    let raw = r#"{"version":2,"next_id":4,"next_z":4,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace_scope":{"kind":"context_default"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}},{"kind":"services","title":"Services","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace_scope":{"kind":"context_default"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}},{"kind":{"workload":"pods"},"title":"Pods","geometry":{"position":[5.0,6.0],"size":[800.0,600.0],"collapsed":false},"z":3,"view":{"namespace_scope":{"kind":"namespace","value":"prod"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
+    let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&loaded.snapshot).unwrap();
+
+    let overview = restored
+        .windows()
+        .iter()
+        .find(|window| matches!(window.kind, k10s_ui::workspace::WindowKind::Overview))
+        .unwrap();
+    let services = restored
+        .windows()
+        .iter()
+        .find(|window| matches!(window.kind, k10s_ui::workspace::WindowKind::Services))
+        .unwrap();
+    let pods = restored
+        .windows()
+        .iter()
+        .find(|window| matches!(window.kind, k10s_ui::workspace::WindowKind::Workload(_)))
+        .unwrap();
+
+    assert_eq!(
+        match &overview.content {
+            k10s_ui::workspace::WindowContent::Resource(state) => &state.namespace_scope,
+            _ => panic!("expected resource state"),
+        },
+        &NamespaceScope::AllNamespaces
+    );
+    assert_eq!(
+        match &services.content {
+            k10s_ui::workspace::WindowContent::Services(state) => &state.namespace_scope,
+            _ => panic!("expected service state"),
+        },
+        &NamespaceScope::AllNamespaces
+    );
+    assert_eq!(
+        match &pods.content {
+            k10s_ui::workspace::WindowContent::Resource(state) => &state.namespace_scope,
+            _ => panic!("expected resource state"),
+        },
+        &NamespaceScope::Namespace("prod".into())
+    );
 }
 
 #[test]

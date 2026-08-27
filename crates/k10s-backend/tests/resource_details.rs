@@ -99,6 +99,44 @@ fn recorded_deployment() -> String {
     .to_string()
 }
 
+fn recorded_pod() -> String {
+    json!({
+        "kind": "Pod",
+        "apiVersion": "v1",
+        "metadata": {
+            "name": "web",
+            "namespace": NS,
+            "uid": "uid-pod",
+            "resourceVersion": "44",
+            "creationTimestamp": "2026-08-21T00:00:00Z",
+        },
+        "status": {"phase": "Running"},
+    })
+    .to_string()
+}
+
+fn empty_event_list(api_version: &str) -> String {
+    json!({
+        "kind": "EventList",
+        "apiVersion": api_version,
+        "metadata": {"resourceVersion": "45"},
+        "items": [],
+    })
+    .to_string()
+}
+
+fn status_failure(code: u16, reason: &str) -> String {
+    json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "message": "sensitive upstream diagnostic must not escape",
+        "reason": reason,
+        "code": code,
+    })
+    .to_string()
+}
+
 #[tokio::test]
 async fn exact_identity_get_returns_tailored_detail_fields() {
     let server = RecordedApiServer::standard();
@@ -322,12 +360,23 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
     );
     let kernel = kernel(&server);
 
-    let detail = detail(&kernel, reference(deployments_gvk(), "web", "uid-web"))
+    let requested = reference(deployments_gvk(), "web", "uid-web");
+    let relations = match kernel
+        .query(Query::ResourceRelations {
+            reference: requested.clone(),
+        })
         .await
-        .expect("deployment resolves");
+        .expect("relations resolve independently")
+    {
+        KernelQueryResult::ResourceRelations(result) => result.wire_payload(),
+        other => panic!("kernel must map relations into their wire payload, got {other:?}"),
+    };
 
-    let rs_group = detail
-        .related
+    assert_eq!(relations.identity.uid, requested.uid);
+    assert!(relations.revision.get() >= 1);
+
+    let rs_group = relations
+        .groups
         .iter()
         .find(|group| group.gvk.kind == "ReplicaSet")
         .expect("the replicaset resolves through its controller UID");
@@ -335,8 +384,8 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
     assert_eq!(rs_group.rows[0].identity.name, "web-frontend-7d9f8");
     assert_eq!(rs_group.rows[0].identity.uid, "uid-rs");
 
-    let pod_group = detail
-        .related
+    let pod_group = relations
+        .groups
         .iter()
         .find(|group| group.gvk.kind == "Pod")
         .expect("pods resolve transitively through the replicaset");
@@ -349,6 +398,14 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
         names,
         vec!["pod-a"],
         "only the controller-owned pod resolves"
+    );
+    assert!(
+        relations
+            .groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .all(|row| row.revision == relations.revision),
+        "the response revision is authoritative for every related row"
     );
 }
 
@@ -449,6 +506,10 @@ async fn events_normalize_both_api_variants_newest_first() {
             ("Killing", 1, "2026-08-21T00:01:00Z"),
         ],
         "both event variants merge into one newest-first projection"
+    );
+    assert_eq!(
+        detail.events_condition,
+        k10s_protocol::EventsCondition::Available
     );
 }
 
@@ -574,11 +635,10 @@ async fn relations_on_a_vanished_target_are_not_found() {
     assert_eq!(error, BackendError::NotFound);
 }
 
-/// Relation traversal shares the caller's detail deadline: a relation sweep
-/// that stalls past the deadline returns Timeout instead of waiting on
-/// unbounded cluster I/O after the detail read already succeeded.
+/// Detail is independent from relation traversal: a stalled relation sweep
+/// cannot delay the authoritative primary record.
 #[tokio::test(start_paused = true)]
-async fn slow_relations_traversal_returns_timeout_at_the_deadline() {
+async fn detail_completes_without_waiting_for_slow_relations() {
     let server = RecordedApiServer::standard();
     server.set_response(
         "/apis/apps/v1/namespaces/default/deployments/web",
@@ -588,7 +648,7 @@ async fn slow_relations_traversal_returns_timeout_at_the_deadline() {
     server.set_hanging_path("/apis/apps/v1/namespaces/default/replicasets");
     let kernel = kernel(&server);
 
-    let error = kernel
+    let result = kernel
         .query_with_deadline(
             Query::ResourceDetail {
                 reference: reference(deployments_gvk(), "web", "uid-web"),
@@ -596,12 +656,157 @@ async fn slow_relations_traversal_returns_timeout_at_the_deadline() {
             Some(Duration::from_millis(500)),
         )
         .await
-        .expect_err("relation traversal past the deadline must be cancelled");
-    assert_eq!(error, BackendError::Timeout);
-    assert!(
-        server.hit_count("/apis/apps/v1/namespaces/default/replicasets") >= 1,
-        "the deadline cut a relation sweep that had already begun"
+        .expect("detail completes within its own deadline");
+    let KernelQueryResult::ResourceDetail(detail) = result else {
+        panic!("expected detail result")
+    };
+    assert!(detail.wire_payload().related.is_empty());
+    assert_eq!(
+        server.hit_count("/apis/apps/v1/namespaces/default/replicasets"),
+        0,
+        "detail never starts relation traversal"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn unavailable_event_api_is_bounded_and_keeps_primary_detail() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/namespaces/default/pods/web",
+        200,
+        &json!({
+            "kind": "Pod", "apiVersion": "v1",
+            "metadata": {"name": "web", "namespace": NS, "uid": "uid-pod", "resourceVersion": "44"},
+            "status": {"phase": "Running"},
+        })
+        .to_string(),
+    );
+    server.set_hanging_path("/api/v1/namespaces/default/events");
+    server.set_hanging_path("/apis/events.k8s.io/v1/namespaces/default/events");
+
+    let detail = tokio::time::timeout(
+        Duration::from_millis(1_100),
+        detail(&kernel(&server), reference(pods_gvk(), "web", "uid-pod")),
+    )
+    .await
+    .expect("the total event budget bounds the detail read")
+    .expect("event unavailability does not fail primary detail");
+
+    assert!(detail.events.is_empty());
+    assert_eq!(
+        detail.events_condition,
+        k10s_protocol::EventsCondition::Unavailable
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deployment_detail_is_bounded_when_both_event_apis_block() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/deployments/web",
+        200,
+        &recorded_deployment(),
+    );
+    server.set_hanging_path("/api/v1/namespaces/default/events");
+    server.set_hanging_path("/apis/events.k8s.io/v1/namespaces/default/events");
+
+    let response = tokio::time::timeout(
+        Duration::from_millis(1_100),
+        detail(
+            &kernel(&server),
+            reference(deployments_gvk(), "web", "uid-web"),
+        ),
+    )
+    .await
+    .expect("one total event budget bounds deployment detail")
+    .expect("blocked event decoration never fails the primary deployment");
+
+    assert!(response.events.is_empty());
+    assert_eq!(
+        response.events_condition,
+        k10s_protocol::EventsCondition::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn forbidden_and_failed_event_variants_degrade_for_pods_and_deployments() {
+    enum EventFailure {
+        Status(u16, &'static str),
+        Transport,
+    }
+
+    let cases = [
+        (
+            pods_gvk(),
+            "/api/v1/namespaces/default/pods/web",
+            recorded_pod(),
+            "uid-pod",
+            "/api/v1/namespaces/default/events",
+            EventFailure::Status(403, "Forbidden"),
+        ),
+        (
+            pods_gvk(),
+            "/api/v1/namespaces/default/pods/web",
+            recorded_pod(),
+            "uid-pod",
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            EventFailure::Status(500, "InternalError"),
+        ),
+        (
+            deployments_gvk(),
+            "/apis/apps/v1/namespaces/default/deployments/web",
+            recorded_deployment(),
+            "uid-web",
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            EventFailure::Status(403, "Forbidden"),
+        ),
+        (
+            deployments_gvk(),
+            "/apis/apps/v1/namespaces/default/deployments/web",
+            recorded_deployment(),
+            "uid-web",
+            "/api/v1/namespaces/default/events",
+            EventFailure::Transport,
+        ),
+    ];
+
+    for (gvk, resource_path, object, uid, failing_path, failure) in cases {
+        let server = RecordedApiServer::standard();
+        server.set_response(resource_path, 200, &object);
+        server.set_response(
+            "/api/v1/namespaces/default/events",
+            200,
+            &empty_event_list("v1"),
+        );
+        server.set_response(
+            "/apis/events.k8s.io/v1/namespaces/default/events",
+            200,
+            &empty_event_list("events.k8s.io/v1"),
+        );
+        match failure {
+            EventFailure::Status(code, reason) => {
+                server.set_response(failing_path, code, &status_failure(code, reason));
+            }
+            EventFailure::Transport => server.set_transport_error("GET", failing_path),
+        }
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            detail(&kernel(&server), reference(gvk, "web", uid)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("event failure at {failing_path} stayed bounded"))
+        .unwrap_or_else(|error| {
+            panic!("event failure at {failing_path} leaked into primary detail: {error}")
+        });
+
+        assert!(response.events.is_empty(), "failure at {failing_path}");
+        assert_eq!(
+            response.events_condition,
+            k10s_protocol::EventsCondition::Unavailable,
+            "failure at {failing_path}"
+        );
+    }
 }
 
 fn hit_once(server: &RecordedApiServer, path: &str) {
