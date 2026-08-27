@@ -93,6 +93,48 @@ fn resource_relations_query_encodes_and_decodes_its_typed_payload() {
 }
 
 #[test]
+fn resource_relations_response_must_echo_the_exact_requested_identity() {
+    let expected = relation_identity();
+    let mismatches = [
+        ResourceIdentity {
+            uid: "uid-from-an-older-object".into(),
+            ..expected.clone()
+        },
+        ResourceIdentity {
+            context: "production".into(),
+            ..expected.clone()
+        },
+        ResourceIdentity {
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            ..expected.clone()
+        },
+    ];
+
+    for echoed in mismatches {
+        let mut client = ready_client();
+        let request = client
+            .begin(Query::ResourceRelations(expected.clone()))
+            .unwrap();
+        let _outbound = client.take_outbound().unwrap();
+
+        let error = client
+            .apply(ServerFrame::response(
+                request.id().clone(),
+                ResourceRelationsResponse {
+                    identity: echoed,
+                    revision: BackendRevision::new(9),
+                    groups: vec![],
+                },
+            ))
+            .unwrap_err();
+
+        assert!(matches!(error, ClientError::Protocol(_)));
+        assert!(client.is_pending(&request));
+        assert!(client.take(request).is_none());
+    }
+}
+
+#[test]
 fn unsupported_resource_relations_is_retained_without_disturbing_detail() {
     let mut client = ready_client();
     let identity = relation_identity();

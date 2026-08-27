@@ -1704,10 +1704,16 @@ impl ClientState {
                     }
                     QueryResult::ResourceDetail(Box::new(detail))
                 }
-                PendingAction::Query(Query::ResourceRelations(_)) => {
+                PendingAction::Query(Query::ResourceRelations(identity)) => {
                     let relations: ResourceRelationsResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
+                    if relations.identity != *identity {
+                        return Err(ClientError::Protocol(
+                            "resource.relations response identity does not match request"
+                                .to_owned(),
+                        ));
+                    }
                     QueryResult::ResourceRelations(Box::new(relations))
                 }
                 PendingAction::Query(Query::ResourceTypes(_)) => {
