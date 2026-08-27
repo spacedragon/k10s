@@ -2453,7 +2453,11 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: "app".to_owned(),
+            container: self
+                .details
+                .get(identity)
+                .and_then(|view| crate::ui::pod_container(&view.manifest))
+                .unwrap_or_else(|| "app".to_owned()),
         })
     }
 
@@ -2691,7 +2695,7 @@ impl K10sApp {
                 window,
             } = entry;
             if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && session_open(
+                && let Err(error) = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
@@ -2699,9 +2703,9 @@ impl K10sApp {
                     &self.connection_url,
                     &self.access_token,
                 )
-                .is_ok()
             {
-                // The session is now live and polling.
+                let reason = format!("could not open stream socket: {error}");
+                fail_stream_tool(&mut self.shell, window, route, &reason);
             }
         }
     }
@@ -2875,13 +2879,33 @@ fn session_open(
     granted: k10s_protocol::StreamTicketResponse,
     connection_url: &str,
     access_token: &str,
-) -> Result<(), ()> {
+) -> Result<(), TransportError> {
     let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
-    session
-        .open_with_ticket(connection_url, access_token, &granted.ticket_id)
-        .map_err(|_| ())?;
+    session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
+}
+
+/// Return one failed dedicated-socket open to the tool that requested it.
+/// The control connection remains healthy and the tool stays reconnectable.
+fn fail_stream_tool(
+    shell: &mut UiShell<ResourceIdentity>,
+    window: WindowId,
+    route: StreamRoute,
+    reason: &str,
+) {
+    match route {
+        StreamRoute::Logs => {
+            if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
+                view.fail(reason);
+            }
+        }
+        StreamRoute::Exec => {
+            if let Some(tool) = shell.stream_stores_mut().shells.get_mut(window) {
+                tool.fail(reason);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -6240,12 +6264,15 @@ mod stream_lifecycle_tests {
     use std::sync::mpsc;
 
     use ewebsock::{WsEvent, WsMessage};
-    use k10s_protocol::{GroupVersionKind, ResourceIdentity, StreamTarget, StreamType};
+    use k10s_protocol::{
+        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+        ResourceIdentity, StreamTarget, StreamType,
+    };
 
     use super::K10sApp;
     use super::tests::test_app;
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::ShellPhase;
+    use crate::ui::tools::{LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -6272,12 +6299,40 @@ mod stream_lifecycle_tests {
     }
 
     pub(super) fn target_for(pod_name: &str) -> StreamTarget {
+        target_for_container(pod_name, "app")
+    }
+
+    fn target_for_container(pod_name: &str, container: &str) -> StreamTarget {
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: pod_name.into(),
             uid: format!("uid-{pod_name}"),
-            container: "app".into(),
+            container: container.into(),
+        }
+    }
+
+    fn detail_with_container(
+        identity: &ResourceIdentity,
+        container: &str,
+    ) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_exec: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: format!(
+                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
+            ),
+            projection: None,
         }
     }
 
@@ -6333,6 +6388,93 @@ mod stream_lifecycle_tests {
         app.stream_sessions
             .insert((window, StreamRoute::Exec), session);
         tx
+    }
+
+    #[test]
+    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("database");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "postgres"));
+        let target = target_for_container(&pod.name, "postgres");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .shells
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Exec, target, true);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Exec), session);
+
+        ready_signal(&tx, "postgres");
+        app.poll_stream_sessions();
+
+        assert!(app.shell_guard_connected(window));
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
+        );
+    }
+
+    #[test]
+    fn logs_for_manifest_container_attach_and_project_output() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("web");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "nginx"));
+        let target = target_for_container(&pod.name, "nginx");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+
+        tx.send(WsEvent::Message(WsMessage::Text(
+            serde_json::to_string(&k10s_protocol::StreamServerMessage::Ready {
+                stream_type: StreamType::Logs,
+                tty: false,
+                container: "nginx".to_owned(),
+            })
+            .unwrap(),
+        )))
+        .unwrap();
+        tx.send(WsEvent::Message(WsMessage::Binary(
+            k10s_protocol::encode_stream_payload(k10s_protocol::payload_kind::STDOUT, b"served"),
+        )))
+        .unwrap();
+        app.poll_stream_sessions();
+
+        let view = app
+            .shell
+            .stream_stores()
+            .logs
+            .get(window)
+            .expect("log view exists");
+        assert_eq!(view.phase(), LogsPhase::Streaming);
+        assert_eq!(
+            view.visible_lines().map(String::as_str).collect::<Vec<_>>(),
+            vec!["served"]
+        );
     }
 
     /// Ready attaches the terminal and engages the guard; resolving the

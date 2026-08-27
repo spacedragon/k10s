@@ -14,6 +14,8 @@ pub mod tools;
 mod top_bar;
 mod window;
 
+pub(crate) use detail::pod_container;
+
 pub use resource_window::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed, RowIdentity,
     SafeUiError,

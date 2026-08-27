@@ -291,6 +291,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
         capabilities: ResourceCapabilities {
             can_view_logs: true,
             can_exec: true,
+            can_edit_yaml: true,
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
@@ -398,7 +399,13 @@ fn tabs_and_actions_are_exact_per_kind() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    for tab in ["Tab Overview", "Tab Events", "Tab Logs", "Tab Shell"] {
+    for tab in [
+        "Tab Overview",
+        "Tab Events",
+        "Tab YAML",
+        "Tab Logs",
+        "Tab Shell",
+    ] {
         window.get_by_role_and_label(Role::Button, tab);
     }
     assert!(
@@ -408,6 +415,47 @@ fn tabs_and_actions_are_exact_per_kind() {
         "pods own nothing, so no related-workloads tab"
     );
     assert!(window.query_by_label("Scale workload").is_none());
+}
+
+#[test]
+fn pod_edit_yaml_action_opens_the_read_only_manifest_before_editing() {
+    let mut harness = harness();
+    harness.state_mut().feed.details.insert(
+        identity("Pod", "db-postgres-0"),
+        pod_detail("db-postgres-0"),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Pods),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Edit YAML")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Read-only");
+    window.get_by_label("apiVersion: v1\nkind: Pod\nmetadata:\n  name: db-postgres-0\n");
+    let pods_id = workload_window_id(
+        harness.state().shell.workspace(),
+        k10s_ui::workspace::WorkloadKind::Pods,
+    );
+    let detail = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(pods_id)
+        .and_then(|resource| resource.detail.as_ref())
+        .expect("pod detail is selected");
+    assert_eq!(detail.active_tab, WorkspaceDetailTab::Yaml);
+    assert!(!detail.yaml.dirty, "opening YAML must remain read-only");
 }
 
 #[test]

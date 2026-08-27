@@ -36,9 +36,9 @@ use futures_util::future::{BoxFuture, Shared};
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
 use crate::port::{
-    AdapterError, BackendError, BootstrapInfo, Command, ContextInfo, ContextPermissionsData,
-    ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData,
-    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    AdapterError, ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo,
+    ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query,
+    QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
@@ -393,16 +393,8 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_watch(context, gvk, namespace).await,
-                // Live infrastructure updates are refreshed explicitly by
-                // the client for now. Accepting the subscription keeps the
-                // capability available instead of replacing a successful
-                // snapshot with an unsupported-capability placeholder.
                 Subscribe::Infrastructure { context } => {
-                    if !self.knows_context(&context) {
-                        Err(BackendError::NotFound)
-                    } else {
-                        Ok(SubscriptionHandle::new(format!("infrastructure:{context}")))
-                    }
+                    self.infrastructure_subscription(context).await
                 }
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     self.redeem_stream_ticket(ticket_id, route).await
@@ -448,31 +440,109 @@ impl KubeAdapter {
             .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let mut records = Vec::new();
+        let client = self.cluster_client(context).await?;
+        Self::infrastructure_snapshot(client, context, descriptors, self.watches.clone())
+            .await
+            .map(QueryResult::Infrastructure)
+    }
+
+    async fn infrastructure_snapshot(
+        client: kube::Client,
+        context: &str,
+        descriptors: Vec<ApiResourceDescriptor>,
+        watches: ClusterWatches,
+    ) -> Result<crate::catalog::CatalogSnapshot, BackendError> {
+        let mut rows = Vec::new();
+        let mut nodes = Vec::new();
         for descriptor in descriptors {
-            match self
-                .resource_list(context.to_owned(), descriptor.gvk, None)
-                .await
+            if descriptor.gvk.kind == "Node" {
+                let inventory = infrastructure::nodes(client.clone(), context).await?;
+                rows.extend(inventory.rows);
+                nodes = inventory.nodes;
+                continue;
+            }
+            match read::list_resource(
+                &client,
+                context,
+                &descriptor.gvk,
+                &descriptor.plural,
+                descriptor.namespaced,
+                None,
+            )
+            .await
             {
-                Ok(QueryResult::ResourceList(list)) => records.extend(list.rows),
-                Ok(_) => unreachable!("resource_list always returns a resource list"),
+                Ok(read) => rows.extend(read.rows),
                 Err(BackendError::NotFound) => continue,
                 Err(error) => return Err(error),
             }
         }
-        let (claims, volumes, classes) = self.storage_inventory(context).await?;
-        let revision = self.watches.next_revision();
-        Ok(QueryResult::Infrastructure(
-            crate::catalog::CatalogSnapshot::live(
-                context,
-                revision,
-                crate::runtime::now_rfc3339(),
-                records,
-                claims,
-                volumes,
-                classes,
-            ),
+        let (claims, volumes, classes) = infrastructure::storage_inventory(client).await?;
+        let revision = watches.next_revision();
+        let records = rows
+            .iter()
+            .map(|row| crate::runtime::record_from_row(row, revision))
+            .collect();
+        Ok(crate::catalog::CatalogSnapshot::live(
+            context,
+            revision,
+            crate::runtime::now_rfc3339(),
+            records,
+            claims,
+            volumes,
+            classes,
+            nodes,
         ))
+    }
+
+    async fn infrastructure_subscription(
+        &self,
+        context: String,
+    ) -> Result<SubscriptionHandle, BackendError> {
+        if !self.knows_context(&context) {
+            return Err(BackendError::NotFound);
+        }
+        let catalog = self.catalog_for(&context).await?;
+        let overview_kinds = [
+            "Node",
+            "Pod",
+            "Deployment",
+            "StatefulSet",
+            "DaemonSet",
+            "Job",
+            "CronJob",
+        ];
+        let descriptors = catalog
+            .types
+            .iter()
+            .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let client = self.cluster_client(&context).await?;
+        let watches = self.watches.clone();
+        let (sender, receiver) = tokio::sync::broadcast::channel(crate::watch::WATCH_CAPACITY);
+        let subscription_id = format!("infrastructure:{context}");
+        tokio::spawn(async move {
+            loop {
+                if sender.receiver_count() == 0 {
+                    break;
+                }
+                if let Ok(snapshot) = Self::infrastructure_snapshot(
+                    client.clone(),
+                    &context,
+                    descriptors.clone(),
+                    watches.clone(),
+                )
+                .await
+                    && sender
+                        .send(crate::port::BackendEvent::Infrastructure(snapshot))
+                        .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        Ok(SubscriptionHandle::with_events(subscription_id, receiver))
     }
 
     /// Open a supervised demand-driven resource watch for one selection.
