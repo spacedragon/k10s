@@ -97,10 +97,10 @@ struct CatalogNode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CatalogStorage {
-    persistent_volume_claims: Vec<CatalogPvc>,
-    persistent_volumes: Vec<CatalogPv>,
-    storage_classes: Vec<CatalogStorageClass>,
+pub(crate) struct CatalogStorage {
+    pub(crate) persistent_volume_claims: Vec<CatalogPvc>,
+    pub(crate) persistent_volumes: Vec<CatalogPv>,
+    pub(crate) storage_classes: Vec<CatalogStorageClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,9 +145,7 @@ impl CatalogSnapshot {
         revision: u64,
         generated_at: impl Into<String>,
         records: Vec<ResourceRecord>,
-        persistent_volume_claims: Vec<CatalogPvc>,
-        persistent_volumes: Vec<CatalogPv>,
-        storage_classes: Vec<CatalogStorageClass>,
+        storage: CatalogStorage,
         node_rows: Vec<NodeRow>,
     ) -> Self {
         let nodes = records
@@ -196,7 +194,8 @@ impl CatalogSnapshot {
             })
             .count() as u32;
         let healthy_workloads = workloads.saturating_sub(unhealthy_workloads);
-        let persistent_storage_bytes = persistent_volume_claims
+        let persistent_storage_bytes = storage
+            .persistent_volume_claims
             .iter()
             .filter_map(|claim| crate::kube::metrics::quantity_bytes(Some(claim.capacity.clone())))
             .fold(0, u64::saturating_add);
@@ -269,11 +268,7 @@ impl CatalogSnapshot {
                     age: node.age,
                 })
                 .collect(),
-            storage: CatalogStorage {
-                persistent_volume_claims,
-                persistent_volumes,
-                storage_classes,
-            },
+            storage,
         }
     }
 
@@ -690,9 +685,7 @@ mod tests {
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
             ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            CatalogStorage::default(),
             Vec::new(),
         )
         .into_protocol();

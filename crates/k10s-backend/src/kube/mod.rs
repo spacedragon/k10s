@@ -476,7 +476,7 @@ impl KubeAdapter {
                 Err(error) => return Err(error),
             }
         }
-        let (claims, volumes, classes) = infrastructure::storage_inventory(client).await?;
+        let storage = infrastructure::storage_inventory(client).await?;
         let revision = watches.next_revision();
         let records = rows
             .iter()
@@ -487,9 +487,7 @@ impl KubeAdapter {
             revision,
             crate::runtime::now_rfc3339(),
             records,
-            claims,
-            volumes,
-            classes,
+            storage,
             nodes,
         ))
     }

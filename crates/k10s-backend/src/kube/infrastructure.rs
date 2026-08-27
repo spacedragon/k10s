@@ -7,13 +7,13 @@ use k8s_openapi::api::{
 use kube::{Api, ResourceExt, api::ListParams};
 
 use crate::{
-    catalog::{CatalogPv, CatalogPvc, CatalogStorageClass},
+    catalog::{CatalogPv, CatalogPvc, CatalogStorage, CatalogStorageClass},
     port::BackendError,
 };
 
 pub(crate) async fn storage_inventory(
     client: kube::Client,
-) -> Result<(Vec<CatalogPvc>, Vec<CatalogPv>, Vec<CatalogStorageClass>), BackendError> {
+) -> Result<CatalogStorage, BackendError> {
     let claim_api = Api::<PersistentVolumeClaim>::all(client.clone());
     let volume_api = Api::<PersistentVolume>::all(client.clone());
     let class_api = Api::<StorageClass>::all(client);
@@ -34,7 +34,11 @@ pub(crate) async fn storage_inventory(
     volumes.sort_by(|a, b| a.name.cmp(&b.name));
     classes.sort_by(|a, b| a.name.cmp(&b.name));
 
-    Ok((claims, volumes, classes))
+    Ok(CatalogStorage {
+        persistent_volume_claims: claims,
+        persistent_volumes: volumes,
+        storage_classes: classes,
+    })
 }
 
 fn optional_items<T>(result: Result<Vec<T>, kube::Error>) -> Result<Vec<T>, BackendError> {
