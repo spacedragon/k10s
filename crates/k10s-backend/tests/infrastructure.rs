@@ -41,6 +41,30 @@ async fn real_adapter_projects_core_nodes_instead_of_rejecting_infrastructure() 
             .to_string(),
         );
     }
+    for (path, kind, api_version) in [
+        (
+            "/api/v1/persistentvolumeclaims",
+            "PersistentVolumeClaimList",
+            "v1",
+        ),
+        ("/api/v1/persistentvolumes", "PersistentVolumeList", "v1"),
+        (
+            "/apis/storage.k8s.io/v1/storageclasses",
+            "StorageClassList",
+            "storage.k8s.io/v1",
+        ),
+    ] {
+        server.set_response(
+            path,
+            200,
+            &serde_json::json!({
+                "kind": kind,
+                "apiVersion": api_version,
+                "items": []
+            })
+            .to_string(),
+        );
+    }
     server.set_response(
         "/api/v1/nodes",
         200,

@@ -97,55 +97,55 @@ struct CatalogNode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CatalogStorage {
-    persistent_volume_claims: Vec<CatalogPvc>,
-    persistent_volumes: Vec<CatalogPv>,
-    storage_classes: Vec<CatalogStorageClass>,
+pub(crate) struct CatalogStorage {
+    pub(crate) persistent_volume_claims: Vec<CatalogPvc>,
+    pub(crate) persistent_volumes: Vec<CatalogPv>,
+    pub(crate) storage_classes: Vec<CatalogStorageClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPvc {
-    namespace: String,
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_volume: String,
-    age: String,
+pub(crate) struct CatalogPvc {
+    pub(crate) namespace: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_volume: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPv {
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_claim: String,
-    reclaim_policy: String,
-    age: String,
+pub(crate) struct CatalogPv {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_claim: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogStorageClass {
-    name: String,
-    provisioner: String,
-    reclaim_policy: String,
-    volume_binding_mode: String,
-    age: String,
+pub(crate) struct CatalogStorageClass {
+    pub(crate) name: String,
+    pub(crate) provisioner: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) volume_binding_mode: String,
+    pub(crate) age: String,
 }
 
 impl CatalogSnapshot {
     /// Build an honest, metrics-free overview from normalized live resource
-    /// rows. The real adapter uses this projection until cluster-wide
-    /// capacity and storage collectors are available; absent values remain
-    /// absent instead of being fabricated.
+    /// rows and storage inventory. Absent metrics remain absent instead of
+    /// being fabricated.
     pub(crate) fn live(
         context: impl Into<String>,
         revision: u64,
         generated_at: impl Into<String>,
         records: Vec<ResourceRecord>,
+        storage: CatalogStorage,
         node_rows: Vec<NodeRow>,
     ) -> Self {
         let nodes = records
@@ -194,6 +194,11 @@ impl CatalogSnapshot {
             })
             .count() as u32;
         let healthy_workloads = workloads.saturating_sub(unhealthy_workloads);
+        let persistent_storage_bytes = storage
+            .persistent_volume_claims
+            .iter()
+            .filter_map(|claim| crate::kube::metrics::quantity_bytes(Some(claim.capacity.clone())))
+            .fold(0, u64::saturating_add);
         let mut workload_health = Vec::new();
         if healthy_workloads > 0 {
             workload_health.push(CatalogHealth {
@@ -218,7 +223,7 @@ impl CatalogSnapshot {
                 nodes,
                 pods,
                 workloads,
-                persistent_storage_bytes: 0,
+                persistent_storage_bytes,
             },
             cluster_cpu: CatalogUsage {
                 used: None,
@@ -263,7 +268,7 @@ impl CatalogSnapshot {
                     age: node.age,
                 })
                 .collect(),
-            storage: CatalogStorage::default(),
+            storage,
         }
     }
 
@@ -680,6 +685,7 @@ mod tests {
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
             ],
+            CatalogStorage::default(),
             Vec::new(),
         )
         .into_protocol();

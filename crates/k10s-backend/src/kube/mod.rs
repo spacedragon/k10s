@@ -15,7 +15,7 @@ mod events;
 mod exec;
 mod infrastructure;
 mod logs;
-mod metrics;
+pub(crate) mod metrics;
 mod mutate;
 mod normalize;
 mod owners;
@@ -476,6 +476,7 @@ impl KubeAdapter {
                 Err(error) => return Err(error),
             }
         }
+        let storage = infrastructure::storage_inventory(client).await?;
         let revision = watches.next_revision();
         let records = rows
             .iter()
@@ -486,6 +487,7 @@ impl KubeAdapter {
             revision,
             crate::runtime::now_rfc3339(),
             records,
+            storage,
             nodes,
         ))
     }

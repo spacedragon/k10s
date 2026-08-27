@@ -1259,6 +1259,21 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
 #[tokio::test]
 async fn kube_adapter_serves_live_infrastructure_inventory() {
     let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/persistentvolumeclaims",
+        200,
+        r#"{"apiVersion":"v1","kind":"PersistentVolumeClaimList","items":[]}"#,
+    );
+    server.set_response(
+        "/api/v1/persistentvolumes",
+        200,
+        r#"{"apiVersion":"v1","kind":"PersistentVolumeList","items":[]}"#,
+    );
+    server.set_response(
+        "/apis/storage.k8s.io/v1/storageclasses",
+        200,
+        r#"{"apiVersion":"storage.k8s.io/v1","kind":"StorageClassList","items":[]}"#,
+    );
     let lists = [
         (
             "/api/v1/nodes",

@@ -128,3 +128,7 @@ fn sanitize_read_list_error(error: kube::Error) -> BackendError {
         other => BackendError::Internal(sanitize_list_error(other)),
     }
 }
+
+pub(super) fn sanitize_infrastructure_list_error(error: kube::Error) -> BackendError {
+    sanitize_read_list_error(error)
+}
