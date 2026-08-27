@@ -7,18 +7,25 @@ use serde::{Deserialize, Serialize};
 
 use super::detail::DetailState;
 
-/// Namespace intent for a namespaced list. Context defaults resolve to the
-/// active kube context namespace (or Kubernetes' `default` namespace).
+/// Namespace intent for a namespaced list. `ContextDefault` remains solely
+/// for decoding legacy snapshots and is normalized before entering live state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum NamespaceScope {
-    #[default]
     ContextDefault,
     Namespace(String),
+    #[default]
     AllNamespaces,
 }
 
 impl NamespaceScope {
+    pub(crate) fn into_live(self) -> Self {
+        match self {
+            Self::ContextDefault => Self::AllNamespaces,
+            scope => scope,
+        }
+    }
+
     #[must_use]
     pub fn resolve<'a>(&'a self, context_namespace: Option<&'a str>) -> Option<&'a str> {
         match self {
@@ -63,7 +70,7 @@ pub struct ResourceWindowState<I> {
 impl<I> Default for ResourceWindowState<I> {
     fn default() -> Self {
         Self {
-            namespace_scope: NamespaceScope::ContextDefault,
+            namespace_scope: NamespaceScope::AllNamespaces,
             search: String::new(),
             filters: BTreeMap::new(),
             sort: None,

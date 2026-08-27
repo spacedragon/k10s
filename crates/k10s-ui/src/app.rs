@@ -4384,7 +4384,7 @@ mod tests {
         let watches = resource_watches(&state);
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].gvk, GroupVersionKind::core("v1", "Pod"));
-        assert_eq!(watches[0].namespace.as_deref(), Some("default"));
+        assert_eq!(watches[0].namespace.as_deref(), None);
 
         app.web_activate_services();
         let watches = resource_watches(&state);
@@ -4411,13 +4411,10 @@ mod tests {
     }
 
     #[test]
-    fn context_default_replaces_watch_when_same_context_namespace_changes() {
+    fn all_namespaces_keeps_watch_when_context_namespace_changes() {
         let (mut app, state) = ready_app();
         let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
-        assert_eq!(
-            resource_watches(&state)[0].namespace.as_deref(),
-            Some("default")
-        );
+        assert_eq!(resource_watches(&state)[0].namespace.as_deref(), None);
 
         let AppView::Ready { contexts, .. } = &mut app.view else {
             panic!("ready")
@@ -4430,8 +4427,8 @@ mod tests {
         app.reconcile_selected_resource_streams();
 
         let watches = resource_watches(&state);
-        assert_eq!(watches.len(), 2);
-        assert_eq!(watches.last().unwrap().namespace.as_deref(), Some("team-b"));
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].namespace.as_deref(), None);
         assert_eq!(
             state
                 .borrow()
@@ -4439,18 +4436,14 @@ mod tests {
                 .iter()
                 .filter(|frame| frame.kind == ClientKind::Unsubscribe)
                 .count(),
-            1
+            0
         );
         let key = app.window_subscriptions.get(&window).unwrap();
         assert!(matches!(
             key.scope,
-            super::SubscriptionScope::Namespaced(NamespaceScope::ContextDefault)
+            super::SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces)
         ));
         assert_eq!(app.resource_subscriptions.len(), 1);
-        assert!(
-            !app.build_resource_feed().window_lists.contains_key(&window),
-            "the replaced watch has no stale rows projected under the window"
-        );
     }
 
     #[test]

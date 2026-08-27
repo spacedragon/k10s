@@ -111,7 +111,7 @@ impl PersistedListView {
     fn into_resource<I>(self) -> ResourceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ResourceWindowState {
-            namespace_scope: self.namespace_scope,
+            namespace_scope: self.namespace_scope.into_live(),
             search: self.search,
             filters: self.filters,
             sort: self.sort,
@@ -127,7 +127,7 @@ impl PersistedListView {
     fn into_service<I>(self) -> ServiceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ServiceWindowState {
-            namespace_scope: self.namespace_scope,
+            namespace_scope: self.namespace_scope.into_live(),
             search: self.search,
             sort: self.sort,
             split_ratio,
@@ -262,7 +262,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                             namespace_scope: view
                                 .namespace
                                 .map(NamespaceScope::Namespace)
-                                .unwrap_or_default(),
+                                .unwrap_or(NamespaceScope::AllNamespaces),
                             search: view.search,
                             filters: view.filters,
                             sort: view.sort,
