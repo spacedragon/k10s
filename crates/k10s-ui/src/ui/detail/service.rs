@@ -112,7 +112,7 @@ pub(super) fn show<I>(
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit YAML".to_owned())
             });
             if edit.clicked() {
-                queued.push(WorkspaceCommand::BeginYamlEdit(window_id));
+                queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
             }
         });
         ui.separator();
