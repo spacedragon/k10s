@@ -197,8 +197,8 @@ impl CatalogSnapshot {
         let healthy_workloads = workloads.saturating_sub(unhealthy_workloads);
         let persistent_storage_bytes = persistent_volume_claims
             .iter()
-            .filter_map(|claim| quantity_bytes(&claim.capacity))
-            .sum();
+            .filter_map(|claim| crate::kube::metrics::quantity_bytes(Some(claim.capacity.clone())))
+            .fold(0, u64::saturating_add);
         let mut workload_health = Vec::new();
         if healthy_workloads > 0 {
             workload_health.push(CatalogHealth {
@@ -511,23 +511,6 @@ impl CatalogSnapshot {
             },
         }
     }
-}
-
-fn quantity_bytes(raw: &str) -> Option<u64> {
-    const SUFFIXES: [(&str, u64); 6] = [
-        ("Ei", 1 << 60),
-        ("Pi", 1 << 50),
-        ("Ti", 1 << 40),
-        ("Gi", 1 << 30),
-        ("Mi", 1 << 20),
-        ("Ki", 1 << 10),
-    ];
-    for (suffix, multiplier) in SUFFIXES {
-        if let Some(value) = raw.strip_suffix(suffix) {
-            return value.parse::<u64>().ok()?.checked_mul(multiplier);
-        }
-    }
-    raw.parse().ok()
 }
 
 fn usage(value: CatalogUsage) -> CapacityUsage {

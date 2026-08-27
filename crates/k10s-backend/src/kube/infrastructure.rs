@@ -75,8 +75,8 @@ fn normalize_claim(claim: PersistentVolumeClaim) -> CatalogPvc {
             .unwrap_or_default(),
         bound_volume: spec
             .and_then(|spec| spec.volume_name.clone())
-            .unwrap_or_default(),
-        age: created_at(&claim.metadata),
+            .unwrap_or_else(|| "—".into()),
+        age: age(&claim.metadata),
     }
 }
 
@@ -84,14 +84,13 @@ fn normalize_volume(volume: PersistentVolume) -> CatalogPv {
     let spec = volume.spec.as_ref();
     let bound_claim = spec
         .and_then(|spec| spec.claim_ref.as_ref())
-        .map(|claim| {
-            format!(
-                "{}/{}",
-                claim.namespace.as_deref().unwrap_or_default(),
-                claim.name.as_deref().unwrap_or_default()
-            )
-        })
-        .unwrap_or_default();
+        .map(
+            |claim| match (claim.namespace.as_deref(), claim.name.as_deref()) {
+                (Some(namespace), Some(name)) => format!("{namespace}/{name}"),
+                _ => "—".into(),
+            },
+        )
+        .unwrap_or_else(|| "—".into());
     CatalogPv {
         name: volume.name_any(),
         status: volume
@@ -114,7 +113,7 @@ fn normalize_volume(volume: PersistentVolume) -> CatalogPv {
         reclaim_policy: spec
             .and_then(|spec| spec.persistent_volume_reclaim_policy.clone())
             .unwrap_or_default(),
-        age: created_at(&volume.metadata),
+        age: age(&volume.metadata),
     }
 }
 
@@ -124,14 +123,31 @@ fn normalize_class(class: StorageClass) -> CatalogStorageClass {
         provisioner: class.provisioner,
         reclaim_policy: class.reclaim_policy.unwrap_or_default(),
         volume_binding_mode: class.volume_binding_mode.unwrap_or_default(),
-        age: created_at(&class.metadata),
+        age: age(&class.metadata),
     }
 }
 
-fn created_at(metadata: &kube::core::ObjectMeta) -> String {
-    metadata
-        .creation_timestamp
-        .as_ref()
-        .map(|time| time.0.to_string())
-        .unwrap_or_default()
+fn age(metadata: &kube::core::ObjectMeta) -> String {
+    let Some(created) = metadata.creation_timestamp.as_ref() else {
+        return "—".into();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let created = u64::try_from(created.0.as_second()).unwrap_or(now);
+    format_age(now.saturating_sub(created))
+}
+
+fn format_age(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const YEAR: u64 = 365 * DAY;
+    match seconds {
+        value if value >= YEAR => format!("{}y", value / YEAR),
+        value if value >= DAY => format!("{}d", value / DAY),
+        value if value >= HOUR => format!("{}h", value / HOUR),
+        value if value >= MINUTE => format!("{}m", value / MINUTE),
+        value => format!("{value}s"),
+    }
 }

@@ -15,7 +15,7 @@ mod events;
 mod exec;
 mod infrastructure;
 mod logs;
-mod metrics;
+pub(crate) mod metrics;
 mod mutate;
 mod normalize;
 mod owners;
