@@ -332,7 +332,7 @@ pub(super) fn show<I>(
         };
         let filters_active = !state.search.is_empty()
             || (namespaced
-                && state.namespace_scope != crate::workspace::NamespaceScope::ContextDefault);
+                && state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces);
         let clear_label = if compact_controls {
             "Clear"
         } else {
@@ -343,7 +343,7 @@ pub(super) fn show<I>(
             if namespaced {
                 queued.push(WorkspaceCommand::SetNamespaceScope(
                     window_id,
-                    crate::workspace::NamespaceScope::ContextDefault,
+                    crate::workspace::NamespaceScope::AllNamespaces,
                 ));
             }
         }

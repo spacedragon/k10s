@@ -124,8 +124,8 @@ Window
               GenericContainer
                 TextInput label="Search pods" value=""
                   TextRun value=""
-                Label value="Context default (default)"
-                  TextRun value="Context default (default)"
+                Label value="All namespaces"
+                  TextRun value="All namespaces"
                 TextInput label="Namespace filter" value=""
                   TextRun value=""
                 Button label="All namespaces"
