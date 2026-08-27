@@ -10,6 +10,7 @@ use super::{ConnectionState, theme};
 pub(super) struct TopBarAction {
     pub(super) context_change: Option<String>,
     pub(super) refresh: bool,
+    pub(super) toggle_free_window_resizing: bool,
 }
 
 pub(super) fn show(
@@ -17,9 +18,11 @@ pub(super) fn show(
     connection: ConnectionState,
     contexts: &[Context],
     selected_context: Option<&str>,
+    free_window_resizing: bool,
 ) -> TopBarAction {
     let mut context_change = None;
     let mut refresh = false;
+    let mut toggle_free_window_resizing = false;
 
     MenuBar::new().ui(ui, |ui| {
         ui.push_id("k10s.top_bar.menus", |ui| {
@@ -30,6 +33,12 @@ pub(super) fn show(
                 }
             });
             ui.menu_button("View", |ui| {
+                let mut enabled = free_window_resizing;
+                if ui.checkbox(&mut enabled, "Free window resizing").clicked() {
+                    toggle_free_window_resizing = true;
+                    ui.close();
+                }
+
                 if ui.button("Minimize").clicked() {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
                     ui.close();
@@ -141,5 +150,6 @@ pub(super) fn show(
     TopBarAction {
         context_change,
         refresh,
+        toggle_free_window_resizing,
     }
 }

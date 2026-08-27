@@ -411,9 +411,18 @@ where
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
             .show(ui, |ui| {
-                let action = top_bar::show(ui, connection, contexts, selected.as_deref());
+                let action = top_bar::show(
+                    ui,
+                    connection,
+                    contexts,
+                    selected.as_deref(),
+                    self.workspace.free_window_resizing(),
+                );
                 context_change = action.context_change;
                 refresh_requested |= action.refresh;
+                if action.toggle_free_window_resizing {
+                    queued.push(WorkspaceCommand::ToggleFreeWindowResizing);
+                }
             });
 
         egui::Panel::left("k10s.launcher")
