@@ -298,6 +298,7 @@ fn detail_responses_carry_populated_service_projections() {
         created_at: "2026-08-21T00:00:00Z".into(),
         owner_references: Vec::new(),
         sections: Vec::new(),
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: Vec::new(),
         related: Vec::new(),
         capabilities: k10s_protocol::ResourceCapabilities::default(),

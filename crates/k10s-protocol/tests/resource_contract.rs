@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, InfrastructureWatchSpec, MetricsAvailability, PodMetrics,
-    RequestId, ResourceCapabilities, ResourceDetailResponse, ResourceGone, ResourceIdentity,
-    ResourceListResponse, ResourceListRow, ResourceScope, ResourceSnapshotPage, ServerFrame,
-    ServerKind, SubscriptionSelector, WorkloadKind, decode_server_frame,
+    BackendRevision, EventsCondition, GroupVersionKind, InfrastructureWatchSpec,
+    MetricsAvailability, PodMetrics, REQUEST_RESOURCE_RELATIONS, RequestId, ResourceCapabilities,
+    ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListResponse, ResourceListRow,
+    ResourceRelationsResponse, ResourceScope, ResourceSnapshotPage, ServerFrame, ServerKind,
+    SubscriptionSelector, WorkloadKind, decode_server_frame,
 };
 use serde_json::{Value, json};
 
@@ -361,6 +362,7 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
             count: 1,
             last_seen: "2026-08-21T00:06:45Z".into(),
         }],
+        events_condition: EventsCondition::Available,
         related: vec![k10s_protocol::RelatedGroup {
             title: "Pods".into(),
             gvk: GroupVersionKind::core("v1", "Pod"),
@@ -388,6 +390,106 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
     assert_eq!(encoded["related"][0]["title"], json!("Pods"));
     assert_eq!(encoded["related"][0]["gvk"]["kind"], json!("Pod"));
     assert_eq!(encoded["capabilities"]["canScale"], json!(false));
+}
+
+fn legacy_detail_json(related: Value) -> Value {
+    json!({
+        "identity": {
+            "context": "dev-local",
+            "gvk": {"group": "apps", "version": "v1", "kind": "Deployment"},
+            "namespace": "default",
+            "name": "web",
+            "uid": "uid-web"
+        },
+        "revision": 17,
+        "createdAt": "2026-08-21T00:06:00Z",
+        "ownerReferences": [],
+        "sections": [],
+        "events": [],
+        "related": related,
+        "capabilities": {
+            "canEditYaml": true,
+            "canDelete": true,
+            "canScale": true,
+            "canViewLogs": true,
+            "canExec": true
+        },
+        "manifest": "apiVersion: apps/v1\nkind: Deployment\n",
+        "projection": null
+    })
+}
+
+#[test]
+fn legacy_detail_without_events_condition_or_related_uses_compatible_defaults() {
+    let mut payload = legacy_detail_json(json!([]));
+    payload.as_object_mut().unwrap().remove("related");
+
+    let decoded: ResourceDetailResponse = serde_json::from_value(payload).unwrap();
+
+    assert_eq!(decoded.events_condition, EventsCondition::Available);
+    assert!(decoded.related.is_empty());
+}
+
+#[test]
+fn legacy_detail_with_eagerly_populated_related_still_decodes() {
+    let decoded: ResourceDetailResponse = serde_json::from_value(legacy_detail_json(json!([{
+        "title": "Pods",
+        "gvk": {"group": "", "version": "v1", "kind": "Pod"},
+        "rows": []
+    }])))
+    .unwrap();
+
+    assert_eq!(decoded.related.len(), 1);
+    assert_eq!(decoded.related[0].title, "Pods");
+}
+
+#[test]
+fn current_detail_encoding_includes_events_condition_and_empty_related() {
+    let response: ResourceDetailResponse =
+        serde_json::from_value(legacy_detail_json(json!([]))).unwrap();
+
+    let encoded = serde_json::to_value(response).unwrap();
+
+    assert_eq!(encoded["eventsCondition"], json!("available"));
+    assert_eq!(encoded["related"], json!([]));
+}
+
+#[test]
+fn resource_relations_response_round_trips_complete_identity_revision_and_groups() {
+    let response = ResourceRelationsResponse {
+        identity: ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        },
+        revision: BackendRevision::new(18),
+        groups: vec![k10s_protocol::RelatedGroup {
+            title: "Pods".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            rows: Vec::new(),
+        }],
+    };
+
+    let encoded = round_trip(&response);
+
+    assert_eq!(encoded["identity"]["context"], json!("dev-local"));
+    assert_eq!(encoded["identity"]["gvk"]["kind"], json!("Deployment"));
+    assert_eq!(encoded["identity"]["namespace"], json!("default"));
+    assert_eq!(encoded["identity"]["name"], json!("web"));
+    assert_eq!(encoded["identity"]["uid"], json!("uid-web"));
+    assert_eq!(encoded["revision"], json!(18));
+    assert_eq!(encoded["groups"][0]["title"], json!("Pods"));
+}
+
+#[test]
+fn resource_relations_request_kind_is_stable() {
+    assert_eq!(REQUEST_RESOURCE_RELATIONS, "resource.relations");
 }
 
 #[test]

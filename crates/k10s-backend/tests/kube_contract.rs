@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{
-    BackendKernel, ContextInfo, FakeKubernetes, KernelQueryResult, KubeAdapter, Query,
+    BackendKernel, ContextInfo, FakeKubernetes, KernelQueryResult, KubeAdapter, Query, Subscribe,
 };
 use serde_json::Value;
 
@@ -496,6 +496,7 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
                 "capabilities",
                 "createdAt",
                 "events",
+                "eventsCondition",
                 "identity",
                 "manifest",
                 "ownerReferences",
@@ -563,12 +564,10 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
         assert!(text.contains("manifest"), "{label}: manifest missing");
     }
 
-    // The kube side resolves the traversal with honest recorded data.
-    let related = kube_payload["related"].as_array().unwrap();
-    assert!(
-        related.iter().any(|group| group["gvk"]["kind"] == "Pod"),
-        "the kube traversal reaches pods transitively"
-    );
+    // Relations are deliberately independent so detail shape never inherits
+    // the latency of a catalog-wide owner traversal.
+    assert!(fake_payload["related"].as_array().unwrap().is_empty());
+    assert!(kube_payload["related"].as_array().unwrap().is_empty());
 }
 
 /// Shared resource-metrics wire contract: the fake adapter's stored samples
@@ -1255,6 +1254,90 @@ async fn fake_and_kube_adapters_agree_on_context_permissions_shape() {
             "{marker}: raw review vocabulary leaked onto the wire"
         );
     }
+}
+
+#[tokio::test]
+async fn kube_adapter_serves_live_infrastructure_inventory() {
+    let server = RecordedApiServer::standard();
+    let lists = [
+        (
+            "/api/v1/nodes",
+            r#"{"kind":"NodeList","apiVersion":"v1","metadata":{"resourceVersion":"1"},"items":[
+              {"metadata":{"name":"worker","uid":"uid-worker","creationTimestamp":"2026-08-27T00:00:00Z"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}
+            ]}"#,
+        ),
+        (
+            "/api/v1/pods",
+            r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[
+              {"metadata":{"name":"api-pod","namespace":"default","uid":"uid-api-pod","creationTimestamp":"2026-08-27T00:00:00Z"},"status":{"phase":"Running"}}
+            ]}"#,
+        ),
+        (
+            "/apis/apps/v1/deployments",
+            r#"{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{"resourceVersion":"3"},"items":[
+              {"metadata":{"name":"api","namespace":"default","uid":"uid-api","creationTimestamp":"2026-08-27T00:00:00Z"},"spec":{"replicas":2},"status":{"readyReplicas":2}}
+            ]}"#,
+        ),
+        (
+            "/apis/apps/v1/statefulsets",
+            r#"{"kind":"StatefulSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"4"},"items":[]}"#,
+        ),
+        (
+            "/apis/apps/v1/daemonsets",
+            r#"{"kind":"DaemonSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"5"},"items":[]}"#,
+        ),
+        (
+            "/apis/batch/v1/jobs",
+            r#"{"kind":"JobList","apiVersion":"batch/v1","metadata":{"resourceVersion":"6"},"items":[]}"#,
+        ),
+        (
+            "/apis/batch/v1/cronjobs",
+            r#"{"kind":"CronJobList","apiVersion":"batch/v1","metadata":{"resourceVersion":"7"},"items":[]}"#,
+        ),
+    ];
+    for (path, body) in lists {
+        server.set_response(path, 200, body);
+    }
+
+    let adapter = KubeAdapter::with_cluster_clients(
+        vec![ContextInfo {
+            name: "contract-mock".into(),
+            cluster: "recorded-apiserver".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
+        }],
+        [("contract-mock", server.clone().into_client("default"))],
+    )
+    .expect("adapter builds around the recorded server");
+    let kernel = BackendKernel::new(adapter);
+
+    let result = kernel
+        .query(Query::Infrastructure {
+            context: "contract-mock".into(),
+        })
+        .await
+        .expect("live infrastructure query succeeds");
+    let KernelQueryResult::Infrastructure(result) = result else {
+        panic!("query must return infrastructure");
+    };
+    let response = result.wire_payload();
+    assert_eq!(response.context, "contract-mock");
+    assert_eq!(response.totals.nodes, 1);
+    assert_eq!(response.totals.pods, 1);
+    assert_eq!(response.totals.workloads, 1);
+
+    for (path, _) in lists {
+        assert_eq!(server.hit_count(path), 1, "overview must list {path}");
+    }
+
+    kernel
+        .subscribe(Subscribe::Infrastructure {
+            context: "contract-mock".into(),
+        })
+        .await
+        .expect("live infrastructure subscription is accepted");
 }
 
 /// Shared permission-probe hardening contract: both adapters enforce the

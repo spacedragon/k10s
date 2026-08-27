@@ -219,6 +219,7 @@ fn backend_restart_during_mutation_requires_status_refresh_before_retry() {
                 created_at: "2026-08-25T00:00:00Z".into(),
                 owner_references: Vec::new(),
                 sections: Vec::new(),
+                events_condition: k10s_protocol::EventsCondition::Available,
                 events: Vec::new(),
                 related: Vec::new(),
                 capabilities: ResourceCapabilities::default(),

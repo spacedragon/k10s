@@ -181,6 +181,7 @@ mod tests {
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
                 events: Vec::new(),
+                events_condition: crate::port::RecordEventsCondition::Available,
                 manifest: String::new(),
                 projection: None,
             }),

@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Request kind for loading independently resolved resource relations.
+pub const REQUEST_RESOURCE_RELATIONS: &str = "resource.relations";
+
 /// Group, version, and kind of a resource type.
 ///
 /// The group is empty for core (`v1`) API objects.
@@ -349,6 +352,18 @@ pub struct RelatedGroup {
     pub rows: Vec<ResourceListRow>,
 }
 
+/// Response payload for independently resolved resource relations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceRelationsResponse {
+    /// Stable identity of the resource whose relations were resolved.
+    pub identity: ResourceIdentity,
+    /// Backend revision at which the relations were true.
+    pub revision: BackendRevision,
+    /// Related rows grouped by resource type.
+    pub groups: Vec<RelatedGroup>,
+}
+
 /// Server-asserted capabilities for one resource type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -419,6 +434,17 @@ pub struct ResourceListResponse {
     pub capabilities: ResourceCapabilities,
 }
 
+/// Whether event rows are available for a resource detail response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EventsCondition {
+    /// Event rows were resolved successfully.
+    #[default]
+    Available,
+    /// Event rows could not be resolved.
+    Unavailable,
+}
+
 /// Response payload for a single-resource detail query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,7 +461,11 @@ pub struct ResourceDetailResponse {
     pub sections: Vec<DetailSection>,
     /// Deterministic backend-resolved events for this object.
     pub events: Vec<EventRow>,
+    /// Whether event rows were available from the backend.
+    #[serde(default)]
+    pub events_condition: EventsCondition,
     /// Related rows resolved by backend owner traversal, grouped by type.
+    #[serde(default)]
     pub related: Vec<RelatedGroup>,
     /// Capabilities asserted for this kind.
     pub capabilities: ResourceCapabilities,

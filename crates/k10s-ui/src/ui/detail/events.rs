@@ -5,7 +5,16 @@ use k10s_protocol::EventRow;
 
 use crate::workspace::WindowId;
 
-pub(super) fn show(ui: &mut egui::Ui, window_id: WindowId, events: &[EventRow]) {
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    condition: k10s_protocol::EventsCondition,
+    events: &[EventRow],
+) {
+    if condition == k10s_protocol::EventsCondition::Unavailable {
+        ui.label("Events unavailable");
+        return;
+    }
     if events.is_empty() {
         ui.label("No events reported");
         return;
