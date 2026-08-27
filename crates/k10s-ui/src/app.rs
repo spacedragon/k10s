@@ -202,8 +202,8 @@ struct SubscriptionKey {
     context: String,
     gvk: k10s_protocol::GroupVersionKind,
     scope: SubscriptionScope,
-    /// Effective selector sent on the wire. Kept beside namespace intent so
-    /// a Bootstrap default-namespace change replaces ContextDefault watches.
+    /// Effective namespace selector sent on the wire and included in the
+    /// canonical identity used to share equivalent subscriptions.
     protocol_namespace: Option<String>,
 }
 
