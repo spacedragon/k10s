@@ -1709,10 +1709,18 @@ impl ClientState {
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     if relations.identity != *identity {
-                        return Err(ClientError::Protocol(
-                            "resource.relations response identity does not match request"
-                                .to_owned(),
-                        ));
+                        self.pending.remove(&id);
+                        self.completed_failures.insert(
+                            id.clone(),
+                            ErrorFrame::new(
+                                ErrorCode::InvalidRequest,
+                                "resource relations response did not match request",
+                                Retryability::Never,
+                                ErrorScope::Request,
+                                id.as_str(),
+                            ),
+                        );
+                        return Ok(());
                     }
                     QueryResult::ResourceRelations(Box::new(relations))
                 }

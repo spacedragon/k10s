@@ -117,7 +117,7 @@ fn resource_relations_response_must_echo_the_exact_requested_identity() {
             .unwrap();
         let _outbound = client.take_outbound().unwrap();
 
-        let error = client
+        client
             .apply(ServerFrame::response(
                 request.id().clone(),
                 ResourceRelationsResponse {
@@ -126,11 +126,19 @@ fn resource_relations_response_must_echo_the_exact_requested_identity() {
                     groups: vec![],
                 },
             ))
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, ClientError::Protocol(_)));
-        assert!(client.is_pending(&request));
-        assert!(client.take(request).is_none());
+        assert_eq!(client.phase(), ClientPhase::Ready);
+        assert!(!client.is_pending(&request));
+        assert!(client.take(request.clone()).is_none());
+        let failure = client.take_failure(request).expect("mismatch is isolated");
+        assert_eq!(failure.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            failure.safe_message,
+            "resource relations response did not match request"
+        );
+        assert!(!failure.safe_message.contains("uid-from-an-older-object"));
+        assert!(!failure.safe_message.contains("production"));
     }
 }
 

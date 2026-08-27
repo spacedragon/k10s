@@ -2906,7 +2906,7 @@ mod tests {
     };
 
     use super::{
-        AppConnection, AppEventError, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
         PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
@@ -4628,21 +4628,51 @@ mod tests {
     fn same_name_different_uid_relation_response_never_enters_app_cache() {
         let (mut app, _) = ready_app();
         let expected = deployment_identity("same-name");
+        let primary: k10s_protocol::ResourceDetailResponse =
+            serde_json::from_value(serde_json::json!({
+            "identity": expected,
+            "revision": 1,
+            "createdAt": "2026-08-21T00:00:00Z",
+            "ownerReferences": [],
+            "sections": [],
+            "events": [],
+            "capabilities": {
+                "canEditYaml": true,
+                "canDelete": true,
+                "canScale": true,
+                "canViewLogs": false,
+                "canExec": false
+            },
+            "manifest": "kind: Deployment"
+            }))
+            .unwrap();
+        app.details.insert(expected.clone(), primary.clone());
         let request = start_relation_request(&mut app, &expected);
         let mut wrong = expected.clone();
         wrong.uid = "replacement-uid".into();
 
-        let outcome = app.handle_event(
+        app.handle_event(
             server_message(&relation_response_frame(&request, wrong)),
             2,
             0,
-        );
-        assert!(matches!(outcome, Err(AppEventError::Terminal(_))));
+        )
+        .unwrap();
+        app.refresh_details_at(2);
 
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(!app.client.is_pending(&request));
+        assert_eq!(app.details.get(&expected), Some(&primary));
+        assert!(matches!(
+            app.relations.get(&expected),
+            Some(RelationState::Failed(_))
+        ));
         assert!(!matches!(
             app.relations.get(&expected),
             Some(RelationState::Loaded { .. })
         ));
+        app.handle_resource_action(ResourceAction::RetryRelations(expected.clone()));
+        app.refresh_details_at(3);
+        assert!(app.relation_requests.contains_key(&expected));
         assert!(!matches!(
             app.build_resource_feed().relations.get(&expected),
             Some(RelationState::Loaded { .. })
