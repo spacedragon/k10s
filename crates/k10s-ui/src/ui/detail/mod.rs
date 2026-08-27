@@ -39,6 +39,7 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
         Some(WorkloadKind::Pod) => &[
             DetailTab::Overview,
             DetailTab::Events,
+            DetailTab::Yaml,
             DetailTab::Logs,
             DetailTab::Shell,
         ],
@@ -228,7 +229,7 @@ pub(super) fn show<I>(
             action_button(ui, "Exec shell", "Exec shell");
         }
         if capabilities.can_edit_yaml && ui.button("Edit YAML").clicked() {
-            queued.push(WorkspaceCommand::BeginYamlEdit(window_id));
+            queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
         }
     });
     ui.separator();

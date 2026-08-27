@@ -168,6 +168,7 @@ Window
                     TextRun value="Details"
                   Button label="Tab Overview"
                   Button label="Tab Events"
+                  Button label="Tab YAML"
                   Button label="Tab Logs"
                   Button label="Tab Shell"
                 Label value="db-postgres-0"
