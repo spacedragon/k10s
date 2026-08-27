@@ -15,11 +15,11 @@ use k10s_protocol::{
     ClientKind, ClientPayload, ContextPermissionsRequest, ContextSwitchRequest, CreateJobRequest,
     CronJobSuspendRequest, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
     InfrastructureRequest, OperationAccepted, OperationId, OperationStatusRequest, OperationUpdate,
-    REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH, RequestId, ResourceIdentity,
-    ResourceListRequest, ResourceRefRequest, ResourceTypesRequest, RestartRequest, ResumeStatus,
-    Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin,
-    SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome,
-    YamlApplyRequest, YamlValidateRequest, decode_client_frame,
+    REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH, REQUEST_RESOURCE_RELATIONS, RequestId,
+    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest,
+    RestartRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId,
+    ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId,
+    SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest, decode_client_frame,
 };
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -696,6 +696,11 @@ pub(crate) async fn serve_socket(
                                 Priority::P1,
                             ),
                             Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceDetail(value))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value.wire_payload()),
+                                Priority::P1,
+                            ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceRelations(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
@@ -1463,6 +1468,13 @@ fn parse_request(
                 }))
             })
             .map_err(|error| format!("invalid resource.detail payload: {error}")),
+        REQUEST_RESOURCE_RELATIONS => serde_json::from_value::<ResourceRefRequest>(payload.clone())
+            .map(|parsed| {
+                Some(ParsedRequest::Query(Query::ResourceRelations {
+                    reference: backend_reference(parsed.identity),
+                }))
+            })
+            .map_err(|error| format!("invalid {REQUEST_RESOURCE_RELATIONS} payload: {error}")),
         "resource.metrics" => serde_json::from_value::<ResourceRefRequest>(payload.clone())
             .map(|parsed| {
                 Some(ParsedRequest::Query(Query::ResourceMetrics {
@@ -2495,6 +2507,7 @@ mod tests {
             created_at: "2026-08-21T00:00:00Z".into(),
             owner_references: Vec::new(),
             events: Vec::new(),
+            events_condition: k10s_backend::RecordEventsCondition::Available,
             manifest: String::new(),
             projection: None,
         }
@@ -3070,6 +3083,7 @@ mod tests {
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
                 events: Vec::new(),
+                events_condition: k10s_backend::RecordEventsCondition::Available,
                 manifest: String::new(),
                 projection: None,
             }],

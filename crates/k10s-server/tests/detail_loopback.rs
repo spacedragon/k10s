@@ -8,8 +8,9 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{BackendKernel, FakeKubernetes};
 use k10s_protocol::{
-    GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRequest,
-    ResourceListResponse, ResourceRefRequest, ServerFrame, ServerKind,
+    EventsCondition, GroupVersionKind, REQUEST_RESOURCE_RELATIONS, ResourceDetailResponse,
+    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceRefRequest,
+    ResourceRelationsResponse, ServerFrame, ServerKind,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::{Value, json};
@@ -110,6 +111,23 @@ async fn request_detail(ws: &mut Ws, request_id: &str, identity: ResourceIdentit
     .await;
 }
 
+async fn request_relations(ws: &mut Ws, request_id: &str, identity: ResourceIdentity) {
+    send_request(
+        ws,
+        request_id,
+        REQUEST_RESOURCE_RELATIONS,
+        serde_json::to_value(ResourceRefRequest { identity }).unwrap(),
+    )
+    .await;
+}
+
+async fn receive_relations(ws: &mut Ws, request_id: &str) -> ResourceRelationsResponse {
+    let frame = receive_frame(ws).await;
+    assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
+    assert_eq!(frame.request_id.as_ref().unwrap().as_str(), request_id);
+    frame.decode_response_payload().unwrap()
+}
+
 #[tokio::test]
 async fn deployment_detail_traverses_replicasets_and_pods_by_controller_uid() {
     let (server, _fake) = spawn_server().await;
@@ -139,7 +157,7 @@ async fn deployment_detail_traverses_replicasets_and_pods_by_controller_uid() {
         .identity
         .clone();
 
-    request_detail(&mut ws, "detail-deploy", web_frontend).await;
+    request_detail(&mut ws, "detail-deploy", web_frontend.clone()).await;
     let detail = receive_detail(&mut ws, "detail-deploy").await;
 
     // Identity header fields are echoed exactly.
@@ -159,9 +177,15 @@ async fn deployment_detail_traverses_replicasets_and_pods_by_controller_uid() {
             .any(|row| row.label == "Name" && row.value == "web-frontend")
     );
 
-    // Controller-UID traversal resolves the replicaset AND its pods.
-    let rs_group = detail
-        .related
+    assert_eq!(detail.events_condition, EventsCondition::Available);
+    assert!(detail.related.is_empty());
+
+    request_relations(&mut ws, "relations-deploy", web_frontend).await;
+    let relations = receive_relations(&mut ws, "relations-deploy").await;
+
+    // Controller-UID traversal independently resolves the replicaset AND its pods.
+    let rs_group = relations
+        .groups
         .iter()
         .find(|group| group.gvk.kind == "ReplicaSet")
         .expect("deployment relates to its replicaset");
@@ -174,8 +198,8 @@ async fn deployment_detail_traverses_replicasets_and_pods_by_controller_uid() {
             .collect::<Vec<_>>(),
         vec!["web-frontend-7d9f8"]
     );
-    let pod_group = detail
-        .related
+    let pod_group = relations
+        .groups
         .iter()
         .find(|group| group.gvk.kind == "Pod")
         .expect("deployment traversal reaches pods transitively");
@@ -204,31 +228,31 @@ async fn replicaset_detail_resolves_its_pods_without_intermediate_layers() {
     let (server, _fake) = spawn_server().await;
     let mut ws = connect_authenticated(&server).await;
 
-    request_detail(
-        &mut ws,
-        "detail-rs",
-        ResourceIdentity {
-            context: "dev-local".into(),
-            gvk: gvk("ReplicaSet"),
-            namespace: Some("default".into()),
-            name: "web-frontend-7d9f8".into(),
-            uid: uid("ReplicaSet", "web-frontend-7d9f8"),
-        },
-    )
-    .await;
+    let identity = ResourceIdentity {
+        context: "dev-local".into(),
+        gvk: gvk("ReplicaSet"),
+        namespace: Some("default".into()),
+        name: "web-frontend-7d9f8".into(),
+        uid: uid("ReplicaSet", "web-frontend-7d9f8"),
+    };
+    request_detail(&mut ws, "detail-rs", identity.clone()).await;
     let detail = receive_detail(&mut ws, "detail-rs").await;
 
     assert!(
         !detail.capabilities.can_scale,
         "replicasets are not directly scalable"
     );
-    let groups: Vec<&str> = detail
-        .related
+    assert!(detail.related.is_empty());
+    assert_eq!(detail.events_condition, EventsCondition::Available);
+    request_relations(&mut ws, "relations-rs", identity).await;
+    let relations = receive_relations(&mut ws, "relations-rs").await;
+    let groups: Vec<&str> = relations
+        .groups
         .iter()
         .map(|group| group.gvk.kind.as_str())
         .collect();
     assert_eq!(groups, vec!["Pod"], "a replicaset has no deeper layer");
-    assert_eq!(detail.related[0].rows.len(), 20);
+    assert_eq!(relations.groups[0].rows.len(), 20);
 }
 
 #[tokio::test]
@@ -288,7 +312,8 @@ async fn stale_uid_detail_is_rejected_as_not_found() {
     server.shutdown().await.unwrap();
 }
 
-/// Prove the shared UI client state can drive the same query end to end.
+/// Prove the shared UI client state can drive legacy-compatible detail and
+/// independently loaded relations end to end.
 #[tokio::test]
 async fn client_state_seam_resolves_the_full_detail_payload() {
     use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget, Query, QueryResult};
@@ -312,14 +337,15 @@ async fn client_state_seam_resolves_the_full_detail_payload() {
     client.apply(receive_frame(&mut socket).await).unwrap();
     assert_eq!(client.phase(), k10s_ui::client::ClientPhase::Ready);
 
+    let identity = ResourceIdentity {
+        context: "dev-local".into(),
+        gvk: gvk("Deployment"),
+        namespace: Some("default".into()),
+        name: "web-frontend".into(),
+        uid: uid("Deployment", "web-frontend"),
+    };
     let request = client
-        .begin(Query::ResourceDetail(ResourceIdentity {
-            context: "dev-local".into(),
-            gvk: gvk("Deployment"),
-            namespace: Some("default".into()),
-            name: "web-frontend".into(),
-            uid: uid("Deployment", "web-frontend"),
-        }))
+        .begin(Query::ResourceDetail(identity.clone()))
         .unwrap();
     socket
         .send(Message::Text(
@@ -335,12 +361,46 @@ async fn client_state_seam_resolves_the_full_detail_payload() {
     match client.take(request).expect("detail response completes") {
         QueryResult::ResourceDetail(detail) => {
             assert_eq!(detail.identity.name, "web-frontend");
+            assert_eq!(detail.events_condition, EventsCondition::Available);
             assert!(
-                detail.related.iter().any(|group| group.gvk.kind == "Pod"),
-                "the client receives backend-resolved related rows"
+                detail.related.is_empty(),
+                "legacy field remains present and empty"
             );
         }
         other => panic!("expected detail result, got {other:?}"),
+    }
+
+    let relations_request = client
+        .begin(Query::ResourceRelations(identity.clone()))
+        .unwrap();
+    let outbound = client.take_outbound().unwrap();
+    let k10s_protocol::ClientPayload::Request(envelope) = outbound.decode_payload().unwrap() else {
+        panic!("expected relations request");
+    };
+    assert_eq!(envelope.request_kind, REQUEST_RESOURCE_RELATIONS);
+    assert_eq!(
+        serde_json::from_value::<ResourceRefRequest>(envelope.payload).unwrap(),
+        ResourceRefRequest { identity }
+    );
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&outbound).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    let frame = receive_frame(&mut socket).await;
+    assert_eq!(frame.request_id.as_ref(), Some(relations_request.id()));
+    client.apply(frame).unwrap();
+    match client
+        .take(relations_request)
+        .expect("relations response completes")
+    {
+        QueryResult::ResourceRelations(relations) => {
+            assert_eq!(relations.identity.name, "web-frontend");
+            assert!(relations.groups.iter().any(|group| group.gvk.kind == "Pod"));
+        }
+        other => panic!("expected relations result, got {other:?}"),
     }
 
     drop(client);
