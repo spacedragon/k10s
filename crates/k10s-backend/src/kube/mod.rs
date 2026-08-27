@@ -13,6 +13,7 @@ mod create;
 mod discovery;
 mod events;
 mod exec;
+mod infrastructure;
 mod logs;
 mod metrics;
 mod mutate;
@@ -359,7 +360,7 @@ impl KubernetesAccess for KubeAdapter {
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
-                Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
+                Query::Infrastructure { context } => self.infrastructure(context).await,
                 Query::OperationStatus { operation_ids } => Ok(QueryResult::OperationStatus(
                     self.operations.status(&operation_ids),
                 )),
@@ -392,8 +393,15 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_watch(context, gvk, namespace).await,
-                Subscribe::Infrastructure { .. } => {
-                    Err(BackendError::unsupported("infrastructure.watch"))
+                // The UI refresh query is authoritative. A successful inert
+                // subscription keeps older servers' capability negotiation
+                // behavior while a dedicated coalesced watch is added later.
+                Subscribe::Infrastructure { context } => {
+                    if !self.knows_context(&context) {
+                        Err(BackendError::NotFound)
+                    } else {
+                        Ok(SubscriptionHandle::new(format!("infrastructure-{context}")))
+                    }
                 }
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     self.redeem_stream_ticket(ticket_id, route).await

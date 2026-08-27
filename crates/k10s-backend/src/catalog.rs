@@ -102,39 +102,91 @@ struct CatalogStorage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPvc {
-    namespace: String,
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_volume: String,
-    age: String,
+pub(crate) struct CatalogPvc {
+    pub(crate) namespace: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_volume: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPv {
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_claim: String,
-    reclaim_policy: String,
-    age: String,
+pub(crate) struct CatalogPv {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_claim: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogStorageClass {
-    name: String,
-    provisioner: String,
-    reclaim_policy: String,
-    volume_binding_mode: String,
-    age: String,
+pub(crate) struct CatalogStorageClass {
+    pub(crate) name: String,
+    pub(crate) provisioner: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) volume_binding_mode: String,
+    pub(crate) age: String,
 }
 
 impl CatalogSnapshot {
+    /// Build a live storage projection when the adapter has no metrics sample.
+    pub(crate) fn live_storage(
+        context: String,
+        revision: u64,
+        generated_at: String,
+        persistent_volume_claims: Vec<CatalogPvc>,
+        persistent_volumes: Vec<CatalogPv>,
+        storage_classes: Vec<CatalogStorageClass>,
+    ) -> Self {
+        let persistent_storage_bytes = persistent_volume_claims
+            .iter()
+            .filter_map(|claim| quantity_bytes(&claim.capacity))
+            .sum();
+        Self {
+            context,
+            revision,
+            generated_at,
+            totals: CatalogTotals {
+                nodes: 0,
+                pods: 0,
+                workloads: 0,
+                persistent_storage_bytes,
+            },
+            cluster_cpu: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            cluster_memory: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            pod_capacity: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            metrics: CatalogMetrics {
+                availability: MetricsAvailability::Unavailable,
+                condition: MetricsCondition::Partial,
+                source: "kubernetes-api".into(),
+                source_updated_at: None,
+                detail: "Metrics are not collected for this snapshot".into(),
+            },
+            workload_health: Vec::new(),
+            attention: Vec::new(),
+            nodes: Vec::new(),
+            storage: CatalogStorage {
+                persistent_volume_claims,
+                persistent_volumes,
+                storage_classes,
+            },
+        }
+    }
     /// Build the deterministic fake catalog. Scenario selection remains in
     /// the fake adapter; this module owns only normalized projection data.
     #[must_use]
@@ -391,6 +443,23 @@ impl CatalogSnapshot {
             },
         }
     }
+}
+
+fn quantity_bytes(raw: &str) -> Option<u64> {
+    const SUFFIXES: [(&str, u64); 6] = [
+        ("Ei", 1 << 60),
+        ("Pi", 1 << 50),
+        ("Ti", 1 << 40),
+        ("Gi", 1 << 30),
+        ("Mi", 1 << 20),
+        ("Ki", 1 << 10),
+    ];
+    for (suffix, multiplier) in SUFFIXES {
+        if let Some(value) = raw.strip_suffix(suffix) {
+            return value.parse::<u64>().ok()?.checked_mul(multiplier);
+        }
+    }
+    raw.parse().ok()
 }
 
 fn usage(value: CatalogUsage) -> CapacityUsage {
