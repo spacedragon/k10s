@@ -465,11 +465,11 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
     harness.state_mut().feed.relations.insert(
         identity("Deployment", "web-frontend"),
         RelationState::Loaded {
-            response: ResourceRelationsResponse {
+            response: std::sync::Arc::new(ResourceRelationsResponse {
                 identity: identity("Deployment", "web-frontend"),
                 revision: BackendRevision::new(1_010),
                 groups: detail.related,
-            },
+            }),
             loaded_at_ms: 0,
             refreshing: false,
             refresh_error: None,
@@ -544,11 +544,11 @@ fn failed_relation_refresh_keeps_stale_rows_and_retries_once() {
     harness.state_mut().feed.relations.insert(
         deployment.clone(),
         RelationState::Loaded {
-            response: ResourceRelationsResponse {
+            response: std::sync::Arc::new(ResourceRelationsResponse {
                 identity: deployment.clone(),
                 revision: BackendRevision::new(1_010),
                 groups: detail.related,
-            },
+            }),
             loaded_at_ms: 0,
             refreshing: false,
             refresh_error: Some(SafeUiError::new("refresh denied")),

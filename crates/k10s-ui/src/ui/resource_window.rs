@@ -81,7 +81,7 @@ pub enum RelationState {
     NotRequested,
     Loading,
     Loaded {
-        response: ResourceRelationsResponse,
+        response: std::sync::Arc<ResourceRelationsResponse>,
         loaded_at_ms: u64,
         refreshing: bool,
         refresh_error: Option<SafeUiError>,

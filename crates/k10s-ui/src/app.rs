@@ -2171,7 +2171,11 @@ impl K10sApp {
             .retain(|identity, _| pinned_set.contains(identity));
         let desired = pinned
             .into_iter()
-            .filter(|identity| !self.primary_details.contains_key(identity))
+            .filter(|identity| {
+                self.client.local_ui().selected_context.as_deref()
+                    == Some(identity.context.as_str())
+                    && !self.primary_details.contains_key(identity)
+            })
             .collect::<Vec<_>>();
         for identity in desired {
             if self.detail_requests.contains_key(&identity) {
@@ -2213,6 +2217,8 @@ impl K10sApp {
                     || current_context != Some(pending.context.as_str())
                 {
                     let _ = self.client.take(pending.request);
+                    self.details.remove(&identity);
+                    self.primary_details.remove(&identity);
                     continue;
                 }
                 if let Some(QueryResult::ResourceDetail(response)) =
@@ -2241,6 +2247,7 @@ impl K10sApp {
 
     fn refresh_relations(&mut self, now_ms: u64) {
         const RELATIONS_TTL_MS: u64 = 30_000;
+        let current_context = self.client.local_ui().selected_context.as_deref();
         let desired: Vec<ResourceIdentity> = self
             .shell
             .workspace()
@@ -2260,6 +2267,7 @@ impl K10sApp {
                     .cloned(),
                 _ => None,
             })
+            .filter(|identity| current_context == Some(identity.context.as_str()))
             .collect();
 
         for identity in desired {
@@ -2346,6 +2354,7 @@ impl K10sApp {
                     != Some(pending.context.as_str())
             {
                 let _ = self.client.take(pending.request);
+                self.relations.remove(&identity);
                 continue;
             }
             if let Some(QueryResult::ResourceRelations(response)) =
@@ -2356,7 +2365,7 @@ impl K10sApp {
                     self.relations.insert(
                         identity,
                         RelationState::Loaded {
-                            response,
+                            response: std::sync::Arc::new(response),
                             loaded_at_ms: now_ms,
                             refreshing: false,
                             refresh_error: None,
@@ -2897,10 +2906,10 @@ mod tests {
     };
 
     use super::{
-        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        AppConnection, AppEventError, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
         PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
     };
-    use crate::client::{ClientPhase, ConnectTarget, Query, TransportError};
+    use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
     use crate::workspace::{
         NamespaceScope, WindowContent, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
@@ -4336,11 +4345,11 @@ mod tests {
         app.relations.insert(
             identity.clone(),
             RelationState::Loaded {
-                response: k10s_protocol::ResourceRelationsResponse {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
                     identity: identity.clone(),
                     revision: BackendRevision::new(1),
                     groups: Vec::new(),
-                },
+                }),
                 loaded_at_ms: 0,
                 refreshing: false,
                 refresh_error: None,
@@ -4376,11 +4385,11 @@ mod tests {
         app.relations.insert(
             identity.clone(),
             RelationState::Loaded {
-                response: k10s_protocol::ResourceRelationsResponse {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
                     identity: identity.clone(),
                     revision: BackendRevision::new(1),
                     groups: Vec::new(),
-                },
+                }),
                 loaded_at_ms: 0,
                 refreshing: false,
                 refresh_error: None,
@@ -4516,11 +4525,11 @@ mod tests {
         app.relations.insert(
             identity.clone(),
             crate::ui::RelationState::Loaded {
-                response: k10s_protocol::ResourceRelationsResponse {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
                     identity: identity.clone(),
                     revision: BackendRevision::new(1),
                     groups: Vec::new(),
-                },
+                }),
                 loaded_at_ms: 10,
                 refreshing: false,
                 refresh_error: None,
@@ -4545,6 +4554,140 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn resource_feed_relation_projection_shares_large_response_storage() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("large-controller");
+        app.relations.insert(
+            identity.clone(),
+            RelationState::Loaded {
+                response: std::sync::Arc::new(k10s_protocol::ResourceRelationsResponse {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(1),
+                    groups: vec![k10s_protocol::RelatedGroup {
+                        title: "Pods".into(),
+                        gvk: GroupVersionKind::core("v1", "Pod"),
+                        rows: (0..5_000)
+                            .map(|index| namespace_row(&format!("related-{index}"), index))
+                            .collect(),
+                    }],
+                }),
+                loaded_at_ms: 0,
+                refreshing: false,
+                refresh_error: None,
+            },
+        );
+        let original = match app.relations.get(&identity).unwrap() {
+            RelationState::Loaded { response, .. } => std::sync::Arc::as_ptr(response),
+            _ => unreachable!(),
+        };
+
+        let feed = app.build_resource_feed();
+        let projected = match feed.relations.get(&identity).unwrap() {
+            RelationState::Loaded { response, .. } => std::sync::Arc::as_ptr(response),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            original, projected,
+            "frame projection must share model data"
+        );
+    }
+
+    fn start_relation_request(app: &mut K10sApp, identity: &ResourceIdentity) -> PendingRequest {
+        let window = pin_deployment_without_request(app, identity);
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+                window,
+                crate::workspace::DetailTab::Pods,
+            ));
+        app.refresh_details_at(1);
+        app.relation_requests
+            .get(identity)
+            .expect("relation request starts")
+            .request
+            .clone()
+    }
+
+    fn relation_response_frame(
+        request: &PendingRequest,
+        identity: ResourceIdentity,
+    ) -> ServerFrame {
+        ServerFrame::response(
+            request.id().clone(),
+            k10s_protocol::ResourceRelationsResponse {
+                identity,
+                revision: BackendRevision::new(2),
+                groups: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn same_name_different_uid_relation_response_never_enters_app_cache() {
+        let (mut app, _) = ready_app();
+        let expected = deployment_identity("same-name");
+        let request = start_relation_request(&mut app, &expected);
+        let mut wrong = expected.clone();
+        wrong.uid = "replacement-uid".into();
+
+        let outcome = app.handle_event(
+            server_message(&relation_response_frame(&request, wrong)),
+            2,
+            0,
+        );
+        assert!(matches!(outcome, Err(AppEventError::Terminal(_))));
+
+        assert!(!matches!(
+            app.relations.get(&expected),
+            Some(RelationState::Loaded { .. })
+        ));
+        assert!(!matches!(
+            app.build_resource_feed().relations.get(&expected),
+            Some(RelationState::Loaded { .. })
+        ));
+    }
+
+    #[test]
+    fn old_generation_relation_response_is_consumed_without_cache_insertion() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("old-generation");
+        let request = start_relation_request(&mut app, &identity);
+        app.resource_generation = app.resource_generation.wrapping_add(1);
+
+        app.handle_event(
+            server_message(&relation_response_frame(&request, identity.clone())),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+
+        assert!(!app.relation_requests.contains_key(&identity));
+        assert!(!app.relations.contains_key(&identity));
+        assert!(!app.build_resource_feed().relations.contains_key(&identity));
+    }
+
+    #[test]
+    fn retired_context_relation_response_is_consumed_without_cache_insertion() {
+        let (mut app, _) = ready_app();
+        let identity = deployment_identity("retired-context");
+        let request = start_relation_request(&mut app, &identity);
+        app.client.local_ui_mut().selected_context = Some("other-context".into());
+
+        app.handle_event(
+            server_message(&relation_response_frame(&request, identity.clone())),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+        app.refresh_details_at(3);
+
+        assert!(!app.relation_requests.contains_key(&identity));
+        assert!(!app.relations.contains_key(&identity));
+        assert!(!app.build_resource_feed().relations.contains_key(&identity));
     }
 
     #[test]
