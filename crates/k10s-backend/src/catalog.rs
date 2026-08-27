@@ -135,6 +135,77 @@ struct CatalogStorageClass {
 }
 
 impl CatalogSnapshot {
+    /// Build the currently supported real-cluster infrastructure projection.
+    ///
+    /// Node inventory is authoritative even when the optional Metrics API and
+    /// the broader overview/storage collectors are unavailable. Keeping those
+    /// fields explicitly unavailable lets the Nodes window remain useful
+    /// without inventing telemetry.
+    #[must_use]
+    pub(crate) fn live_nodes(
+        context: impl Into<String>,
+        revision: u64,
+        generated_at: impl Into<String>,
+        nodes: Vec<NodeRow>,
+    ) -> Self {
+        let node_count = u32::try_from(nodes.len()).unwrap_or(u32::MAX);
+        Self {
+            context: context.into(),
+            revision,
+            generated_at: generated_at.into(),
+            totals: CatalogTotals {
+                nodes: node_count,
+                pods: 0,
+                workloads: 0,
+                persistent_storage_bytes: 0,
+            },
+            cluster_cpu: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            cluster_memory: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            pod_capacity: CatalogUsage {
+                used: None,
+                capacity: None,
+            },
+            metrics: CatalogMetrics {
+                availability: MetricsAvailability::Unavailable,
+                condition: MetricsCondition::Partial,
+                source: "metrics.k8s.io".into(),
+                source_updated_at: None,
+                detail: "Node inventory is available; usage metrics were not collected".into(),
+            },
+            workload_health: Vec::new(),
+            attention: Vec::new(),
+            nodes: nodes
+                .into_iter()
+                .map(|node| CatalogNode {
+                    name: node.name,
+                    status: node.status,
+                    roles: node.roles,
+                    kubernetes_version: node.kubernetes_version,
+                    cpu: CatalogUsage {
+                        used: node.cpu.used,
+                        capacity: node.cpu.capacity,
+                    },
+                    memory: CatalogUsage {
+                        used: node.memory.used,
+                        capacity: node.memory.capacity,
+                    },
+                    pods: CatalogUsage {
+                        used: node.pods.used,
+                        capacity: node.pods.capacity,
+                    },
+                    age: node.age,
+                })
+                .collect(),
+            storage: CatalogStorage::default(),
+        }
+    }
+
     /// Build the deterministic fake catalog. Scenario selection remains in
     /// the fake adapter; this module owns only normalized projection data.
     #[must_use]

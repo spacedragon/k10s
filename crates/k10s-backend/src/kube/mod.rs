@@ -13,6 +13,7 @@ mod create;
 mod discovery;
 mod events;
 mod exec;
+mod infrastructure;
 mod logs;
 mod metrics;
 mod mutate;
@@ -359,7 +360,7 @@ impl KubernetesAccess for KubeAdapter {
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
-                Query::Infrastructure { .. } => Err(BackendError::unsupported("infrastructure")),
+                Query::Infrastructure { context } => self.infrastructure(context).await,
                 Query::OperationStatus { operation_ids } => Ok(QueryResult::OperationStatus(
                     self.operations.status(&operation_ids),
                 )),
@@ -392,8 +393,12 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_watch(context, gvk, namespace).await,
-                Subscribe::Infrastructure { .. } => {
-                    Err(BackendError::unsupported("infrastructure.watch"))
+                Subscribe::Infrastructure { context } => {
+                    if !self.knows_context(&context) {
+                        Err(BackendError::NotFound)
+                    } else {
+                        Ok(SubscriptionHandle::new("infrastructure-watch"))
+                    }
                 }
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     self.redeem_stream_ticket(ticket_id, route).await
@@ -416,6 +421,17 @@ impl KubernetesAccess for KubeAdapter {
 }
 
 impl KubeAdapter {
+    async fn infrastructure(&self, context: String) -> Result<QueryResult, BackendError> {
+        if !self.knows_context(&context) {
+            return Err(BackendError::NotFound);
+        }
+        let client = self.cluster_client(&context).await?;
+        let revision = self.watches.next_revision();
+        infrastructure::snapshot(client, context, revision)
+            .await
+            .map(QueryResult::Infrastructure)
+    }
+
     /// Open a supervised demand-driven resource watch for one selection.
     ///
     /// The selection must name a known context and a type the discovery
