@@ -127,7 +127,7 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace" value="All namespaces"
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
                 Button label="Hide details"

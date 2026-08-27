@@ -189,7 +189,9 @@ pub(super) fn show_namespace_combobox<I>(
     };
     let missing = matches!(scope, crate::workspace::NamespaceScope::Namespace(value)
         if matches!(catalog, NamespaceCatalogState::Ready(values) if !values.contains(value)));
-    let selected_text = if missing {
+    let selected_text = if matches!(catalog, NamespaceCatalogState::NotDemanded) {
+        "Namespace catalog not requested".to_owned()
+    } else if missing {
         format!("{selected} · namespace no longer exists")
     } else {
         selected.to_owned()
@@ -229,6 +231,9 @@ pub(super) fn show_namespace_combobox<I>(
                     ui.close();
                 }
                 if let NamespaceCatalogState::Ready(values) = catalog {
+                    if values.is_empty() {
+                        ui.label("No namespaces found");
+                    }
                     for namespace in values
                         .iter()
                         .filter(|value| value.to_lowercase().contains(&needle))

@@ -183,6 +183,55 @@ fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
     );
 }
 
+#[test]
+fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_empty() {
+    let mut fixture = Fixture::default();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    assert_eq!(
+        selector.value().as_deref(),
+        Some("Namespace catalog not requested")
+    );
+    selector.click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none()
+    );
+
+    harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Loading;
+    harness.run_steps(2);
+    harness.get_by_label("Loading namespaces");
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Search namespaces")
+            .is_none()
+    );
+
+    harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Ready(Vec::new());
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    harness.get_by_label("No namespaces found");
+    harness.get_by_role_and_label(Role::Button, "All namespaces");
+}
+
 fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
@@ -535,6 +584,11 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(
+        window
+            .query_by_role_and_label(Role::ComboBox, "Namespace")
+            .is_none()
+    );
     // Cluster-scoped: no namespace column and no namespace filter control.
     assert!(window.query_by_label("Namespace").is_none());
     assert!(
@@ -564,6 +618,113 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     harness
         .get_by_role_and_label(Role::Window, "Custom Resources")
         .get_by_role_and_label(Role::TextInput, "Search resource types");
+}
+
+#[test]
+fn namespace_search_scratch_is_per_window() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog =
+        NamespaceCatalogState::Ready(vec!["default".into(), "sea-team".into(), "other".into()]);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let ids: Vec<_> = fixture
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .filter(|window| matches!(window.kind, WindowKind::Workload(_)))
+        .map(|window| window.id)
+        .collect();
+    for (id, x) in ids.into_iter().zip([0.0, 680.0]) {
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 30.0],
+                    size: [640.0, 520.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 700.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
+    search.type_text("sea");
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Search namespaces")
+            .value()
+            .as_deref(),
+        Some("sea")
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Search namespaces")
+            .value()
+            .as_deref(),
+        Some("")
+    );
+    harness.get_by_role_and_label(Role::Button, "other");
+}
+
+#[test]
+fn namespace_combobox_remains_reachable_in_compact_viewport() {
+    let mut fixture = Fixture::default();
+    fixture.feed.namespace_catalog = NamespaceCatalogState::Ready(vec!["default".into()]);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(680.0, 700.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "default")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        workspace_resource_namespace(harness.state().shell.workspace(), id).as_deref(),
+        Some("default")
+    );
 }
 
 #[test]

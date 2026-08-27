@@ -201,6 +201,19 @@ fn missing_service_namespace_is_reported_without_broadening() {
         k10s_ui::workspace::WindowContent::Services(state)
             if state.namespace_scope == k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into())
     ));
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Namespace")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "All namespaces")
+        .click();
+    harness.run_steps(2);
+    assert!(matches!(
+        &harness.state().shell.workspace().window(id).unwrap().content,
+        k10s_ui::workspace::WindowContent::Services(state)
+            if state.namespace_scope == k10s_ui::workspace::NamespaceScope::AllNamespaces
+    ));
 }
 
 fn harness() -> Harness<'static, Fixture> {
