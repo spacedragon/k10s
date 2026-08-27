@@ -536,6 +536,7 @@ impl ResourceDetailResult {
                     })
                     .collect(),
                 sections,
+                events_condition: k10s_protocol::EventsCondition::Available,
                 events: record
                     .events
                     .iter()

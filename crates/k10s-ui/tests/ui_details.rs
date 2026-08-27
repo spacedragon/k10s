@@ -132,6 +132,7 @@ fn deployment_detail(name: &str) -> ResourceDetailResponse {
             ("Name", name),
             ("Status", "20/20 ready"),
         ])],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: vec![EventRow {
             reason: "Started".into(),
             message: format!("{name} reached 20/20 ready"),
@@ -182,6 +183,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
         created_at: "2026-08-21T00:50:10Z".to_owned(),
         owner_references: Vec::new(),
         sections: vec![overview_section(&[("Status", "Running")])],
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: vec![EventRow {
             reason: "Started".into(),
             message: "container started".into(),

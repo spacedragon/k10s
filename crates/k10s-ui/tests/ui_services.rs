@@ -528,6 +528,7 @@ fn service_detail(name: &str, policies: bool) -> ResourceDetailResponse {
         created_at: "2026-08-21T00:00:00Z".to_owned(),
         owner_references: Vec::new(),
         sections: Vec::new(),
+        events_condition: k10s_protocol::EventsCondition::Available,
         events: Vec::new(),
         related: Vec::new(),
         capabilities: ResourceCapabilities {
