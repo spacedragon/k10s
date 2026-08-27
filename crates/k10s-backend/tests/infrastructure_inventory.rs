@@ -13,9 +13,45 @@ fn adapter(server: &RecordedApiServer) -> KubeAdapter {
     .unwrap()
 }
 
+fn set_empty_overview_lists(server: &RecordedApiServer) {
+    for (path, body) in [
+        (
+            "/api/v1/nodes",
+            r#"{"apiVersion":"v1","kind":"NodeList","items":[]}"#,
+        ),
+        (
+            "/api/v1/pods",
+            r#"{"apiVersion":"v1","kind":"PodList","items":[]}"#,
+        ),
+        (
+            "/apis/apps/v1/deployments",
+            r#"{"apiVersion":"apps/v1","kind":"DeploymentList","items":[]}"#,
+        ),
+        (
+            "/apis/apps/v1/statefulsets",
+            r#"{"apiVersion":"apps/v1","kind":"StatefulSetList","items":[]}"#,
+        ),
+        (
+            "/apis/apps/v1/daemonsets",
+            r#"{"apiVersion":"apps/v1","kind":"DaemonSetList","items":[]}"#,
+        ),
+        (
+            "/apis/batch/v1/jobs",
+            r#"{"apiVersion":"batch/v1","kind":"JobList","items":[]}"#,
+        ),
+        (
+            "/apis/batch/v1/cronjobs",
+            r#"{"apiVersion":"batch/v1","kind":"CronJobList","items":[]}"#,
+        ),
+    ] {
+        server.set_response(path, 200, body);
+    }
+}
+
 #[tokio::test]
 async fn infrastructure_query_lists_bound_pvc_capacity_and_storage_class() {
-    let server = RecordedApiServer::default();
+    let server = RecordedApiServer::standard();
+    set_empty_overview_lists(&server);
     server.set_response(
         "/api/v1/persistentvolumeclaims",
         200,
@@ -67,19 +103,19 @@ async fn infrastructure_query_lists_bound_pvc_capacity_and_storage_class() {
 
 #[tokio::test]
 async fn infrastructure_subscription_is_advertised_for_known_context() {
-    let server = RecordedApiServer::default();
+    let server = RecordedApiServer::standard();
     let handle = adapter(&server)
         .subscribe(Subscribe::Infrastructure {
             context: CONTEXT.into(),
         })
         .await
         .unwrap();
-    assert_eq!(handle.id, "infrastructure-kind-bunyip");
+    assert_eq!(handle.id, "infrastructure:kind-bunyip");
 }
 
 #[tokio::test]
 async fn infrastructure_query_and_subscription_reject_unknown_context() {
-    let server = RecordedApiServer::default();
+    let server = RecordedApiServer::standard();
     assert!(
         adapter(&server)
             .query(Query::Infrastructure {

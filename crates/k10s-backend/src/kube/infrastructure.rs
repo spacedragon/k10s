@@ -7,21 +7,18 @@ use k8s_openapi::api::{
 use kube::{Api, ResourceExt, api::ListParams};
 
 use crate::{
-    catalog::{CatalogPv, CatalogPvc, CatalogSnapshot, CatalogStorageClass},
-    port::{BackendError, QueryResult},
+    catalog::{CatalogPv, CatalogPvc, CatalogStorageClass},
+    port::BackendError,
 };
 
 use super::KubeAdapter;
 
 impl KubeAdapter {
-    pub(super) async fn infrastructure(
+    pub(super) async fn storage_inventory(
         &self,
-        context: String,
-    ) -> Result<QueryResult, BackendError> {
-        if !self.knows_context(&context) {
-            return Err(BackendError::NotFound);
-        }
-        let client = self.cluster_client(&context).await?;
+        context: &str,
+    ) -> Result<(Vec<CatalogPvc>, Vec<CatalogPv>, Vec<CatalogStorageClass>), BackendError> {
+        let client = self.cluster_client(context).await?;
         let claim_api = Api::<PersistentVolumeClaim>::all(client.clone());
         let volume_api = Api::<PersistentVolume>::all(client.clone());
         let class_api = Api::<StorageClass>::all(client);
@@ -40,14 +37,7 @@ impl KubeAdapter {
         volumes.sort_by(|a, b| a.name.cmp(&b.name));
         classes.sort_by(|a, b| a.name.cmp(&b.name));
 
-        Ok(QueryResult::Infrastructure(CatalogSnapshot::live_storage(
-            context,
-            self.watches.next_revision(),
-            crate::runtime::now_rfc3339(),
-            claims,
-            volumes,
-            classes,
-        )))
+        Ok((claims, volumes, classes))
     }
 }
 

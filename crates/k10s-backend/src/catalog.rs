@@ -11,6 +11,8 @@ use k10s_protocol::{
     WorkloadHealth,
 };
 
+use crate::port::ResourceRecord;
+
 const GIB: u64 = 1_073_741_824;
 
 /// Deterministic metrics behavior exposed by an adapter catalog.
@@ -135,27 +137,92 @@ pub(crate) struct CatalogStorageClass {
 }
 
 impl CatalogSnapshot {
-    /// Build a live storage projection when the adapter has no metrics sample.
-    pub(crate) fn live_storage(
-        context: String,
+    /// Build an honest, metrics-free overview from normalized live resource
+    /// rows and storage inventory. Absent metrics remain absent instead of
+    /// being fabricated.
+    pub(crate) fn live(
+        context: impl Into<String>,
         revision: u64,
-        generated_at: String,
+        generated_at: impl Into<String>,
+        records: Vec<ResourceRecord>,
         persistent_volume_claims: Vec<CatalogPvc>,
         persistent_volumes: Vec<CatalogPv>,
         storage_classes: Vec<CatalogStorageClass>,
     ) -> Self {
+        let nodes = records
+            .iter()
+            .filter(|record| record.reference.gvk.kind == "Node")
+            .count() as u32;
+        let pods = records
+            .iter()
+            .filter(|record| record.reference.gvk.kind == "Pod")
+            .count() as u32;
+        let workload_kinds = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
+        let workloads = records
+            .iter()
+            .filter(|record| workload_kinds.contains(&record.reference.gvk.kind.as_str()))
+            .count() as u32;
+
+        let is_unhealthy = |summary: &str| {
+            let value = summary.to_ascii_lowercase();
+            [
+                "pending",
+                "failed",
+                "error",
+                "not ready",
+                "unavailable",
+                "crash",
+            ]
+            .iter()
+            .any(|marker| value.contains(marker))
+        };
+        let attention = records
+            .iter()
+            .filter(|record| is_unhealthy(&record.summary))
+            .map(|record| CatalogAttention {
+                namespace: record.reference.namespace.clone(),
+                kind: record.reference.gvk.kind.clone(),
+                name: record.reference.name.clone(),
+                status: record.summary.clone(),
+                reason: "Resource is not healthy".into(),
+            })
+            .collect::<Vec<_>>();
+        let unhealthy_workloads = records
+            .iter()
+            .filter(|record| {
+                workload_kinds.contains(&record.reference.gvk.kind.as_str())
+                    && is_unhealthy(&record.summary)
+            })
+            .count() as u32;
+        let healthy_workloads = workloads.saturating_sub(unhealthy_workloads);
         let persistent_storage_bytes = persistent_volume_claims
             .iter()
             .filter_map(|claim| quantity_bytes(&claim.capacity))
             .sum();
+        let mut workload_health = Vec::new();
+        if healthy_workloads > 0 {
+            workload_health.push(CatalogHealth {
+                level: HealthLevel::Healthy,
+                label: "Healthy".into(),
+                count: healthy_workloads,
+            });
+        }
+        if unhealthy_workloads > 0 {
+            workload_health.push(CatalogHealth {
+                level: HealthLevel::Failure,
+                label: "Unhealthy".into(),
+                count: unhealthy_workloads,
+            });
+        }
+
         Self {
-            context,
+            context: context.into(),
             revision,
-            generated_at,
+            generated_at: generated_at.into(),
             totals: CatalogTotals {
-                nodes: 0,
-                pods: 0,
-                workloads: 0,
+                nodes,
+                pods,
+                workloads,
                 persistent_storage_bytes,
             },
             cluster_cpu: CatalogUsage {
@@ -167,18 +234,18 @@ impl CatalogSnapshot {
                 capacity: None,
             },
             pod_capacity: CatalogUsage {
-                used: None,
+                used: Some(u64::from(pods)),
                 capacity: None,
             },
             metrics: CatalogMetrics {
                 availability: MetricsAvailability::Unavailable,
-                condition: MetricsCondition::Partial,
-                source: "kubernetes-api".into(),
+                condition: MetricsCondition::Stale,
+                source: "metrics.k8s.io".into(),
                 source_updated_at: None,
-                detail: "Metrics are not collected for this snapshot".into(),
+                detail: "Cluster metrics have not been collected for this overview".into(),
             },
-            workload_health: Vec::new(),
-            attention: Vec::new(),
+            workload_health,
+            attention,
             nodes: Vec::new(),
             storage: CatalogStorage {
                 persistent_volume_claims,
@@ -187,6 +254,7 @@ impl CatalogSnapshot {
             },
         }
     }
+
     /// Build the deterministic fake catalog. Scenario selection remains in
     /// the fake adapter; this module owns only normalized projection data.
     #[must_use]
@@ -575,5 +643,65 @@ fn metrics(
                 detail: "Last sample is outside the freshness window".into(),
             },
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::port::{Gvk, ResourceRecord, ResourceRef};
+
+    fn record(kind: &str, name: &str, namespace: Option<&str>, summary: &str) -> ResourceRecord {
+        ResourceRecord {
+            reference: ResourceRef {
+                context: "kind-test".into(),
+                gvk: Gvk::new("apps", "v1", kind),
+                namespace: namespace.map(str::to_owned),
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: 1,
+            labels: Default::default(),
+            summary: summary.into(),
+            created_at: "2026-08-27T00:00:00Z".into(),
+            owner_references: Vec::new(),
+            events: Vec::new(),
+            manifest: String::new(),
+            projection: None,
+        }
+    }
+
+    #[test]
+    fn live_overview_projects_cluster_counts_and_unhealthy_rows() {
+        let snapshot = CatalogSnapshot::live(
+            "kind-test",
+            9,
+            "2026-08-27T01:00:00Z",
+            vec![
+                record("Node", "worker", None, "Ready"),
+                record("Pod", "healthy-pod", Some("default"), "Running"),
+                record("Pod", "broken-pod", Some("default"), "CrashLoopBackOff"),
+                record("Deployment", "api", Some("default"), "2/2 ready"),
+                record("Job", "migration", Some("default"), "Failed"),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .into_protocol();
+
+        assert_eq!(snapshot.context, "kind-test");
+        assert_eq!(snapshot.revision.get(), 9);
+        assert_eq!(snapshot.totals.nodes, 1);
+        assert_eq!(snapshot.totals.pods, 2);
+        assert_eq!(snapshot.totals.workloads, 2);
+        assert_eq!(snapshot.attention.len(), 2);
+        assert!(
+            snapshot
+                .attention
+                .iter()
+                .any(|row| row.name == "broken-pod")
+        );
+        assert!(snapshot.attention.iter().any(|row| row.name == "migration"));
     }
 }
