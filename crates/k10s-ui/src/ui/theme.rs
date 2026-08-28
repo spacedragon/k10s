@@ -9,6 +9,7 @@ pub(super) const APP_BACKGROUND: Color32 = Color32::from_rgb(15, 17, 19);
 pub(super) const PANEL_BACKGROUND: Color32 = Color32::from_rgb(23, 25, 28);
 pub(super) const WINDOW_BACKGROUND: Color32 = Color32::from_rgb(27, 30, 33);
 pub(super) const CONTROL_BACKGROUND: Color32 = Color32::from_rgb(36, 40, 44);
+pub(super) const STATUS_BACKGROUND: Color32 = Color32::from_rgb(30, 34, 38);
 pub(super) const BORDER: Color32 = Color32::from_rgb(61, 66, 72);
 pub(super) const TEXT: Color32 = Color32::from_rgb(229, 232, 235);
 pub(super) const MUTED_TEXT: Color32 = Color32::from_rgb(171, 178, 186);
@@ -72,6 +73,9 @@ fn console_visuals() -> Visuals {
     visuals.hyperlink_color = ACCENT;
     visuals.selection.bg_fill = ACCENT_DARK;
     visuals.selection.stroke = Stroke::new(1.0, TEXT);
+    // Disabled controls remain plainly legible at normal scale while their
+    // fill and interaction semantics still distinguish them from enabled UI.
+    visuals.disabled_alpha = 0.75;
     visuals.widgets.noninteractive.bg_fill = WINDOW_BACKGROUND;
     visuals.widgets.noninteractive.weak_bg_fill = PANEL_BACKGROUND;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
@@ -151,5 +155,21 @@ mod tests {
             assert!(contrast(MUTED_TEXT, background) >= 4.5);
         }
         assert!(contrast(Color32::WHITE, ACCENT_DARK) >= 4.5);
+        for status in [HEALTHY, CONNECTING, WARNING, DANGER] {
+            assert!(contrast(status, WINDOW_BACKGROUND) >= 4.5);
+        }
+        assert!(contrast(ACCENT, WINDOW_BACKGROUND) >= 3.0);
+
+        let blend = |foreground: Color32, background: Color32, alpha: f32| {
+            let channel = |fg: u8, bg: u8| {
+                (f32::from(fg) * alpha + f32::from(bg) * (1.0 - alpha)).round() as u8
+            };
+            Color32::from_rgb(
+                channel(foreground.r(), background.r()),
+                channel(foreground.g(), background.g()),
+                channel(foreground.b(), background.b()),
+            )
+        };
+        assert!(contrast(blend(TEXT, CONTROL_BACKGROUND, 0.75), CONTROL_BACKGROUND) >= 4.5);
     }
 }

@@ -427,7 +427,7 @@ fn stale_connection_shows_the_banner() {
 
     harness
         .get_by_role_and_label(Role::Window, "Services")
-        .get_by_label("▲ Stale · last sync unknown · retry in pending · attempt 1");
+        .get_by_label("[~] Reconnecting · last sync unknown · retry in pending · attempt 1");
 }
 
 #[test]

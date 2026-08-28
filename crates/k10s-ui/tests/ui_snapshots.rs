@@ -513,6 +513,8 @@ fn window_freshness_states() {
         W::StatefulSets,
         W::DaemonSets,
         W::Jobs,
+        W::CronJobs,
+        W::ConfigMaps,
     ] {
         harness
             .state_mut()
@@ -526,12 +528,16 @@ fn window_freshness_states() {
     let stateful_sets = workload_id(harness.state(), W::StatefulSets);
     let daemon_sets = workload_id(harness.state(), W::DaemonSets);
     let jobs = workload_id(harness.state(), W::Jobs);
+    let cron_jobs = workload_id(harness.state(), W::CronJobs);
+    let config_maps = workload_id(harness.state(), W::ConfigMaps);
     for (window, position) in [
         (deployments, [10.0, 20.0]),
         (pods, [1_010.0, 20.0]),
-        (stateful_sets, [10.0, 500.0]),
-        (daemon_sets, [1_010.0, 500.0]),
-        (jobs, [510.0, 980.0]),
+        (stateful_sets, [10.0, 380.0]),
+        (daemon_sets, [1_010.0, 380.0]),
+        (jobs, [10.0, 740.0]),
+        (cron_jobs, [1_010.0, 740.0]),
+        (config_maps, [510.0, 1_100.0]),
     ] {
         harness
             .state_mut()
@@ -540,7 +546,7 @@ fn window_freshness_states() {
                 window,
                 WindowGeom {
                     position,
-                    size: [950.0, 430.0],
+                    size: [950.0, 330.0],
                     collapsed: false,
                 },
             ));
@@ -563,6 +569,14 @@ fn window_freshness_states() {
     feed.window_lists.insert(stateful_sets, Vec::new());
     feed.window_lists.insert(daemon_sets, Vec::new());
     feed.window_lists.insert(jobs, Vec::new());
+    feed.window_lists.insert(
+        cron_jobs,
+        vec![list_row("batch", "v1", "CronJob", "nightly", "Active 0")],
+    );
+    feed.window_lists.insert(
+        config_maps,
+        vec![list_row("", "v1", "ConfigMap", "app-settings", "3 keys")],
+    );
     feed.window_freshness.insert(
         deployments,
         WindowFreshness::Live {
@@ -594,9 +608,134 @@ fn window_freshness_states() {
     );
     feed.window_freshness
         .insert(jobs, WindowFreshness::ReadyEmpty);
+    feed.window_freshness.insert(
+        cron_jobs,
+        WindowFreshness::Reconnecting {
+            last_sync_age: "42s ago".into(),
+            retry_in: "2s".into(),
+            attempt: 3,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(
+            config_maps,
+            "does-not-exist".into(),
+        ));
     run_steps(&mut harness);
 
     snapshot_tree(&harness, "window_freshness_states");
+    if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+        harness
+            .render()
+            .expect("render window-state gallery")
+            .save("../../docs/screenshots/issue-171/after-window-states-standard-2200x1500.png")
+            .expect("save window-state screenshot");
+    }
+}
+
+#[test]
+fn compact_window_freshness_states() {
+    let cases = [
+        (
+            "live",
+            Some(WindowFreshness::Live {
+                last_sync_age: "4s ago".into(),
+            }),
+            false,
+        ),
+        (
+            "stale",
+            Some(WindowFreshness::StaleRetrying {
+                last_sync_age: "37s ago".into(),
+                retry_in: "3s".into(),
+                attempt: 2,
+            }),
+            false,
+        ),
+        (
+            "reconnecting",
+            Some(WindowFreshness::Reconnecting {
+                last_sync_age: "42s ago".into(),
+                retry_in: "2s".into(),
+                attempt: 3,
+            }),
+            false,
+        ),
+        (
+            "forbidden",
+            Some(WindowFreshness::Forbidden {
+                user: "alice@example.com".into(),
+                verb: "list".into(),
+                resource: "deployments.apps".into(),
+                scope: "--namespace=payments".into(),
+            }),
+            false,
+        ),
+        (
+            "failed",
+            Some(WindowFreshness::Failed {
+                message: "watch ended unexpectedly".into(),
+            }),
+            false,
+        ),
+        ("empty", Some(WindowFreshness::ReadyEmpty), false),
+        ("filtered-empty", None, true),
+    ];
+
+    for (name, freshness, filtered_empty) in cases {
+        let mut harness = harness_with_size(egui::vec2(640.0, 480.0));
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(W::Deployments),
+            ));
+        run_steps(&mut harness);
+        let window = workload_id(harness.state(), W::Deployments);
+        harness.state_mut().feed.window_lists.insert(
+            window,
+            if matches!(freshness, Some(WindowFreshness::ReadyEmpty)) {
+                Vec::new()
+            } else {
+                vec![list_row(
+                    "apps",
+                    "v1",
+                    "Deployment",
+                    "api-server",
+                    "2/2 ready",
+                )]
+            },
+        );
+        if let Some(freshness) = freshness {
+            harness
+                .state_mut()
+                .feed
+                .window_freshness
+                .insert(window, freshness);
+        }
+        if filtered_empty {
+            harness
+                .state_mut()
+                .shell
+                .apply_workspace_command(WorkspaceCommand::SetSearch(
+                    window,
+                    "does-not-exist".into(),
+                ));
+        }
+        run_steps(&mut harness);
+        snapshot_tree(&harness, &format!("issue_171_compact_{name}"));
+        if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+            harness
+                .render()
+                .expect("render compact state")
+                .save(format!(
+                    "../../docs/screenshots/issue-171/after-window-{name}-compact-640x480.png"
+                ))
+                .expect("save compact state screenshot");
+        }
+    }
 }
 
 #[test]

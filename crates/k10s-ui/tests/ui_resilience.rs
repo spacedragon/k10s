@@ -319,8 +319,20 @@ fn stale_connections_banner_every_data_window_as_text() {
     );
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("▲ Stale · last sync unknown · retry in pending · attempt 1");
-    window.get_by_label("Mutations disabled while this window is stale");
+    window.get_by_label("[~] Reconnecting · last sync unknown · retry in pending · attempt 1");
+    window.get_by_label("Mutations are disabled; recovery controls unlock after reconnecting.");
+    assert!(
+        window
+            .get_by_role_and_label(Role::Button, "Retry now")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        window
+            .get_by_role_and_label(Role::Button, "Full resync")
+            .accesskit_node()
+            .is_disabled()
+    );
     window.get_by_label("db-postgres-0");
 
     // Status must survive without color: the dot carries its state in its

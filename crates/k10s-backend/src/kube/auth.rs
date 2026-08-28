@@ -169,6 +169,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::process::{ExitStatus, Output};
 
     use super::{MAX_DIAGNOSTIC_BYTES, classify_exec_auth_error, sanitize_stderr};

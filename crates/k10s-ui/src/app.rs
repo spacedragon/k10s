@@ -1816,7 +1816,7 @@ impl K10sApp {
             );
             self.window_freshness_overrides.insert(
                 window,
-                WindowFreshness::StaleRetrying {
+                WindowFreshness::Reconnecting {
                     last_sync_age,
                     retry_in,
                     attempt,
