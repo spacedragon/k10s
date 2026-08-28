@@ -199,6 +199,8 @@ pub enum Query {
     ResourceList(ResourceListQuery),
     /// Retrieve normalized details for one resource identity.
     ResourceDetail(ResourceIdentity),
+    /// Authoritatively dry-run deletion for one exact target and policy.
+    DeletePreflight(k10s_protocol::DeletePreflightRequest),
     /// Resolve related resources independently of the primary detail.
     ResourceRelations(ResourceIdentity),
     /// List the selectable resource types of one context.
@@ -291,6 +293,8 @@ pub enum Command {
         target: ResourceIdentity,
         /// How dependents are handled.
         propagation: DeletePropagation,
+        /// Resource version authorized by the successful preflight.
+        resource_version: String,
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
@@ -380,6 +384,8 @@ pub enum QueryResult {
     ResourceList(ResourceListResponse),
     /// Normalized single-resource detail result with backend-resolved events.
     ResourceDetail(Box<ResourceDetailResponse>),
+    /// Successful exact-target delete dry-run.
+    DeletePreflight(Box<k10s_protocol::DeletePreflightResponse>),
     /// Independently resolved related resource groups.
     ResourceRelations(Box<ResourceRelationsResponse>),
     /// Selectable resource types of one context (built-ins and CRDs).
@@ -527,6 +533,7 @@ impl PendingAction {
             Self::Query(Query::PortForwardList) => REQUEST_PORT_FORWARD_LIST,
             Self::Query(Query::ResourceList(_)) => "resource.list",
             Self::Query(Query::ResourceDetail(_)) => "resource.detail",
+            Self::Query(Query::DeletePreflight(_)) => k10s_protocol::REQUEST_DELETE_PREFLIGHT,
             Self::Query(Query::ResourceRelations(_)) => REQUEST_RESOURCE_RELATIONS,
             Self::Query(Query::ResourceTypes(_)) => "resource.types",
             Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
@@ -571,6 +578,7 @@ impl PendingAction {
             Self::Query(Query::ResourceDetail(identity)) => encode(ResourceRefRequest {
                 identity: identity.clone(),
             }),
+            Self::Query(Query::DeletePreflight(request)) => encode(request),
             Self::Query(Query::ResourceRelations(identity)) => encode(ResourceRefRequest {
                 identity: identity.clone(),
             }),
@@ -638,10 +646,12 @@ impl PendingAction {
             Self::Command(Command::Delete {
                 target,
                 propagation,
+                resource_version,
                 ..
             }) => encode(DeleteRequest {
                 identity: target.clone(),
                 propagation: *propagation,
+                resource_version: resource_version.clone(),
             }),
         }
     }
@@ -1710,6 +1720,20 @@ impl ClientState {
                         }
                     }
                     QueryResult::ResourceDetail(Box::new(detail))
+                }
+                PendingAction::Query(Query::DeletePreflight(request)) => {
+                    let response: k10s_protocol::DeletePreflightResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    if response.identity != request.identity
+                        || response.propagation != request.propagation
+                        || response.resource_version.is_empty()
+                    {
+                        return Err(ClientError::Protocol(
+                            "delete preflight response did not match its exact request".into(),
+                        ));
+                    }
+                    QueryResult::DeletePreflight(Box::new(response))
                 }
                 PendingAction::Query(Query::ResourceRelations(identity)) => {
                     let relations: ResourceRelationsResponse = frame

@@ -178,6 +178,7 @@ async fn custom_resources_obey_discovered_scale_and_delete_capabilities() {
                 uid: "uid-widget".into(),
             },
             propagation: Propagation::Background,
+            resource_version: "1".into(),
             idempotency_key: "custom-delete".into(),
         })
         .await;

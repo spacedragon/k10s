@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
-    ClientFrame, Context, ContextAvailability, InfrastructureRequest, RequestId,
+    ClientFrame, Context, ContextAvailability, ErrorCode, InfrastructureRequest, RequestId,
     ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
     ResourceTypesRequest, ServerFrame, StreamTarget,
 };
@@ -152,6 +152,8 @@ pub struct K10sApp {
     types_request: Option<(String, PendingRequest)>,
     /// In-flight workload mutations awaiting their accepted operation.
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
+    /// Exact-target delete dry-runs awaiting authoritative server results.
+    pending_delete_preflights: BTreeMap<RequestId, PendingDeletePreflight>,
     /// In-flight context switch awaiting the backend's verdict; local state
     /// moves only after it succeeds.
     pending_switch: Option<PendingSwitch>,
@@ -187,6 +189,14 @@ struct PendingStreamTicket {
 struct PendingMutation {
     request: PendingRequest,
     window: WindowId,
+}
+
+#[derive(Debug)]
+struct PendingDeletePreflight {
+    request: PendingRequest,
+    window: WindowId,
+    target: ResourceIdentity,
+    propagation: k10s_protocol::DeletePropagation,
 }
 
 /// A context switch sent to the backend whose response has not arrived.
@@ -318,6 +328,7 @@ impl K10sApp {
             types_context: None,
             types_request: None,
             pending_mutations: BTreeMap::new(),
+            pending_delete_preflights: BTreeMap::new(),
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
@@ -901,6 +912,16 @@ impl K10sApp {
             self.shell
                 .dialogs_mut()
                 .open_scale(window, identity, Some(1));
+        }
+    }
+
+    /// Open the real shared destructive confirmation for the selected resource.
+    pub fn web_open_delete_dialog(&mut self, window: WindowId) {
+        if let Some(identity) = self
+            .web_selected_detail(window)
+            .map(|(identity, _)| identity.clone())
+        {
+            self.shell.dialogs_mut().open_delete(window, identity);
         }
     }
 
@@ -2206,6 +2227,37 @@ impl K10sApp {
                 continue;
             }
             let command = match action {
+                DialogAction::RequestDeletePreflight {
+                    target,
+                    propagation,
+                } => {
+                    let superseded = self
+                        .pending_delete_preflights
+                        .iter()
+                        .filter_map(|(id, entry)| (entry.window == window).then_some(id.clone()))
+                        .collect::<Vec<_>>();
+                    for id in superseded {
+                        if let Some(entry) = self.pending_delete_preflights.remove(&id) {
+                            let _ = self.client.cancel(&entry.request);
+                        }
+                    }
+                    let request = self.client.begin(Query::DeletePreflight(
+                        k10s_protocol::DeletePreflightRequest {
+                            identity: target.clone(),
+                            propagation,
+                        },
+                    ))?;
+                    self.pending_delete_preflights.insert(
+                        request.id().clone(),
+                        PendingDeletePreflight {
+                            request,
+                            window,
+                            target,
+                            propagation,
+                        },
+                    );
+                    continue;
+                }
                 DialogAction::SubmitScale {
                     target,
                     replicas,
@@ -2218,10 +2270,12 @@ impl K10sApp {
                 DialogAction::SubmitDelete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 } => Command::Delete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 },
             };
@@ -2257,7 +2311,54 @@ impl K10sApp {
             }
         }
         self.finish_type_requests();
+        self.finish_delete_preflights();
         self.refresh_details();
+    }
+
+    fn finish_delete_preflights(&mut self) {
+        while let Some(id) = self
+            .pending_delete_preflights
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let entry = self.pending_delete_preflights.remove(&id).unwrap();
+            let preflight = match self.client.take(entry.request.clone()) {
+                Some(QueryResult::DeletePreflight(response)) => {
+                    crate::ui::dialogs::DestructivePreflight::Ready {
+                        impact: response.impact,
+                        dry_run: response.dry_run,
+                        resource_version: response.resource_version,
+                    }
+                }
+                _ => {
+                    let failure = self.client.take_failure(entry.request);
+                    match failure {
+                        Some(failure) if failure.code == ErrorCode::Unauthorized => {
+                            crate::ui::dialogs::DestructivePreflight::Forbidden(
+                                failure.safe_message,
+                            )
+                        }
+                        Some(failure) if failure.code == ErrorCode::Conflict => {
+                            crate::ui::dialogs::DestructivePreflight::Conflict(failure.safe_message)
+                        }
+                        Some(failure) => crate::ui::dialogs::DestructivePreflight::DryRunFailed(
+                            failure.safe_message,
+                        ),
+                        None => crate::ui::dialogs::DestructivePreflight::DryRunFailed(
+                            "delete dry-run failed".into(),
+                        ),
+                    }
+                }
+            };
+            if let Some(crate::ui::dialogs::DialogHandle::Delete(dialog)) =
+                self.shell.dialogs_mut().active_mut(entry.window)
+                && dialog.target() == &entry.target
+                && dialog.propagation() == entry.propagation
+            {
+                dialog.set_preflight(preflight);
+            }
+        }
     }
 
     /// Issue detail queries for every identity a window pinned so the

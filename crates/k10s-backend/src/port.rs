@@ -38,6 +38,11 @@ pub enum Query {
     },
     /// Fetch normalized details for one resource.
     ResourceDetail { reference: ResourceRef },
+    /// Authoritatively dry-run deletion of one exact target and policy.
+    DeletePreflight {
+        target: ResourceRef,
+        propagation: crate::operation::Propagation,
+    },
     /// Resolve the related objects of one resource by controller-owner
     /// traversal (for example Deployment → ReplicaSet → Pod).
     ResourceRelations { reference: ResourceRef },
@@ -315,6 +320,7 @@ pub enum Command {
     Delete {
         target: ResourceRef,
         propagation: crate::operation::Propagation,
+        resource_version: String,
         idempotency_key: String,
     },
 }
@@ -359,6 +365,8 @@ pub enum QueryResult {
     ResourceList(ResourceListData),
     /// Normalized details for one resource.
     ResourceDetail(ResourceRecord),
+    /// Successful exact-target delete dry-run.
+    DeletePreflight(k10s_protocol::DeletePreflightResponse),
     /// Backend-resolved related rows for one resource.
     ResourceRelations(RelatedData),
     /// Availability-gated metrics sample for one pod.

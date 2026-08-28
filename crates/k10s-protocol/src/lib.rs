@@ -45,12 +45,13 @@ pub use metrics::{
     MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use operation::{
-    CreateJobRequest, CronJobSuspendRequest, DeletePropagation, DeleteRequest, OperationAccepted,
-    OperationProgress, OperationSnapshotEntry, OperationStatusRequest, OperationStatusResponse,
-    REQUEST_CRONJOB_SUSPEND, REQUEST_JOB_CREATE, REQUEST_OPERATION_STATUS, REQUEST_WORKLOAD_DELETE,
-    REQUEST_WORKLOAD_RESTART, REQUEST_WORKLOAD_SCALE, REQUEST_YAML_APPLY, REQUEST_YAML_VALIDATE,
-    RestartRequest, ScaleRequest, ValidationTicket, YamlApplyRequest, YamlDiagnostic, YamlOutcome,
-    YamlValidateRequest, buffer_hash,
+    CreateJobRequest, CronJobSuspendRequest, DeletePreflightRequest, DeletePreflightResponse,
+    DeletePropagation, DeleteRequest, OperationAccepted, OperationProgress, OperationSnapshotEntry,
+    OperationStatusRequest, OperationStatusResponse, REQUEST_CRONJOB_SUSPEND,
+    REQUEST_DELETE_PREFLIGHT, REQUEST_JOB_CREATE, REQUEST_OPERATION_STATUS,
+    REQUEST_WORKLOAD_DELETE, REQUEST_WORKLOAD_RESTART, REQUEST_WORKLOAD_SCALE, REQUEST_YAML_APPLY,
+    REQUEST_YAML_VALIDATE, RestartRequest, ScaleRequest, ValidationTicket, YamlApplyRequest,
+    YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
 };
 pub use port_forward::{
     CAPABILITY_SERVICE_PORT_FORWARD, PORT_FORWARD_EVENT_SESSION, PortForwardFailure,

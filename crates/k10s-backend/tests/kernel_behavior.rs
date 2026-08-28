@@ -155,6 +155,7 @@ async fn fake_scale_and_delete_execute_through_the_kernel() {
                 uid: "uid-stale".into(),
             },
             propagation: k10s_backend::Propagation::Background,
+            resource_version: "1".into(),
             idempotency_key: "idem-stale-delete".into(),
         })
         .await
@@ -172,6 +173,7 @@ async fn fake_scale_and_delete_execute_through_the_kernel() {
                 uid: "uid-prod-readonly-deployment-default-edge-gateway".into(),
             },
             propagation: k10s_backend::Propagation::Foreground,
+            resource_version: "1".into(),
             idempotency_key: "idem-readonly-delete".into(),
         })
         .await
@@ -412,6 +414,7 @@ async fn execute_returns_operation_id_through_kernel() {
                 uid: "uid-api".into(),
             },
             propagation: k10s_backend::Propagation::Background,
+            resource_version: "1".into(),
             idempotency_key: "idem-1".into(),
         })
         .await

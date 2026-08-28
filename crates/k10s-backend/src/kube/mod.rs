@@ -358,6 +358,10 @@ impl KubernetesAccess for KubeAdapter {
                     namespace,
                 } => self.resource_list(context, gvk, namespace).await,
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
+                Query::DeletePreflight {
+                    target,
+                    propagation,
+                } => self.delete_preflight(target, propagation).await,
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
                 Query::Infrastructure { context } => self.infrastructure(&context).await,

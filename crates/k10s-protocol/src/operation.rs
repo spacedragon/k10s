@@ -25,6 +25,8 @@ pub const REQUEST_JOB_CREATE: &str = "job.create";
 pub const REQUEST_CRONJOB_SUSPEND: &str = "cronjob.suspend";
 /// Request kind carrying a [`DeleteRequest`] payload.
 pub const REQUEST_WORKLOAD_DELETE: &str = "workload.delete";
+/// Request kind preflighting one exact destructive delete.
+pub const REQUEST_DELETE_PREFLIGHT: &str = "workload.delete.preflight";
 /// Request kind carrying an [`OperationStatusRequest`] payload.
 pub const REQUEST_OPERATION_STATUS: &str = "operation.status";
 
@@ -216,6 +218,34 @@ pub struct DeleteRequest {
     pub identity: ResourceIdentity,
     /// How dependents are handled.
     pub propagation: DeletePropagation,
+    /// Resource version authorized by the successful server dry-run.
+    pub resource_version: String,
+}
+
+/// Query payload for an authoritative delete dry-run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePreflightRequest {
+    /// Exact immutable target identity.
+    pub identity: ResourceIdentity,
+    /// Propagation policy being evaluated.
+    pub propagation: DeletePropagation,
+}
+
+/// Successful authoritative delete dry-run bound to its exact request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePreflightResponse {
+    /// Exact immutable target identity echoed by the server.
+    pub identity: ResourceIdentity,
+    /// Propagation policy evaluated by the API server.
+    pub propagation: DeletePropagation,
+    /// Resource version against which the API server accepted the dry-run.
+    pub resource_version: String,
+    /// Safe impact estimate derived by the backend.
+    pub impact: String,
+    /// Safe API-server dry-run result.
+    pub dry_run: String,
 }
 
 /// Deterministic progress of a running background operation.
@@ -343,10 +373,23 @@ mod tests {
                 uid: "uid-p".into(),
             },
             propagation: DeletePropagation::Foreground,
+            resource_version: "42".into(),
         };
         let value = serde_json::to_value(&delete).unwrap();
         assert_eq!(value["propagation"], "foreground");
         assert_eq!(value["identity"]["uid"], "uid-p");
+
+        let preflight = DeletePreflightRequest {
+            identity: delete.identity.clone(),
+            propagation: DeletePropagation::Foreground,
+        };
+        assert_eq!(
+            serde_json::from_value::<DeletePreflightRequest>(
+                serde_json::to_value(&preflight).unwrap()
+            )
+            .unwrap(),
+            preflight
+        );
 
         let create = CreateJobRequest {
             source: delete.identity.clone(),
