@@ -11,6 +11,8 @@
 
 use std::collections::VecDeque;
 
+use egui::accesskit::Role;
+use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
     BackendRevision, DeletePropagation, GroupVersionKind, OperationId, OperationProgress,
     OperationStatus, OperationUpdate, ResourceCapabilities, ResourceDetailResponse,
@@ -20,7 +22,7 @@ use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, Query, QueryResult,
 };
 use k10s_ui::ui::dialogs::{
-    DeleteDialog, DialogAction, DialogPhase, OperationDialogs, ScaleDialog,
+    DeleteDialog, DestructivePreflight, DialogAction, DialogPhase, OperationDialogs, ScaleDialog,
 };
 
 const CONTEXT: &str = "dev-local";
@@ -178,6 +180,86 @@ fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     dialog.connection_lost();
     assert_eq!(dialog.disabled_reason(), Some("not connected"));
     assert!(dialog.take_action().is_none());
+}
+
+#[test]
+fn destructive_contract_exposes_exact_scope_preflight_and_kubectl_command() {
+    let mut dialog = DeleteDialog::for_target(deployment("api-server"));
+    assert_eq!(dialog.target().context, CONTEXT);
+    assert_eq!(dialog.target().namespace.as_deref(), Some("default"));
+    assert_eq!(dialog.target().gvk.kind, "Deployment");
+    assert_eq!(dialog.target().name, "api-server");
+    assert_eq!(
+        dialog.target().uid,
+        "uid-dev-local-deployment-default-api-server"
+    );
+    assert_eq!(dialog.propagation(), DeletePropagation::Background);
+    assert_eq!(
+        dialog.kubectl_command(),
+        "kubectl --context dev-local delete deployment api-server --namespace default --cascade=background --wait=false"
+    );
+
+    dialog.set_confirmation("api-server");
+    for fixture in [
+        DestructivePreflight::fake_forbidden(),
+        DestructivePreflight::fake_conflict(),
+        DestructivePreflight::fake_dry_run_failure(),
+    ] {
+        dialog.set_preflight(fixture);
+        assert!(!dialog.can_submit(), "failed preflight must block delete");
+        assert!(dialog.disabled_reason().is_some());
+    }
+    dialog.set_preflight(DestructivePreflight::fake_success());
+    assert!(dialog.can_submit());
+
+    dialog.mark_stale("stale data — refresh the resource before deleting");
+    assert_eq!(
+        dialog.disabled_reason(),
+        Some("stale data — refresh the resource before deleting")
+    );
+    assert!(dialog.take_action().is_none());
+}
+
+#[test]
+fn destructive_dialog_enter_is_gated_and_submits_only_once() {
+    let window = k10s_ui::workspace::WindowId(17);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui_state(
+            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true),
+            dialogs,
+        );
+
+    let confirmation = harness.get_by_label("Confirm deletion");
+    confirmation.focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(harness.state_mut().drain_actions().is_empty());
+
+    if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) =
+        harness.state_mut().active_mut(window)
+    {
+        delete.set_confirmation("api-server");
+    }
+    harness.run();
+    harness.get_by_label("Confirm deletion").focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    let actions = harness.state_mut().drain_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0].1, DialogAction::SubmitDelete { .. }));
+
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(harness.state_mut().drain_actions().is_empty());
+    let dialog = harness.get_by_role_and_label(Role::Window, "Delete resource");
+    dialog.get_by_label("WARNING — Destructive action");
+    dialog.get_by_label_contains("[PASS] Server dry-run");
+    dialog.get_by_role_and_label(Role::Button, "Copy command");
 }
 
 // ---------------------------------------------------------------------------

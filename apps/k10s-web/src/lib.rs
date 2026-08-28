@@ -188,6 +188,10 @@ impl Runtime {
             && let Some(window) = self.active_window
         {
             app.web_open_scale_dialog(window);
+        } else if action == "open-delete"
+            && let Some(window) = self.active_window
+        {
+            app.web_open_delete_dialog(window);
         }
         self.render_key.clear();
     }
@@ -386,6 +390,9 @@ impl Runtime {
                 if detail.capabilities.can_scale {
                     self.append_button("Scale workload", "open-scale");
                 }
+                if detail.capabilities.can_delete {
+                    self.append_button("Delete resource", "open-delete");
+                }
                 if detail.capabilities.can_view_logs {
                     self.append_button("Connect logs", "connect-logs");
                 }
@@ -415,6 +422,16 @@ impl Runtime {
                 .unwrap();
             let title = self.create_element("h2");
             title.set_text_content(Some("Scale workload"));
+            dialog.append_child(&title).unwrap();
+            self.root.append_child(&dialog).unwrap();
+        } else if dialog == Some(ActiveDialogKind::Delete) {
+            let dialog = self.create_element("section");
+            dialog.set_attribute("role", "dialog").unwrap();
+            dialog
+                .set_attribute("aria-label", "Delete resource")
+                .unwrap();
+            let title = self.create_element("h2");
+            title.set_text_content(Some("Destructive confirmation"));
             dialog.append_child(&title).unwrap();
             self.root.append_child(&dialog).unwrap();
         }

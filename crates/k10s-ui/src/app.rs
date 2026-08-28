@@ -904,6 +904,16 @@ impl K10sApp {
         }
     }
 
+    /// Open the real shared destructive confirmation for the selected resource.
+    pub fn web_open_delete_dialog(&mut self, window: WindowId) {
+        if let Some(identity) = self
+            .web_selected_detail(window)
+            .map(|(identity, _)| identity.clone())
+        {
+            self.shell.dialogs_mut().open_delete(window, identity);
+        }
+    }
+
     /// Current shared operation dialog kind, if one is open.
     #[must_use]
     pub fn web_dialog_kind(

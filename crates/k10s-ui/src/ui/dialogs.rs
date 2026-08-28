@@ -15,6 +15,58 @@ use k10s_protocol::{DeletePropagation, OperationId, ResourceIdentity};
 
 use crate::workspace::WindowId;
 
+/// Authoritative preflight outcome shown by every destructive confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestructivePreflight {
+    /// The API server accepted the dry-run and returned an impact estimate.
+    Ready { impact: String, dry_run: String },
+    /// RBAC denied the dry-run.
+    Forbidden(String),
+    /// The target changed after the view was loaded.
+    Conflict(String),
+    /// The API server rejected or could not complete the dry-run.
+    DryRunFailed(String),
+}
+
+impl DestructivePreflight {
+    /// Deterministic fake-mode fixtures covering every safety outcome.
+    #[must_use]
+    pub fn fake_success() -> Self {
+        Self::Ready {
+            impact: "Deletes this object; dependents follow the selected propagation policy."
+                .into(),
+            dry_run: "Passed — the API server accepted the delete dry-run.".into(),
+        }
+    }
+
+    /// Fake RBAC denial fixture.
+    #[must_use]
+    pub fn fake_forbidden() -> Self {
+        Self::Forbidden("Forbidden — delete is not allowed in this context.".into())
+    }
+
+    /// Fake stale-resource conflict fixture.
+    #[must_use]
+    pub fn fake_conflict() -> Self {
+        Self::Conflict("Conflict — the resource changed; refresh before deleting.".into())
+    }
+
+    /// Fake server dry-run failure fixture.
+    #[must_use]
+    pub fn fake_dry_run_failure() -> Self {
+        Self::DryRunFailed("Dry-run failed — the API server rejected this delete.".into())
+    }
+
+    fn blocking_reason(&self) -> Option<&str> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::Forbidden(reason) | Self::Conflict(reason) | Self::DryRunFailed(reason) => {
+                Some(reason)
+            }
+        }
+    }
+}
+
 /// One queued mutation request from a dialog, drained by the application
 /// layer after rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +265,8 @@ pub struct DeleteDialog {
     confirmation: String,
     idempotency_key: String,
     connected: bool,
+    stale_reason: Option<String>,
+    preflight: DestructivePreflight,
     consumed: bool,
     submitted_operation: Option<OperationId>,
     failure: Option<String>,
@@ -228,6 +282,8 @@ impl DeleteDialog {
             confirmation: String::new(),
             target,
             connected: true,
+            stale_reason: None,
+            preflight: DestructivePreflight::fake_success(),
             consumed: false,
             submitted_operation: None,
             failure: None,
@@ -261,11 +317,51 @@ impl DeleteDialog {
         self.propagation
     }
 
+    /// Replace the authoritative impact and server dry-run result.
+    pub fn set_preflight(&mut self, preflight: DestructivePreflight) {
+        self.preflight = preflight;
+    }
+
+    /// Mark the displayed target data stale and revoke submission authority.
+    pub fn mark_stale(&mut self, reason: impl Into<String>) {
+        self.stale_reason = Some(reason.into());
+    }
+
+    /// Equivalent command for the exact target and selected propagation.
+    #[must_use]
+    pub fn kubectl_command(&self) -> String {
+        let namespace = self
+            .target
+            .namespace
+            .as_ref()
+            .map(|namespace| format!(" --namespace {namespace}"))
+            .unwrap_or_default();
+        let propagation = match self.propagation {
+            DeletePropagation::Background => "Background",
+            DeletePropagation::Foreground => "Foreground",
+            DeletePropagation::Orphan => "Orphan",
+        };
+        format!(
+            "kubectl --context {} delete {} {}{} --cascade={} --wait=false",
+            self.target.context,
+            self.target.gvk.kind.to_ascii_lowercase(),
+            self.target.name,
+            namespace,
+            propagation.to_ascii_lowercase()
+        )
+    }
+
     /// Why submission is disabled right now, if it is.
     #[must_use]
-    pub fn disabled_reason(&self) -> Option<&'static str> {
+    pub fn disabled_reason(&self) -> Option<&str> {
         if !self.connected {
             return Some("not connected");
+        }
+        if self.stale_reason.is_some() {
+            return self.stale_reason.as_deref();
+        }
+        if let Some(reason) = self.preflight.blocking_reason() {
+            return Some(reason);
         }
         if self.consumed {
             return Some("already submitted");
@@ -583,10 +679,35 @@ fn render_delete(
     submit: &mut bool,
     close: &mut bool,
 ) {
-    ui.label(format!(
-        "Permanently delete {}? Type its name to confirm.",
-        dialog.target().name
-    ));
+    ui.heading("WARNING — Destructive action");
+    ui.label("Review the exact scope and server preflight before deleting.");
+    egui::Grid::new("delete-scope")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let target = dialog.target();
+            let gvk = if target.gvk.group.is_empty() {
+                format!("{}/{}", target.gvk.version, target.gvk.kind)
+            } else {
+                format!(
+                    "{}/{}/{}",
+                    target.gvk.group, target.gvk.version, target.gvk.kind
+                )
+            };
+            for (label, value) in [
+                ("Context", target.context.as_str()),
+                (
+                    "Namespace",
+                    target.namespace.as_deref().unwrap_or("Cluster-scoped"),
+                ),
+                ("GVK", gvk.as_str()),
+                ("Name", target.name.as_str()),
+                ("UID", target.uid.as_str()),
+            ] {
+                ui.strong(label);
+                ui.label(value);
+                ui.end_row();
+            }
+        });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Propagation");
@@ -600,6 +721,34 @@ fn render_delete(
             }
         }
     });
+    ui.label(format!("Propagation policy: {:?}", dialog.propagation()));
+    match &dialog.preflight {
+        DestructivePreflight::Ready { impact, dry_run } => {
+            ui.label(format!("[IMPACT] {impact}"));
+            ui.label(
+                RichText::new(format!("[PASS] Server dry-run: {dry_run}"))
+                    .color(egui::Color32::GREEN),
+            );
+        }
+        DestructivePreflight::Forbidden(reason) => {
+            ui.label(
+                RichText::new(format!("[BLOCKED] Forbidden: {reason}"))
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+        DestructivePreflight::Conflict(reason) => {
+            ui.label(
+                RichText::new(format!("[STALE] Conflict: {reason}")).color(egui::Color32::YELLOW),
+            );
+        }
+        DestructivePreflight::DryRunFailed(reason) => {
+            ui.label(
+                RichText::new(format!("[FAILED] Server dry-run failed: {reason}"))
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+    }
+    ui.label(format!("Type {} to confirm.", dialog.target().name));
     let field = ui.text_edit_singleline(dialog.confirmation_buffer());
     field.widget_info(|| {
         egui::WidgetInfo::labeled(
@@ -607,6 +756,14 @@ fn render_delete(
             true,
             "Confirm deletion".to_owned(),
         )
+    });
+    let command = dialog.kubectl_command();
+    ui.label("Equivalent kubectl command");
+    ui.horizontal(|ui| {
+        ui.monospace(&command);
+        if ui.button("Copy command").clicked() {
+            ui.ctx().copy_text(command);
+        }
     });
     if let Some(reason) = dialog.disabled_reason() {
         ui.label(RichText::new(reason).weak());
@@ -630,4 +787,7 @@ fn render_delete(
             *submit = true;
         }
     });
+    if ui.input(|input| input.key_pressed(egui::Key::Enter)) && dialog.can_submit() {
+        *submit = true;
+    }
 }
