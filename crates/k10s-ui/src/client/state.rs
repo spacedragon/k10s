@@ -289,6 +289,7 @@ pub enum Command {
         target: ResourceIdentity,
         /// How dependents are handled.
         propagation: DeletePropagation,
+        /// Resource version authorized by the successful preflight.
         resource_version: String,
         /// Idempotency key for safe retries.
         idempotency_key: String,
