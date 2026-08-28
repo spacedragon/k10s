@@ -1,6 +1,7 @@
 //! Searchable functional resource taxonomy backed by workspace state and
 //! backend-owned launcher projections.
 
+use super::InfrastructureLoad;
 use crate::workspace::{LauncherItem, WorkloadKind, WorkspaceCommand, WorkspaceState};
 use egui::{RichText, WidgetInfo, WidgetType};
 use std::{fmt::Debug, hash::Hash};
@@ -32,6 +33,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState<I>,
     response: Option<&k10s_protocol::InfrastructureResponse>,
+    load: InfrastructureLoad,
     state: &mut LauncherState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -61,7 +63,7 @@ pub(super) fn show<I>(
     filter.widget_info(|| WidgetInfo::labeled(WidgetType::TextEdit, true, "Filter resources…"));
     let query = state.filter.trim().to_ascii_lowercase();
     let matches = |label: &str| query.is_empty() || label.to_ascii_lowercase().contains(&query);
-    let counts = response.map(|value| value.launcher).unwrap_or_default();
+    let inventory = Inventory::new(load, response);
     egui::ScrollArea::vertical()
         .id_salt("resource-launcher")
         .auto_shrink([false, false])
@@ -76,7 +78,7 @@ pub(super) fn show<I>(
                     workspace,
                     queued,
                     WorkloadKind::Events,
-                    Some((counts.events_warning, "warn")),
+                    Some(inventory.warning(response.map(|value| value.launcher.events_warning))),
                 );
             }
             if matches("Namespaces") {
@@ -88,7 +90,7 @@ pub(super) fn show<I>(
             group(
                 ui,
                 "Workloads",
-                counts.workloads,
+                inventory.count(response.map(|value| value.launcher.workloads)),
                 &mut state.workloads_open,
                 &query,
                 WorkloadKind::ALL,
@@ -97,7 +99,7 @@ pub(super) fn show<I>(
             );
             group_with_services(
                 ui,
-                counts.network,
+                inventory.count(response.map(|value| value.launcher.network)),
                 &mut state.network_open,
                 &query,
                 workspace,
@@ -106,7 +108,7 @@ pub(super) fn show<I>(
             group(
                 ui,
                 "Config",
-                counts.config,
+                inventory.count(response.map(|value| value.launcher.config)),
                 &mut state.config_open,
                 &query,
                 WorkloadKind::CONFIG,
@@ -116,7 +118,7 @@ pub(super) fn show<I>(
             group(
                 ui,
                 "Storage",
-                counts.storage,
+                inventory.count(response.map(|value| value.launcher.storage)),
                 &mut state.storage_open,
                 &query,
                 WorkloadKind::STORAGE,
@@ -126,7 +128,7 @@ pub(super) fn show<I>(
             group(
                 ui,
                 "Access",
-                counts.access,
+                inventory.count(response.map(|value| value.launcher.access)),
                 &mut state.access_open,
                 &query,
                 WorkloadKind::ACCESS,
@@ -140,7 +142,7 @@ pub(super) fn show<I>(
 fn group<I, const N: usize>(
     ui: &mut egui::Ui,
     label: &'static str,
-    count: u32,
+    badge: InventoryBadge,
     open: &mut bool,
     query: &str,
     kinds: [WorkloadKind; N],
@@ -157,7 +159,7 @@ fn group<I, const N: usize>(
         return;
     }
     let reveal = !query.is_empty();
-    group_header(ui, label, count, open, reveal);
+    group_header(ui, label, badge, open, reveal);
     if *open || reveal {
         ui.indent(("launcher-group", label), |ui| {
             for kind in visible {
@@ -169,7 +171,7 @@ fn group<I, const N: usize>(
 
 fn group_with_services<I>(
     ui: &mut egui::Ui,
-    count: u32,
+    badge: InventoryBadge,
     open: &mut bool,
     query: &str,
     workspace: &WorkspaceState<I>,
@@ -186,7 +188,7 @@ fn group_with_services<I>(
         return;
     }
     let reveal = !query.is_empty();
-    group_header(ui, "Network", count, open, reveal);
+    group_header(ui, "Network", badge, open, reveal);
     if *open || reveal {
         ui.indent("launcher-group-network", |ui| {
             if service_matches {
@@ -199,21 +201,20 @@ fn group_with_services<I>(
     }
 }
 
-fn group_header(ui: &mut egui::Ui, label: &'static str, count: u32, open: &mut bool, reveal: bool) {
+fn group_header(
+    ui: &mut egui::Ui,
+    label: &'static str,
+    badge: InventoryBadge,
+    open: &mut bool,
+    reveal: bool,
+) {
     ui.horizontal(|ui| {
         let arrow = if *open || reveal { "▾" } else { "▸" };
         ui.label(arrow);
         if ui.button(label).clicked() {
             *open = !*open;
         }
-        let badge = ui.monospace(count.to_string());
-        badge.widget_info(|| {
-            WidgetInfo::labeled(
-                WidgetType::Label,
-                true,
-                format!("{count} {label} resources"),
-            )
-        });
+        inventory_badge(ui, badge, label);
     });
 }
 
@@ -245,7 +246,7 @@ fn resource<I>(
     workspace: &WorkspaceState<I>,
     queued: &mut Vec<WorkspaceCommand<I>>,
     kind: WorkloadKind,
-    badge: Option<(u32, &'static str)>,
+    badge: Option<InventoryBadge>,
 ) where
     I: Clone + Eq + Hash + Debug,
 {
@@ -275,8 +276,8 @@ fn resource<I>(
             );
             let value = ui.monospace(count.to_string());
             value.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text.clone()));
-        } else if let Some((value, suffix)) = badge.filter(|(value, _)| *value > 0) {
-            ui.label(format!("{value} {suffix}"));
+        } else if let Some(badge) = badge {
+            inventory_badge(ui, badge, label);
         } else {
             ui.add_space(8.0);
         }
@@ -287,4 +288,67 @@ fn resource<I>(
             queued.push(WorkspaceCommand::AddWorkloadInstance(kind));
         }
     });
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InventoryBadge {
+    Loading,
+    Count(u32),
+    Warning(u32),
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Inventory(InfrastructureLoad);
+
+impl Inventory {
+    fn new(
+        load: InfrastructureLoad,
+        response: Option<&k10s_protocol::InfrastructureResponse>,
+    ) -> Self {
+        Self(
+            if load == InfrastructureLoad::Available && response.is_none() {
+                InfrastructureLoad::Loading
+            } else {
+                load
+            },
+        )
+    }
+
+    fn count(self, value: Option<u32>) -> InventoryBadge {
+        self.badge(value, false)
+    }
+
+    fn warning(self, value: Option<u32>) -> InventoryBadge {
+        self.badge(value, true)
+    }
+
+    fn badge(self, value: Option<u32>, warning: bool) -> InventoryBadge {
+        match self.0 {
+            InfrastructureLoad::Loading => InventoryBadge::Loading,
+            InfrastructureLoad::Unavailable => InventoryBadge::Unavailable,
+            InfrastructureLoad::Available => {
+                let value = value.unwrap_or_default();
+                if warning && value > 0 {
+                    InventoryBadge::Warning(value)
+                } else {
+                    InventoryBadge::Count(value)
+                }
+            }
+        }
+    }
+}
+
+fn inventory_badge(ui: &mut egui::Ui, badge: InventoryBadge, label: &'static str) {
+    let (visible, accessible) = match badge {
+        InventoryBadge::Loading => ("…".to_owned(), format!("Loading {label} inventory")),
+        InventoryBadge::Count(count) => (count.to_string(), format!("{count} {label} resources")),
+        InventoryBadge::Warning(count) => (
+            format!("{count} warn"),
+            format!("{count} warning {label} resources"),
+        ),
+        InventoryBadge::Unavailable => ("—".to_owned(), format!("{label} inventory unavailable")),
+    };
+    let response = ui.monospace(visible);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
 }

@@ -51,6 +51,8 @@ Window
                 GenericContainer
                   GenericContainer
                     Button label="Events"
+                  Label value="0 Events resources"
+                    TextRun value="0"
                   Button label="Open another Events window"
                 GenericContainer
                   GenericContainer

@@ -423,6 +423,8 @@ where
                 .find(|context| context.name == name)
                 .and_then(|context| context.namespace.as_deref())
         });
+        let selected_response =
+            response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
         let mut refresh_requested = false;
         taskbar::shortcuts(ui.ctx(), &self.workspace, &mut queued);
         egui::Panel::top("k10s.top_bar")
@@ -461,7 +463,8 @@ where
                 launcher::show(
                     ui,
                     &self.workspace,
-                    response,
+                    selected_response,
+                    load,
                     &mut self.launcher,
                     &mut queued,
                 );
@@ -471,8 +474,6 @@ where
         egui::CentralPanel::default()
             .frame(theme::canvas_frame())
             .show(ui, |ui| {
-                let response = response
-                    .filter(|response| Some(response.context.as_str()) == selected.as_deref());
                 refresh_requested |= window::show_canvas(
                     ui,
                     &self.workspace,
@@ -481,7 +482,7 @@ where
                     &mut self.yaml,
                     &mut self.streams,
                     &mut self.dialogs,
-                    response,
+                    selected_response,
                     load,
                     feed,
                     selected_namespace,

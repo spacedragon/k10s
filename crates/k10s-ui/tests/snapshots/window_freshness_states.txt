@@ -58,6 +58,8 @@ Window
                 GenericContainer
                   GenericContainer
                     Button label="Events"
+                  Label value="Loading Events inventory"
+                    TextRun value="…"
                   Button label="Open another Events window"
                 GenericContainer
                   GenericContainer
@@ -68,8 +70,8 @@ Window
                   Label value="▾"
                     TextRun value="▾"
                   Button label="Workloads"
-                  Label value="0 Workloads resources"
-                    TextRun value="0"
+                  Label value="Loading Workloads inventory"
+                    TextRun value="…"
                 GenericContainer
                   GenericContainer
                     GenericContainer
@@ -115,8 +117,8 @@ Window
                   Label value="▾"
                     TextRun value="▾"
                   Button label="Network"
-                  Label value="0 Network resources"
-                    TextRun value="0"
+                  Label value="Loading Network inventory"
+                    TextRun value="…"
                 GenericContainer
                   Button label="Services"
                   GenericContainer
@@ -135,20 +137,20 @@ Window
                   Label value="▸"
                     TextRun value="▸"
                   Button label="Config"
-                  Label value="0 Config resources"
-                    TextRun value="0"
+                  Label value="Loading Config inventory"
+                    TextRun value="…"
                 GenericContainer
                   Label value="▸"
                     TextRun value="▸"
                   Button label="Storage"
-                  Label value="0 Storage resources"
-                    TextRun value="0"
+                  Label value="Loading Storage inventory"
+                    TextRun value="…"
                 GenericContainer
                   Label value="▸"
                     TextRun value="▸"
                   Button label="Access"
-                  Label value="0 Access resources"
-                    TextRun value="0"
+                  Label value="Loading Access inventory"
+                    TextRun value="…"
         GenericContainer
           GenericContainer
   Window label="Overview"
