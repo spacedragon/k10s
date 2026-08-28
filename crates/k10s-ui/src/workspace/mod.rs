@@ -56,6 +56,8 @@ pub enum WorkspaceCommand<I> {
     ActivateLauncherItem(LauncherItem),
     /// Launcher `+`: open another independent workload instance.
     AddWorkloadInstance(WorkloadKind),
+    /// Command-palette modified activation: open another independent list.
+    AddListInstance(LauncherItem),
     /// Raise a window above the others.
     FocusWindow(WindowId),
     CloseWindow(WindowId),
@@ -283,6 +285,14 @@ where
                 let id = self.open_workload(kind);
                 vec![WorkspaceEvent::Opened(id)]
             }
+            WorkspaceCommand::AddListInstance(item) => {
+                let id = match item {
+                    LauncherItem::Workload(kind) => self.open_workload(kind),
+                    LauncherItem::Services => self.open_singleton(WindowKind::Services),
+                    _ => return self.activate(item),
+                };
+                vec![WorkspaceEvent::Opened(id)]
+            }
             WorkspaceCommand::FocusWindow(id) => self.focus(id),
             WorkspaceCommand::CloseWindow(id) => self.close_window(id),
             WorkspaceCommand::SetGeometry(id, geometry) => {
@@ -406,7 +416,8 @@ where
         let existing = self
             .windows
             .iter()
-            .find(|window| window.kind == kind)
+            .filter(|window| window.kind == kind)
+            .max_by_key(|window| window.z)
             .map(|window| window.id);
         match existing {
             Some(id) => self.focus(id),
