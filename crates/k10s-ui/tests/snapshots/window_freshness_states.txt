@@ -45,7 +45,7 @@ Window
               GenericContainer
                 Button label="DaemonSets · all namespaces"
               GenericContainer
-                Button label="Jobs · all namespaces · ● Active"
+                Button label="Jobs · all namespaces"
               GenericContainer
                 Button label="CronJobs · all namespaces"
               GenericContainer
