@@ -430,12 +430,17 @@ impl K10sApp {
     fn commit_context_layout(&mut self, to: String) {
         let from = self.shell.workspace().context().to_owned();
         if !from.is_empty() && from != to {
-            self.workspace_layouts.insert(from, self.workspace_snapshot());
+            self.workspace_layouts
+                .insert(from, self.workspace_snapshot());
         }
         if let Some(snapshot) = self.workspace_layouts.get(&to).cloned() {
-            self.shell.apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+            self.shell
+                .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
         }
-        for event in self.shell.apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to }) {
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to })
+        {
             self.handle_workspace_event(event);
         }
     }
@@ -3384,6 +3389,27 @@ mod tests {
     #[test]
     fn production_control_inbox_holds_a_large_default_snapshot_burst() {
         assert_eq!(super::CONTROL_INBOX_CAPACITY, 256);
+    }
+
+    #[test]
+    fn context_switches_restore_independent_window_layouts() {
+        let (mut app, _state) = test_app(Vec::new());
+        app.commit_context_layout("dev".into());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let dev_snapshot = app.workspace_snapshot();
+
+        app.commit_context_layout("prod".into());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+        let prod_snapshot = app.workspace_snapshot();
+        assert_ne!(dev_snapshot, prod_snapshot);
+
+        app.commit_context_layout("dev".into());
+        assert_eq!(app.workspace_snapshot().windows, dev_snapshot.windows);
+        app.commit_context_layout("prod".into());
+        assert_eq!(app.workspace_snapshot().windows, prod_snapshot.windows);
+        assert_eq!(app.workspace_layouts().len(), 2);
     }
 
     #[derive(Debug, Default)]

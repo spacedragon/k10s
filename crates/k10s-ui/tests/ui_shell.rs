@@ -455,7 +455,13 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
         .id;
     assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
 
-    harness.get_by_role_and_label(Role::Button, "Nodes").click();
+    harness
+        .get_by(|node| {
+            node.role() == Role::Button
+                && node.label().as_deref() == Some("Nodes")
+                && node.toggled() == Some(Toggled::True)
+        })
+        .click();
     harness.run_steps(4);
     let nodes: Vec<_> = harness
         .state()

@@ -109,14 +109,6 @@ Window
                         Button label="Open another Custom Resources… window"
         GenericContainer
           GenericContainer
-            GenericContainer
-              Button label="Tile"
-              Button label="Cascade"
-              Button label="Focus"
-              Button label="Overview"
-              Button label="Pods · all namespaces · ● Active"
-        GenericContainer
-          GenericContainer
   Window label="Overview"
     GenericContainer
       GenericContainer
@@ -243,3 +235,11 @@ Window
     Splitter
     Splitter
     Splitter
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        Button label="Tile"
+        Button label="Cascade"
+        Button label="Focus"
+        Button label="Overview"
+        Button label="Pods · all namespaces · ● Active"

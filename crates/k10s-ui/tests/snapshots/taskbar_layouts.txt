@@ -19,34 +19,13 @@ Window
                         Label value="Kubernetes context"
                           TextRun value="Kubernetes context"
                   GenericContainer
-                    Button label="Refresh"
-                  Label value="Connected"
-                    TextRun value="Connected"
-                  Label value="Connection status: Connected"
+                    Button label="Retry"
+                  Label value="Connecting"
+                    TextRun value="Connecting"
+                  Label value="Connection status: Connecting"
                     TextRun value="●"
         GenericContainer
           GenericContainer
-            GenericContainer
-              GenericContainer
-                GenericContainer
-                  Label value="WINDOWS"
-                    TextRun value="WINDOWS"
-                  GenericContainer
-                    Button label="Focus Overview window"
-                  GenericContainer
-                    Button label="Pods window, focused"
-        GenericContainer
-          GenericContainer
-            GenericContainer
-              Label value="◈"
-                TextRun value="◈"
-              GenericContainer
-                Label value="k10s"
-                  TextRun value="k10s"
-                Label value="KUBERNETES CONSOLE"
-                  TextRun value="KUBERNETES CONSOLE"
-            Label value="CLUSTER"
-              TextRun value="CLUSTER"
             GenericContainer
               Button label="Overview"
             GenericContainer
@@ -73,8 +52,8 @@ Window
                     GenericContainer
                       GenericContainer
                         Button label="Pods"
-                      Label value="1 open Pods window"
-                        TextRun value="1"
+                      Label value="2 open Pods windows"
+                        TextRun value="2"
                       GenericContainer
                         Button label="Open another Pods window"
                   GenericContainer
@@ -142,6 +121,43 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              Label value="Connection stale · showing last known rows"
+                TextRun value="Connection stale · showing last known rows"
+              GenericContainer
+                TextInput label="Search pods" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Clear"
+                Button label="Hide details"
+              GenericContainer
+                ProgressIndicator
+                Label value="Loading pods"
+                  TextRun value="Loading pods"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Pods"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="Connection stale · showing last known rows"
+                TextRun value="Connection stale · showing last known rows"
               GenericContainer
                 TextInput label="Search pods" value=""
                   TextRun value=""
@@ -153,61 +169,47 @@ Window
                       TextRun value="Namespace"
                 Button label="Hide details"
               GenericContainer
-                Button label="Clear selection"
-                GenericContainer
-                  Label value="Details"
-                    TextRun value="Details"
-                  GenericContainer
-                    Label value="Pod / db-postgres-0"
-                      TextRun value="Pod / db-postgres-0"
-                    GenericContainer
-                      Label value="Kind Pod"
-                        TextRun value="Kind Pod"
-                      Label value="Namespace default"
-                        TextRun value="Namespace default"
-                      Label value="Context dev-local"
-                        TextRun value="Context dev-local"
-                    GenericContainer
-                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                      Label value="Created 2026-08-21T00:50:10Z"
-                        TextRun value="Created 2026-08-21T00:50:10Z"
-                      Label value="Fresh · live"
-                        TextRun value="Fresh · live"
-                  Button label="Pop out ↗"
-                  Button label="Restore split"
-                GenericContainer
-                  Button label="Tab Overview"
-                  Button label="Tab Events"
-                  Button label="Tab YAML"
-                  Button label="Tab Logs"
-                  Button label="Tab Shell"
-                GenericContainer
-                  Button label="Delete resource"
-                  Button label="View logs"
-                  Button label="Exec shell"
-                  Button label="Edit YAML"
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox value="Container: app"
-                  CheckBox label="Previous"
-                  GenericContainer
-                    GenericContainer
-                      ComboBox value="Since: 5m"
-                  Button label="Connect logs"
-                  Label value="Disconnected"
-                    TextRun value="Disconnected"
-                  TextInput label="Find in logs" value=""
-                    TextRun value=""
-                  CheckBox label="Wrap"
-                  Button label="Export"
-                GenericContainer
-                  GenericContainer
-                    Label value="kubelet started pod"
-                      TextRun value="kubelet started pod"
-                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
-                  TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                ProgressIndicator
+                Label value="Loading pods"
+                  TextRun value="Loading pods"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Detail"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                Label value="Details"
+                  TextRun value="Details"
+                Button label="Tab Overview"
+                Button label="Tab Events"
+                Button label="Tab YAML"
+                Button label="Tab Logs"
+                Button label="Tab Shell"
+              Label value="api-0"
+                TextRun value="api-0"
+              Label value="Kind Pod"
+                TextRun value="Kind Pod"
+              Label value="Namespace default"
+                TextRun value="Namespace default"
+              Label value="UID uid-dev-local-pod-default-api-0"
+                TextRun value="UID uid-dev-local-pod-default-api-0"
+              GenericContainer
+                ProgressIndicator
+                Label value="Loading details"
+                  TextRun value="Loading details"
     Splitter
     Splitter
     Splitter
@@ -222,5 +224,7 @@ Window
         Button label="Tile"
         Button label="Cascade"
         Button label="Focus"
-        Button label="Overview"
-        Button label="Pods · all namespaces · ● Active"
+        Button label="Overview · ↻ Stale data"
+        GenericContainer
+          GenericContainer
+            ComboBox value="More tasks (3)"

@@ -45,6 +45,54 @@ fn tile_is_deterministic_non_overlapping_and_preserves_minima_in_overflow() {
             .iter()
             .all(|g| g.size[0] >= 480.0 && g.size[1] >= 320.0)
     );
+    for (index, left) in geometries.iter().enumerate() {
+        for right in geometries.iter().skip(index + 1) {
+            let separated = left.position[0] + left.size[0] <= right.position[0]
+                || right.position[0] + right.size[0] <= left.position[0]
+                || left.position[1] + left.size[1] <= right.position[1]
+                || right.position[1] + right.size[1] <= left.position[1];
+            assert!(
+                separated,
+                "tiled windows must not overlap: {left:?} {right:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cycle_window_and_indexed_focus_use_the_registry_order() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+    let registry_ids: Vec<_> = state.windows().iter().map(|window| window.id).collect();
+
+    state.apply(WorkspaceCommand::FocusWindow(registry_ids[0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        registry_ids[0]
+    );
+    state.apply(WorkspaceCommand::CycleWindow);
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        registry_ids[2]
+    );
+    state.apply(WorkspaceCommand::CloseWindow(registry_ids[2]));
+    assert!(
+        !state
+            .windows()
+            .iter()
+            .any(|window| window.id == registry_ids[2])
+    );
 }
 
 #[test]

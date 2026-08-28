@@ -35,6 +35,7 @@ struct Fixture {
     feed: ResourceFeed,
     response: Option<InfrastructureResponse>,
     selected_context: String,
+    connection: ConnectionState,
 }
 
 impl Default for Fixture {
@@ -44,6 +45,7 @@ impl Default for Fixture {
             feed: ResourceFeed::default(),
             response: None,
             selected_context: CONTEXT.to_owned(),
+            connection: ConnectionState::Connected,
         }
     }
 }
@@ -53,7 +55,7 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let mut selected = Some(fixture.selected_context.clone());
     fixture.shell.show_with_resources(
         ui,
-        ConnectionState::Connected,
+        fixture.connection,
         &contexts,
         &mut selected,
         fixture.response.as_ref(),
@@ -65,8 +67,12 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 fn harness() -> Harness<'static, Fixture> {
+    harness_with_size(egui::vec2(1_280.0, 800.0))
+}
+
+fn harness_with_size(size: egui::Vec2) -> Harness<'static, Fixture> {
     Harness::builder()
-        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(render, Fixture::default())
 }
@@ -590,4 +596,69 @@ fn window_freshness_states() {
     run_steps(&mut harness);
 
     snapshot_tree(&harness, "window_freshness_states");
+}
+
+#[test]
+fn compact_taskbar_exposes_instance_status_and_keyboard_reachable_overflow() {
+    let mut harness = harness_with_size(egui::vec2(640.0, 420.0));
+    let pod = list_row("", "v1", "Pod", "api-0", "Running").identity;
+    {
+        let fixture = harness.state_mut();
+        fixture.connection = ConnectionState::Connecting;
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(W::Pods));
+        let first_pods = workload_id(fixture, W::Pods);
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                first_pods,
+                k10s_ui::workspace::NamespaceScope::Namespace("payments".into()),
+            ));
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(W::Pods));
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pod));
+        let detail = fixture
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == k10s_ui::workspace::WindowKind::Detail)
+            .expect("dedicated detail")
+            .id;
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(detail));
+    }
+    run_steps(&mut harness);
+    snapshot_tree(&harness, "taskbar_layouts");
+
+    // The compact overflow control participates in ordinary keyboard focus
+    // traversal, while numbered accelerators still address registry entries.
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (3)")
+    });
+    overflow.focus();
+    run_steps(&mut harness);
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (3)")
+    });
+    assert!(overflow.is_focused());
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num1);
+    run_steps(&mut harness);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        harness.state().shell.workspace().windows()[0].id
+    );
 }
