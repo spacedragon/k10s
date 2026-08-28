@@ -814,6 +814,7 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
         container: "shell".into(),
         tail_lines: Some(20),
         since_seconds: Some(300),
+        previous: false,
         timestamps: false,
         follow: false,
     };

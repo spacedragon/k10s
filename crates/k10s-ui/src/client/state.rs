@@ -223,6 +223,10 @@ pub enum Query {
         stream_type: StreamType,
         /// Exec mode: interactive TTY shell vs separated stdout/stderr.
         tty: bool,
+        /// Logs-only history window.
+        since_seconds: Option<i64>,
+        /// Logs-only previous terminated-container selection.
+        previous: bool,
     },
     /// Look up the current state of specific operations by ID. Used after
     /// reconnects to refresh every nonterminal operation before allowing
@@ -580,6 +584,8 @@ impl PendingAction {
                 target,
                 stream_type,
                 tty,
+                since_seconds,
+                previous,
             }) => encode(StreamTicketRequest {
                 target: target.clone(),
                 stream_type: *stream_type,
@@ -590,7 +596,8 @@ impl PendingAction {
                     Vec::new()
                 },
                 tail_lines: (*stream_type == k10s_protocol::StreamType::Logs).then_some(200),
-                since_seconds: None,
+                since_seconds: *since_seconds,
+                previous: *previous,
                 timestamps: *stream_type == k10s_protocol::StreamType::Logs,
                 follow: *stream_type == k10s_protocol::StreamType::Logs,
             }),

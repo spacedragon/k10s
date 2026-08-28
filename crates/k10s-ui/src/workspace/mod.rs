@@ -68,6 +68,11 @@ pub enum WorkspaceCommand<I> {
     SetFilter(WindowId, String, String),
     SetSort(WindowId, Option<SortSpec>),
     SetSplitRatio(WindowId, f32),
+    /// Give the integrated detail the full content area while remembering
+    /// the user's current split for an explicit restore.
+    MaximizeDetailPane(WindowId),
+    /// Return from a focused detail view to the remembered split.
+    RestoreDetailPane(WindowId),
     ToggleDetailPane(WindowId),
     /// Pick (or clear) the resource type of a custom-resources window. The
     /// key is the canonical `group/version/kind` string of a picker entry.
@@ -328,6 +333,30 @@ where
                 let clamped = ratio.clamp(0.0, 1.0);
                 self.with_resource_mut(id, move |resource| resource.split_ratio = clamped);
                 self.with_service_mut(id, move |service| service.split_ratio = clamped);
+                Vec::new()
+            }
+            WorkspaceCommand::MaximizeDetailPane(id) => {
+                self.with_resource_mut(id, |resource| {
+                    resource
+                        .prior_split_ratio
+                        .get_or_insert(resource.split_ratio);
+                });
+                self.with_service_mut(id, |service| {
+                    service.prior_split_ratio.get_or_insert(service.split_ratio);
+                });
+                Vec::new()
+            }
+            WorkspaceCommand::RestoreDetailPane(id) => {
+                self.with_resource_mut(id, |resource| {
+                    if let Some(ratio) = resource.prior_split_ratio.take() {
+                        resource.split_ratio = ratio;
+                    }
+                });
+                self.with_service_mut(id, |service| {
+                    if let Some(ratio) = service.prior_split_ratio.take() {
+                        service.split_ratio = ratio;
+                    }
+                });
                 Vec::new()
             }
             WorkspaceCommand::ToggleDetailPane(id) => {

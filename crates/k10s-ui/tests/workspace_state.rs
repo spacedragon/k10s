@@ -11,6 +11,26 @@ use k10s_ui::workspace::{
 };
 
 #[test]
+fn detail_maximize_restores_the_exact_prior_split() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    select(&mut state, window, TestIdentity::pod("web"));
+    events(&mut state, WorkspaceCommand::SetSplitRatio(window, 0.37));
+
+    events(&mut state, WorkspaceCommand::MaximizeDetailPane(window));
+    let focused = state.resource_state(window).unwrap();
+    assert_eq!(focused.prior_split_ratio, Some(0.37));
+    assert_eq!(focused.split_ratio, 0.37);
+
+    // Repeated automatic focus must not overwrite the user's real split.
+    events(&mut state, WorkspaceCommand::MaximizeDetailPane(window));
+    events(&mut state, WorkspaceCommand::RestoreDetailPane(window));
+    let restored = state.resource_state(window).unwrap();
+    assert_eq!(restored.prior_split_ratio, None);
+    assert_eq!(restored.split_ratio, 0.37);
+}
+
+#[test]
 fn namespace_scope_has_explicit_resolution_semantics() {
     assert_eq!(
         NamespaceScope::ContextDefault.resolve(Some("sea")),

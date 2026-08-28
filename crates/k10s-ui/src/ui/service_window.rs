@@ -338,6 +338,7 @@ where
         ui,
         &mut ratio,
         detail_shown,
+        state.prior_split_ratio.is_some(),
         |ui| {
             show_table(
                 ui,
@@ -365,6 +366,8 @@ where
                     primary_state,
                     detail_view,
                     gone,
+                    true,
+                    state.prior_split_ratio.is_some(),
                     yaml,
                     streams,
                     dialogs,
@@ -378,6 +381,14 @@ where
         },
     );
 
+    if detail_shown && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if state.prior_split_ratio.is_some() {
+            queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
+        } else {
+            queued.push(WorkspaceCommand::ClearSelection(window_id));
+        }
+    }
+
     if let Some(actions) = list_actions {
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
@@ -388,6 +399,17 @@ where
         // Double-click and the row context menu pop a dedicated window out.
         if let Some(identity) = actions.popped_out {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        }
+    }
+
+    if let Some(identity) = state.selection.clone()
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        if ui.input(|input| input.modifiers.any()) && !gone {
+            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        } else if !state.detail_visible {
+            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 

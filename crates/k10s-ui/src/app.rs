@@ -915,14 +915,21 @@ impl K10sApp {
 
     /// Request the selected Pod's real bounded logs stream.
     pub fn web_connect_logs(&mut self, window: WindowId) -> Result<(), ClientError> {
-        let target = self.workspace_stream_target(window).ok_or_else(|| {
-            ClientError::Protocol("selected resource cannot stream logs".to_owned())
-        })?;
+        let target = self
+            .current_stream_target(window, StreamRoute::Logs)
+            .ok_or_else(|| {
+                ClientError::Protocol("selected resource cannot stream logs".to_owned())
+            })?;
         let stores = self.shell.stream_stores_mut();
         stores.logs.ensure(window, target.clone()).connect();
         stores.logs.queue(
             window,
-            crate::ui::tools::LogsAction::OpenLogs { window, target },
+            crate::ui::tools::LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
         );
         self.process_stream_requests()
     }
@@ -2729,6 +2736,20 @@ impl K10sApp {
         })
     }
 
+    /// Resolve the authoritative target for a live route. Logs retain their
+    /// per-window container choice while the workspace remains on the same
+    /// pod; exec continues to use the manifest's default container.
+    fn current_stream_target(&self, window: WindowId, route: StreamRoute) -> Option<StreamTarget> {
+        let workspace_target = self.workspace_stream_target(window)?;
+        if route == StreamRoute::Logs
+            && let Some(selected) = self.shell.stream_stores().logs.target_of(window)
+            && crate::ui::tools::logs::same_workload(&selected, &workspace_target)
+        {
+            return Some(selected);
+        }
+        Some(workspace_target)
+    }
+
     /// Whether the window's workspace shell guard is currently engaged.
     fn shell_guard_connected(&self, window: WindowId) -> bool {
         self.shell
@@ -2835,7 +2856,7 @@ impl K10sApp {
         for (key, session) in self.stream_sessions.iter() {
             let (window, route) = *key;
             let target_matches =
-                self.workspace_stream_target(window).as_ref() == Some(session.target());
+                self.current_stream_target(window, route).as_ref() == Some(session.target());
             if !target_matches {
                 // The selection moved on while this session existed. If it
                 // had already engaged the guard, release that guard too.
@@ -2888,12 +2909,18 @@ impl K10sApp {
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_log_actions() {
+            let crate::ui::tools::LogsAction::OpenLogs {
+                target,
+                since_seconds,
+                previous,
+                ..
+            } = action;
             let request = self.client.begin(Query::StreamTicket {
-                target: match action {
-                    crate::ui::tools::LogsAction::OpenLogs { target, .. } => target,
-                },
+                target,
                 stream_type: k10s_protocol::StreamType::Logs,
                 tty: false,
+                since_seconds,
+                previous,
             })?;
             // The tool moves to Connecting immediately; the Ready signal
             // completes the attach.
@@ -2914,6 +2941,8 @@ impl K10sApp {
                 target: target.clone(),
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
+                since_seconds: None,
+                previous: false,
             })?;
             // Same explicit Connecting transition for the terminal.
             if let Some(shell) = self.shell.stream_stores_mut().shells.get_mut(window) {
@@ -2997,7 +3026,7 @@ impl K10sApp {
             // the new pod's guard or attach the old session.
             let bound_target = session.target().clone();
             let target_current =
-                self.workspace_stream_target(window).as_ref() == Some(&bound_target);
+                self.current_stream_target(window, route).as_ref() == Some(&bound_target);
             // Guard transitions are collected while the tool stores are
             // borrowed and applied afterwards.
             let mut guard_connected = false;
@@ -6922,6 +6951,45 @@ mod stream_lifecycle_tests {
         assert_eq!(
             view.visible_lines().map(String::as_str).collect::<Vec<_>>(),
             vec!["served"]
+        );
+    }
+
+    #[test]
+    fn selected_log_container_is_authoritative_across_render_reconciliation() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("multi-container");
+        let window = open_pod_detail(&mut app, &pod);
+        let mut detail = detail_with_container(&pod, "app");
+        detail.manifest = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: app\n    - name: metrics\n".to_owned();
+        app.details.insert(pod.clone(), detail);
+
+        let default_target = target_for_container(&pod.name, "app");
+        let selected_target = target_for_container(&pod.name, "metrics");
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, default_target.clone())
+            .select_container("metrics");
+        // The next render still supplies the manifest default. It must not
+        // replace the user's selected container.
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, default_target);
+
+        assert_eq!(
+            app.current_stream_target(window, StreamRoute::Logs),
+            Some(selected_target.clone())
+        );
+
+        let session = StreamSession::new(StreamRoute::Logs, selected_target, false);
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+        app.reconcile_sessions();
+        assert!(
+            app.stream_sessions
+                .contains_key(&(window, StreamRoute::Logs)),
+            "reconciliation retains the selected-container stream"
         );
     }
 

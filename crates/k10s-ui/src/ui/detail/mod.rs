@@ -72,6 +72,17 @@ fn tab_label(tab: DetailTab) -> &'static str {
     }
 }
 
+fn shortcut_tab(key: egui::Key) -> Option<DetailTab> {
+    match key {
+        egui::Key::L => Some(DetailTab::Logs),
+        egui::Key::P => Some(DetailTab::Pods),
+        egui::Key::S => Some(DetailTab::Shell),
+        egui::Key::Y => Some(DetailTab::Yaml),
+        egui::Key::E => Some(DetailTab::Events),
+        _ => None,
+    }
+}
+
 /// Whether this GVK is exactly core/v1 `Service`.
 pub(super) fn is_service_gvk(gvk: &GroupVersionKind) -> bool {
     gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Service"
@@ -91,6 +102,8 @@ pub(super) fn show<I>(
     primary_state: Option<&crate::ui::PrimaryDetailState>,
     view: Option<&ResourceDetailResponse>,
     gone: bool,
+    integrated: bool,
+    detail_maximized: bool,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
     dialogs: &mut dialogs::OperationDialogs,
@@ -102,37 +115,33 @@ pub(super) fn show<I>(
 ) where
     I: RowIdentity,
 {
-    // Services render through their dedicated read-only body; the generic
-    // workload path stays untouched for every other kind.
-    if is_service_gvk(&detail_identity_gvk(detail)) {
-        service::show(
-            ui,
-            window_id,
-            detail,
-            primary_state,
-            view,
-            gone,
-            yaml,
-            feed,
-            service_port_drafts,
-            mutations_allowed,
-            resource_actions,
-            queued,
-        );
+    let Some(identity) = detail.identity.as_row_identity() else {
         return;
-    }
-
-    // A gone resource renders only its pinned identity header plus the
-    // gone message: no cached response may resurrect Scale/Delete/YAML or
-    // stream controls for an object the authoritative rows dropped.
-    if gone && let Some(identity) = detail.identity.as_row_identity() {
-        show_header(ui, identity, None);
-        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
-        return;
-    }
-
+    };
     ui.horizontal(|ui| {
         ui.heading(RichText::new("Details").strong());
+        show_header(ui, identity, if gone { None } else { view });
+        if integrated && !gone {
+            if ui.button("Pop out ↗").clicked() {
+                queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                    detail.identity.clone(),
+                ));
+            }
+            let maximize_label = if detail_maximized {
+                "Restore split"
+            } else {
+                "Maximize"
+            };
+            if ui.button(maximize_label).clicked() {
+                queued.push(if detail_maximized {
+                    WorkspaceCommand::RestoreDetailPane(window_id)
+                } else {
+                    WorkspaceCommand::MaximizeDetailPane(window_id)
+                });
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
         for tab in tabs_for_kind(&detail_identity_gvk(detail)) {
             let active = *tab == detail.active_tab;
             let label = if active {
@@ -155,12 +164,53 @@ pub(super) fn show<I>(
     });
     ui.separator();
 
-    // The header renders from the pinned identity alone, so a dedicated
-    // window never follows a later integrated selection.
-    let Some(identity) = detail.identity.as_row_identity() else {
+    if !ui.ctx().memory(|memory| memory.focused().is_some()) {
+        let shortcut = ui.input(|input| {
+            [
+                egui::Key::L,
+                egui::Key::P,
+                egui::Key::S,
+                egui::Key::Y,
+                egui::Key::E,
+            ]
+            .into_iter()
+            .find(|key| input.key_pressed(*key))
+            .and_then(shortcut_tab)
+        });
+        if let Some(tab) =
+            shortcut.filter(|tab| tabs_for_kind(&detail_identity_gvk(detail)).contains(tab))
+        {
+            queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
+        }
+    }
+
+    // A gone resource retains the common chrome but never resurrects stale
+    // body actions from a cached response.
+    if gone {
+        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
+        show_shortcut_footer(ui);
         return;
-    };
-    show_header(ui, identity, view);
+    }
+
+    // Services share the header, tabs, shortcuts, and pane actions above,
+    // then render their specialized read-only body.
+    if is_service_gvk(&detail_identity_gvk(detail)) {
+        service::show(
+            ui,
+            window_id,
+            detail,
+            primary_state,
+            view,
+            yaml,
+            feed,
+            service_port_drafts,
+            mutations_allowed,
+            resource_actions,
+            queued,
+        );
+        show_shortcut_footer(ui);
+        return;
+    }
 
     let view = match primary_state {
         Some(crate::ui::PrimaryDetailState::Loaded(view)) => Some(view),
@@ -273,11 +323,14 @@ pub(super) fn show<I>(
             }
         }
         DetailTab::Logs => {
+            let containers = pod_containers(&view.manifest);
             tools::logs::show(
                 ui,
                 window_id,
                 &mut streams.logs,
                 stream_target(detail, view),
+                &containers,
+                status_summary(view).is_some_and(|status| status.contains("CrashLoopBackOff")),
             );
         }
         DetailTab::Shell => {
@@ -289,6 +342,17 @@ pub(super) fn show<I>(
             );
         }
     }
+    show_shortcut_footer(ui);
+}
+
+fn show_shortcut_footer(ui: &mut egui::Ui) {
+    ui.separator();
+    ui.label(
+        RichText::new(
+            "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+        )
+        .weak(),
+    );
 }
 
 /// The default pod container streamed by the connected tools.
@@ -341,6 +405,10 @@ where
 /// manifest. Kubernetes does not prescribe an `app` container name, so the
 /// first regular container is the only generally valid implicit selection.
 pub(crate) fn pod_container(manifest: &str) -> Option<String> {
+    pod_containers(manifest).into_iter().next()
+}
+
+pub(crate) fn pod_containers(manifest: &str) -> Vec<String> {
     #[derive(Deserialize)]
     struct Manifest {
         spec: Spec,
@@ -357,13 +425,16 @@ pub(crate) fn pod_container(manifest: &str) -> Option<String> {
     }
 
     serde_yaml::from_str::<Manifest>(manifest)
-        .ok()?
-        .spec
-        .containers
-        .into_iter()
-        .next()
-        .map(|container| container.name)
-        .filter(|name| !name.is_empty())
+        .map(|manifest| {
+            manifest
+                .spec
+                .containers
+                .into_iter()
+                .map(|container| container.name)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn detail_identity_gvk<I>(detail: &DetailState<I>) -> GroupVersionKind
@@ -386,20 +457,26 @@ pub(super) fn show_header(
     identity: &k10s_protocol::ResourceIdentity,
     view: Option<&ResourceDetailResponse>,
 ) {
-    ui.heading(RichText::new(identity.name.as_str()).strong());
-    ui.label(format!("Kind {}", identity.gvk.kind));
-    match identity.namespace.as_deref() {
-        Some(namespace) => {
-            ui.label(format!("Namespace {namespace}"));
-        }
-        None => {
-            ui.label("Scope Cluster-scoped");
-        }
-    }
-    ui.monospace(format!("UID {}", identity.uid));
-    if let Some(view) = view {
-        ui.monospace(format!("Created {}", view.created_at));
-    }
+    ui.vertical(|ui| {
+        ui.heading(RichText::new(format!("{} / {}", identity.gvk.kind, identity.name)).strong());
+        ui.horizontal(|ui| {
+            ui.label(format!("Kind {}", identity.gvk.kind));
+            match identity.namespace.as_deref() {
+                Some(namespace) => ui.label(format!("Namespace {namespace}")),
+                None => ui.label("Scope Cluster-scoped"),
+            };
+            ui.label(format!("Context {}", identity.context));
+        });
+        ui.horizontal(|ui| {
+            ui.monospace(format!("UID {}", identity.uid));
+            if let Some(view) = view {
+                ui.monospace(format!("Created {}", view.created_at));
+                ui.label(RichText::new("Fresh · live").color(crate::ui::theme::HEALTHY));
+            } else {
+                ui.label(RichText::new("Refreshing…").weak());
+            }
+        });
+    });
 }
 
 fn action_button(ui: &mut egui::Ui, label: &str, accessible: &str) {
@@ -411,7 +488,18 @@ fn action_button(ui: &mut egui::Ui, label: &str, accessible: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::pod_container;
+    use super::{pod_container, shortcut_tab};
+    use crate::workspace::DetailTab;
+
+    #[test]
+    fn detail_shortcuts_map_to_investigation_tabs() {
+        assert_eq!(shortcut_tab(egui::Key::L), Some(DetailTab::Logs));
+        assert_eq!(shortcut_tab(egui::Key::P), Some(DetailTab::Pods));
+        assert_eq!(shortcut_tab(egui::Key::S), Some(DetailTab::Shell));
+        assert_eq!(shortcut_tab(egui::Key::Y), Some(DetailTab::Yaml));
+        assert_eq!(shortcut_tab(egui::Key::E), Some(DetailTab::Events));
+        assert_eq!(shortcut_tab(egui::Key::Enter), None);
+    }
 
     #[test]
     fn pod_container_reads_first_regular_container_from_yaml_manifest() {

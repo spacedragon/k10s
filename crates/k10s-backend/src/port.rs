@@ -225,6 +225,7 @@ pub enum StreamKind {
         container: String,
         tail_lines: Option<i64>,
         since_seconds: Option<i64>,
+        previous: bool,
         timestamps: bool,
         follow: bool,
     },

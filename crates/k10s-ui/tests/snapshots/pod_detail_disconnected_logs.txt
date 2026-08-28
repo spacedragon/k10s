@@ -153,70 +153,61 @@ Window
                       TextRun value="Namespace"
                 Button label="Hide details"
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        GenericContainer
-                          GenericContainer
-                            Label value="Namespace"
-                              TextRun value="Namespace"
-                            Button label="Sort pods by namespace"
-                          GenericContainer
-                            Label value="Name"
-                              TextRun value="Name"
-                            Button label="Sort pods by name"
-                          GenericContainer
-                            Label value="Status"
-                              TextRun value="Status"
-                            Button label="Sort pods by status"
-                          GenericContainer
-                            Label value="Created"
-                              TextRun value="Created"
-                            Button label="Sort pods by created"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="db-postgres-0"
-                          Label value="Running"
-                            TextRun value="Running"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
-              Unknown
-              GenericContainer
                 Button label="Clear selection"
                 GenericContainer
                   Label value="Details"
                     TextRun value="Details"
+                  GenericContainer
+                    Label value="Pod / db-postgres-0"
+                      TextRun value="Pod / db-postgres-0"
+                    GenericContainer
+                      Label value="Kind Pod"
+                        TextRun value="Kind Pod"
+                      Label value="Namespace default"
+                        TextRun value="Namespace default"
+                      Label value="Context dev-local"
+                        TextRun value="Context dev-local"
+                    GenericContainer
+                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
+                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
+                      Label value="Created 2026-08-21T00:50:10Z"
+                        TextRun value="Created 2026-08-21T00:50:10Z"
+                      Label value="Fresh · live"
+                        TextRun value="Fresh · live"
+                  Button label="Pop out ↗"
+                  Button label="Restore split"
+                GenericContainer
                   Button label="Tab Overview"
                   Button label="Tab Events"
                   Button label="Tab YAML"
                   Button label="Tab Logs"
                   Button label="Tab Shell"
-                Label value="db-postgres-0"
-                  TextRun value="db-postgres-0"
-                Label value="Kind Pod"
-                  TextRun value="Kind Pod"
-                Label value="Namespace default"
-                  TextRun value="Namespace default"
-                Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                  TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                Label value="Created 2026-08-21T00:50:10Z"
-                  TextRun value="Created 2026-08-21T00:50:10Z"
                 GenericContainer
                   Button label="Delete resource"
                   Button label="View logs"
                   Button label="Exec shell"
                   Button label="Edit YAML"
                 GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox value="Container: app"
+                  CheckBox label="Previous"
+                  GenericContainer
+                    GenericContainer
+                      ComboBox value="Since: 5m"
                   Button label="Connect logs"
                   Label value="Disconnected"
                     TextRun value="Disconnected"
                   TextInput label="Find in logs" value=""
                     TextRun value=""
+                  CheckBox label="Wrap"
+                  Button label="Export"
                 GenericContainer
                   GenericContainer
                     Label value="kubelet started pod"
                       TextRun value="kubelet started pod"
+                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                  TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
     Splitter
     Splitter
     Splitter

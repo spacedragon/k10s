@@ -22,6 +22,8 @@ pub struct ServiceWindowState<I> {
     /// Fraction of the window height given to the list pane, clamped to
     /// the unit interval. Pane minima are enforced by the renderer.
     pub split_ratio: f32,
+    /// Split to restore after a focused, detail-only view.
+    pub prior_split_ratio: Option<f32>,
     /// Whether the detail pane is visible; hiding keeps the detail state.
     pub detail_visible: bool,
     /// Integrated detail state, present exactly when `selection` is.
@@ -40,6 +42,7 @@ impl<I> Default for ServiceWindowState<I> {
             sort: None,
             selection: None,
             split_ratio: 0.5,
+            prior_split_ratio: None,
             detail_visible: true,
             detail: None,
             port_drafts: BTreeMap::new(),

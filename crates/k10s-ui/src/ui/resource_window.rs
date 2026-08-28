@@ -14,7 +14,7 @@ use k10s_protocol::{
     ResourceRelationsResponse, ResourceTypeEntry,
 };
 
-use crate::workspace::{ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
+use crate::workspace::{DetailTab, ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
 use super::{ConnectionState, theme};
 
@@ -589,10 +589,12 @@ pub(super) fn show<I>(
     let primary_state = detail_identity.and_then(|identity| feed.primary_details.get(identity));
     let detail_view = detail_identity.and_then(|identity| feed.details.get(identity));
 
+    let available_height = ui.available_height();
     let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
         detail_shown,
+        state.prior_split_ratio.is_some(),
         |ui| {
             super::resource_table::show(
                 ui,
@@ -621,6 +623,8 @@ pub(super) fn show<I>(
                     primary_state,
                     detail_view,
                     gone,
+                    true,
+                    state.prior_split_ratio.is_some(),
                     yaml,
                     streams,
                     dialogs,
@@ -633,6 +637,37 @@ pub(super) fn show<I>(
             }
         },
     );
+
+    if detail_shown {
+        let auto_focus =
+            state.detail.as_ref().is_some_and(|detail| {
+                matches!(detail.active_tab, DetailTab::Logs | DetailTab::Shell)
+            }) && super::split::pane_heights(available_height, ratio, true).1
+                < super::split::DETAIL_PANE_MIN + 80.0;
+        if auto_focus && state.prior_split_ratio.is_none() {
+            queued.push(WorkspaceCommand::MaximizeDetailPane(window_id));
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            let find_active = state
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.active_tab == DetailTab::Logs)
+                && streams
+                    .logs
+                    .get(window_id)
+                    .and_then(|logs| logs.find())
+                    .is_some();
+            if find_active {
+                if let Some(logs) = streams.logs.get_mut(window_id) {
+                    logs.set_find(None);
+                }
+            } else if state.prior_split_ratio.is_some() {
+                queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
+            } else {
+                queued.push(WorkspaceCommand::ClearSelection(window_id));
+            }
+        }
+    }
 
     if let Some(actions) = list_actions {
         if actions.cleared {
@@ -655,6 +690,17 @@ pub(super) fn show<I>(
         // window's later selection.
         if let Some(identity) = actions.popped_out {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        }
+    }
+
+    if let Some(identity) = state.selection.clone()
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        if ui.input(|input| input.modifiers.any()) && !gone {
+            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        } else if !state.detail_visible {
+            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 
