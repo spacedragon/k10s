@@ -171,6 +171,7 @@ mod tests {
             kind: WindowKind::Detail,
             title: "Detail".into(),
             geometry: WindowGeom::staggered(0, [640.0, 420.0]),
+            layout_revision: 0,
             z: 2,
             content: WindowContent::Detail(DetailState::new(ResourceIdentity {
                 context: "dev".into(),

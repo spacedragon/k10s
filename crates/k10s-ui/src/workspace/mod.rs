@@ -322,7 +322,9 @@ where
                 Vec::new()
             }
             WorkspaceCommand::Cascade(size) => {
-                self.toggle_layout(|index, _count| WindowGeom::cascade(index, size));
+                self.toggle_layout(|window, index, _count| {
+                    WindowGeom::cascade(index, size, window.kind.min_size())
+                });
                 Vec::new()
             }
             WorkspaceCommand::ToggleFocus(size) => {
@@ -337,7 +339,8 @@ where
                     .map(|w| w.id)
                     && let Some(window) = self.window_mut(active)
                 {
-                    window.geometry = WindowGeom::focused(size);
+                    window.geometry = WindowGeom::focused(size, window.kind.min_size());
+                    window.layout_revision = window.layout_revision.wrapping_add(1);
                 }
                 Vec::new()
             }
@@ -532,19 +535,21 @@ where
         for (id, geometry) in saved {
             if let Some(window) = self.window_mut(id) {
                 window.geometry = geometry;
+                window.layout_revision = window.layout_revision.wrapping_add(1);
             }
         }
         true
     }
 
-    fn toggle_layout(&mut self, geometry: impl Fn(usize, usize) -> WindowGeom) {
+    fn toggle_layout(&mut self, geometry: impl Fn(&Window<I>, usize, usize) -> WindowGeom) {
         if self.restore_layout() {
             return;
         }
         self.save_layout();
         let count = self.windows.len();
         for (index, window) in self.windows.iter_mut().enumerate() {
-            window.geometry = geometry(index, count);
+            window.geometry = geometry(window, index, count);
+            window.layout_revision = window.layout_revision.wrapping_add(1);
         }
     }
 
@@ -553,8 +558,19 @@ where
         if count == 0 {
             return;
         }
+        let minimum = self
+            .windows
+            .iter()
+            .fold([0.0_f32, 0.0_f32], |minimum, window| {
+                let window_minimum = window.kind.min_size();
+                [
+                    minimum[0].max(window_minimum[0]),
+                    minimum[1].max(window_minimum[1]),
+                ]
+            });
         for (index, window) in self.windows.iter_mut().enumerate() {
-            window.geometry = WindowGeom::tiled(index, count, size);
+            window.geometry = WindowGeom::tiled(index, count, size, minimum);
+            window.layout_revision = window.layout_revision.wrapping_add(1);
         }
     }
 
@@ -612,6 +628,7 @@ where
             kind,
             title,
             geometry,
+            layout_revision: 0,
             z,
             content,
         });

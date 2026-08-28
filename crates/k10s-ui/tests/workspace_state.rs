@@ -38,12 +38,12 @@ fn tile_is_deterministic_non_overlapping_and_preserves_minima_in_overflow() {
     state.apply(WorkspaceCommand::Tile([800.0, 500.0]));
     let geometries: Vec<_> = state.windows().iter().map(|w| w.geometry).collect();
     assert_eq!(geometries[0].position, [0.0, 0.0]);
-    assert_eq!(geometries[1].position, [480.0, 0.0]);
-    assert_eq!(geometries[2].position, [0.0, 320.0]);
+    assert_eq!(geometries[1].position, [672.0, 0.0]);
+    assert_eq!(geometries[2].position, [0.0, 424.0]);
     assert!(
         geometries
             .iter()
-            .all(|g| g.size[0] >= 480.0 && g.size[1] >= 320.0)
+            .all(|g| g.size[0] >= 672.0 && g.size[1] >= 424.0)
     );
     for (index, left) in geometries.iter().enumerate() {
         for right in geometries.iter().skip(index + 1) {

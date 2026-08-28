@@ -131,13 +131,16 @@ where
         canvas.min.x + state.geometry.position[0],
         canvas.min.y + state.geometry.position[1],
     );
-    let min_size = match state.kind {
-        WindowKind::Workload(_) | WindowKind::Detail => Vec2::new(640.0, 420.0),
-        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage | WindowKind::Services => {
-            Vec2::new(480.0, 320.0)
-        }
-    };
+    let min_size = Vec2::from(state.kind.min_size());
     let id = layer_id(state.id).id;
+    let layout_revision_id = id.with("layout_revision");
+    let applied_layout_revision = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<u64>(layout_revision_id));
+    let apply_layout_size =
+        applied_layout_revision.is_some() && applied_layout_revision != Some(state.layout_revision);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(layout_revision_id, state.layout_revision));
 
     // Workload windows render from a mutable clone of their list state and
     // queue the resulting commands; the workspace stays immutable during
@@ -148,7 +151,7 @@ where
         WindowContent::Detail(detail) => (None, None, Some(detail.clone())),
     };
 
-    let response = egui::Window::new(state.title.as_str())
+    let mut window = egui::Window::new(state.title.as_str())
         .id(id)
         .open(&mut open)
         .movable(true)
@@ -157,108 +160,118 @@ where
         .default_open(!state.geometry.collapsed)
         .current_pos(position)
         .default_size(state.geometry.size)
-        .min_size(min_size)
-        .constrain_to(canvas)
-        .show(ui.ctx(), |ui| {
-            ui.set_min_size(min_size - Vec2::new(24.0, 48.0));
-            if let (Some(resource), WindowKind::Workload(kind)) =
-                (resource_state.as_mut(), state.kind)
-            {
-                super::resource_window::show(
-                    ui,
-                    resources,
-                    state.id,
-                    kind,
-                    resource,
-                    yaml,
-                    streams,
-                    dialogs,
-                    feed,
-                    context_namespace,
-                    connection,
-                    resource_actions,
-                    queued,
-                );
-                false
-            } else {
-                match state.kind {
-                    WindowKind::Overview => super::overview::show(ui, response, load, connection),
-                    WindowKind::Nodes => {
-                        super::infrastructure::show_nodes(
+        .min_size(min_size);
+    let layout_fits_canvas = state.geometry.position[0] + state.geometry.size[0] <= canvas.width()
+        && state.geometry.position[1] + state.geometry.size[1] <= canvas.height();
+    if state.layout_revision == 0 || layout_fits_canvas {
+        window = window.constrain_to(canvas);
+    } else {
+        window = window.constrain(false);
+    }
+    if apply_layout_size {
+        // Clamp egui's persisted resize state for this frame. The next frame
+        // is movable/resizable again, so layouts never disable manual edits.
+        window = window.fixed_pos(position).fixed_size(state.geometry.size);
+    }
+    let response = window.show(ui.ctx(), |ui| {
+        ui.set_min_size(min_size - Vec2::new(24.0, 48.0));
+        if let (Some(resource), WindowKind::Workload(kind)) = (resource_state.as_mut(), state.kind)
+        {
+            super::resource_window::show(
+                ui,
+                resources,
+                state.id,
+                kind,
+                resource,
+                yaml,
+                streams,
+                dialogs,
+                feed,
+                context_namespace,
+                connection,
+                resource_actions,
+                queued,
+            );
+            false
+        } else {
+            match state.kind {
+                WindowKind::Overview => super::overview::show(ui, response, load, connection),
+                WindowKind::Nodes => {
+                    super::infrastructure::show_nodes(
+                        ui,
+                        infrastructure,
+                        response,
+                        load,
+                        connection,
+                    );
+                    false
+                }
+                WindowKind::Storage => {
+                    super::infrastructure::show_storage(
+                        ui,
+                        infrastructure,
+                        response,
+                        load,
+                        connection,
+                    );
+                    false
+                }
+                WindowKind::Services => {
+                    if let Some(service) = service_state.as_mut() {
+                        super::service_window::show(
                             ui,
-                            infrastructure,
-                            response,
-                            load,
+                            resources,
+                            state.id,
+                            service,
+                            feed,
+                            context_namespace,
                             connection,
-                        );
-                        false
-                    }
-                    WindowKind::Storage => {
-                        super::infrastructure::show_storage(
-                            ui,
-                            infrastructure,
-                            response,
-                            load,
-                            connection,
-                        );
-                        false
-                    }
-                    WindowKind::Services => {
-                        if let Some(service) = service_state.as_mut() {
-                            super::service_window::show(
-                                ui,
-                                resources,
-                                state.id,
-                                service,
-                                feed,
-                                context_namespace,
-                                connection,
-                                yaml,
-                                streams,
-                                dialogs,
-                                resource_actions,
-                                queued,
-                            )
-                        } else {
-                            false
-                        }
-                    }
-                    WindowKind::Workload(_) => {
-                        unreachable!("workload windows render through resource_window")
-                    }
-                    WindowKind::Detail => {
-                        // Dedicated windows render only their pinned
-                        // identity; they never read the integrated
-                        // selection of any list window.
-                        if let Some(detail) = detail_state.as_ref() {
-                            let identity = detail.identity.as_row_identity();
-                            let primary_state =
-                                identity.and_then(|identity| feed.primary_details.get(identity));
-                            let view = identity.and_then(|identity| feed.details.get(identity));
-                            super::detail::show(
-                                ui,
-                                state.id,
-                                detail,
-                                primary_state,
-                                view,
-                                false,
-                                false,
-                                false,
-                                yaml,
-                                streams,
-                                dialogs,
-                                feed,
-                                None,
-                                true,
-                                resource_actions,
-                                queued,
-                            );
-                        }
+                            yaml,
+                            streams,
+                            dialogs,
+                            resource_actions,
+                            queued,
+                        )
+                    } else {
                         false
                     }
                 }
+                WindowKind::Workload(_) => {
+                    unreachable!("workload windows render through resource_window")
+                }
+                WindowKind::Detail => {
+                    // Dedicated windows render only their pinned
+                    // identity; they never read the integrated
+                    // selection of any list window.
+                    if let Some(detail) = detail_state.as_ref() {
+                        let identity = detail.identity.as_row_identity();
+                        let primary_state =
+                            identity.and_then(|identity| feed.primary_details.get(identity));
+                        let view = identity.and_then(|identity| feed.details.get(identity));
+                        super::detail::show(
+                            ui,
+                            state.id,
+                            detail,
+                            primary_state,
+                            view,
+                            false,
+                            false,
+                            false,
+                            yaml,
+                            streams,
+                            dialogs,
+                            feed,
+                            None,
+                            true,
+                            resource_actions,
+                            queued,
+                        );
+                    }
+                    false
+                }
             }
-        });
+        }
+    });
 
     if !open {
         queued.push(WorkspaceCommand::CloseWindow(state.id));
@@ -301,7 +314,10 @@ where
         },
         collapsed,
     };
-    if geometry != state.geometry {
+    // A layout resize updates egui's persisted area/resize state during this
+    // frame. Do not let the response from that transition frame overwrite
+    // the command's target geometry before egui presents it next frame.
+    if geometry != state.geometry && !apply_layout_size {
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)

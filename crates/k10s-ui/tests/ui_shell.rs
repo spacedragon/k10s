@@ -100,6 +100,26 @@ fn window_layer(id: WindowId) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(("k10s.window", id.0)))
 }
 
+fn rendered_window(harness: &Harness<'_, ShellFixture>, title: &str) -> egui::Rect {
+    harness.get_by_role_and_label(Role::Window, title).rect()
+}
+
+fn assert_rect_matches_geometry(
+    rect: egui::Rect,
+    canvas_origin: egui::Pos2,
+    geometry: k10s_ui::workspace::WindowGeom,
+) {
+    let expected = egui::Rect::from_min_size(
+        canvas_origin + egui::vec2(geometry.position[0], geometry.position[1]),
+        egui::vec2(geometry.size[0], geometry.size[1]),
+    );
+    assert!(
+        (rect.min - expected.min).length() <= 1.0
+            && (rect.size() - expected.size()).length() <= 1.0,
+        "rendered {rect:?} did not apply workspace geometry {expected:?}"
+    );
+}
+
 fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
     harness
         .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
@@ -225,6 +245,110 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
             task.top() >= size.y - 37.0 && task.bottom() <= size.y,
             "the taskbar must occupy the bottom 29 px at {size:?}: {task:?}"
         );
+    }
+}
+
+#[test]
+fn layout_commands_apply_to_already_rendered_window_rectangles() {
+    let mut harness = shell_harness_at(egui::vec2(1_280.0, 800.0));
+    for kind in [WorkloadKind::Pods, WorkloadKind::Jobs] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(kind));
+    }
+    harness.run_steps(4);
+
+    let canvas = [1_080.0, 700.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Tile(canvas));
+    harness.run_steps(4);
+
+    let tiled: Vec<_> = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .map(|window| (window.title.clone(), window.geometry))
+        .collect();
+    let first_rect = rendered_window(&harness, &tiled[0].0);
+    let canvas_origin = first_rect.min - egui::vec2(tiled[0].1.position[0], tiled[0].1.position[1]);
+    let tiled_rects: Vec<_> = tiled
+        .iter()
+        .map(|(title, geometry)| {
+            let rect = rendered_window(&harness, title);
+            assert_rect_matches_geometry(rect, canvas_origin, *geometry);
+            rect
+        })
+        .collect();
+    for (index, left) in tiled_rects.iter().enumerate() {
+        for right in tiled_rects.iter().skip(index + 1) {
+            let separated = left.right() <= right.left()
+                || right.right() <= left.left()
+                || left.bottom() <= right.top()
+                || right.bottom() <= left.top();
+            assert!(
+                separated,
+                "tiled rendered windows overlap: {left:?} {right:?}"
+            );
+        }
+    }
+    assert!(
+        tiled_rects.iter().any(|rect| rect.right() > 1_280.0),
+        "compact tiling keeps usable minima on an intentional overflow surface"
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    let focused = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .max_by_key(|window| window.z)
+        .expect("active window");
+    assert_rect_matches_geometry(
+        rendered_window(&harness, &focused.title),
+        canvas_origin,
+        focused.geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for window in harness.state().shell.workspace().windows() {
+        assert_rect_matches_geometry(
+            rendered_window(&harness, &window.title),
+            canvas_origin,
+            window.geometry,
+        );
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
     }
 }
 

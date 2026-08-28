@@ -74,6 +74,14 @@ impl WindowKind {
             WindowKind::Detail => "Detail",
         }
     }
+
+    /// Smallest usable outer size, shared by layout commands and rendering.
+    pub const fn min_size(self) -> [f32; 2] {
+        match self {
+            Self::Workload(_) | Self::Detail => [672.0, 424.0],
+            Self::Overview | Self::Nodes | Self::Storage | Self::Services => [480.0, 320.0],
+        }
+    }
 }
 
 /// Position and size in egui points, plus the collapse flag. Positions are
@@ -89,7 +97,6 @@ pub struct WindowGeom {
 }
 
 impl WindowGeom {
-    pub const MIN_SIZE: [f32; 2] = [480.0, 320.0];
     /// Default geometry for the `index`-th window, staggered so freshly
     /// opened windows do not fully overlap.
     pub fn staggered(index: usize, size: [f32; 2]) -> Self {
@@ -104,11 +111,11 @@ impl WindowGeom {
     /// Deterministic row-major grid. If the canvas cannot fit practical
     /// minima, cells retain those minima and form an intentional overflow
     /// surface instead of shrinking windows into unusable slivers.
-    pub fn tiled(index: usize, count: usize, canvas: [f32; 2]) -> Self {
+    pub fn tiled(index: usize, count: usize, canvas: [f32; 2], minimum: [f32; 2]) -> Self {
         let columns = (count as f32).sqrt().ceil() as usize;
         let rows = count.div_ceil(columns);
-        let width = (canvas[0] / columns as f32).max(Self::MIN_SIZE[0]);
-        let height = (canvas[1] / rows as f32).max(Self::MIN_SIZE[1]);
+        let width = (canvas[0] / columns as f32).max(minimum[0]);
+        let height = (canvas[1] / rows as f32).max(minimum[1]);
         Self {
             position: [
                 (index % columns) as f32 * width,
@@ -119,22 +126,22 @@ impl WindowGeom {
         }
     }
 
-    pub fn cascade(index: usize, canvas: [f32; 2]) -> Self {
+    pub fn cascade(index: usize, canvas: [f32; 2], minimum: [f32; 2]) -> Self {
         let offset = index as f32 * 28.0;
         Self {
             position: [offset, offset],
             size: [
-                (canvas[0] - offset).max(Self::MIN_SIZE[0]),
-                (canvas[1] - offset).max(Self::MIN_SIZE[1]),
+                (canvas[0] - offset).max(minimum[0]),
+                (canvas[1] - offset).max(minimum[1]),
             ],
             collapsed: false,
         }
     }
 
-    pub fn focused(canvas: [f32; 2]) -> Self {
+    pub fn focused(canvas: [f32; 2], minimum: [f32; 2]) -> Self {
         Self {
             position: [0.0, 0.0],
-            size: canvas,
+            size: [canvas[0].max(minimum[0]), canvas[1].max(minimum[1])],
             collapsed: false,
         }
     }
@@ -156,6 +163,8 @@ pub struct Window<I> {
     pub kind: WindowKind,
     pub title: String,
     pub geometry: WindowGeom,
+    /// Incremented when a layout command must override egui's remembered size.
+    pub layout_revision: u64,
     /// Z-order; higher means raised. Focus and opening bump this counter.
     pub z: u64,
     pub content: WindowContent<I>,

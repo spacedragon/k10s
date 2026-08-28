@@ -492,6 +492,7 @@ where
                 kind,
                 title: window.title.clone(),
                 geometry,
+                layout_revision: 0,
                 z: window.z,
                 content,
             });
