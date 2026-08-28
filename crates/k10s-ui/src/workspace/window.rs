@@ -16,6 +16,8 @@ pub struct WindowId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
+    Events,
+    Namespaces,
     Deployments,
     Pods,
     StatefulSets,
@@ -23,9 +25,45 @@ pub enum WorkloadKind {
     Jobs,
     CronJobs,
     CustomResources,
+    Ingresses,
+    Endpoints,
+    NetworkPolicies,
+    ConfigMaps,
+    Secrets,
+    PersistentVolumeClaims,
+    PersistentVolumes,
+    StorageClasses,
+    ServiceAccounts,
+    Roles,
+    RoleBindings,
 }
 
 impl WorkloadKind {
+    /// Every resource-backed launcher entry, including cluster, workload,
+    /// network, config, storage, and access resources.
+    pub const TAXONOMY: [WorkloadKind; 20] = [
+        WorkloadKind::Events,
+        WorkloadKind::Namespaces,
+        WorkloadKind::Deployments,
+        WorkloadKind::Pods,
+        WorkloadKind::StatefulSets,
+        WorkloadKind::DaemonSets,
+        WorkloadKind::Jobs,
+        WorkloadKind::CronJobs,
+        WorkloadKind::CustomResources,
+        WorkloadKind::Ingresses,
+        WorkloadKind::Endpoints,
+        WorkloadKind::NetworkPolicies,
+        WorkloadKind::ConfigMaps,
+        WorkloadKind::Secrets,
+        WorkloadKind::PersistentVolumeClaims,
+        WorkloadKind::PersistentVolumes,
+        WorkloadKind::StorageClasses,
+        WorkloadKind::ServiceAccounts,
+        WorkloadKind::Roles,
+        WorkloadKind::RoleBindings,
+    ];
+
     pub const ALL: [WorkloadKind; 7] = [
         WorkloadKind::Deployments,
         WorkloadKind::Pods,
@@ -36,9 +74,28 @@ impl WorkloadKind {
         WorkloadKind::CustomResources,
     ];
 
+    pub const NETWORK: [WorkloadKind; 3] = [
+        WorkloadKind::Ingresses,
+        WorkloadKind::Endpoints,
+        WorkloadKind::NetworkPolicies,
+    ];
+    pub const CONFIG: [WorkloadKind; 2] = [WorkloadKind::ConfigMaps, WorkloadKind::Secrets];
+    pub const STORAGE: [WorkloadKind; 3] = [
+        WorkloadKind::PersistentVolumeClaims,
+        WorkloadKind::PersistentVolumes,
+        WorkloadKind::StorageClasses,
+    ];
+    pub const ACCESS: [WorkloadKind; 3] = [
+        WorkloadKind::ServiceAccounts,
+        WorkloadKind::Roles,
+        WorkloadKind::RoleBindings,
+    ];
+
     /// Default window title for this kind.
     pub fn title(self) -> &'static str {
         match self {
+            WorkloadKind::Events => "Events",
+            WorkloadKind::Namespaces => "Namespaces",
             WorkloadKind::Deployments => "Deployments",
             WorkloadKind::Pods => "Pods",
             WorkloadKind::StatefulSets => "StatefulSets",
@@ -46,7 +103,27 @@ impl WorkloadKind {
             WorkloadKind::Jobs => "Jobs",
             WorkloadKind::CronJobs => "CronJobs",
             WorkloadKind::CustomResources => "Custom Resources",
+            WorkloadKind::Ingresses => "Ingresses",
+            WorkloadKind::Endpoints => "Endpoints",
+            WorkloadKind::NetworkPolicies => "NetworkPolicies",
+            WorkloadKind::ConfigMaps => "ConfigMaps",
+            WorkloadKind::Secrets => "Secrets",
+            WorkloadKind::PersistentVolumeClaims => "PersistentVolumeClaims",
+            WorkloadKind::PersistentVolumes => "PersistentVolumes",
+            WorkloadKind::StorageClasses => "StorageClasses",
+            WorkloadKind::ServiceAccounts => "ServiceAccounts",
+            WorkloadKind::Roles => "Roles",
+            WorkloadKind::RoleBindings => "RoleBindings",
         }
+    }
+
+    pub fn namespaced(self) -> bool {
+        !matches!(
+            self,
+            WorkloadKind::Namespaces
+                | WorkloadKind::PersistentVolumes
+                | WorkloadKind::StorageClasses
+        )
     }
 }
 

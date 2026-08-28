@@ -41,8 +41,8 @@ pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};
 pub use ids::{CorrelationId, OperationId, RequestId, SessionId, SubscriptionId};
 pub use metrics::{
     CapacityUsage, ClusterTotals, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
-    InfrastructureResponse, InfrastructureWatchSpec, MetricsAvailability, MetricsCondition,
-    MetricsStatus, PodMetrics, ResourceMetricsResponse,
+    InfrastructureResponse, InfrastructureWatchSpec, LauncherCounts, MetricsAvailability,
+    MetricsCondition, MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use operation::{
     CreateJobRequest, CronJobSuspendRequest, DeletePreflightRequest, DeletePreflightResponse,

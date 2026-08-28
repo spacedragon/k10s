@@ -1185,6 +1185,7 @@ fn infrastructure_response(
         revision: BackendRevision::new(revision),
         generated_at: format!("2026-08-21T01:0{revision}:00Z"),
         totals: ClusterTotals::default(),
+        launcher: Default::default(),
         cluster_cpu: CapacityUsage::default(),
         cluster_memory: CapacityUsage::default(),
         pod_capacity: CapacityUsage::default(),

@@ -281,7 +281,7 @@ impl Runtime {
         let navigation = self.create_element("nav");
         navigation.set_attribute("aria-label", "Resources").unwrap();
         self.append_button_to(&navigation, "Services", "services");
-        for kind in WorkloadKind::ALL {
+        for kind in WorkloadKind::TAXONOMY {
             self.append_button_to(&navigation, kind.title(), &format!("workload:{kind:?}"));
         }
         self.root.append_child(&navigation).unwrap();
@@ -506,7 +506,7 @@ impl Runtime {
 }
 
 fn parse_kind(value: &str) -> Option<WorkloadKind> {
-    WorkloadKind::ALL
+    WorkloadKind::TAXONOMY
         .into_iter()
         .find(|kind| format!("{kind:?}") == value)
 }

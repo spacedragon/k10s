@@ -401,6 +401,8 @@ fn gvk(group: &str, version: &str, kind: &str) -> GroupVersionKind {
 /// their own type instead.
 fn builtin_gvk(kind: WorkloadKind) -> Option<GroupVersionKind> {
     match kind {
+        WorkloadKind::Events => Some(GroupVersionKind::core("v1", "Event")),
+        WorkloadKind::Namespaces => Some(GroupVersionKind::core("v1", "Namespace")),
         WorkloadKind::Deployments => Some(gvk("apps", "v1", "Deployment")),
         WorkloadKind::Pods => Some(GroupVersionKind::core("v1", "Pod")),
         WorkloadKind::StatefulSets => Some(gvk("apps", "v1", "StatefulSet")),
@@ -408,6 +410,19 @@ fn builtin_gvk(kind: WorkloadKind) -> Option<GroupVersionKind> {
         WorkloadKind::Jobs => Some(gvk("batch", "v1", "Job")),
         WorkloadKind::CronJobs => Some(gvk("batch", "v1", "CronJob")),
         WorkloadKind::CustomResources => None,
+        WorkloadKind::Ingresses => Some(gvk("networking.k8s.io", "v1", "Ingress")),
+        WorkloadKind::Endpoints => Some(GroupVersionKind::core("v1", "Endpoints")),
+        WorkloadKind::NetworkPolicies => Some(gvk("networking.k8s.io", "v1", "NetworkPolicy")),
+        WorkloadKind::ConfigMaps => Some(GroupVersionKind::core("v1", "ConfigMap")),
+        WorkloadKind::Secrets => Some(GroupVersionKind::core("v1", "Secret")),
+        WorkloadKind::PersistentVolumeClaims => {
+            Some(GroupVersionKind::core("v1", "PersistentVolumeClaim"))
+        }
+        WorkloadKind::PersistentVolumes => Some(GroupVersionKind::core("v1", "PersistentVolume")),
+        WorkloadKind::StorageClasses => Some(gvk("storage.k8s.io", "v1", "StorageClass")),
+        WorkloadKind::ServiceAccounts => Some(GroupVersionKind::core("v1", "ServiceAccount")),
+        WorkloadKind::Roles => Some(gvk("rbac.authorization.k8s.io", "v1", "Role")),
+        WorkloadKind::RoleBindings => Some(gvk("rbac.authorization.k8s.io", "v1", "RoleBinding")),
     }
 }
 
@@ -454,7 +469,7 @@ pub(super) fn show<I>(
             .as_deref()
             .and_then(|key| feed.types.iter().find(|entry| type_key(&entry.gvk) == *key))
             .map(|entry| (entry.gvk.clone(), entry.namespaced)),
-        _ => builtin_gvk(kind).map(|gvk| (gvk, true)),
+        _ => builtin_gvk(kind).map(|gvk| (gvk, kind.namespaced())),
     };
     let Some((_, namespaced)) = selected_type else {
         show_picker(ui, scratch, window_id, feed, queued);
@@ -771,4 +786,71 @@ fn show_picker<I>(
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::*;
+
+    #[test]
+    fn every_named_taxonomy_entry_maps_directly_to_its_gvk_and_scope() {
+        let expected = [
+            (WorkloadKind::Events, "", "Event", true),
+            (WorkloadKind::Namespaces, "", "Namespace", false),
+            (
+                WorkloadKind::Ingresses,
+                "networking.k8s.io",
+                "Ingress",
+                true,
+            ),
+            (WorkloadKind::Endpoints, "", "Endpoints", true),
+            (
+                WorkloadKind::NetworkPolicies,
+                "networking.k8s.io",
+                "NetworkPolicy",
+                true,
+            ),
+            (WorkloadKind::ConfigMaps, "", "ConfigMap", true),
+            (WorkloadKind::Secrets, "", "Secret", true),
+            (
+                WorkloadKind::PersistentVolumeClaims,
+                "",
+                "PersistentVolumeClaim",
+                true,
+            ),
+            (
+                WorkloadKind::PersistentVolumes,
+                "",
+                "PersistentVolume",
+                false,
+            ),
+            (
+                WorkloadKind::StorageClasses,
+                "storage.k8s.io",
+                "StorageClass",
+                false,
+            ),
+            (WorkloadKind::ServiceAccounts, "", "ServiceAccount", true),
+            (
+                WorkloadKind::Roles,
+                "rbac.authorization.k8s.io",
+                "Role",
+                true,
+            ),
+            (
+                WorkloadKind::RoleBindings,
+                "rbac.authorization.k8s.io",
+                "RoleBinding",
+                true,
+            ),
+        ];
+        for (kind, group, wire_kind, namespaced) in expected {
+            let gvk = builtin_gvk(kind).expect("named entries bypass the custom picker");
+            assert_eq!(
+                (gvk.group.as_str(), gvk.version.as_str(), gvk.kind.as_str()),
+                (group, "v1", wire_kind)
+            );
+            assert_eq!(kind.namespaced(), namespaced);
+        }
+    }
 }
