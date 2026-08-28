@@ -422,6 +422,7 @@ where
                 .and_then(|context| context.namespace.as_deref())
         });
         let mut refresh_requested = false;
+        taskbar::shortcuts(ui.ctx(), &self.workspace, &mut queued);
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
             .exact_size(theme::TOP_BAR_HEIGHT)
@@ -446,6 +447,19 @@ where
             .frame(theme::launcher_frame())
             .show(ui, |ui| {
                 launcher::show(ui, &self.workspace, &mut queued);
+            });
+
+        egui::Panel::bottom("k10s.taskbar")
+            .resizable(false)
+            .show(ui, |ui| {
+                let available = ui.ctx().content_rect();
+                taskbar::show(
+                    ui,
+                    &self.workspace,
+                    connection,
+                    [available.width(), available.height()],
+                    &mut queued,
+                );
             });
 
         let mut resources = std::mem::take(&mut self.resources);

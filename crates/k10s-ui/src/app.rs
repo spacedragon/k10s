@@ -172,6 +172,8 @@ pub struct K10sApp {
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
+    /// Restorable window layouts not currently active, keyed by kube context.
+    workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
     clock_started: Instant,
     jitter_counter: u64,
 }
@@ -340,6 +342,7 @@ impl K10sApp {
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
+            workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
         })
@@ -405,6 +408,36 @@ impl K10sApp {
     #[must_use]
     pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
         self.shell.workspace().snapshot()
+    }
+
+    /// All known layouts, including the currently rendered context.
+    #[must_use]
+    pub fn workspace_layouts(&self) -> BTreeMap<String, WorkspaceSnapshot> {
+        let mut layouts = self.workspace_layouts.clone();
+        let context = self.shell.workspace().context();
+        if !context.is_empty() {
+            layouts.insert(context.to_owned(), self.workspace_snapshot());
+        }
+        layouts
+    }
+
+    /// Install context-keyed layouts loaded by a native host. The matching
+    /// layout is restored when bootstrap confirms or a switch enters it.
+    pub fn restore_workspace_layouts(&mut self, layouts: BTreeMap<String, WorkspaceSnapshot>) {
+        self.workspace_layouts = layouts;
+    }
+
+    fn commit_context_layout(&mut self, to: String) {
+        let from = self.shell.workspace().context().to_owned();
+        if !from.is_empty() && from != to {
+            self.workspace_layouts.insert(from, self.workspace_snapshot());
+        }
+        if let Some(snapshot) = self.workspace_layouts.get(&to).cloned() {
+            self.shell.apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+        }
+        for event in self.shell.apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to }) {
+            self.handle_workspace_event(event);
+        }
     }
 
     /// Restore a persisted workspace snapshot through the normal command
@@ -1529,13 +1562,7 @@ impl K10sApp {
                         // guards still belong to the old one leaves the UI
                         // inconsistent until some later switch succeeds.
                         if self.shell.workspace().context() != context {
-                            for event in self.shell.apply_workspace_command(
-                                WorkspaceCommand::CommitContextSwitch {
-                                    to: context.clone(),
-                                },
-                            ) {
-                                self.handle_workspace_event(event);
-                            }
+                            self.commit_context_layout(context.clone());
                         }
                         // The bootstrap answer already wrote the selection,
                         // so the render-time context-change path would skip
@@ -1626,12 +1653,7 @@ impl K10sApp {
                 self.failed_switch = None;
                 let current = response.current;
                 self.client.local_ui_mut().selected_context = Some(current.clone());
-                for event in self
-                    .shell
-                    .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to: current })
-                {
-                    self.handle_workspace_event(event);
-                }
+                self.commit_context_layout(current);
                 let current = self.shell.workspace().context().to_owned();
                 self.reconcile_resource_streams(&current)
                     .map_err(|error| AppEventError::Terminal(error.to_string()))?;

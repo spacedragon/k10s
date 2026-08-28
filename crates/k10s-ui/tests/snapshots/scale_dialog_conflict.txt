@@ -109,6 +109,14 @@ Window
                         Button label="Open another Custom Resources… window"
         GenericContainer
           GenericContainer
+            GenericContainer
+              Button label="Tile"
+              Button label="Cascade"
+              Button label="Focus"
+              Button label="Overview"
+              Button label="Deployments · all namespaces · ● Active"
+        GenericContainer
+          GenericContainer
   Window label="Overview"
     GenericContainer
       GenericContainer

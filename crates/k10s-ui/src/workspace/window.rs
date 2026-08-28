@@ -89,6 +89,7 @@ pub struct WindowGeom {
 }
 
 impl WindowGeom {
+    pub const MIN_SIZE: [f32; 2] = [480.0, 320.0];
     /// Default geometry for the `index`-th window, staggered so freshly
     /// opened windows do not fully overlap.
     pub fn staggered(index: usize, size: [f32; 2]) -> Self {
@@ -96,6 +97,44 @@ impl WindowGeom {
         Self {
             position: [64.0 + step, 48.0 + step],
             size,
+            collapsed: false,
+        }
+    }
+
+    /// Deterministic row-major grid. If the canvas cannot fit practical
+    /// minima, cells retain those minima and form an intentional overflow
+    /// surface instead of shrinking windows into unusable slivers.
+    pub fn tiled(index: usize, count: usize, canvas: [f32; 2]) -> Self {
+        let columns = (count as f32).sqrt().ceil() as usize;
+        let rows = count.div_ceil(columns);
+        let width = (canvas[0] / columns as f32).max(Self::MIN_SIZE[0]);
+        let height = (canvas[1] / rows as f32).max(Self::MIN_SIZE[1]);
+        Self {
+            position: [
+                (index % columns) as f32 * width,
+                (index / columns) as f32 * height,
+            ],
+            size: [width, height],
+            collapsed: false,
+        }
+    }
+
+    pub fn cascade(index: usize, canvas: [f32; 2]) -> Self {
+        let offset = index as f32 * 28.0;
+        Self {
+            position: [offset, offset],
+            size: [
+                (canvas[0] - offset).max(Self::MIN_SIZE[0]),
+                (canvas[1] - offset).max(Self::MIN_SIZE[1]),
+            ],
+            collapsed: false,
+        }
+    }
+
+    pub fn focused(canvas: [f32; 2]) -> Self {
+        Self {
+            position: [0.0, 0.0],
+            size: canvas,
             collapsed: false,
         }
     }

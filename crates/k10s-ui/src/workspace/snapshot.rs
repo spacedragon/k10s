@@ -455,6 +455,7 @@ where
             context: String::new(),
             yaml_owner: std::collections::HashMap::new(),
             pending: None,
+            layout_checkpoint: None,
         };
 
         for window in &restorable {

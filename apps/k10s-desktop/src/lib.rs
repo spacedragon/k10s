@@ -15,6 +15,7 @@ use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
 use k10s_ui::workspace::{LoadedWorkspaceSnapshot, WorkspaceSnapshot};
+use std::collections::BTreeMap;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -142,6 +143,7 @@ pub struct DesktopApp {
     /// Workspace-state persistence for session restore; `None` when no
     /// writable config directory exists on this host.
     state_store: Option<StateStore>,
+    context_state_store: Option<ContextStateStore>,
 }
 
 impl std::fmt::Debug for DesktopApp {
@@ -197,10 +199,17 @@ impl DesktopApp {
             }
             app.restore_workspace_snapshot(on_disk.snapshot);
         }
+        let mut context_state_store = state_store
+            .as_ref()
+            .map(|store| ContextStateStore::new(store.path.with_file_name("workspace-layouts-by-context.json")));
+        if let Some(layouts) = context_state_store.as_mut().and_then(ContextStateStore::load) {
+            app.restore_workspace_layouts(layouts);
+        }
         Ok(Self {
             app: Some(app),
             server: Some(server),
             state_store,
+            context_state_store,
         })
     }
 
@@ -211,6 +220,34 @@ impl DesktopApp {
             .as_ref()
             .expect("desktop server exists until drop")
             .local_addr()
+    }
+}
+
+/// Context-keyed companion to the legacy single-layout file. Keeping the
+/// legacy reader provides a migration fallback while new sessions restore
+/// each Kubernetes context independently.
+#[derive(Debug)]
+struct ContextStateStore {
+    path: PathBuf,
+    last_saved: Option<BTreeMap<String, WorkspaceSnapshot>>,
+}
+
+impl ContextStateStore {
+    fn new(path: PathBuf) -> Self { Self { path, last_saved: None } }
+
+    fn load(&mut self) -> Option<BTreeMap<String, WorkspaceSnapshot>> {
+        let layouts: BTreeMap<String, WorkspaceSnapshot> =
+            serde_json::from_str(&fs::read_to_string(&self.path).ok()?).ok()?;
+        self.last_saved = Some(layouts.clone());
+        Some(layouts)
+    }
+
+    fn save(&mut self, layouts: &BTreeMap<String, WorkspaceSnapshot>) {
+        if self.last_saved.as_ref() == Some(layouts) { return; }
+        match serde_json::to_string(layouts).map_err(io::Error::other).and_then(|json| write_state_file(&self.path, &json)) {
+            Ok(()) => self.last_saved = Some(layouts.clone()),
+            Err(error) => tracing::warn!("context workspace state save failed: {error}"),
+        }
     }
 }
 
@@ -405,6 +442,9 @@ impl eframe::App for DesktopApp {
         if let Some(store) = self.state_store.as_mut() {
             store.tick(&app.workspace_snapshot(), Instant::now());
         }
+        if let Some(store) = self.context_state_store.as_mut() {
+            store.save(&app.workspace_layouts());
+        }
         app.poll();
         context.request_repaint_after(Duration::from_millis(16));
     }
@@ -425,6 +465,11 @@ impl Drop for DesktopApp {
             && let Some(store) = self.state_store.as_mut()
         {
             store.flush(&app.workspace_snapshot());
+        }
+        if let Some(app) = self.app.as_ref()
+            && let Some(store) = self.context_state_store.as_mut()
+        {
+            store.save(&app.workspace_layouts());
         }
         drop(self.app.take());
         if let Some(mut server) = self.server.take() {

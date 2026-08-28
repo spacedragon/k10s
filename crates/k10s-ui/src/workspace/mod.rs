@@ -62,6 +62,14 @@ pub enum WorkspaceCommand<I> {
     FocusWindow(WindowId),
     CloseWindow(WindowId),
     SetGeometry(WindowId, WindowGeom),
+    /// Arrange all windows in a deterministic grid inside `[width, height]`.
+    Tile([f32; 2]),
+    /// Toggle a deterministic cascade, restoring the prior geometry on repeat.
+    Cascade([f32; 2]),
+    /// Toggle focus mode for the active window, restoring all prior geometry.
+    ToggleFocus([f32; 2]),
+    /// Focus the next window in registry MRU order.
+    CycleWindow,
     SetNamespaceScope(WindowId, NamespaceScope),
     SetSearch(WindowId, String),
     SetServicePortDraft(WindowId, String, String),
@@ -155,6 +163,7 @@ pub struct WorkspaceState<I> {
     /// Writable-YAML ownership: at most one editor per resource identity.
     yaml_owner: HashMap<I, WindowId>,
     pending: Option<PendingNavigation<I>>,
+    layout_checkpoint: Option<Vec<(WindowId, WindowGeom)>>,
 }
 
 impl<I> Default for WorkspaceState<I>
@@ -180,6 +189,7 @@ where
             context: String::new(),
             yaml_owner: HashMap::new(),
             pending: None,
+            layout_checkpoint: None,
         };
         state.open_singleton(WindowKind::Overview);
         state
@@ -306,6 +316,32 @@ where
                 }
                 Vec::new()
             }
+            WorkspaceCommand::Tile(size) => {
+                self.layout_checkpoint = None;
+                self.tile(size);
+                Vec::new()
+            }
+            WorkspaceCommand::Cascade(size) => {
+                self.toggle_layout(|index, _count| WindowGeom::cascade(index, size));
+                Vec::new()
+            }
+            WorkspaceCommand::ToggleFocus(size) => {
+                if self.restore_layout() {
+                    return Vec::new();
+                }
+                self.save_layout();
+                if let Some(active) = self
+                    .windows
+                    .iter()
+                    .max_by_key(|window| window.z)
+                    .map(|w| w.id)
+                    && let Some(window) = self.window_mut(active)
+                {
+                    window.geometry = WindowGeom::focused(size);
+                }
+                Vec::new()
+            }
+            WorkspaceCommand::CycleWindow => self.cycle_window(),
             WorkspaceCommand::SetNamespaceScope(id, scope) => self.set_namespace_scope(id, scope),
             WorkspaceCommand::SetSearch(id, search) => {
                 self.with_resource_mut(id, |resource| resource.search = search.clone());
@@ -464,6 +500,62 @@ where
         self.next_z += 1;
         self.windows[index].z = self.next_z;
         vec![WorkspaceEvent::Focused(id)]
+    }
+
+    fn cycle_window(&mut self) -> Vec<WorkspaceEvent<I>> {
+        let mut ids: Vec<_> = self
+            .windows
+            .iter()
+            .map(|window| (window.z, window.id))
+            .collect();
+        ids.sort_by_key(|(z, _)| std::cmp::Reverse(*z));
+        match ids.as_slice() {
+            [] => Vec::new(),
+            [_] => self.focus(ids[0].1),
+            _ => self.focus(ids[1].1),
+        }
+    }
+
+    fn save_layout(&mut self) {
+        self.layout_checkpoint = Some(
+            self.windows
+                .iter()
+                .map(|window| (window.id, window.geometry))
+                .collect(),
+        );
+    }
+
+    fn restore_layout(&mut self) -> bool {
+        let Some(saved) = self.layout_checkpoint.take() else {
+            return false;
+        };
+        for (id, geometry) in saved {
+            if let Some(window) = self.window_mut(id) {
+                window.geometry = geometry;
+            }
+        }
+        true
+    }
+
+    fn toggle_layout(&mut self, geometry: impl Fn(usize, usize) -> WindowGeom) {
+        if self.restore_layout() {
+            return;
+        }
+        self.save_layout();
+        let count = self.windows.len();
+        for (index, window) in self.windows.iter_mut().enumerate() {
+            window.geometry = geometry(index, count);
+        }
+    }
+
+    fn tile(&mut self, size: [f32; 2]) {
+        let count = self.windows.len();
+        if count == 0 {
+            return;
+        }
+        for (index, window) in self.windows.iter_mut().enumerate() {
+            window.geometry = WindowGeom::tiled(index, count, size);
+        }
     }
 
     fn open_singleton(&mut self, kind: WindowKind) -> WindowId {

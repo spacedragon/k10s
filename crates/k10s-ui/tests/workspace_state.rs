@@ -31,6 +31,68 @@ fn detail_maximize_restores_the_exact_prior_split() {
 }
 
 #[test]
+fn tile_is_deterministic_non_overlapping_and_preserves_minima_in_overflow() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+    state.apply(WorkspaceCommand::Tile([800.0, 500.0]));
+    let geometries: Vec<_> = state.windows().iter().map(|w| w.geometry).collect();
+    assert_eq!(geometries[0].position, [0.0, 0.0]);
+    assert_eq!(geometries[1].position, [480.0, 0.0]);
+    assert_eq!(geometries[2].position, [0.0, 320.0]);
+    assert!(
+        geometries
+            .iter()
+            .all(|g| g.size[0] >= 480.0 && g.size[1] >= 320.0)
+    );
+}
+
+#[test]
+fn cascade_and_focus_toggle_restore_exact_prior_geometry() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    let before: Vec<_> = state.windows().iter().map(|w| w.geometry).collect();
+    state.apply(WorkspaceCommand::Cascade([1200.0, 700.0]));
+    assert_ne!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+    state.apply(WorkspaceCommand::Cascade([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+    state.apply(WorkspaceCommand::ToggleFocus([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|w| w.z)
+            .unwrap()
+            .geometry
+            .size,
+        [1200.0, 700.0]
+    );
+    state.apply(WorkspaceCommand::ToggleFocus([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
 fn namespace_scope_has_explicit_resolution_semantics() {
     assert_eq!(
         NamespaceScope::ContextDefault.resolve(Some("sea")),
