@@ -521,12 +521,34 @@ fn workloads_group_expands_and_launcher_never_uses_checkbox_roles() {
 fn launcher_filter_reveals_matches_inside_collapsed_groups() {
     let mut harness = shell_harness();
     assert!(harness.query_by_label("Secrets").is_none());
+    harness
+        .get_by_role_and_label(Role::Button, "Config")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
     let filter = harness.get_by_role_and_label(Role::TextInput, "Filter resources…");
     filter.click();
     filter.type_text("secret");
     harness.run_steps(4);
     harness.get_by_role_and_label(Role::Button, "Secrets");
     assert!(harness.query_by_label("Pods").is_none());
+
+    // A filter is a transient reveal: toggling the matching group must not
+    // remove the result, and clearing the focused input restores the saved
+    // collapsed state instead of silently expanding it.
+    harness
+        .get_by_role_and_label(Role::Button, "Config")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
+    harness
+        .get_by_role_and_label(Role::TextInput, "Filter resources…")
+        .focus();
+    for _ in 0.."secret".len() {
+        harness.key_press(egui::Key::Backspace);
+    }
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Secrets").is_none());
 }
 
 #[test]
