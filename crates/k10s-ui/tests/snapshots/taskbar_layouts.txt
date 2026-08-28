@@ -221,19 +221,27 @@ Window
               GenericContainer
                 Label value="Details"
                   TextRun value="Details"
+                GenericContainer
+                  Label value="Pod / api-0"
+                    TextRun value="Pod / api-0"
+                  GenericContainer
+                    Label value="Kind Pod"
+                      TextRun value="Kind Pod"
+                    Label value="Namespace default"
+                      TextRun value="Namespace default"
+                    Label value="Context dev-local"
+                      TextRun value="Context dev-local"
+                  GenericContainer
+                    Label value="UID uid-dev-local-pod-default-api-0"
+                      TextRun value="UID uid-dev-local-pod-default-api-0"
+                    Label value="Refreshing…"
+                      TextRun value="Refreshing…"
+              GenericContainer
                 Button label="Tab Overview"
                 Button label="Tab Events"
                 Button label="Tab YAML"
                 Button label="Tab Logs"
                 Button label="Tab Shell"
-              Label value="api-0"
-                TextRun value="api-0"
-              Label value="Kind Pod"
-                TextRun value="Kind Pod"
-              Label value="Namespace default"
-                TextRun value="Namespace default"
-              Label value="UID uid-dev-local-pod-default-api-0"
-                TextRun value="UID uid-dev-local-pod-default-api-0"
               GenericContainer
                 ProgressIndicator
                 Label value="Loading details"
