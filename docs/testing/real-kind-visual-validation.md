@@ -14,15 +14,15 @@ renderer. It does not add a fixture-only UI path.
 | Renderer | Chromium WebGL through the Trunk web build |
 | Context | `kind-bunyip` |
 | Namespace scope | all namespaces |
-| Cluster state | healthy Pods, one `ImagePullBackOff` Pod, one completed Job, one ready StatefulSet, and a dense all-namespace Pod list |
+| Cluster state | healthy Pods, one `ImagePullBackOff` Pod, one completed Job, one ready StatefulSet, and a dense all-namespace Pod list (at least 9 Pods) |
 | Access | read-only navigation (`get`, `list`, and `watch`); no mutation controls |
 
 The committed evidence is:
 
-- [before: deterministic fake UI](../../screenshots/issue-170/before-fake-1280x800.png)
-- [after: real-kind Pods](../../screenshots/issue-170/after-real-kind-pods-1280x800.png)
-- [after: real-kind completed Job](../../screenshots/issue-170/after-real-kind-job-1280x800.png)
-- [after: real-kind StatefulSet](../../screenshots/issue-170/after-real-kind-statefulset-1280x800.png)
+- [before: deterministic fake UI](../screenshots/issue-170/before-fake-1280x800.png)
+- [after: real-kind Pods](../screenshots/issue-170/after-real-kind-pods-1280x800.png)
+- [after: real-kind completed Job](../screenshots/issue-170/after-real-kind-job-1280x800.png)
+- [after: real-kind StatefulSet](../screenshots/issue-170/after-real-kind-statefulset-1280x800.png)
 
 The Pod capture supplies both healthy and `ImagePullBackOff` states and the
 dense-list case. The other two captures make completion and controller replica
