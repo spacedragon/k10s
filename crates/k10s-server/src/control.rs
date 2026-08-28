@@ -1531,6 +1531,7 @@ fn parse_request(
                             container: target.container.clone(),
                             tail_lines: parsed.tail_lines,
                             since_seconds: parsed.since_seconds,
+                            previous: parsed.previous,
                             timestamps: parsed.timestamps,
                             follow: parsed.follow,
                         },

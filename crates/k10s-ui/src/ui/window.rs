@@ -242,6 +242,7 @@ where
                                 primary_state,
                                 view,
                                 false,
+                                false,
                                 yaml,
                                 streams,
                                 dialogs,

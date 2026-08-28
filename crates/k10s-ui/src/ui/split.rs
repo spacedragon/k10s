@@ -41,10 +41,22 @@ pub(super) fn show_vertical<R, S>(
     ui: &mut egui::Ui,
     ratio: &mut f32,
     detail_visible: bool,
+    detail_maximized: bool,
     top: impl FnOnce(&mut egui::Ui) -> R,
     bottom: impl FnOnce(&mut egui::Ui) -> S,
 ) -> (Option<R>, Option<S>) {
     let total = ui.available_size().y;
+    if detail_visible && detail_maximized {
+        let width = ui.available_size().x;
+        let bottom_result = ui
+            .allocate_ui_with_layout(
+                Vec2::new(width, total),
+                Layout::top_down_justified(Align::Min),
+                bottom,
+            )
+            .inner;
+        return (None, Some(bottom_result));
+    }
     let (list_height, detail_height) = pane_heights(total, *ratio, detail_visible);
     let width = ui.available_size().x;
 

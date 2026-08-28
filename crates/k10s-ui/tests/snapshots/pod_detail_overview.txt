@@ -187,21 +187,31 @@ Window
                 GenericContainer
                   Label value="Details"
                     TextRun value="Details"
+                  GenericContainer
+                    Label value="Pod / db-postgres-0"
+                      TextRun value="Pod / db-postgres-0"
+                    GenericContainer
+                      Label value="Kind Pod"
+                        TextRun value="Kind Pod"
+                      Label value="Namespace default"
+                        TextRun value="Namespace default"
+                      Label value="Context dev-local"
+                        TextRun value="Context dev-local"
+                    GenericContainer
+                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
+                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
+                      Label value="Created 2026-08-21T00:50:10Z"
+                        TextRun value="Created 2026-08-21T00:50:10Z"
+                      Label value="Fresh · live"
+                        TextRun value="Fresh · live"
+                  Button label="Pop out ↗"
+                  Button label="Maximize"
+                GenericContainer
                   Button label="Tab Overview"
                   Button label="Tab Events"
                   Button label="Tab YAML"
                   Button label="Tab Logs"
                   Button label="Tab Shell"
-                Label value="db-postgres-0"
-                  TextRun value="db-postgres-0"
-                Label value="Kind Pod"
-                  TextRun value="Kind Pod"
-                Label value="Namespace default"
-                  TextRun value="Namespace default"
-                Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                  TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                Label value="Created 2026-08-21T00:50:10Z"
-                  TextRun value="Created 2026-08-21T00:50:10Z"
                 GenericContainer
                   Button label="Delete resource"
                   Button label="View logs"
@@ -215,6 +225,8 @@ Window
                       GenericContainer
                         Label value="Status Running"
                           TextRun value="Status Running"
+                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                  TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
     Splitter
     Splitter
     Splitter

@@ -121,6 +121,43 @@ fn unavailable_events_are_explicitly_safe() {
         .get_by_label("Events unavailable");
 }
 
+#[test]
+fn crashloop_logs_default_to_previous_with_complete_toolbar() {
+    let mut harness = harness();
+    let pod = identity("Pod", "web-frontend-7d9f8-00001");
+    let mut detail = pod_detail("web-frontend-7d9f8-00001");
+    detail.sections[0]
+        .rows
+        .iter_mut()
+        .find(|row| row.label == "Status")
+        .unwrap()
+        .value = "CrashLoopBackOff".into();
+    harness.state_mut().feed.details.insert(pod, detail);
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Tab Logs")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    for label in ["Previous", "Wrap"] {
+        window.get_by_role_and_label(Role::CheckBox, label);
+    }
+    for label in ["Connect logs", "Export"] {
+        window.get_by_role_and_label(Role::Button, label);
+    }
+    window.get_by_role_and_label(Role::TextInput, "Find in logs");
+    window.get_by_label(
+        "CrashLoopBackOff: showing logs from the previous terminated container by default",
+    );
+}
+
 impl Default for Fixture {
     fn default() -> Self {
         let mut fixture = Self {

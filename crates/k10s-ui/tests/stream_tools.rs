@@ -39,6 +39,26 @@ fn logs_tail_truncation_keeps_the_newest_lines_and_counts_dropped() {
 }
 
 #[test]
+fn log_source_toolbar_state_controls_container_history_wrap_and_export() {
+    let mut tool = logs_tool();
+    tool.set_previous(true);
+    tool.set_since_seconds(Some(900));
+    tool.set_wrap(true);
+    tool.select_container("metrics");
+
+    assert!(tool.previous());
+    assert_eq!(tool.since_seconds(), Some(900));
+    assert!(tool.wraps());
+    assert_eq!(tool.target().container, "metrics");
+
+    tool.connect();
+    tool.attach();
+    tool.append("first");
+    tool.append("second");
+    assert_eq!(tool.export_text(), "first\nsecond");
+}
+
+#[test]
 fn oversize_lines_are_truncated_with_a_marker() {
     let mut tool = logs_tool();
     tool.connect();
@@ -316,6 +336,8 @@ fn client_state_encodes_stream_ticket_queries_safely() {
             target: target.clone(),
             stream_type: StreamType::Exec,
             tty: true,
+            since_seconds: None,
+            previous: false,
         })
         .unwrap();
     let frame = client.take_outbound().unwrap();

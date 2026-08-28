@@ -922,7 +922,12 @@ impl K10sApp {
         stores.logs.ensure(window, target.clone()).connect();
         stores.logs.queue(
             window,
-            crate::ui::tools::LogsAction::OpenLogs { window, target },
+            crate::ui::tools::LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
         );
         self.process_stream_requests()
     }
@@ -2888,12 +2893,18 @@ impl K10sApp {
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_log_actions() {
+            let crate::ui::tools::LogsAction::OpenLogs {
+                target,
+                since_seconds,
+                previous,
+                ..
+            } = action;
             let request = self.client.begin(Query::StreamTicket {
-                target: match action {
-                    crate::ui::tools::LogsAction::OpenLogs { target, .. } => target,
-                },
+                target,
                 stream_type: k10s_protocol::StreamType::Logs,
                 tty: false,
+                since_seconds,
+                previous,
             })?;
             // The tool moves to Connecting immediately; the Ready signal
             // completes the attach.
@@ -2914,6 +2925,8 @@ impl K10sApp {
                 target: target.clone(),
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
+                since_seconds: None,
+                previous: false,
             })?;
             // Same explicit Connecting transition for the terminal.
             if let Some(shell) = self.shell.stream_stores_mut().shells.get_mut(window) {

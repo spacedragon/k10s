@@ -2094,6 +2094,11 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
 
     // The web-frontend replica wave: twenty pods owned by its replicaset.
     for index in 1..=20_u32 {
+        let summary = if index == 20 {
+            "CrashLoopBackOff"
+        } else {
+            "Running"
+        };
         records.push(record(RecordSeed {
             owner_references: vec![OwnerRef {
                 gvk: replicaset_gvk(),
@@ -2108,7 +2113,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             }],
             ..seed(
                 3_000 + u64::from(index) * 10,
-                "Running",
+                summary,
                 Gvk::core("v1", "Pod"),
                 Some("default"),
                 &format!("web-frontend-7d9f8-{index:05}"),
@@ -2221,6 +2226,19 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::port::BackendEvent;
+
+    #[test]
+    fn deterministic_fixture_includes_a_crashlooping_pod() {
+        let fake = FakeKubernetes::default();
+        let state = fake.lock();
+        let crashloop = state
+            .records
+            .iter()
+            .find(|record| record.summary == "CrashLoopBackOff")
+            .expect("the fake fixture exposes previous-log behavior");
+        assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
+        assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+    }
 
     #[tokio::test]
     async fn specialized_idempotency_keys_bind_the_exact_source_uid() {

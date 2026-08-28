@@ -40,6 +40,7 @@ fn request(container: &str) -> StreamKind {
         container: container.into(),
         tail_lines: Some(25),
         since_seconds: Some(60),
+        previous: false,
         timestamps: true,
         follow: true,
     }
