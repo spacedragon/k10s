@@ -27,14 +27,11 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              GenericContainer
-                GenericContainer
-                  Label value="WINDOWS"
-                    TextRun value="WINDOWS"
-                  GenericContainer
-                    Button label="Focus Overview window"
-                  GenericContainer
-                    Button label="Custom Resources window, focused"
+              Button label="Tile"
+              Button label="Cascade"
+              Button label="Focus"
+              Button label="Overview"
+              Button label="Custom Resources · all namespaces · ● Active"
         GenericContainer
           GenericContainer
             GenericContainer
@@ -157,11 +154,3 @@ Window
     Splitter
     Splitter
     Splitter
-  GenericContainer
-    GenericContainer
-      GenericContainer
-        Button label="Tile"
-        Button label="Cascade"
-        Button label="Focus"
-        Button label="Overview"
-        Button label="Custom Resources · all namespaces · ● Active"

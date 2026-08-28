@@ -20,12 +20,30 @@ Window
                           TextRun value="Kubernetes context"
                   GenericContainer
                     Button label="Retry"
-                  Label value="Connecting"
-                    TextRun value="Connecting"
                   Label value="Connection status: Connecting"
                     TextRun value="●"
         GenericContainer
           GenericContainer
+            GenericContainer
+              Button label="Tile"
+              Button label="Cascade"
+              Button label="Focus"
+              Button label="Overview · ↻ Stale data"
+              GenericContainer
+                GenericContainer
+                  ComboBox value="More tasks (3)"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Label value="◈"
+                TextRun value="◈"
+              GenericContainer
+                Label value="k10s"
+                  TextRun value="k10s"
+                Label value="KUBERNETES CONSOLE"
+                  TextRun value="KUBERNETES CONSOLE"
+            Label value="CLUSTER"
+              TextRun value="CLUSTER"
             GenericContainer
               Button label="Overview"
             GenericContainer
@@ -218,13 +236,3 @@ Window
     Splitter
     Splitter
     Splitter
-  GenericContainer
-    GenericContainer
-      GenericContainer
-        Button label="Tile"
-        Button label="Cascade"
-        Button label="Focus"
-        Button label="Overview · ↻ Stale data"
-        GenericContainer
-          GenericContainer
-            ComboBox value="More tasks (3)"

@@ -438,7 +438,17 @@ where
             .exact_size(theme::TASKBAR_HEIGHT)
             .frame(theme::taskbar_frame())
             .show(ui, |ui| {
-                taskbar::show(ui, &self.workspace, &mut queued);
+                let available = ui.ctx().content_rect();
+                taskbar::show(
+                    ui,
+                    &self.workspace,
+                    connection,
+                    [
+                        available.width(),
+                        available.height() - theme::TASKBAR_HEIGHT,
+                    ],
+                    &mut queued,
+                );
             });
 
         egui::Panel::left("k10s.launcher")
@@ -489,32 +499,6 @@ where
         if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {
             refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
         }
-
-        // Windows use egui's middle layer. Keep the taskbar in the foreground
-        // so maximized/compact windows cannot paint over the registry controls.
-        let content = ui.ctx().content_rect();
-        egui::Area::new(egui::Id::new("k10s.taskbar"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(
-                content.left(),
-                content.bottom() - taskbar::HEIGHT - 8.0,
-            ))
-            .default_size(egui::vec2(content.width(), taskbar::HEIGHT))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::new()
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        ui.set_min_height(taskbar::HEIGHT);
-                        taskbar::show(
-                            ui,
-                            &self.workspace,
-                            connection,
-                            [content.width(), content.height() - taskbar::HEIGHT],
-                            &mut queued,
-                        );
-                    });
-            });
 
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))

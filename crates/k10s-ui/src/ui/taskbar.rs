@@ -7,7 +7,6 @@ use crate::workspace::{
 use super::{ConnectionState, resource_window::RowIdentity};
 
 const TASK_WIDTH: f32 = 172.0;
-pub(super) const HEIGHT: f32 = 30.0;
 
 fn dirty<I>(window: &Window<I>) -> bool {
     match &window.content {
@@ -96,7 +95,6 @@ pub(super) fn show<I: RowIdentity>(
     canvas_size: [f32; 2],
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
-    ui.set_min_width(ui.ctx().content_rect().width());
     ui.horizontal(|ui| {
         if ui
             .button("Tile")

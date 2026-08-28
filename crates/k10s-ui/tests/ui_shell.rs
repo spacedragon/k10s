@@ -168,7 +168,7 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
         "Overview is the only initial workspace window"
     );
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
-    harness.get_by_role_and_label(Role::Button, "Overview window, focused");
+    harness.get_by_role_and_label(Role::Button, "Overview · ● Active");
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
             "the window canvas must begin beyond the 196 px launcher at {size:?}: launcher={launcher:?}, window={window:?}"
         );
         let task = harness
-            .get_by_role_and_label(Role::Button, "Overview window, focused")
+            .get_by_role_and_label(Role::Button, "Overview · ● Active")
             .rect();
         assert!(
             task.top() >= size.y - 37.0 && task.bottom() <= size.y,
@@ -229,7 +229,7 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
 }
 
 #[test]
-fn compact_taskbar_scrolls_every_window_entry_into_view() {
+fn compact_taskbar_overflow_remains_keyboard_reachable() {
     let mut harness = shell_harness_at(egui::vec2(640.0, 420.0));
     for kind in WorkloadKind::ALL {
         harness
@@ -241,26 +241,17 @@ fn compact_taskbar_scrolls_every_window_entry_into_view() {
     }
     harness.run_steps(4);
 
-    let final_entry =
-        harness.get_by_role_and_label(Role::Button, "Custom Resources window, focused");
-    assert!(
-        final_entry.rect().right() > 640.0,
-        "the capacity fixture must overflow before scrolling"
-    );
-    final_entry.scroll_to_me();
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+    });
+    overflow.focus();
     harness.run_steps(4);
 
-    let final_rect = harness
-        .get_by_role_and_label(Role::Button, "Custom Resources window, focused")
-        .rect();
-    assert!(
-        final_rect.left() >= 0.0 && final_rect.right() <= 640.0,
-        "the final taskbar entry must be horizontally reachable: {final_rect:?}"
-    );
-    assert!(
-        final_rect.top() >= 420.0 - 37.0 && final_rect.bottom() <= 420.0,
-        "the scrolled entry must remain inside the taskbar: {final_rect:?}"
-    );
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+    });
+    assert!(overflow.is_focused());
+    assert!(overflow.rect().right() <= 640.0);
 }
 
 #[test]
