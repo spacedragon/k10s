@@ -36,7 +36,7 @@ test('remains usable at the supported 640x420 minimum viewport', async ({ page }
     return canvas.width >= 640 && canvas.height >= 420;
   });
   expect(renderedPixels).toBeTruthy();
-  // Let foreground areas complete egui's sizing pass before pixel capture.
+  // Let egui complete its final layout pass before pixel capture.
   await page.waitForTimeout(500);
   await expect(page).toHaveScreenshot('compact-workspace.png', {
     animations: 'disabled',
