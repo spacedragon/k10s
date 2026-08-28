@@ -102,6 +102,7 @@ pub(super) fn show<I>(
     primary_state: Option<&crate::ui::PrimaryDetailState>,
     view: Option<&ResourceDetailResponse>,
     gone: bool,
+    integrated: bool,
     detail_maximized: bool,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
@@ -149,22 +150,24 @@ pub(super) fn show<I>(
     ui.horizontal(|ui| {
         ui.heading(RichText::new("Details").strong());
         show_header(ui, identity, view);
-        if ui.button("Pop out ↗").clicked() {
-            queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                detail.identity.clone(),
-            ));
-        }
-        let maximize_label = if detail_maximized {
-            "Restore split"
-        } else {
-            "Maximize"
-        };
-        if ui.button(maximize_label).clicked() {
-            queued.push(if detail_maximized {
-                WorkspaceCommand::RestoreDetailPane(window_id)
+        if integrated {
+            if ui.button("Pop out ↗").clicked() {
+                queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                    detail.identity.clone(),
+                ));
+            }
+            let maximize_label = if detail_maximized {
+                "Restore split"
             } else {
-                WorkspaceCommand::MaximizeDetailPane(window_id)
-            });
+                "Maximize"
+            };
+            if ui.button(maximize_label).clicked() {
+                queued.push(if detail_maximized {
+                    WorkspaceCommand::RestoreDetailPane(window_id)
+                } else {
+                    WorkspaceCommand::MaximizeDetailPane(window_id)
+                });
+            }
         }
     });
     ui.horizontal_wrapped(|ui| {

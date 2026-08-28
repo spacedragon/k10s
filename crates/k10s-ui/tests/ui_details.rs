@@ -728,6 +728,18 @@ fn popout_is_pinned_and_never_follows_later_selection() {
     dedicated.get_by_label("UID uid-dev-local-deployment-default-web-frontend");
     assert!(
         dedicated
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none(),
+        "a dedicated detail must not offer another pop-out"
+    );
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none(),
+        "pane-only maximize is hidden in a dedicated window"
+    );
+    assert!(
+        dedicated
             .query_by_label("UID uid-dev-local-deployment-default-api-server")
             .is_none()
     );

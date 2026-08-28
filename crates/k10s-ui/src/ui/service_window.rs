@@ -366,6 +366,7 @@ where
                     primary_state,
                     detail_view,
                     gone,
+                    true,
                     state.prior_split_ratio.is_some(),
                     yaml,
                     streams,

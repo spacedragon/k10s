@@ -243,6 +243,7 @@ where
                                 view,
                                 false,
                                 false,
+                                false,
                                 yaml,
                                 streams,
                                 dialogs,
