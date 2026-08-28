@@ -27,6 +27,7 @@ pub(super) fn show<I>(
     yaml: &mut tools::YamlEditors,
     feed: &crate::ui::ResourceFeed,
     port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    mutations_allowed: bool,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -107,9 +108,13 @@ pub(super) fn show<I>(
     // Read-only panel: only the guarded YAML entry point.
     if view.capabilities.can_edit_yaml {
         ui.horizontal(|ui| {
-            let edit = ui.button("Edit YAML");
+            let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
             edit.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit YAML".to_owned())
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    mutations_allowed,
+                    "Edit YAML".to_owned(),
+                )
             });
             if edit.clicked() {
                 queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
@@ -143,6 +148,7 @@ pub(super) fn show<I>(
                     yaml,
                     detail.identity.as_row_identity(),
                     Some(view.manifest.as_str()),
+                    mutations_allowed,
                     queued,
                 );
             }

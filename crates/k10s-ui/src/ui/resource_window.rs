@@ -33,6 +33,37 @@ impl SafeUiError {
     }
 }
 
+/// Window-local lifecycle for a resource watch. Values are presentation-ready
+/// so deterministic fixtures never depend on wall-clock time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowFreshness {
+    Live {
+        last_sync_age: String,
+    },
+    StaleRetrying {
+        last_sync_age: String,
+        retry_in: String,
+        attempt: u32,
+    },
+    Forbidden {
+        user: String,
+        verb: String,
+        resource: String,
+        scope: String,
+    },
+    Failed {
+        message: String,
+    },
+    ReadyEmpty,
+}
+
+impl WindowFreshness {
+    #[must_use]
+    pub fn mutations_allowed(&self) -> bool {
+        matches!(self, Self::Live { .. } | Self::ReadyEmpty)
+    }
+}
+
 /// Authoritative lifecycle of the shared core/v1 Namespace catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NamespaceCatalogState {
@@ -99,6 +130,9 @@ pub enum RelationState {
 /// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
+    /// Lifecycle of each open list window. Missing entries retain the legacy
+    /// inference from connection and row state for compatibility.
+    pub window_freshness: HashMap<WindowId, WindowFreshness>,
     /// Shared Namespace candidates for every namespaced list window.
     pub namespace_catalog: NamespaceCatalogState,
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so
@@ -141,6 +175,86 @@ pub trait RowIdentity: Clone + Eq + std::hash::Hash + std::fmt::Debug {
     fn as_row_identity(&self) -> Option<&ResourceIdentity> {
         None
     }
+}
+
+pub(super) fn show_window_freshness(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    freshness: &WindowFreshness,
+    resource_actions: &mut Vec<super::ResourceAction>,
+) {
+    match freshness {
+        WindowFreshness::Live { last_sync_age } => {
+            ui.label(
+                RichText::new(format!("● Live · synced {last_sync_age}")).color(theme::HEALTHY),
+            );
+        }
+        WindowFreshness::ReadyEmpty => {
+            ui.label("◇ Ready · no resources");
+            if ui.button("Refresh list").clicked() {
+                resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+            }
+        }
+        WindowFreshness::StaleRetrying {
+            last_sync_age,
+            retry_in,
+            attempt,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "▲ Stale · last sync {last_sync_age} · retry in {retry_in} · attempt {attempt}"
+                ))
+                .color(theme::WARNING),
+            );
+            ui.label("Mutations disabled while this window is stale");
+            ui.horizontal(|ui| {
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+                if ui.button("Full resync").clicked() {
+                    resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+                }
+            });
+        }
+        WindowFreshness::Forbidden {
+            user,
+            verb,
+            resource,
+            scope,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "■ Forbidden · user {user} cannot {verb} {resource} in {scope}"
+                ))
+                .color(egui::Color32::LIGHT_RED),
+            );
+            ui.label("Ask a cluster administrator to grant this permission, then retry.");
+            let command = format!("kubectl auth can-i {verb} {resource} --as={user} {scope}");
+            ui.horizontal(|ui| {
+                ui.monospace(&command);
+                if ui.button("Copy auth can-i command").clicked() {
+                    ui.ctx().copy_text(command);
+                }
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+            });
+        }
+        WindowFreshness::Failed { message } => {
+            ui.label(
+                RichText::new(format!("✕ Failed · {message}")).color(egui::Color32::LIGHT_RED),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+                if ui.button("Full resync").clicked() {
+                    resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+                }
+            });
+        }
+    }
+    ui.separator();
 }
 
 impl RowIdentity for ResourceIdentity {
@@ -318,9 +432,18 @@ pub(super) fn show<I>(
     I: RowIdentity,
 {
     let title = kind.title();
-    if connection != ConnectionState::Connected {
-        ui.label(RichText::new("Connection stale · showing last known rows").color(theme::WARNING));
-        ui.separator();
+    let fallback_freshness =
+        (connection != ConnectionState::Connected).then(|| WindowFreshness::StaleRetrying {
+            last_sync_age: "unknown".into(),
+            retry_in: "pending".into(),
+            attempt: 1,
+        });
+    let effective_freshness = feed
+        .window_freshness
+        .get(&window_id)
+        .or(fallback_freshness.as_ref());
+    if let Some(freshness) = effective_freshness {
+        show_window_freshness(ui, window_id, freshness, resource_actions);
     }
 
     // Resolve which type this window displays. Custom resources must pick
@@ -416,6 +539,15 @@ pub(super) fn show<I>(
         return;
     };
 
+    if rows.is_empty() && effective_freshness.is_none() {
+        show_window_freshness(
+            ui,
+            window_id,
+            &WindowFreshness::ReadyEmpty,
+            resource_actions,
+        );
+    }
+
     // The namespace restriction filters authoritative rows locally; the
     // search text filter lives in the table module.
     let needle = state.search.to_lowercase();
@@ -494,6 +626,7 @@ pub(super) fn show<I>(
                     dialogs,
                     feed,
                     None,
+                    effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
                     resource_actions,
                     queued,
                 );

@@ -96,6 +96,7 @@ pub(super) fn show<I>(
     dialogs: &mut dialogs::OperationDialogs,
     feed: &crate::ui::ResourceFeed,
     service_port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    mutations_allowed: bool,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -114,6 +115,7 @@ pub(super) fn show<I>(
             yaml,
             feed,
             service_port_drafts,
+            mutations_allowed,
             resource_actions,
             queued,
         );
@@ -189,7 +191,7 @@ pub(super) fn show<I>(
         let capabilities = view.capabilities;
         let identity = detail.identity.as_row_identity();
         if capabilities.can_scale {
-            let scale = ui.button("Scale");
+            let scale = ui.add_enabled(mutations_allowed, egui::Button::new("Scale"));
             scale.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
@@ -208,7 +210,7 @@ pub(super) fn show<I>(
             }
         }
         if capabilities.can_delete && identity.is_some() {
-            let delete = ui.button("Delete");
+            let delete = ui.add_enabled(mutations_allowed, egui::Button::new("Delete"));
             delete.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
@@ -228,10 +230,17 @@ pub(super) fn show<I>(
         if capabilities.can_exec {
             action_button(ui, "Exec shell", "Exec shell");
         }
-        if capabilities.can_edit_yaml && ui.button("Edit YAML").clicked() {
+        if capabilities.can_edit_yaml
+            && ui
+                .add_enabled(mutations_allowed, egui::Button::new("Edit YAML"))
+                .clicked()
+        {
             queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
         }
     });
+    if !mutations_allowed {
+        ui.label("Scale, delete, and YAML edits are disabled until this window is live");
+    }
     ui.separator();
 
     match detail.active_tab {
@@ -258,6 +267,7 @@ pub(super) fn show<I>(
                     yaml,
                     detail.identity.as_row_identity(),
                     Some(view.manifest.as_str()),
+                    mutations_allowed,
                     queued,
                 );
             }

@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
     ClientFrame, Context, ContextAvailability, InfrastructureRequest, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceTypeEntry, ResourceTypesRequest, ServerFrame,
-    StreamTarget,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+    ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
@@ -22,7 +22,7 @@ use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
-    SafeUiError,
+    SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
     WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
@@ -125,6 +125,12 @@ pub struct K10sApp {
     /// Deterministic projection from every open list window to its shared
     /// canonical subscription.
     window_subscriptions: BTreeMap<WindowId, SubscriptionKey>,
+    window_freshness_overrides: BTreeMap<WindowId, WindowFreshness>,
+    /// Last authoritative rows retained when an individual watch is rejected.
+    /// The owning window keeps useful read-only context until retry succeeds.
+    window_retained_rows: BTreeMap<WindowId, Vec<ResourceListRow>>,
+    window_last_sync_ms: BTreeMap<WindowId, u64>,
+    rejected_subscription_keys: std::collections::BTreeSet<SubscriptionKey>,
     /// One cluster-scoped core/v1 Namespace watch shared by all namespaced
     /// list windows. It is deliberately not represented as a fake window.
     namespace_subscription: Option<(String, LiveSubscription)>,
@@ -295,6 +301,10 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
+            window_freshness_overrides: BTreeMap::new(),
+            window_retained_rows: BTreeMap::new(),
+            window_last_sync_ms: BTreeMap::new(),
+            rejected_subscription_keys: std::collections::BTreeSet::new(),
             namespace_subscription: None,
             namespace_catalog: NamespaceCatalogState::NotDemanded,
             namespace_rejected_context: None,
@@ -1080,6 +1090,72 @@ impl K10sApp {
                             );
                             self.namespace_rejected_context = Some(context);
                         }
+                        ClientError::Server(ref server_error)
+                            if server_error.scope == k10s_protocol::ErrorScope::Subscription
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.resource_subscriptions
+                                        .values()
+                                        .any(|entry| entry.live.id() == id)
+                                }) =>
+                        {
+                            let id = stream_subscription_id
+                                .as_ref()
+                                .expect("matched subscription");
+                            let key = self
+                                .resource_subscriptions
+                                .iter()
+                                .find_map(|(key, entry)| {
+                                    (entry.live.id() == id).then(|| key.clone())
+                                })
+                                .expect("matched subscription key");
+                            let entry = self
+                                .resource_subscriptions
+                                .remove(&key)
+                                .expect("matched subscription entry");
+                            self.rejected_subscription_keys.insert(key.clone());
+                            let retained_rows = self
+                                .client
+                                .resource_list(entry.live.id())
+                                .map(|state| state.rows().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            self.client.retire_rejected_subscription(&entry.live);
+                            let details = server_error.details.as_ref();
+                            for window in entry.windows {
+                                self.window_retained_rows
+                                    .insert(window, retained_rows.clone());
+                                let state = if server_error.code
+                                    == k10s_protocol::ErrorCode::Unauthorized
+                                {
+                                    WindowFreshness::Forbidden {
+                                        user: details
+                                            .and_then(|v| v.get("user"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("current user")
+                                            .to_owned(),
+                                        verb: details
+                                            .and_then(|v| v.get("verb"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("list")
+                                            .to_owned(),
+                                        resource: details
+                                            .and_then(|v| v.get("resource"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or(key.gvk.kind.as_str())
+                                            .to_owned(),
+                                        scope: details
+                                            .and_then(|v| v.get("scope"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("--all-namespaces")
+                                            .to_owned(),
+                                    }
+                                } else {
+                                    WindowFreshness::Failed {
+                                        message: server_error.safe_message.clone(),
+                                    }
+                                };
+                                self.window_freshness_overrides.insert(window, state);
+                            }
+                        }
                         // A request-scoped mutation denial is projected into
                         // the originating dialog for a corrected retry; it
                         // never kills the control connection.
@@ -1291,6 +1367,22 @@ impl K10sApp {
                     self.shell
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
+                }
+                if applied
+                    && let Some(subscription) = stream_subscription_id.as_ref()
+                    && self.client.resource_list(subscription).is_some()
+                {
+                    let windows: Vec<_> = self
+                        .resource_subscriptions
+                        .values()
+                        .find(|entry| entry.live.id() == subscription)
+                        .map(|entry| entry.windows.iter().copied().collect())
+                        .unwrap_or_default();
+                    for window in windows {
+                        self.window_last_sync_ms.insert(window, now_ms);
+                        self.window_freshness_overrides.remove(&window);
+                        self.window_retained_rows.remove(&window);
+                    }
                 }
                 if applied && (server_rebuild_requested || replacement_snapshot_started) {
                     // A replacement is assembled across chunks, so neither
@@ -1638,8 +1730,42 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        for (window, key) in &self.window_subscriptions {
+            if let Some(rows) = self
+                .resource_subscriptions
+                .get(key)
+                .and_then(|entry| self.client.resource_list(entry.live.id()))
+                .map(|state| state.rows().cloned().collect())
+            {
+                self.window_retained_rows.insert(*window, rows);
+            }
+        }
         if self.client.phase() != ClientPhase::Disconnected {
             self.client.transport_lost(now_ms, entropy);
+        }
+        let retry = self.client.retry_schedule();
+        for window in self.window_subscriptions.keys().copied() {
+            let last_sync_age = self.window_last_sync_ms.get(&window).map_or_else(
+                || "unknown".to_owned(),
+                |synced| format_age(now_ms.saturating_sub(*synced)),
+            );
+            let (retry_in, attempt) = retry.map_or_else(
+                || ("pending".to_owned(), 1),
+                |schedule| {
+                    (
+                        format_duration(schedule.retry_at_ms.saturating_sub(now_ms)),
+                        schedule.attempt.saturating_add(1),
+                    )
+                },
+            );
+            self.window_freshness_overrides.insert(
+                window,
+                WindowFreshness::StaleRetrying {
+                    last_sync_age,
+                    retry_in,
+                    attempt,
+                },
+            );
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
@@ -1686,11 +1812,13 @@ impl K10sApp {
         let mut window_lists = std::collections::HashMap::new();
         let mut window_services = std::collections::HashMap::new();
         for (window, key) in &self.window_subscriptions {
-            let Some(subscription) = self.resource_subscriptions.get(key) else {
-                continue;
-            };
-            if let Some(state) = self.client.resource_list(subscription.live.id()) {
-                let rows = state.rows().cloned().collect();
+            let rows = self
+                .resource_subscriptions
+                .get(key)
+                .and_then(|subscription| self.client.resource_list(subscription.live.id()))
+                .map(|state| state.rows().cloned().collect::<Vec<_>>())
+                .or_else(|| self.window_retained_rows.get(window).cloned());
+            if let Some(rows) = rows {
                 if key.gvk.group.is_empty() && key.gvk.version == "v1" && key.gvk.kind == "Service"
                 {
                     window_services.insert(*window, rows);
@@ -1714,6 +1842,34 @@ impl K10sApp {
             (state, _) => state.clone(),
         };
         ResourceFeed {
+            window_freshness: window_lists
+                .iter()
+                .map(|(window, rows)| {
+                    let state = if rows.is_empty() {
+                        WindowFreshness::ReadyEmpty
+                    } else {
+                        WindowFreshness::Live {
+                            last_sync_age: "just now".into(),
+                        }
+                    };
+                    (*window, state)
+                })
+                .chain(window_services.iter().map(|(window, rows)| {
+                    let state = if rows.is_empty() {
+                        WindowFreshness::ReadyEmpty
+                    } else {
+                        WindowFreshness::Live {
+                            last_sync_age: "just now".into(),
+                        }
+                    };
+                    (*window, state)
+                }))
+                .chain(
+                    self.window_freshness_overrides
+                        .iter()
+                        .map(|(window, state)| (*window, state.clone())),
+                )
+                .collect(),
             namespace_catalog,
             lists: std::collections::HashMap::new(),
             window_lists,
@@ -1830,7 +1986,10 @@ impl K10sApp {
             .collect();
         let additions = desired
             .keys()
-            .filter(|key| !self.resource_subscriptions.contains_key(*key))
+            .filter(|key| {
+                !self.resource_subscriptions.contains_key(*key)
+                    && !self.rejected_subscription_keys.contains(*key)
+            })
             .count();
         let namespace_removed = usize::from(self.namespace_subscription.as_ref().is_some_and(
             |(subscribed_context, _)| !namespace_demanded || subscribed_context != context,
@@ -1879,6 +2038,9 @@ impl K10sApp {
             self.namespace_rejected_context = None;
         }
         for (key, windows) in desired {
+            if self.rejected_subscription_keys.contains(&key) {
+                continue;
+            }
             if let Some(entry) = self.resource_subscriptions.get_mut(&key) {
                 entry.windows = windows;
                 continue;
@@ -1902,6 +2064,14 @@ impl K10sApp {
             self.resource_subscriptions
                 .insert(key, RetainedSubscription { live, windows });
         }
+        self.window_freshness_overrides
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.window_retained_rows
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.window_last_sync_ms
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.rejected_subscription_keys
+            .retain(|key| window_subscriptions.values().any(|wanted| wanted == key));
         self.window_subscriptions = window_subscriptions;
 
         if custom_open {
@@ -1972,6 +2142,16 @@ impl K10sApp {
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
+            if self
+                .window_freshness_overrides
+                .get(&window)
+                .is_some_and(|freshness| !freshness.mutations_allowed())
+            {
+                if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
+                    dialog.operation_failed("window is not live; retry the list before mutating");
+                }
+                continue;
+            }
             let command = match action {
                 DialogAction::SubmitScale {
                     target,
@@ -2064,6 +2244,48 @@ impl K10sApp {
             ResourceAction::RetryNamespaceCatalog => {
                 self.namespace_rejected_context = None;
                 self.namespace_catalog = NamespaceCatalogState::Loading;
+                self.reconcile_selected_resource_streams();
+            }
+            ResourceAction::RetryWindow(window) | ResourceAction::FullResyncWindow(window) => {
+                // A stale window may be the projection of a dead control
+                // transport rather than a watch-local failure. Route its
+                // retry through transport recovery and keep the cached rows
+                // until a replacement snapshot arrives.
+                if self.client.phase() != ClientPhase::Ready {
+                    let now_ms =
+                        u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    self.jitter_counter = self.jitter_counter.wrapping_add(1);
+                    let entropy =
+                        now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
+                    if let Err(error) = self.retry_now(now_ms, entropy) {
+                        self.terminal_failure(error.to_string());
+                    }
+                    return;
+                }
+                let Some(key) = self.window_subscriptions.get(&window).cloned() else {
+                    return;
+                };
+                self.rejected_subscription_keys.remove(&key);
+                let affected: Vec<_> = self
+                    .window_subscriptions
+                    .iter()
+                    .filter_map(|(candidate, candidate_key)| {
+                        (candidate_key == &key).then_some(*candidate)
+                    })
+                    .collect();
+                for affected_window in affected {
+                    self.window_freshness_overrides.insert(
+                        affected_window,
+                        WindowFreshness::StaleRetrying {
+                            last_sync_age: "cached".to_owned(),
+                            retry_in: "now".to_owned(),
+                            attempt: 1,
+                        },
+                    );
+                }
+                if let Some(subscription) = self.resource_subscriptions.remove(&key) {
+                    let _ = self.client.unsubscribe(&subscription.live);
+                }
                 self.reconcile_selected_resource_streams();
             }
         }
@@ -2908,6 +3130,18 @@ fn fail_stream_tool(
     }
 }
 
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        format!("{}s", milliseconds.div_ceil(1_000))
+    }
+}
+
+fn format_age(milliseconds: u64) -> String {
+    format!("{} ago", format_duration(milliseconds))
+}
+
 #[derive(Debug)]
 enum AppEventError {
     Transient,
@@ -2942,7 +3176,7 @@ mod tests {
 
     use super::{
         AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
-        PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
+        PrimaryDetailState, RelationState, ResourceAction, SafeUiError, WindowFreshness,
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
     use crate::workspace::{
@@ -4798,6 +5032,174 @@ mod tests {
         let watches = resource_watches(&state);
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[1].gvk, GroupVersionKind::core("v1", "Service"));
+    }
+
+    #[test]
+    fn rejected_watch_retains_its_rows_without_obscuring_a_healthy_sibling() {
+        let (mut app, state) = ready_app();
+        let deployments = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .expect("deployments window opens");
+        let pods = app
+            .web_activate_workload(WorkloadKind::Pods)
+            .expect("pods window opens");
+
+        let subscription_for = |app: &K10sApp, kind: &str| {
+            app.resource_subscriptions
+                .iter()
+                .find_map(|(key, entry)| (key.gvk.kind == kind).then(|| entry.live.id().clone()))
+                .expect("watch exists")
+        };
+        let deployment_subscription = subscription_for(&app, "Deployment");
+        let pod_subscription = subscription_for(&app, "Pod");
+        let row = |kind: &str, name: &str| ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: if kind == "Pod" {
+                    GroupVersionKind::core("v1", "Pod")
+                } else {
+                    GroupVersionKind {
+                        group: "apps".into(),
+                        version: "v1".into(),
+                        kind: kind.into(),
+                    }
+                },
+                namespace: Some("default".into()),
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: BackendRevision::new(7),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let apply_snapshot =
+            |app: &mut K10sApp, subscription: &SubscriptionId, row: ResourceListRow| {
+                for (kind, payload) in [
+                    (
+                        ServerKind::Subscribed,
+                        serde_json::to_value(Subscribed).unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotBegin,
+                        serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotChunk,
+                        serde_json::to_value(SnapshotChunk {
+                            chunk_index: 0,
+                            data: serde_json::to_value(ResourceSnapshotPage {
+                                revision: BackendRevision::new(7),
+                                rows: vec![row.clone()],
+                            })
+                            .unwrap(),
+                        })
+                        .unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotEnd,
+                        serde_json::to_value(SnapshotEnd {
+                            checksum: "fixture".into(),
+                        })
+                        .unwrap(),
+                    ),
+                ] {
+                    app.handle_event(
+                        server_message(&ServerFrame {
+                            kind,
+                            request_id: None,
+                            subscription_id: Some(subscription.clone()),
+                            sequence: None,
+                            payload,
+                        }),
+                        0,
+                        0,
+                    )
+                    .unwrap();
+                }
+            };
+        apply_snapshot(
+            &mut app,
+            &deployment_subscription,
+            row("Deployment", "healthy-api"),
+        );
+        apply_snapshot(&mut app, &pod_subscription, row("Pod", "cached-pod"));
+
+        let denied = ErrorFrame::new(
+            ErrorCode::Unauthorized,
+            "pods are forbidden",
+            Retryability::AfterRefresh,
+            ErrorScope::Subscription,
+            "pod-watch",
+        )
+        .with_details(serde_json::json!({
+            "user": "alice@example.com",
+            "verb": "list",
+            "resource": "pods",
+            "scope": "--namespace=default"
+        }));
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: None,
+                subscription_id: Some(pod_subscription),
+                sequence: None,
+                payload: serde_json::to_value(denied).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        let feed = app.build_resource_feed();
+        assert_eq!(
+            feed.window_lists[&deployments][0].identity.name,
+            "healthy-api"
+        );
+        assert!(matches!(
+            feed.window_freshness.get(&deployments),
+            Some(WindowFreshness::Live { .. })
+        ));
+        assert_eq!(feed.window_lists[&pods][0].identity.name, "cached-pod");
+        assert!(matches!(
+            feed.window_freshness.get(&pods),
+            Some(WindowFreshness::Forbidden { verb, resource, .. })
+                if verb == "list" && resource == "pods"
+        ));
+        app.reconcile_selected_resource_streams();
+        assert_eq!(
+            resource_watches(&state).len(),
+            2,
+            "a rejected watch waits for explicit retry"
+        );
+        app.handle_resource_action(ResourceAction::RetryWindow(pods));
+        assert_eq!(
+            resource_watches(&state).len(),
+            3,
+            "retry starts one replacement watch"
+        );
+
+        app.transient_loss(100, 250);
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod"
+        );
+        app.handle_resource_action(ResourceAction::RetryWindow(pods));
+        assert_eq!(
+            state.borrow().connect_count,
+            2,
+            "window retry during transport staleness starts transport recovery"
+        );
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod",
+            "cached rows remain visible until a replacement snapshot succeeds"
+        );
     }
 
     #[test]

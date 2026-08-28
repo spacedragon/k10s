@@ -19,7 +19,7 @@ pub(crate) use detail::pod_container;
 
 pub use resource_window::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed, RowIdentity,
-    SafeUiError,
+    SafeUiError, WindowFreshness,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
@@ -99,6 +99,8 @@ pub enum ResourceAction {
     RetryPrimary(k10s_protocol::ResourceIdentity),
     RetryRelations(k10s_protocol::ResourceIdentity),
     RetryNamespaceCatalog,
+    RetryWindow(WindowId),
+    FullResyncWindow(WindowId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -467,8 +469,13 @@ where
             .retain(|id| self.workspace.window(id).is_some());
         let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
         self.dialogs.retain(|id| live_windows.contains(&id));
-        self.dialogs
-            .show(ui, connection == ConnectionState::Connected);
+        self.dialogs.show(ui, |window| {
+            connection == ConnectionState::Connected
+                && feed
+                    .window_freshness
+                    .get(&window)
+                    .is_none_or(resource_window::WindowFreshness::mutations_allowed)
+        });
 
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))
