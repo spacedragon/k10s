@@ -40,6 +40,14 @@ impl ResultGroup {
             Self::Commands => "COMMANDS",
         }
     }
+
+    fn result_limit(self) -> usize {
+        match self {
+            Self::ResourceJumps => 30,
+            Self::ListWindows => 3,
+            Self::Commands => 7,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -333,7 +341,15 @@ fn search(query: &str, contexts: &[Context], feed: &ResourceFeed) -> Vec<Palette
             .then_with(|| b.score.cmp(&a.score))
             .then_with(|| a.label.cmp(&b.label))
     });
-    results.truncate(40);
+    let mut group_counts = [0_usize; 3];
+    results.retain(|result| {
+        let count = &mut group_counts[result.group as usize];
+        if *count >= result.group.result_limit() {
+            return false;
+        }
+        *count += 1;
+        true
+    });
     results
 }
 
@@ -404,10 +420,18 @@ fn resource_score(needle: &str, row: &ResourceListRow) -> Option<i32> {
         row.identity.gvk.kind.as_str(),
         row.summary.as_str(),
     ];
-    haystacks
-        .iter()
-        .filter_map(|haystack| text_score(needle, haystack))
-        .max()
+    let terms = needle.split_whitespace().collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Some(1);
+    }
+    terms.into_iter().try_fold(0, |total, term| {
+        let term = term.to_lowercase();
+        haystacks
+            .iter()
+            .filter_map(|haystack| text_score(&term, haystack))
+            .max()
+            .map(|score| total + score)
+    })
 }
 
 fn text_score(needle: &str, haystack: &str) -> Option<i32> {
@@ -562,5 +586,53 @@ mod tests {
                 .iter()
                 .any(|result| matches!(result.action, PaletteAction::Namespace(_)))
         );
+    }
+
+    #[test]
+    fn compound_terms_match_across_namespace_and_status() {
+        let mut feed = ResourceFeed::default();
+        feed.lists.insert(
+            WorkloadKind::Pods,
+            vec![row("Pod", "worker", "CrashLoopBackOff · 7 restarts")],
+        );
+
+        let results = search("po payments crash", &[], &feed);
+        assert!(results.iter().any(|result| {
+            matches!(
+                &result.action,
+                PaletteAction::Resource(identity, ResourceJump::Detail)
+                    if identity.name == "worker"
+            )
+        }));
+    }
+
+    #[test]
+    fn result_cap_reserves_space_for_every_required_group() {
+        let mut feed = ResourceFeed::default();
+        feed.lists.insert(
+            WorkloadKind::Pods,
+            (0..25)
+                .map(|index| row("Pod", &format!("worker-{index}"), "Running"))
+                .collect(),
+        );
+        feed.namespace_catalog = NamespaceCatalogState::Ready(vec!["payments".into()]);
+        let contexts = vec![Context {
+            name: "dev-local".into(),
+            cluster: "dev".into(),
+            namespace: Some("default".into()),
+            is_current: true,
+            availability: k10s_protocol::ContextAvailability::Available,
+            unavailable_reason: None,
+        }];
+
+        let results = search("", &contexts, &feed);
+        assert!(results.len() <= 40);
+        for group in [
+            ResultGroup::ResourceJumps,
+            ResultGroup::ListWindows,
+            ResultGroup::Commands,
+        ] {
+            assert!(results.iter().any(|result| result.group == group));
+        }
     }
 }
