@@ -230,6 +230,7 @@ fn infrastructure_response(condition: MetricsCondition, detail: &str) -> Infrast
             workloads: 2,
             persistent_storage_bytes: 20 * GIB,
         },
+        launcher: Default::default(),
         cluster_cpu: CapacityUsage::new(Some(500), Some(4_000)),
         cluster_memory: CapacityUsage::new(Some(2 * GIB), Some(16 * GIB)),
         pod_capacity: CapacityUsage::new(Some(3), Some(110)),

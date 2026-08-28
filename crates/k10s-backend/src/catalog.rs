@@ -6,8 +6,8 @@
 
 use k10s_protocol::{
     AttentionRow, BackendRevision, CapacityUsage, ClusterTotals, HealthLevel,
-    InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, NodeRow,
-    PersistentVolumeClaimRow, PersistentVolumeRow, StorageClassRow, StorageInventory,
+    InfrastructureResponse, LauncherCounts, MetricsAvailability, MetricsCondition, MetricsStatus,
+    NodeRow, PersistentVolumeClaimRow, PersistentVolumeRow, StorageClassRow, StorageInventory,
     WorkloadHealth,
 };
 
@@ -43,6 +43,7 @@ pub struct CatalogSnapshot {
     attention: Vec<CatalogAttention>,
     nodes: Vec<CatalogNode>,
     storage: CatalogStorage,
+    launcher: LauncherCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +162,12 @@ impl CatalogSnapshot {
             .iter()
             .filter(|record| workload_kinds.contains(&record.reference.gvk.kind.as_str()))
             .count() as u32;
+        let count_kinds = |kinds: &[&str]| {
+            records
+                .iter()
+                .filter(|record| kinds.contains(&record.reference.gvk.kind.as_str()))
+                .count() as u32
+        };
 
         let is_unhealthy = |summary: &str| {
             let value = summary.to_ascii_lowercase();
@@ -186,6 +193,13 @@ impl CatalogSnapshot {
                 reason: "Resource is not healthy".into(),
             })
             .collect::<Vec<_>>();
+        let event_warnings = records
+            .iter()
+            .filter(|record| {
+                record.reference.gvk.kind == "Event"
+                    && record.summary.eq_ignore_ascii_case("Warning")
+            })
+            .count() as u32;
         let unhealthy_workloads = records
             .iter()
             .filter(|record| {
@@ -269,6 +283,18 @@ impl CatalogSnapshot {
                 })
                 .collect(),
             storage,
+            launcher: LauncherCounts {
+                events_warning: event_warnings,
+                workloads,
+                network: count_kinds(&["Service", "Ingress", "Endpoints", "NetworkPolicy"]),
+                config: count_kinds(&["ConfigMap", "Secret"]),
+                storage: count_kinds(&[
+                    "PersistentVolumeClaim",
+                    "PersistentVolume",
+                    "StorageClass",
+                ]),
+                access: count_kinds(&["ServiceAccount", "Role", "RoleBinding"]),
+            },
         }
     }
 
@@ -374,6 +400,14 @@ impl CatalogSnapshot {
                     age: "90d".into(),
                 }],
             },
+            launcher: LauncherCounts {
+                events_warning: 4,
+                workloads: 6,
+                network: 4,
+                config: 2,
+                storage: 3,
+                access: 4,
+            },
         }
     }
 
@@ -410,6 +444,10 @@ impl CatalogSnapshot {
                 age: "30d".into(),
             }],
             storage: CatalogStorage::default(),
+            launcher: LauncherCounts {
+                workloads: 1,
+                ..LauncherCounts::default()
+            },
         }
     }
 
@@ -438,6 +476,7 @@ impl CatalogSnapshot {
                 workloads: self.totals.workloads,
                 persistent_storage_bytes: self.totals.persistent_storage_bytes,
             },
+            launcher: self.launcher,
             cluster_cpu: usage(self.cluster_cpu),
             cluster_memory: usage(self.cluster_memory),
             pod_capacity: usage(self.pod_capacity),
@@ -684,6 +723,8 @@ mod tests {
                 record("Pod", "broken-pod", Some("default"), "CrashLoopBackOff"),
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
+                record("Event", "image-pull", Some("default"), "Warning"),
+                record("Event", "scheduled", Some("default"), "Normal"),
             ],
             CatalogStorage::default(),
             Vec::new(),
@@ -696,6 +737,12 @@ mod tests {
         assert_eq!(snapshot.totals.pods, 2);
         assert_eq!(snapshot.totals.workloads, 2);
         assert_eq!(snapshot.attention.len(), 2);
+        assert_eq!(snapshot.launcher.events_warning, 1);
+        assert_eq!(snapshot.launcher.workloads, 2);
+        assert_eq!(snapshot.launcher.network, 0);
+        assert_eq!(snapshot.launcher.config, 0);
+        assert_eq!(snapshot.launcher.storage, 0);
+        assert_eq!(snapshot.launcher.access, 0);
         assert!(
             snapshot
                 .attention

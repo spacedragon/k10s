@@ -86,6 +86,18 @@ pub struct ClusterTotals {
     pub persistent_storage_bytes: u64,
 }
 
+/// Backend-owned counts displayed beside launcher resource groups.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherCounts {
+    pub events_warning: u32,
+    pub workloads: u32,
+    pub network: u32,
+    pub config: u32,
+    pub storage: u32,
+    pub access: u32,
+}
+
 /// Availability, provenance, and freshness of the infrastructure metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +153,9 @@ pub struct InfrastructureResponse {
     pub generated_at: String,
     /// Overview totals.
     pub totals: ClusterTotals,
+    /// Counts and warning badges for the resource launcher.
+    #[serde(default)]
+    pub launcher: LauncherCounts,
     /// Aggregate CPU usage/capacity in millicores.
     pub cluster_cpu: CapacityUsage,
     /// Aggregate memory usage/capacity in bytes.

@@ -36,6 +36,10 @@ test('remains usable at the supported 640x420 minimum viewport', async ({ page }
     return canvas.width >= 640 && canvas.height >= 420;
   });
   expect(renderedPixels).toBeTruthy();
+  // The taxonomy exceeds the minimum viewport. Scroll the launcher to prove
+  // lower groups remain reachable instead of being clipped after CronJobs.
+  await page.mouse.move(100, 300);
+  await page.mouse.wheel(0, 1000);
   // Let egui complete its final layout pass before pixel capture.
   await page.waitForTimeout(500);
   await expect(page).toHaveScreenshot('compact-workspace.png', {
@@ -60,5 +64,22 @@ test('matches the fixed 1280x800 shell composition', async ({ page }) => {
     animations: 'disabled',
     fullPage: true,
     path: 'docs/screenshots/issue-152-shell-1280x800.png',
+  });
+});
+
+test('resource taxonomy opens a named built-in from its group', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await connect(page);
+
+  // Expand Config on the real canvas. Eframe does not expose its AccessKit
+  // tree on web, so the hidden semantic companion drives the named resource.
+  await page.mouse.click(52, 538);
+  await page
+    .getByRole('button', { name: 'Secrets', exact: true })
+    .dispatchEvent('click');
+  await expect(page.getByRole('table', { name: 'Secrets' })).toBeVisible();
+  await expect(page).toHaveScreenshot('resource-taxonomy.png', {
+    animations: 'disabled',
+    fullPage: true,
   });
 });

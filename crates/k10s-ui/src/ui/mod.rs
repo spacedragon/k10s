@@ -94,6 +94,7 @@ pub struct UiShell<I> {
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_actions: Vec<PortForwardAction<I>>,
     resource_actions: Vec<ResourceAction>,
+    launcher: launcher::LauncherState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,7 @@ where
             requested_context: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
+            launcher: launcher::LauncherState::default(),
         }
     }
 
@@ -456,7 +458,13 @@ where
             .exact_size(theme::LAUNCHER_WIDTH)
             .frame(theme::launcher_frame())
             .show(ui, |ui| {
-                launcher::show(ui, &self.workspace, &mut queued);
+                launcher::show(
+                    ui,
+                    &self.workspace,
+                    response,
+                    &mut self.launcher,
+                    &mut queued,
+                );
             });
 
         let mut resources = std::mem::take(&mut self.resources);

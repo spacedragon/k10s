@@ -1288,6 +1288,14 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
             ]}"#,
         ),
         (
+            "/api/v1/services",
+            r#"{"kind":"ServiceList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[]}"#,
+        ),
+        (
+            "/api/v1/configmaps",
+            r#"{"kind":"ConfigMapList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[]}"#,
+        ),
+        (
             "/apis/apps/v1/deployments",
             r#"{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{"resourceVersion":"3"},"items":[
               {"metadata":{"name":"api","namespace":"default","uid":"uid-api","creationTimestamp":"2026-08-27T00:00:00Z"},"spec":{"replicas":2},"status":{"readyReplicas":2}}

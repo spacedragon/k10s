@@ -125,6 +125,9 @@ fn summarize(gvk: &Gvk, object: &kube::core::DynamicObject) -> String {
         ("", "v1", "Node") => typed(object, |n: &k8s_openapi::api::core::v1::Node| {
             node_summary(n)
         }),
+        ("", "v1", "Event") => typed(object, |event: &k8s_openapi::api::core::v1::Event| {
+            event.type_.clone().unwrap_or_default()
+        }),
         ("", "v1", "PersistentVolumeClaim") => typed(
             object,
             |p: &k8s_openapi::api::core::v1::PersistentVolumeClaim| {

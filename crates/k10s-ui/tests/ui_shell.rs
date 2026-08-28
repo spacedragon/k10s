@@ -518,6 +518,49 @@ fn workloads_group_expands_and_launcher_never_uses_checkbox_roles() {
 }
 
 #[test]
+fn launcher_filter_reveals_matches_inside_collapsed_groups() {
+    let mut harness = shell_harness();
+    assert!(harness.query_by_label("Secrets").is_none());
+    let filter = harness.get_by_role_and_label(Role::TextInput, "Filter resources…");
+    filter.click();
+    filter.type_text("secret");
+    harness.run_steps(4);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
+    assert!(harness.query_by_label("Pods").is_none());
+}
+
+#[test]
+fn full_taxonomy_entries_open_named_windows_and_track_instances() {
+    // Keep every expanded taxonomy row inside the test viewport so clicks
+    // exercise the controls rather than clipped accessibility nodes.
+    let mut harness = shell_harness_at(egui::vec2(1_280.0, 1_200.0));
+    for group in ["Config", "Storage", "Access"] {
+        harness.get_by_role_and_label(Role::Button, group).click();
+        harness.run_steps(2);
+    }
+    for label in [
+        "Events",
+        "Namespaces",
+        "Ingresses",
+        "Endpoints",
+        "NetworkPolicies",
+        "ConfigMaps",
+        "Secrets",
+        "PersistentVolumeClaims",
+        "PersistentVolumes",
+        "StorageClasses",
+        "ServiceAccounts",
+        "Roles",
+        "RoleBindings",
+    ] {
+        harness.get_by_role_and_label(Role::Button, label).click();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(Role::Window, label);
+        harness.get_by_label(&format!("1 open {label} window"));
+    }
+}
+
+#[test]
 fn workload_highlight_count_plus_and_close_track_workspace_instances() {
     let mut harness = shell_harness();
 
@@ -606,19 +649,19 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
         .z;
 
     harness
-        .get_by_role_and_label(Role::Button, "Storage")
+        .get_by_role_and_label(Role::Button, "Services")
         .click();
     harness.run_steps(4);
-    let storage_id = harness
+    let services_id = harness
         .state()
         .shell
         .workspace()
         .windows()
         .iter()
-        .find(|window| window.kind == WindowKind::Storage)
-        .expect("Storage opens")
+        .find(|window| window.kind == WindowKind::Services)
+        .expect("Services opens")
         .id;
-    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
+    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(services_id)));
 
     harness
         .get_by(|node| {

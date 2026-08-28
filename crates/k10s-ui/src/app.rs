@@ -2048,16 +2048,23 @@ impl K10sApp {
                         };
                         (descriptor.gvk.clone(), scope)
                     } else {
-                        let Some((group, version, kind)) = builtin_kind_gvk(*kind) else {
+                        let resource_kind = *kind;
+                        let Some((group, version, wire_kind)) = builtin_kind_gvk(resource_kind)
+                        else {
                             continue;
+                        };
+                        let scope = if resource_kind.namespaced() {
+                            SubscriptionScope::Namespaced(state.namespace_scope.clone())
+                        } else {
+                            SubscriptionScope::ClusterScoped
                         };
                         (
                             k10s_protocol::GroupVersionKind {
                                 group: group.to_owned(),
                                 version: version.to_owned(),
-                                kind: kind.to_owned(),
+                                kind: wire_kind.to_owned(),
                             },
-                            SubscriptionScope::Namespaced(state.namespace_scope.clone()),
+                            scope,
                         )
                     }
                 }
@@ -3280,6 +3287,8 @@ fn resource_delta_projection(
 /// picker-driven and have no single GVK.
 fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
     match kind {
+        WorkloadKind::Events => Some(("", "v1", "Event")),
+        WorkloadKind::Namespaces => Some(("", "v1", "Namespace")),
         WorkloadKind::Deployments => Some(("apps", "v1", "Deployment")),
         WorkloadKind::StatefulSets => Some(("apps", "v1", "StatefulSet")),
         WorkloadKind::DaemonSets => Some(("apps", "v1", "DaemonSet")),
@@ -3287,6 +3296,17 @@ fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &
         WorkloadKind::CronJobs => Some(("batch", "v1", "CronJob")),
         WorkloadKind::Pods => Some(("", "v1", "Pod")),
         WorkloadKind::CustomResources => None,
+        WorkloadKind::Ingresses => Some(("networking.k8s.io", "v1", "Ingress")),
+        WorkloadKind::Endpoints => Some(("", "v1", "Endpoints")),
+        WorkloadKind::NetworkPolicies => Some(("networking.k8s.io", "v1", "NetworkPolicy")),
+        WorkloadKind::ConfigMaps => Some(("", "v1", "ConfigMap")),
+        WorkloadKind::Secrets => Some(("", "v1", "Secret")),
+        WorkloadKind::PersistentVolumeClaims => Some(("", "v1", "PersistentVolumeClaim")),
+        WorkloadKind::PersistentVolumes => Some(("", "v1", "PersistentVolume")),
+        WorkloadKind::StorageClasses => Some(("storage.k8s.io", "v1", "StorageClass")),
+        WorkloadKind::ServiceAccounts => Some(("", "v1", "ServiceAccount")),
+        WorkloadKind::Roles => Some(("rbac.authorization.k8s.io", "v1", "Role")),
+        WorkloadKind::RoleBindings => Some(("rbac.authorization.k8s.io", "v1", "RoleBinding")),
     }
 }
 
