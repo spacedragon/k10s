@@ -10,6 +10,14 @@ use super::{ConnectionState, theme};
 pub(super) struct TopBarAction {
     pub(super) context_change: Option<String>,
     pub(super) refresh: bool,
+    pub(super) layout: Option<LayoutAction>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LayoutAction {
+    Tile,
+    Cascade,
+    Focus,
 }
 
 pub(super) fn show(
@@ -20,6 +28,7 @@ pub(super) fn show(
 ) -> TopBarAction {
     let mut context_change = None;
     let mut refresh = false;
+    let mut layout = None;
     let compact = ui.available_width() < 760.0;
 
     MenuBar::new().ui(ui, |ui| {
@@ -50,6 +59,20 @@ pub(super) fn show(
                     ui.close();
                 }
             });
+            ui.menu_button("Window", |ui| {
+                if ui.button("Tile windows").clicked() {
+                    layout = Some(LayoutAction::Tile);
+                    ui.close();
+                }
+                if ui.button("Cascade windows").clicked() {
+                    layout = Some(LayoutAction::Cascade);
+                    ui.close();
+                }
+                if ui.button("Focus active window").clicked() {
+                    layout = Some(LayoutAction::Focus);
+                    ui.close();
+                }
+            });
             ui.menu_button("Help", |ui| {
                 ui.hyperlink_to(
                     "Documentation",
@@ -67,13 +90,48 @@ pub(super) fn show(
             });
         });
 
+        ui.separator();
+        ui.push_id("k10s.top_bar.layout", |ui| {
+            for (label, action, help) in [
+                ("Tile", LayoutAction::Tile, "Tile all workspace windows"),
+                (
+                    if compact { "Stack" } else { "Cascade" },
+                    LayoutAction::Cascade,
+                    "Cascade workspace windows",
+                ),
+                (
+                    "Focus",
+                    LayoutAction::Focus,
+                    "Focus the active window or restore the layout",
+                ),
+            ] {
+                if ui.button(label).on_hover_text(help).clicked() {
+                    layout = Some(action);
+                }
+            }
+        });
+
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
             ui.push_id("k10s.top_bar.context", |ui| {
                 ui.add_enabled_ui(!contexts.is_empty(), |ui| {
                     let selected_text = selected_context.unwrap_or("No contexts");
-                    let response = ComboBox::new("selector", "Kubernetes context")
-                        .selected_text(selected_text)
-                        .width(if compact { 128.0 } else { 220.0 })
+                    let compact_text = compact.then(|| {
+                        let mut chars = selected_text.chars();
+                        let prefix = chars.by_ref().take(9).collect::<String>();
+                        if chars.next().is_some() {
+                            format!("{prefix}...")
+                        } else {
+                            prefix
+                        }
+                    });
+                    let combo = if compact {
+                        ComboBox::from_id_salt("selector")
+                    } else {
+                        ComboBox::new("selector", "Kubernetes context")
+                    };
+                    let response = combo
+                        .selected_text(compact_text.as_deref().unwrap_or(selected_text))
+                        .width(if compact { 96.0 } else { 180.0 })
                         .show_ui(ui, |ui| {
                             for context in contexts {
                                 if context.availability == ContextAvailability::Unavailable {
@@ -102,6 +160,9 @@ pub(super) fn show(
                             }
                         })
                         .response;
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::ComboBox, true, "Kubernetes context")
+                    });
                     response.on_hover_text(selected_text);
                 });
             });
@@ -123,10 +184,16 @@ pub(super) fn show(
                     .clicked();
             });
 
-            if !compact {
-                ui.separator();
-                ui.label(connection.label());
-            }
+            ui.separator();
+            let version = if compact {
+                format!("v{}", env!("CARGO_PKG_VERSION"))
+            } else {
+                format!("k10s v{}", env!("CARGO_PKG_VERSION"))
+            };
+            ui.label(version).on_hover_text("Application version");
+
+            ui.separator();
+            ui.label(connection.label());
             let color = match connection {
                 ConnectionState::Connecting => theme::CONNECTING,
                 ConnectionState::Connected => theme::HEALTHY,
@@ -146,5 +213,6 @@ pub(super) fn show(
     TopBarAction {
         context_change,
         refresh,
+        layout,
     }
 }

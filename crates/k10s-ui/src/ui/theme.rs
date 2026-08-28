@@ -126,6 +126,36 @@ pub(super) fn canvas_frame() -> Frame {
     Frame::NONE.fill(APP_BACKGROUND)
 }
 
+pub(super) fn window_frame(focused: bool) -> Frame {
+    let (stroke, shadow) = if focused {
+        (
+            Stroke::new(2.0, ACCENT),
+            Shadow {
+                offset: [0, 10],
+                blur: 28,
+                spread: 2,
+                color: Color32::from_black_alpha(190),
+            },
+        )
+    } else {
+        (
+            Stroke::new(1.0, BORDER),
+            Shadow {
+                offset: [0, 4],
+                blur: 12,
+                spread: 0,
+                color: Color32::from_black_alpha(105),
+            },
+        )
+    };
+    Frame::NONE
+        .fill(WINDOW_BACKGROUND)
+        .stroke(stroke)
+        .shadow(shadow)
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(Margin::symmetric(10, 8))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

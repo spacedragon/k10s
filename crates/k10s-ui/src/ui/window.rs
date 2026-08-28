@@ -160,7 +160,8 @@ where
         .default_open(!state.geometry.collapsed)
         .current_pos(position)
         .default_size(state.geometry.size)
-        .min_size(min_size);
+        .min_size(min_size)
+        .frame(super::theme::window_frame(focused));
     let layout_fits_canvas = state.geometry.position[0] + state.geometry.size[0] <= canvas.width()
         && state.geometry.position[1] + state.geometry.size[1] <= canvas.height();
     if state.layout_revision == 0 || layout_fits_canvas {

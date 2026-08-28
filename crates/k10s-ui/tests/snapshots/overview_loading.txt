@@ -9,7 +9,12 @@ Window
                 GenericContainer
                   Button label="File"
                   Button label="View"
+                  Button label="Window"
                   Button label="Help"
+                GenericContainer
+                  Button label="Tile"
+                  Button label="Cascade"
+                  Button label="Focus"
                 GenericContainer
                   GenericContainer
                     GenericContainer
@@ -20,6 +25,8 @@ Window
                           TextRun value="Kubernetes context"
                   GenericContainer
                     Button label="Refresh"
+                  Label value="k10s v0.1.4"
+                    TextRun value="k10s v0.1.4"
                   Label value="Connected"
                     TextRun value="Connected"
                   Label value="Connection status: Connected"
@@ -27,10 +34,8 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              Button label="Tile"
-              Button label="Cascade"
-              Button label="Focus"
-              Button label="Overview · ● Active"
+              GenericContainer
+                Button label="Overview · ● Active"
         GenericContainer
           GenericContainer
             GenericContainer

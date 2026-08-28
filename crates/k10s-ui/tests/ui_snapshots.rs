@@ -779,12 +779,12 @@ fn compact_taskbar_exposes_instance_status_and_keyboard_reachable_overflow() {
     // The compact overflow control participates in ordinary keyboard focus
     // traversal, while numbered accelerators still address registry entries.
     let overflow = harness.get_by(|node| {
-        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (3)")
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (2)")
     });
     overflow.focus();
     run_steps(&mut harness);
     let overflow = harness.get_by(|node| {
-        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (3)")
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (2)")
     });
     assert!(overflow.is_focused());
     harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num1);

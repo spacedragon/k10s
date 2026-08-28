@@ -164,9 +164,14 @@ fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: 
 fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
     let harness = shell_harness();
 
-    for menu in ["File", "View", "Help"] {
+    for menu in ["File", "View", "Window", "Help"] {
         harness.get_by_role_and_label(Role::Button, menu);
     }
+    for command in ["Tile", "Cascade", "Focus"] {
+        harness.get_by_role_and_label(Role::Button, command);
+    }
+    let version = format!("k10s v{}", env!("CARGO_PKG_VERSION"));
+    harness.get_by_label(&version);
     harness.get_by_label("Connected");
     harness.get_by_role_and_label(Role::Button, "Refresh");
     let context = harness.get_by_role_and_label(Role::ComboBox, "Kubernetes context");
@@ -202,7 +207,16 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
         let controls = [
             harness.get_by_role_and_label(Role::Button, "File").rect(),
             harness.get_by_role_and_label(Role::Button, "View").rect(),
+            harness.get_by_role_and_label(Role::Button, "Window").rect(),
             harness.get_by_role_and_label(Role::Button, "Help").rect(),
+            harness.get_by_role_and_label(Role::Button, "Tile").rect(),
+            harness
+                .get_by_role_and_label(
+                    Role::Button,
+                    if size.x < 760.0 { "Stack" } else { "Cascade" },
+                )
+                .rect(),
+            harness.get_by_role_and_label(Role::Button, "Focus").rect(),
             harness
                 .get_by_role_and_label(Role::Button, "Refresh")
                 .rect(),
@@ -416,13 +430,13 @@ fn compact_taskbar_overflow_remains_keyboard_reachable() {
     harness.run_steps(4);
 
     let overflow = harness.get_by(|node| {
-        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (6)")
     });
     overflow.focus();
     harness.run_steps(4);
 
     let overflow = harness.get_by(|node| {
-        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (6)")
     });
     assert!(overflow.is_focused());
     assert!(overflow.rect().right() <= 640.0);
@@ -441,6 +455,14 @@ fn top_bar_menus_expose_window_view_and_help_actions() {
     harness.get_by_role_and_label(Role::Button, "Minimize");
     harness.get_by_role_and_label(Role::Button, "Enter full screen");
 
+    harness
+        .get_by_role_and_label(Role::Button, "Window")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Tile windows");
+    harness.get_by_role_and_label(Role::Button, "Cascade windows");
+    harness.get_by_role_and_label(Role::Button, "Focus active window");
+
     harness.get_by_role_and_label(Role::Button, "Help").click();
     harness.run_steps(2);
     harness.get_by_label("Documentation");
@@ -457,6 +479,35 @@ fn top_bar_menus_expose_window_view_and_help_actions() {
         help_buttons
             .iter()
             .any(|label| label.starts_with("About k10s"))
+    );
+}
+
+#[test]
+fn global_layout_controls_are_keyboard_focusable_and_dispatch_workspace_commands() {
+    let mut harness = shell_harness();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness.run_steps(4);
+
+    let tile = harness.get_by_role_and_label(Role::Button, "Tile");
+    tile.focus();
+    harness.run_steps(2);
+    let tile = harness.get_by_role_and_label(Role::Button, "Tile");
+    assert!(tile.is_focused());
+    tile.click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .all(|window| window.layout_revision > 0),
+        "the top-bar command must use the real workspace layout path"
     );
 }
 

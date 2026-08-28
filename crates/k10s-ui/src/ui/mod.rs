@@ -433,6 +433,18 @@ where
                 let action = top_bar::show(ui, connection, contexts, selected.as_deref());
                 context_change = action.context_change;
                 refresh_requested |= action.refresh;
+                let canvas = ui.ctx().content_rect();
+                let canvas_size = [
+                    canvas.width() - theme::LAUNCHER_WIDTH,
+                    canvas.height() - theme::TOP_BAR_HEIGHT - theme::TASKBAR_HEIGHT,
+                ];
+                if let Some(layout) = action.layout {
+                    queued.push(match layout {
+                        top_bar::LayoutAction::Tile => WorkspaceCommand::Tile(canvas_size),
+                        top_bar::LayoutAction::Cascade => WorkspaceCommand::Cascade(canvas_size),
+                        top_bar::LayoutAction::Focus => WorkspaceCommand::ToggleFocus(canvas_size),
+                    });
+                }
             });
 
         egui::Panel::bottom("k10s.taskbar")
@@ -440,17 +452,7 @@ where
             .exact_size(theme::TASKBAR_HEIGHT)
             .frame(theme::taskbar_frame())
             .show(ui, |ui| {
-                let available = ui.ctx().content_rect();
-                taskbar::show(
-                    ui,
-                    &self.workspace,
-                    connection,
-                    [
-                        available.width(),
-                        available.height() - theme::TASKBAR_HEIGHT,
-                    ],
-                    &mut queued,
-                );
+                taskbar::show(ui, &self.workspace, connection, &mut queued);
             });
 
         egui::Panel::left("k10s.launcher")
