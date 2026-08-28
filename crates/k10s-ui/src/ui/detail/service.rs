@@ -108,9 +108,13 @@ pub(super) fn show<I>(
     // Read-only panel: only the guarded YAML entry point.
     if view.capabilities.can_edit_yaml {
         ui.horizontal(|ui| {
-            let edit = ui.button("Edit YAML");
+            let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
             edit.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit YAML".to_owned())
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    mutations_allowed,
+                    "Edit YAML".to_owned(),
+                )
             });
             if edit.clicked() {
                 queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));

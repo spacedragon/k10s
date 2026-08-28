@@ -213,11 +213,11 @@ where
             retry_in: "pending".into(),
             attempt: 1,
         });
-    if let Some(freshness) = feed
+    let effective_freshness = feed
         .window_freshness
         .get(&window_id)
-        .or(fallback_freshness.as_ref())
-    {
+        .or(fallback_freshness.as_ref());
+    if let Some(freshness) = effective_freshness {
         super::resource_window::show_window_freshness(ui, window_id, freshness, resource_actions);
     }
 
@@ -289,7 +289,7 @@ where
         });
         return false;
     };
-    if rows.is_empty() && !feed.window_freshness.contains_key(&window_id) {
+    if rows.is_empty() && effective_freshness.is_none() {
         super::resource_window::show_window_freshness(
             ui,
             window_id,
@@ -370,9 +370,7 @@ where
                     dialogs,
                     feed,
                     Some(&state.port_drafts),
-                    feed.window_freshness
-                        .get(&window_id)
-                        .is_none_or(super::WindowFreshness::mutations_allowed),
+                    effective_freshness.is_none_or(super::WindowFreshness::mutations_allowed),
                     resource_actions,
                     queued,
                 );

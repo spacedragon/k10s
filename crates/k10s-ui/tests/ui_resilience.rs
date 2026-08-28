@@ -476,14 +476,15 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
         .open_scale(window, identity.clone(), Some(2));
     harness.run_steps(2);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployment_window = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
-        window
+        deployment_window
             .get_by_role_and_label(Role::Button, "Scale workload")
             .accesskit_node()
             .is_disabled()
     );
-    window.get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
+    deployment_window
+        .get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Scale workload")
@@ -491,6 +492,20 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
             .accesskit_node()
             .is_disabled(),
         "an already-open dialog follows the owning window freshness"
+    );
+
+    // The connection-derived fallback is the effective freshness when the
+    // application has not supplied a window-local projection yet.
+    harness.state_mut().feed.window_freshness.remove(&window);
+    harness.state_mut().connection = ConnectionState::Failed;
+    harness.run_steps(2);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Deployments")
+            .get_by_role_and_label(Role::Button, "Scale workload")
+            .accesskit_node()
+            .is_disabled(),
+        "the disconnected fallback gates cached detail controls"
     );
 }
 

@@ -4,14 +4,20 @@
 //! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
     TargetPort, TransportProtocol,
 };
 use k10s_ui::{
-    ui::{ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell},
+    ui::{
+        ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
+        WindowFreshness,
+    },
     workspace::{WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
@@ -384,6 +390,37 @@ fn stale_connection_shows_the_banner() {
     harness
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_label("▲ Stale · last sync unknown · retry in pending · attempt 1");
+}
+
+#[test]
+fn stale_service_window_disables_its_yaml_launcher() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    harness.state_mut().feed.window_freshness.insert(
+        window,
+        WindowFreshness::Failed {
+            message: "watch ended".into(),
+        },
+    );
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Services")
+            .get_by_role_and_label(Role::Button, "Edit YAML")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 
 #[test]
