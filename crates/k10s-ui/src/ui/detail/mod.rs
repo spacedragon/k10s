@@ -115,41 +115,12 @@ pub(super) fn show<I>(
 ) where
     I: RowIdentity,
 {
-    // Services render through their dedicated read-only body; the generic
-    // workload path stays untouched for every other kind.
-    if is_service_gvk(&detail_identity_gvk(detail)) {
-        service::show(
-            ui,
-            window_id,
-            detail,
-            primary_state,
-            view,
-            gone,
-            yaml,
-            feed,
-            service_port_drafts,
-            mutations_allowed,
-            resource_actions,
-            queued,
-        );
-        return;
-    }
-
-    // A gone resource renders only its pinned identity header plus the
-    // gone message: no cached response may resurrect Scale/Delete/YAML or
-    // stream controls for an object the authoritative rows dropped.
-    if gone && let Some(identity) = detail.identity.as_row_identity() {
-        show_header(ui, identity, None);
-        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
-        return;
-    }
-
     let Some(identity) = detail.identity.as_row_identity() else {
         return;
     };
     ui.horizontal(|ui| {
         ui.heading(RichText::new("Details").strong());
-        show_header(ui, identity, view);
+        show_header(ui, identity, if gone { None } else { view });
         if integrated {
             if ui.button("Pop out ↗").clicked() {
                 queued.push(WorkspaceCommand::OpenDedicatedDetail(
@@ -211,6 +182,34 @@ pub(super) fn show<I>(
         {
             queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
         }
+    }
+
+    // A gone resource retains the common chrome but never resurrects stale
+    // body actions from a cached response.
+    if gone {
+        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
+        show_shortcut_footer(ui);
+        return;
+    }
+
+    // Services share the header, tabs, shortcuts, and pane actions above,
+    // then render their specialized read-only body.
+    if is_service_gvk(&detail_identity_gvk(detail)) {
+        service::show(
+            ui,
+            window_id,
+            detail,
+            primary_state,
+            view,
+            yaml,
+            feed,
+            service_port_drafts,
+            mutations_allowed,
+            resource_actions,
+            queued,
+        );
+        show_shortcut_footer(ui);
+        return;
     }
 
     let view = match primary_state {
@@ -343,6 +342,10 @@ pub(super) fn show<I>(
             );
         }
     }
+    show_shortcut_footer(ui);
+}
+
+fn show_shortcut_footer(ui: &mut egui::Ui) {
     ui.separator();
     ui.label(
         RichText::new(

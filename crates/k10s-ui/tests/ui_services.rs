@@ -307,6 +307,44 @@ fn network_launcher_group_offers_the_services_singleton() {
 }
 
 #[test]
+fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actions() {
+    let mut harness = harness();
+    let service = harness.state().feed.services.as_ref().unwrap()[0]
+        .identity
+        .clone();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let integrated = harness.get_by_role_and_label(Role::Window, "Services");
+    integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
+    integrated.get_by_role_and_label(Role::Button, "Maximize");
+    integrated.get_by_label(
+        "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(service));
+    harness.run_steps(4);
+    let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none()
+    );
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none()
+    );
+}
+
+#[test]
 fn list_columns_render_strictly_from_projections() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
