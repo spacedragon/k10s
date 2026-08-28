@@ -76,13 +76,8 @@ async fn delete_preflight_is_an_exact_uid_rv_server_dry_run() {
         response.propagation,
         k10s_protocol::DeletePropagation::Foreground
     );
-    let uri = server
-        .request_uris(DEPLOYMENT)
-        .into_iter()
-        .find(|uri| uri.contains("dryRun"))
-        .expect("delete preflight reaches the API server as dry-run");
-    assert!(uri.contains("dryRun=All"));
     let body = server.request_bodies(DEPLOYMENT).pop().unwrap();
+    assert!(body.contains("\"dryRun\":[\"All\"]"));
     assert!(body.contains("uid-web"));
     assert!(body.contains("42"));
 }
