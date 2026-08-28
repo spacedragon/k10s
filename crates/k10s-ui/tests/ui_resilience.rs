@@ -460,11 +460,20 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
         .click();
     harness.run_steps(2);
     let detail = deployment_detail("stale-api");
+    let identity = detail.identity.clone();
     harness
         .state_mut()
         .feed
         .details
-        .insert(detail.identity.clone(), detail);
+        .insert(identity.clone(), detail);
+    // These surfaces were opened while live in the regression that prompted
+    // this test. Injecting them directly verifies that a later window-local
+    // failure gates already-open state, not only its launch buttons.
+    harness
+        .state_mut()
+        .shell
+        .dialogs_mut()
+        .open_scale(window, identity.clone(), Some(2));
     harness.run_steps(2);
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
@@ -475,6 +484,14 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
             .is_disabled()
     );
     window.get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Apply scale")
+            .accesskit_node()
+            .is_disabled(),
+        "an already-open dialog follows the owning window freshness"
+    );
 }
 
 #[test]

@@ -27,6 +27,7 @@ pub(super) fn show<I>(
     yaml: &mut tools::YamlEditors,
     feed: &crate::ui::ResourceFeed,
     port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    mutations_allowed: bool,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -143,6 +144,7 @@ pub(super) fn show<I>(
                     yaml,
                     detail.identity.as_row_identity(),
                     Some(view.manifest.as_str()),
+                    mutations_allowed,
                     queued,
                 );
             }

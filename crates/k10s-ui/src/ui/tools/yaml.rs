@@ -381,6 +381,7 @@ pub(crate) fn show<I>(
     editors: &mut YamlEditors,
     identity: Option<&ResourceIdentity>,
     view_manifest: Option<&str>,
+    mutations_allowed: bool,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: crate::ui::resource_window::RowIdentity,
@@ -411,7 +412,7 @@ pub(crate) fn show<I>(
                     .show(ui, |ui| {
                         ui.add(egui::Label::new(RichText::new(manifest).monospace()).wrap());
                     });
-                let edit = ui.button("Edit YAML");
+                let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
                 edit.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
@@ -436,7 +437,10 @@ pub(crate) fn show<I>(
                     });
                 editor.set_buffer(buffer);
                 ui.horizontal(|ui| {
-                    if ui.button("Review changes").clicked() {
+                    if ui
+                        .add_enabled(mutations_allowed, egui::Button::new("Review changes"))
+                        .clicked()
+                    {
                         editor.review();
                     }
                     if ui.button("Discard").clicked() {
@@ -479,7 +483,7 @@ pub(crate) fn show<I>(
                             editor.acknowledge_disruption();
                         }
                     }
-                    let apply_enabled = editor.can_apply();
+                    let apply_enabled = mutations_allowed && editor.can_apply();
                     let apply = ui.add_enabled(apply_enabled, egui::Button::new("Apply"));
                     apply.widget_info(|| {
                         egui::WidgetInfo::labeled(
@@ -503,7 +507,10 @@ pub(crate) fn show<I>(
                             request,
                         });
                     }
-                    if ui.button("Validate").clicked() {
+                    if ui
+                        .add_enabled(mutations_allowed, egui::Button::new("Validate"))
+                        .clicked()
+                    {
                         queued_action = Some(YamlAction::Validate {
                             window: window_id,
                             context: editor.target().context.clone(),
@@ -519,6 +526,9 @@ pub(crate) fn show<I>(
                     }
                 });
             }
+        }
+        if !mutations_allowed {
+            ui.label("YAML validation and apply are disabled until this window is live");
         }
     }
     if let Some(action) = queued_action {

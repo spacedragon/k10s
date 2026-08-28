@@ -2142,6 +2142,16 @@ impl K10sApp {
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
+            if self
+                .window_freshness_overrides
+                .get(&window)
+                .is_some_and(|freshness| !freshness.mutations_allowed())
+            {
+                if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
+                    dialog.operation_failed("window is not live; retry the list before mutating");
+                }
+                continue;
+            }
             let command = match action {
                 DialogAction::SubmitScale {
                     target,
@@ -2237,6 +2247,21 @@ impl K10sApp {
                 self.reconcile_selected_resource_streams();
             }
             ResourceAction::RetryWindow(window) | ResourceAction::FullResyncWindow(window) => {
+                // A stale window may be the projection of a dead control
+                // transport rather than a watch-local failure. Route its
+                // retry through transport recovery and keep the cached rows
+                // until a replacement snapshot arrives.
+                if self.client.phase() != ClientPhase::Ready {
+                    let now_ms =
+                        u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    self.jitter_counter = self.jitter_counter.wrapping_add(1);
+                    let entropy =
+                        now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
+                    if let Err(error) = self.retry_now(now_ms, entropy) {
+                        self.terminal_failure(error.to_string());
+                    }
+                    return;
+                }
                 let Some(key) = self.window_subscriptions.get(&window).cloned() else {
                     return;
                 };
@@ -2249,8 +2274,14 @@ impl K10sApp {
                     })
                     .collect();
                 for affected_window in affected {
-                    self.window_freshness_overrides.remove(&affected_window);
-                    self.window_retained_rows.remove(&affected_window);
+                    self.window_freshness_overrides.insert(
+                        affected_window,
+                        WindowFreshness::StaleRetrying {
+                            last_sync_age: "cached".to_owned(),
+                            retry_in: "now".to_owned(),
+                            attempt: 1,
+                        },
+                    );
                 }
                 if let Some(subscription) = self.resource_subscriptions.remove(&key) {
                     let _ = self.client.unsubscribe(&subscription.live);
@@ -5147,6 +5178,27 @@ mod tests {
             resource_watches(&state).len(),
             3,
             "retry starts one replacement watch"
+        );
+
+        app.transient_loss(100, 250);
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod"
+        );
+        app.handle_resource_action(ResourceAction::RetryWindow(pods));
+        assert_eq!(
+            state.borrow().connect_count,
+            2,
+            "window retry during transport staleness starts transport recovery"
+        );
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod",
+            "cached rows remain visible until a replacement snapshot succeeds"
         );
     }
 

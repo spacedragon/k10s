@@ -469,8 +469,13 @@ where
             .retain(|id| self.workspace.window(id).is_some());
         let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
         self.dialogs.retain(|id| live_windows.contains(&id));
-        self.dialogs
-            .show(ui, connection == ConnectionState::Connected);
+        self.dialogs.show(ui, |window| {
+            connection == ConnectionState::Connected
+                && feed
+                    .window_freshness
+                    .get(&window)
+                    .is_none_or(resource_window::WindowFreshness::mutations_allowed)
+        });
 
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))

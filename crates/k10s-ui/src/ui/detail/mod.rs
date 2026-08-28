@@ -115,6 +115,7 @@ pub(super) fn show<I>(
             yaml,
             feed,
             service_port_drafts,
+            mutations_allowed,
             resource_actions,
             queued,
         );
@@ -266,6 +267,7 @@ pub(super) fn show<I>(
                     yaml,
                     detail.identity.as_row_identity(),
                     Some(view.manifest.as_str()),
+                    mutations_allowed,
                     queued,
                 );
             }
