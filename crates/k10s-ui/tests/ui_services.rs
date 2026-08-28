@@ -665,6 +665,10 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
 #[test]
 fn gone_selection_renders_no_longer_exists() {
     let mut harness = harness();
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
     open_via_launcher(&mut harness);
     harness
         .get_by_role_and_label(Role::Window, "Services")
@@ -675,9 +679,19 @@ fn gone_selection_renders_no_longer_exists() {
     // The authoritative watch drops the pinned row.
     harness.state_mut().feed.services = Some(Vec::new());
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Services")
-        .get_by_label("This resource no longer exists");
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("This resource no longer exists");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none(),
+        "a cached gone detail cannot be popped into a stale dedicated window"
+    );
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none()
+    );
 }
 
 #[test]

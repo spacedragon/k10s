@@ -121,7 +121,7 @@ pub(super) fn show<I>(
     ui.horizontal(|ui| {
         ui.heading(RichText::new("Details").strong());
         show_header(ui, identity, if gone { None } else { view });
-        if integrated {
+        if integrated && !gone {
             if ui.button("Pop out ↗").clicked() {
                 queued.push(WorkspaceCommand::OpenDedicatedDetail(
                     detail.identity.clone(),
