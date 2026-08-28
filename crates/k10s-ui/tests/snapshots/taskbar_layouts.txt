@@ -139,8 +139,13 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              Label value="Connection stale · showing last known rows"
-                TextRun value="Connection stale · showing last known rows"
+              Label value="▲ Stale · last sync unknown · retry in pending · attempt 1"
+                TextRun value="▲ Stale · last sync unknown · retry in pending · attempt 1"
+              Label value="Mutations disabled while this window is stale"
+                TextRun value="Mutations disabled while this window is stale"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 TextInput label="Search pods" value=""
                   TextRun value=""
@@ -174,8 +179,13 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              Label value="Connection stale · showing last known rows"
-                TextRun value="Connection stale · showing last known rows"
+              Label value="▲ Stale · last sync unknown · retry in pending · attempt 1"
+                TextRun value="▲ Stale · last sync unknown · retry in pending · attempt 1"
+              Label value="Mutations disabled while this window is stale"
+                TextRun value="Mutations disabled while this window is stale"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 TextInput label="Search pods" value=""
                   TextRun value=""
