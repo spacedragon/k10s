@@ -27,6 +27,25 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
+              GenericContainer
+                GenericContainer
+                  Label value="WINDOWS"
+                    TextRun value="WINDOWS"
+                  GenericContainer
+                    Button label="Overview window, focused"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Label value="◈"
+                TextRun value="◈"
+              GenericContainer
+                Label value="k10s"
+                  TextRun value="k10s"
+                Label value="KUBERNETES CONSOLE"
+                  TextRun value="KUBERNETES CONSOLE"
+            Label value="CLUSTER"
+              TextRun value="CLUSTER"
+            GenericContainer
               Button label="Overview"
             GenericContainer
               Button label="Nodes"

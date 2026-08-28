@@ -9,6 +9,7 @@ mod resource_table;
 mod resource_window;
 mod service_window;
 mod split;
+mod taskbar;
 mod theme;
 pub mod tools;
 mod top_bar;
@@ -412,40 +413,53 @@ where
         let mut refresh_requested = false;
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
+            .exact_size(theme::TOP_BAR_HEIGHT)
+            .frame(theme::top_bar_frame())
             .show(ui, |ui| {
                 let action = top_bar::show(ui, connection, contexts, selected.as_deref());
                 context_change = action.context_change;
                 refresh_requested |= action.refresh;
             });
 
+        egui::Panel::bottom("k10s.taskbar")
+            .resizable(false)
+            .exact_size(theme::TASKBAR_HEIGHT)
+            .frame(theme::taskbar_frame())
+            .show(ui, |ui| {
+                taskbar::show(ui, &self.workspace, &mut queued);
+            });
+
         egui::Panel::left("k10s.launcher")
             .resizable(false)
-            .exact_size(176.0)
+            .exact_size(theme::LAUNCHER_WIDTH)
+            .frame(theme::launcher_frame())
             .show(ui, |ui| {
                 launcher::show(ui, &self.workspace, &mut queued);
             });
 
         let mut resources = std::mem::take(&mut self.resources);
-        egui::CentralPanel::default().show(ui, |ui| {
-            let response =
-                response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
-            refresh_requested |= window::show_canvas(
-                ui,
-                &self.workspace,
-                &mut self.infrastructure,
-                &mut resources,
-                &mut self.yaml,
-                &mut self.streams,
-                &mut self.dialogs,
-                response,
-                load,
-                feed,
-                selected_namespace,
-                connection,
-                &mut self.resource_actions,
-                &mut queued,
-            );
-        });
+        egui::CentralPanel::default()
+            .frame(theme::canvas_frame())
+            .show(ui, |ui| {
+                let response = response
+                    .filter(|response| Some(response.context.as_str()) == selected.as_deref());
+                refresh_requested |= window::show_canvas(
+                    ui,
+                    &self.workspace,
+                    &mut self.infrastructure,
+                    &mut resources,
+                    &mut self.yaml,
+                    &mut self.streams,
+                    &mut self.dialogs,
+                    response,
+                    load,
+                    feed,
+                    selected_namespace,
+                    connection,
+                    &mut self.resource_actions,
+                    &mut queued,
+                );
+            });
         resources.retain(|id| self.workspace.window(id).is_some());
         self.resources = resources;
         self.yaml.retain(|id| self.workspace.window(id).is_some());

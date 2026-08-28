@@ -3,7 +3,7 @@
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use egui::{CollapsingHeader, WidgetInfo, WidgetType};
+use egui::{CollapsingHeader, RichText, WidgetInfo, WidgetType};
 
 use crate::workspace::{LauncherItem, WorkloadKind, WorkspaceCommand, WorkspaceState};
 
@@ -14,20 +14,41 @@ pub(super) fn show<I>(
 ) where
     I: Clone + Eq + Hash + Debug,
 {
-    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("◈")
+                .size(18.0)
+                .strong()
+                .color(super::theme::ACCENT),
+        );
+        ui.vertical(|ui| {
+            ui.label(RichText::new("k10s").size(16.0).strong());
+            ui.label(
+                RichText::new("KUBERNETES CONSOLE")
+                    .small()
+                    .color(super::theme::MUTED_TEXT),
+            );
+        });
+    });
+    ui.add_space(5.0);
+    ui.separator();
+    ui.label(
+        RichText::new("CLUSTER")
+            .small()
+            .color(super::theme::MUTED_TEXT),
+    );
     singleton(ui, workspace, queued, LauncherItem::Overview, "Overview");
     singleton(ui, workspace, queued, LauncherItem::Nodes, "Nodes");
     singleton(ui, workspace, queued, LauncherItem::Storage, "Storage");
 
-    CollapsingHeader::new("Network")
+    ui.add_space(3.0);
+    CollapsingHeader::new(RichText::new("Network").strong())
         .id_salt("k10s.launcher.network")
         .default_open(true)
         .show(ui, |ui| {
             singleton(ui, workspace, queued, LauncherItem::Services, "Services");
         });
-    ui.separator();
-
-    CollapsingHeader::new("Workloads")
+    CollapsingHeader::new(RichText::new("Workloads").strong())
         .id_salt("k10s.launcher.workloads")
         .default_open(true)
         .show(ui, |ui| {
