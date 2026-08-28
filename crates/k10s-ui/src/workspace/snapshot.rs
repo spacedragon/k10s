@@ -456,6 +456,7 @@ where
             yaml_owner: std::collections::HashMap::new(),
             pending: None,
             layout_checkpoint: None,
+            next_layout_revision: 0,
         };
 
         for window in &restorable {

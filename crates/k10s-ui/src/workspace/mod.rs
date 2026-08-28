@@ -164,6 +164,8 @@ pub struct WorkspaceState<I> {
     yaml_owner: HashMap<I, WindowId>,
     pending: Option<PendingNavigation<I>>,
     layout_checkpoint: Option<Vec<(WindowId, WindowGeom)>>,
+    /// Monotonic live-render token; intentionally not persisted.
+    next_layout_revision: u64,
 }
 
 impl<I> Default for WorkspaceState<I>
@@ -190,6 +192,7 @@ where
             yaml_owner: HashMap::new(),
             pending: None,
             layout_checkpoint: None,
+            next_layout_revision: 0,
         };
         state.open_singleton(WindowKind::Overview);
         state
@@ -290,7 +293,12 @@ where
             // it back while a navigation guard is pending; mismatched or
             // malformed snapshots leave the current state untouched.
             WorkspaceCommand::RestoreSnapshot(snapshot) => {
-                if let Some(restored) = Self::from_snapshot(&snapshot) {
+                if let Some(mut restored) = Self::from_snapshot(&snapshot) {
+                    let revision = self.next_layout_revision.wrapping_add(1);
+                    restored.next_layout_revision = revision;
+                    for window in &mut restored.windows {
+                        window.layout_revision = revision;
+                    }
                     *self = restored;
                 }
                 Vec::new()
@@ -337,10 +345,12 @@ where
                     .iter()
                     .max_by_key(|window| window.z)
                     .map(|w| w.id)
-                    && let Some(window) = self.window_mut(active)
                 {
-                    window.geometry = WindowGeom::focused(size, window.kind.min_size());
-                    window.layout_revision = window.layout_revision.wrapping_add(1);
+                    let revision = self.bump_layout_revision();
+                    if let Some(window) = self.window_mut(active) {
+                        window.geometry = WindowGeom::focused(size, window.kind.min_size());
+                        window.layout_revision = revision;
+                    }
                 }
                 Vec::new()
             }
@@ -528,14 +538,20 @@ where
         );
     }
 
+    fn bump_layout_revision(&mut self) -> u64 {
+        self.next_layout_revision = self.next_layout_revision.wrapping_add(1);
+        self.next_layout_revision
+    }
+
     fn restore_layout(&mut self) -> bool {
         let Some(saved) = self.layout_checkpoint.take() else {
             return false;
         };
+        let revision = self.bump_layout_revision();
         for (id, geometry) in saved {
             if let Some(window) = self.window_mut(id) {
                 window.geometry = geometry;
-                window.layout_revision = window.layout_revision.wrapping_add(1);
+                window.layout_revision = revision;
             }
         }
         true
@@ -547,9 +563,10 @@ where
         }
         self.save_layout();
         let count = self.windows.len();
+        let revision = self.bump_layout_revision();
         for (index, window) in self.windows.iter_mut().enumerate() {
             window.geometry = geometry(window, index, count);
-            window.layout_revision = window.layout_revision.wrapping_add(1);
+            window.layout_revision = revision;
         }
     }
 
@@ -568,9 +585,10 @@ where
                     minimum[1].max(window_minimum[1]),
                 ]
             });
+        let revision = self.bump_layout_revision();
         for (index, window) in self.windows.iter_mut().enumerate() {
             window.geometry = WindowGeom::tiled(index, count, size, minimum);
-            window.layout_revision = window.layout_revision.wrapping_add(1);
+            window.layout_revision = revision;
         }
     }
 

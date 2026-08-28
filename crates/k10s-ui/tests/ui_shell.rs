@@ -353,6 +353,56 @@ fn layout_commands_apply_to_already_rendered_window_rectangles() {
 }
 
 #[test]
+fn live_snapshot_restore_reapplies_geometry_across_context_like_a_b_a_cycle() {
+    let mut harness = shell_harness();
+    harness.run_steps(4);
+
+    let mut layout_a = harness.state().shell.workspace().snapshot();
+    layout_a.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [12.0, 18.0],
+        size: [720.0, 500.0],
+        collapsed: false,
+    };
+    let mut layout_b = layout_a.clone();
+    layout_b.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [140.0, 96.0],
+        size: [800.0, 560.0],
+        collapsed: false,
+    };
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    let rect_a = rendered_window(&harness, "Overview");
+    let canvas_origin = rect_a.min - egui::vec2(12.0, 18.0);
+    assert_rect_matches_geometry(rect_a, canvas_origin, layout_a.windows[0].geometry);
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_b.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_b.windows[0].geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_a.windows[0].geometry,
+    );
+}
+
+#[test]
 fn compact_taskbar_overflow_remains_keyboard_reachable() {
     let mut harness = shell_harness_at(egui::vec2(640.0, 420.0));
     for kind in WorkloadKind::ALL {
