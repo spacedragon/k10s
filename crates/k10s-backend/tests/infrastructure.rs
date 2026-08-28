@@ -23,6 +23,8 @@ async fn real_adapter_projects_core_nodes_instead_of_rejecting_infrastructure() 
     let server = RecordedApiServer::standard();
     for (path, kind, api_version) in [
         ("/api/v1/pods", "PodList", "v1"),
+        ("/api/v1/services", "ServiceList", "v1"),
+        ("/api/v1/configmaps", "ConfigMapList", "v1"),
         ("/apis/apps/v1/deployments", "DeploymentList", "apps/v1"),
         ("/apis/apps/v1/statefulsets", "StatefulSetList", "apps/v1"),
         ("/apis/apps/v1/daemonsets", "DaemonSetList", "apps/v1"),
