@@ -1,5 +1,6 @@
 //! The fixed application shell rendered around the command-driven workspace.
 
+mod command_palette;
 mod detail;
 pub mod dialogs;
 mod infrastructure;
@@ -85,6 +86,7 @@ pub struct UiShell<I> {
     yaml: tools::YamlEditors,
     streams: tools::StreamStores,
     dialogs: dialogs::OperationDialogs,
+    command_palette: command_palette::CommandPalette,
     /// A requested context switch awaiting backend validation; drained by
     /// the application layer, which sends the request and commits locally
     /// only after the response succeeds. The origin distinguishes a fresh
@@ -135,6 +137,7 @@ where
             yaml: tools::YamlEditors::default(),
             streams: tools::StreamStores::default(),
             dialogs: dialogs::OperationDialogs::default(),
+            command_palette: command_palette::CommandPalette::default(),
             requested_context: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
@@ -144,6 +147,11 @@ where
     /// Inspect the persistent workspace rendered by this shell.
     pub fn workspace(&self) -> &WorkspaceState<I> {
         &self.workspace
+    }
+
+    /// Whether palette search currently needs its cross-resource projections.
+    pub(crate) fn command_palette_open(&self) -> bool {
+        self.command_palette.is_open()
     }
 
     /// Apply a command initiated outside the shell's immediate-mode frame,
@@ -383,6 +391,7 @@ where
         load: InfrastructureLoad,
     ) -> bool {
         theme::apply(ui.ctx());
+        self.command_palette.handle_global_shortcut(ui.ctx());
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
         let selected = selected_context
@@ -477,6 +486,10 @@ where
                     .is_none_or(resource_window::WindowFreshness::mutations_allowed)
         });
 
+        if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {
+            refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
+        }
+
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))
             .or_else(|| {
@@ -530,5 +543,157 @@ where
             ui.ctx().request_repaint();
         }
         refresh_requested
+    }
+
+    fn activate_palette_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: command_palette::PaletteAction,
+        new_window: bool,
+    ) -> bool {
+        use crate::workspace::{NamespaceScope, WindowContent, WindowKind};
+        use command_palette::PaletteAction;
+
+        let mut commands = Vec::new();
+        match action {
+            PaletteAction::Refresh => return true,
+            PaletteAction::Context(to) => {
+                self.requested_context = Some((to, ContextRequestOrigin::Explicit));
+                return false;
+            }
+            PaletteAction::Namespace(namespace) => {
+                let active = self
+                    .workspace
+                    .windows()
+                    .iter()
+                    .filter(|window| {
+                        matches!(
+                            window.content,
+                            WindowContent::Resource(_) | WindowContent::Services(_)
+                        )
+                    })
+                    .max_by_key(|window| window.z)
+                    .map(|window| window.id);
+                if let Some(window) = active {
+                    commands.push(WorkspaceCommand::SetNamespaceScope(
+                        window,
+                        NamespaceScope::Namespace(namespace),
+                    ));
+                } else {
+                    let events = self.workspace.apply(WorkspaceCommand::ActivateLauncherItem(
+                        crate::workspace::LauncherItem::Workload(
+                            crate::workspace::WorkloadKind::Pods,
+                        ),
+                    ));
+                    if let Some(id) = events.iter().find_map(|event| match event {
+                        WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(*id),
+                        _ => None,
+                    }) {
+                        self.workspace.apply(WorkspaceCommand::SetNamespaceScope(
+                            id,
+                            NamespaceScope::Namespace(namespace),
+                        ));
+                        ctx.move_to_top(window::layer_id(id));
+                    }
+                    return false;
+                }
+            }
+            PaletteAction::List(item) => {
+                commands.push(if new_window {
+                    WorkspaceCommand::AddListInstance(item)
+                } else {
+                    WorkspaceCommand::ActivateLauncherItem(item)
+                });
+            }
+            PaletteAction::Resource(identity, jump) => {
+                let workspace_identity = I::from_row_identity(&identity);
+                let tab = command_palette::tab_for_jump(jump);
+                if new_window {
+                    let events = self
+                        .workspace
+                        .apply(WorkspaceCommand::OpenDedicatedDetail(workspace_identity));
+                    if let Some(id) = events.iter().find_map(|event| match event {
+                        WorkspaceEvent::Opened(id) => Some(*id),
+                        _ => None,
+                    }) {
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                        ctx.move_to_top(window::layer_id(id));
+                    }
+                    return false;
+                }
+
+                let target_kind = match identity.gvk.kind.as_str() {
+                    "Pod" => Some(WindowKind::Workload(crate::workspace::WorkloadKind::Pods)),
+                    "Deployment" => Some(WindowKind::Workload(
+                        crate::workspace::WorkloadKind::Deployments,
+                    )),
+                    "Service" => Some(WindowKind::Services),
+                    _ => None,
+                };
+                let existing = target_kind.and_then(|kind| {
+                    self.workspace
+                        .windows()
+                        .iter()
+                        .filter(|window| window.kind == kind)
+                        .max_by_key(|window| window.z)
+                        .map(|window| window.id)
+                });
+                let window_id = if let Some(id) = existing {
+                    self.workspace.apply(WorkspaceCommand::FocusWindow(id));
+                    Some(id)
+                } else if let Some(kind) = target_kind {
+                    let item = match kind {
+                        WindowKind::Workload(kind) => {
+                            crate::workspace::LauncherItem::Workload(kind)
+                        }
+                        WindowKind::Services => crate::workspace::LauncherItem::Services,
+                        _ => unreachable!(),
+                    };
+                    self.workspace
+                        .apply(WorkspaceCommand::ActivateLauncherItem(item))
+                        .iter()
+                        .find_map(|event| match event {
+                            WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(*id),
+                            _ => None,
+                        })
+                } else {
+                    self.workspace
+                        .apply(WorkspaceCommand::OpenDedicatedDetail(
+                            workspace_identity.clone(),
+                        ))
+                        .iter()
+                        .find_map(|event| match event {
+                            WorkspaceEvent::Opened(id) => Some(*id),
+                            _ => None,
+                        })
+                };
+                if let Some(id) = window_id {
+                    if matches!(
+                        self.workspace.window(id).map(|window| window.kind),
+                        Some(WindowKind::Detail)
+                    ) {
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                    } else {
+                        self.workspace
+                            .apply(WorkspaceCommand::SelectRow(id, workspace_identity));
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                    }
+                    ctx.move_to_top(window::layer_id(id));
+                }
+                return false;
+            }
+        }
+
+        for command in commands {
+            for event in self.workspace.apply(command) {
+                if let WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) = event {
+                    ctx.move_to_top(window::layer_id(id));
+                }
+            }
+        }
+        false
     }
 }

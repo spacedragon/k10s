@@ -2154,6 +2154,16 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             &[("app", "db")],
         )
     }));
+    // Design 08 command-palette fixture: searchable by name, status, and
+    // restart count while remaining an ordinary authoritative fake row.
+    records.push(record(seed(
+        5_250,
+        "1/2 ready · CrashLoopBackOff · 7 restarts",
+        Gvk::core("v1", "Pod"),
+        Some("payments"),
+        "worker-7f498f8b6c-x2psq",
+        &[("app", "worker")],
+    )));
     records
 }
 

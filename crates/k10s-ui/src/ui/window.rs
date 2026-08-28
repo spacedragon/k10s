@@ -41,6 +41,7 @@ where
             command,
             WorkspaceCommand::ActivateLauncherItem(_)
                 | WorkspaceCommand::AddWorkloadInstance(_)
+                | WorkspaceCommand::AddListInstance(_)
                 | WorkspaceCommand::FocusWindow(_)
         )
     });

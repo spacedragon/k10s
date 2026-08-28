@@ -25,7 +25,8 @@ use crate::ui::{
     SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
-    WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
+    NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
+    WorkspaceState,
 };
 
 /// Bounded production control-event inbox sized to absorb one large
@@ -1811,6 +1812,8 @@ impl K10sApp {
     fn build_resource_feed(&self) -> ResourceFeed {
         let mut window_lists = std::collections::HashMap::new();
         let mut window_services = std::collections::HashMap::new();
+        let mut lists = std::collections::HashMap::new();
+        let mut services = None;
         for (window, key) in &self.window_subscriptions {
             let rows = self
                 .resource_subscriptions
@@ -1825,6 +1828,28 @@ impl K10sApp {
                 } else {
                     window_lists.insert(*window, rows);
                 }
+            }
+        }
+        for (key, subscription) in &self.resource_subscriptions {
+            if !matches!(
+                key.scope,
+                SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces)
+            ) {
+                continue;
+            }
+            let Some(state) = self.client.resource_list(subscription.live.id()) else {
+                continue;
+            };
+            let rows = state.rows().cloned().collect::<Vec<_>>();
+            match key.gvk.kind.as_str() {
+                "Pod" => {
+                    lists.insert(WorkloadKind::Pods, rows);
+                }
+                "Deployment" => {
+                    lists.insert(WorkloadKind::Deployments, rows);
+                }
+                "Service" => services = Some(rows),
+                _ => {}
             }
         }
         let namespace_catalog = match (&self.namespace_catalog, &self.namespace_subscription) {
@@ -1871,9 +1896,9 @@ impl K10sApp {
                 )
                 .collect(),
             namespace_catalog,
-            lists: std::collections::HashMap::new(),
+            lists,
             window_lists,
-            services: None,
+            services,
             window_services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
@@ -1915,6 +1940,27 @@ impl K10sApp {
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
         let mut namespace_demanded = false;
+        if self.shell.command_palette_open() {
+            for (group, version, kind) in [
+                ("", "v1", "Pod"),
+                ("apps", "v1", "Deployment"),
+                ("", "v1", "Service"),
+            ] {
+                desired
+                    .entry(SubscriptionKey {
+                        context: context.to_owned(),
+                        gvk: k10s_protocol::GroupVersionKind {
+                            group: group.to_owned(),
+                            version: version.to_owned(),
+                            kind: kind.to_owned(),
+                        },
+                        protocol_namespace: None,
+                        scope: SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces),
+                    })
+                    .or_default();
+            }
+            namespace_demanded = true;
+        }
         for window in self.shell.workspace().windows() {
             let (gvk, scope) = match (&window.kind, &window.content) {
                 (WindowKind::Services, WindowContent::Services(state)) => (

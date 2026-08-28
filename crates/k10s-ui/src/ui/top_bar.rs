@@ -56,6 +56,7 @@ pub(super) fn show(
                     "https://github.com/spacedragon/k10s#readme",
                 );
                 ui.menu_button("Keyboard shortcuts", |ui| {
+                    ui.label("Command palette: : or Ctrl+K");
                     ui.label("Refresh resources: Ctrl+R");
                     ui.label("Close window: use the window close button");
                 });
