@@ -341,6 +341,12 @@ impl DeleteDialog {
     /// Mark the displayed target data stale and revoke submission authority.
     pub fn mark_stale(&mut self, reason: impl Into<String>) {
         self.stale_reason = Some(reason.into());
+        self.preflight = DestructivePreflight::Pending;
+    }
+
+    /// Clear a stale-data block, returning whether a fresh preflight is needed.
+    pub fn clear_stale(&mut self) -> bool {
+        self.stale_reason.take().is_some()
     }
 
     /// Equivalent command for the exact target and selected propagation.
@@ -350,7 +356,7 @@ impl DeleteDialog {
             .target
             .namespace
             .as_ref()
-            .map(|namespace| format!(" --namespace {namespace}"))
+            .map(|namespace| format!(" --namespace {}", shell_quote(namespace)))
             .unwrap_or_default();
         let propagation = match self.propagation {
             DeletePropagation::Background => "Background",
@@ -359,9 +365,9 @@ impl DeleteDialog {
         };
         format!(
             "kubectl --context {} delete {} {}{} --cascade={} --wait=false",
-            self.target.context,
-            self.target.gvk.kind.to_ascii_lowercase(),
-            self.target.name,
+            shell_quote(&self.target.context),
+            shell_quote(&self.target.gvk.kind.to_ascii_lowercase()),
+            shell_quote(&self.target.name),
             namespace,
             propagation.to_ascii_lowercase()
         )
@@ -449,6 +455,22 @@ impl DeleteDialog {
     #[must_use]
     pub fn submitted_operation(&self) -> Option<OperationId> {
         self.submitted_operation.clone()
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+                )
+        })
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 }
 
@@ -637,30 +659,37 @@ impl OperationDialogs {
     }
 
     /// Render every open dialog. Queues actions; never blocks.
-    pub fn show(&mut self, ui: &mut egui::Ui, mut mutations_allowed: impl FnMut(WindowId) -> bool) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        connected: bool,
+        mut mutations_allowed: impl FnMut(WindowId) -> bool,
+    ) {
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
         let mut refresh = Vec::new();
         for window in windows {
-            let connected = mutations_allowed(window);
+            let mutations_allowed = mutations_allowed(window);
             let Some(dialog) = self.windows.get_mut(&window) else {
                 continue;
             };
             match dialog {
                 ActiveDialog::Scale(scale) => {
-                    if connected {
+                    if connected && mutations_allowed {
                         scale.reconnected()
                     } else {
                         scale.connection_lost()
                     }
                 }
                 ActiveDialog::Delete(delete) => {
-                    if connected {
-                        if !delete.connected {
+                    if !connected {
+                        delete.connection_lost()
+                    } else if mutations_allowed {
+                        if !delete.connected || delete.clear_stale() {
                             refresh.push((window, delete.target.clone(), delete.propagation));
                         }
                         delete.reconnected()
                     } else {
-                        delete.connection_lost()
+                        delete.mark_stale("stale data - refresh the resource before deleting")
                     }
                 }
             }

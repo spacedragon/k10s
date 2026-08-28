@@ -228,6 +228,14 @@ fn destructive_contract_exposes_exact_scope_preflight_and_kubectl_command() {
         "kubectl --context dev-local delete deployment api-server --namespace default --cascade=background --wait=false"
     );
 
+    let mut quoted_target = deployment("api'server; rm -rf /");
+    quoted_target.context = "prod west; echo unsafe".to_owned();
+    quoted_target.namespace = Some("team's namespace".to_owned());
+    assert_eq!(
+        DeleteDialog::for_target(quoted_target).kubectl_command(),
+        "kubectl --context 'prod west; echo unsafe' delete deployment 'api'\"'\"'server; rm -rf /' --namespace 'team'\"'\"'s namespace' --cascade=background --wait=false"
+    );
+
     dialog.set_confirmation("api-server");
     for fixture in [
         DestructivePreflight::fake_forbidden(),
@@ -257,7 +265,7 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .build_ui_state(
-            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, |_| true),
+            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
             dialogs,
         );
     assert!(matches!(
@@ -294,6 +302,44 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
     dialog.get_by_label("WARNING — Destructive action");
     dialog.get_by_label_contains("[PASS] Server dry-run");
     dialog.get_by_role_and_label(Role::Button, "Copy command");
+}
+
+#[test]
+fn connected_stale_window_reports_stale_and_refreshes_before_delete() {
+    let window = k10s_ui::workspace::WindowId(18);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    dialogs.drain_actions();
+    if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window) {
+        delete.set_confirmation("api-server");
+        delete.set_preflight(DestructivePreflight::fake_success());
+    }
+
+    let mut harness = Harness::builder().build_ui_state(
+        move |ui, state: &mut (OperationDialogs, bool)| {
+            let mutations_allowed = state.1;
+            state.0.show(ui, true, |_| mutations_allowed);
+        },
+        (dialogs, false),
+    );
+    harness.run();
+    let state = harness.state_mut();
+    let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = state.0.active_mut(window)
+    else {
+        panic!("delete dialog must remain open");
+    };
+    assert_eq!(
+        delete.disabled_reason(),
+        Some("stale data - refresh the resource before deleting")
+    );
+    assert!(!delete.can_submit());
+
+    state.1 = true;
+    harness.run();
+    assert!(matches!(
+        harness.state_mut().0.drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
 }
 
 // ---------------------------------------------------------------------------

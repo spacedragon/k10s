@@ -478,13 +478,12 @@ where
             .retain(|id| self.workspace.window(id).is_some());
         let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
         self.dialogs.retain(|id| live_windows.contains(&id));
-        self.dialogs.show(ui, |window| {
-            connection == ConnectionState::Connected
-                && feed
-                    .window_freshness
+        self.dialogs
+            .show(ui, connection == ConnectionState::Connected, |window| {
+                feed.window_freshness
                     .get(&window)
                     .is_none_or(resource_window::WindowFreshness::mutations_allowed)
-        });
+            });
 
         if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {
             refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
