@@ -1,6 +1,6 @@
 //! Standard egui windows placed on the free canvas to the launcher's right.
 
-use egui::{Id, LayerId, Order, Pos2, Rect, Vec2};
+use egui::{Id, LayerId, Order, Pos2, Rect, Stroke, StrokeKind, Vec2, pos2};
 
 use crate::workspace::{
     Window, WindowContent, WindowGeom, WindowId, WindowKind, WorkspaceCommand, WorkspaceState,
@@ -35,6 +35,7 @@ where
     I: resource_window::RowIdentity,
 {
     let canvas = ui.available_rect_before_wrap();
+    paint_canvas(ui, canvas);
     let navigation_queued = queued.iter().any(|command| {
         matches!(
             command,
@@ -45,6 +46,7 @@ where
     });
     let mut windows: Vec<_> = workspace.windows().iter().collect();
     windows.sort_by_key(|window| window.z);
+    let focused = windows.last().map(|window| window.id);
 
     let mut refresh_requested = false;
     for window in windows {
@@ -52,6 +54,7 @@ where
             ui,
             canvas,
             window,
+            focused == Some(window.id),
             infrastructure,
             resources,
             yaml,
@@ -84,11 +87,28 @@ where
     refresh_requested
 }
 
+fn paint_canvas(ui: &egui::Ui, canvas: Rect) {
+    let spacing = 20.0;
+    let color = super::theme::BORDER.gamma_multiply(0.42);
+    let start_x = (canvas.left() / spacing).ceil() * spacing;
+    let start_y = (canvas.top() / spacing).ceil() * spacing;
+    let mut y = start_y;
+    while y <= canvas.bottom() {
+        let mut x = start_x;
+        while x <= canvas.right() {
+            ui.painter().circle_filled(pos2(x, y), 0.75, color);
+            x += spacing;
+        }
+        y += spacing;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn show_window<I>(
     ui: &mut egui::Ui,
     canvas: Rect,
     state: &Window<I>,
+    focused: bool,
     infrastructure: &mut InfrastructureUiState,
     resources: &mut resource_window::ResourceUiState,
     yaml: &mut super::tools::YamlEditors,
@@ -246,6 +266,28 @@ where
     };
     let collapsed = response.inner.is_none();
     let rect = response.response.rect;
+    let focus_stroke = if focused {
+        Stroke::new(2.0, super::theme::ACCENT)
+    } else {
+        Stroke::new(1.0, super::theme::BORDER)
+    };
+    ui.ctx().layer_painter(layer_id(state.id)).rect_stroke(
+        rect,
+        4.0,
+        focus_stroke,
+        StrokeKind::Inside,
+    );
+    if focused {
+        let title_rule = Rect::from_min_max(
+            pos2(rect.left() + 8.0, rect.top() + 24.0),
+            pos2(rect.right() - 8.0, rect.top() + 26.0),
+        );
+        ui.ctx().layer_painter(layer_id(state.id)).rect_filled(
+            title_rule,
+            1.0,
+            super::theme::ACCENT,
+        );
+    }
     let geometry = WindowGeom {
         position: [rect.min.x - canvas.min.x, rect.min.y - canvas.min.y],
         size: if collapsed {

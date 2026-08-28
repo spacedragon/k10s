@@ -86,8 +86,12 @@ fn context(name: &str, is_current: bool) -> Context {
 }
 
 fn shell_harness() -> Harness<'static, ShellFixture> {
+    shell_harness_at(egui::vec2(1_280.0, 800.0))
+}
+
+fn shell_harness_at(size: egui::Vec2) -> Harness<'static, ShellFixture> {
     Harness::builder()
-        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(render_shell, ShellFixture::default())
 }
@@ -164,6 +168,64 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
         "Overview is the only initial workspace window"
     );
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    harness.get_by_role_and_label(Role::Button, "Overview window, focused");
+}
+
+#[test]
+fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
+    for size in [
+        egui::vec2(640.0, 420.0),
+        egui::vec2(1_280.0, 800.0),
+        egui::vec2(1_440.0, 900.0),
+    ] {
+        let harness = shell_harness_at(size);
+        let controls = [
+            harness.get_by_role_and_label(Role::Button, "File").rect(),
+            harness.get_by_role_and_label(Role::Button, "View").rect(),
+            harness.get_by_role_and_label(Role::Button, "Help").rect(),
+            harness
+                .get_by_role_and_label(Role::Button, "Refresh")
+                .rect(),
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+                .rect(),
+        ];
+        let top = controls
+            .iter()
+            .map(egui::Rect::top)
+            .fold(f32::INFINITY, f32::min);
+        for (index, left) in controls.iter().enumerate() {
+            assert!(
+                left.top() >= top && left.bottom() <= top + 29.0,
+                "{size:?}: {left:?}"
+            );
+            for right in controls.iter().skip(index + 1) {
+                assert!(
+                    !left.intersects(*right),
+                    "top-bar controls overlap at {size:?}: {left:?} and {right:?}"
+                );
+            }
+        }
+
+        let launcher = harness
+            .get_by_role_and_label(Role::Button, "Overview")
+            .rect();
+        let window = harness
+            .get_by_role_and_label(Role::Window, "Overview")
+            .rect();
+        let launcher_panel_left = launcher.left() - 9.0;
+        assert!(
+            window.left() - launcher_panel_left >= 196.0,
+            "the window canvas must begin beyond the 196 px launcher at {size:?}: launcher={launcher:?}, window={window:?}"
+        );
+        let task = harness
+            .get_by_role_and_label(Role::Button, "Overview window, focused")
+            .rect();
+        assert!(
+            task.top() >= size.y - 37.0 && task.bottom() <= size.y,
+            "the taskbar must occupy the bottom 29 px at {size:?}: {task:?}"
+        );
+    }
 }
 
 #[test]
