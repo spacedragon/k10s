@@ -696,7 +696,7 @@ pub(super) fn show<I>(
     if let Some(identity) = state.selection.clone()
         && ui.input(|input| input.key_pressed(egui::Key::Enter))
     {
-        if ui.input(|input| input.modifiers.any()) {
+        if ui.input(|input| input.modifiers.any()) && !gone {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
         } else if !state.detail_visible {
             queued.push(WorkspaceCommand::ToggleDetailPane(window_id));

@@ -692,6 +692,18 @@ fn gone_selection_renders_no_longer_exists() {
             .query_by_role_and_label(Role::Button, "Maximize")
             .is_none()
     );
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .all(|window| window.kind != k10s_ui::workspace::WindowKind::Detail),
+        "modified Enter cannot pop a cached gone service"
+    );
 }
 
 #[test]
