@@ -45,6 +45,11 @@ pub enum WindowFreshness {
         retry_in: String,
         attempt: u32,
     },
+    Reconnecting {
+        last_sync_age: String,
+        retry_in: String,
+        attempt: u32,
+    },
     Forbidden {
         user: String,
         verb: String,
@@ -61,6 +66,25 @@ impl WindowFreshness {
     #[must_use]
     pub fn mutations_allowed(&self) -> bool {
         matches!(self, Self::Live { .. } | Self::ReadyEmpty)
+    }
+}
+
+fn recovery_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    unavailable_reason: &str,
+) -> bool {
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.to_owned())
+    });
+    if enabled {
+        response.clicked()
+    } else {
+        response
+            .on_disabled_hover_text(unavailable_reason)
+            .clicked()
     }
 }
 
@@ -214,6 +238,29 @@ pub(super) fn show_window_freshness(
                 if ui.button("Full resync").clicked() {
                     resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
                 }
+            });
+        }
+        WindowFreshness::Reconnecting {
+            last_sync_age,
+            retry_in,
+            attempt,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "[~] Reconnecting · last sync {last_sync_age} · retry in {retry_in} · attempt {attempt}"
+                ))
+                .strong()
+                .color(theme::CONNECTING),
+            );
+            ui.label("Mutations are disabled; recovery controls unlock after reconnecting.");
+            ui.horizontal(|ui| {
+                recovery_button(ui, "Retry now", false, "Reconnect is already in progress");
+                recovery_button(
+                    ui,
+                    "Full resync",
+                    false,
+                    "Full resync is unavailable until the transport reconnects",
+                );
             });
         }
         WindowFreshness::Forbidden {
@@ -448,7 +495,7 @@ pub(super) fn show<I>(
 {
     let title = kind.title();
     let fallback_freshness =
-        (connection != ConnectionState::Connected).then(|| WindowFreshness::StaleRetrying {
+        (connection != ConnectionState::Connected).then(|| WindowFreshness::Reconnecting {
             last_sync_age: "unknown".into(),
             retry_in: "pending".into(),
             attempt: 1,
@@ -580,6 +627,23 @@ pub(super) fn show<I>(
     let mut sorted = filtered;
     if let Some(sort) = state.sort.as_ref() {
         super::resource_table::sort_rows(&mut sorted, sort);
+    }
+
+    if sorted.is_empty() && !rows.is_empty() {
+        egui::Frame::NONE
+            .fill(theme::STATUS_BACKGROUND)
+            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+            .corner_radius(egui::CornerRadius::same(3))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("[?]").strong().color(theme::ACCENT));
+                    ui.strong("Filtered empty");
+                });
+                ui.label("Resources exist, but none match the active filters.");
+                ui.label("Use Clear filters in the toolbar to restore all rows.");
+            });
+        ui.separator();
     }
 
     let selected: Option<&I> = state.selection.as_ref();

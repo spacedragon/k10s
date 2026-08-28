@@ -215,20 +215,30 @@ impl std::error::Error for ContextUnavailableMarker {}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::process::{ExitStatus, Output};
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::time::Duration;
 
+    #[cfg(unix)]
     use tower::{Layer as _, ServiceExt as _, service_fn};
 
+    #[cfg(unix)]
     use crate::port::{ContextInfo, Gvk};
+    #[cfg(unix)]
     use crate::runtime::cluster::{
         ClusterMetrics, ClusterWatches, MetricsApiState, MetricsPollSource, MetricsSnapshot,
     };
+    #[cfg(unix)]
     use crate::runtime::supervisor::{ListedState, WatchSource, WatchUpdate};
+    #[cfg(unix)]
     use crate::watch::WatchSelector;
 
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]
@@ -237,9 +247,11 @@ mod tests {
         ExitStatus::from_raw(17 << 8)
     }
 
+    #[cfg(unix)]
     #[derive(Debug)]
     struct PendingWatch;
 
+    #[cfg(unix)]
     impl WatchSource for PendingWatch {
         fn list<'a>(
             &'a self,
@@ -256,9 +268,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[derive(Debug)]
     struct OneMetricsCut;
 
+    #[cfg(unix)]
     impl MetricsPollSource for OneMetricsCut {
         fn poll(&self) -> Pin<Box<dyn Future<Output = MetricsSnapshot> + Send + '_>> {
             Box::pin(async {

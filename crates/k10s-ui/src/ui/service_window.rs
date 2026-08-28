@@ -208,7 +208,7 @@ where
     I: RowIdentity,
 {
     let fallback_freshness =
-        (connection != ConnectionState::Connected).then(|| super::WindowFreshness::StaleRetrying {
+        (connection != ConnectionState::Connected).then(|| super::WindowFreshness::Reconnecting {
             last_sync_age: "unknown".into(),
             retry_in: "pending".into(),
             attempt: 1,

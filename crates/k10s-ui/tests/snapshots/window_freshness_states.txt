@@ -35,7 +35,9 @@ Window
               Button label="Pods · all namespaces"
               Button label="StatefulSets · all namespaces"
               Button label="DaemonSets · all namespaces"
-              Button label="Jobs · all namespaces · ● Active"
+              Button label="Jobs · all namespaces"
+              Button label="CronJobs · all namespaces"
+              Button label="ConfigMaps · all namespaces · ● Active"
         GenericContainer
           GenericContainer
             GenericContainer
@@ -102,6 +104,8 @@ Window
                   GenericContainer
                     GenericContainer
                       Button label="CronJobs"
+                    Label value="1 open CronJobs window"
+                      TextRun value="1"
                     Button label="Open another CronJobs window"
                   GenericContainer
                     GenericContainer
@@ -395,6 +399,112 @@ Window
               GenericContainer
                 Label value="No Jobs in this view"
                   TextRun value="No Jobs in this view"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="CronJobs"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
+                TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
+              Label value="Mutations are disabled; recovery controls unlock after reconnecting."
+                TextRun value="Mutations are disabled; recovery controls unlock after reconnecting."
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
+              GenericContainer
+                TextInput label="Search cronjobs" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Namespace"
+                              TextRun value="Namespace"
+                            Button label="Sort cronjobs by namespace"
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Button label="Sort cronjobs by name"
+                          GenericContainer
+                            Label value="Status"
+                              TextRun value="Status"
+                            Button label="Sort cronjobs by status"
+                          GenericContainer
+                            Label value="Created"
+                              TextRun value="Created"
+                            Button label="Sort cronjobs by created"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="nightly"
+                          Label value="Active 0"
+                            TextRun value="Active 0"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="ConfigMaps"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                TextInput label="Search configmaps" value="does-not-exist"
+                  TextRun value="does-not-exist"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Clear filters"
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  Label value="[?]"
+                    TextRun value="[?]"
+                  Label value="Filtered empty"
+                    TextRun value="Filtered empty"
+                Label value="Resources exist, but none match the active filters."
+                  TextRun value="Resources exist, but none match the active filters."
+                Label value="Use Clear filters in the toolbar to restore all rows."
+                  TextRun value="Use Clear filters in the toolbar to restore all rows."
+              GenericContainer
+                Label value="No resources match these filters"
+                  TextRun value="No resources match these filters"
     Splitter
     Splitter
     Splitter

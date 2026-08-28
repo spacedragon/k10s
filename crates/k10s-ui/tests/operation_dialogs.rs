@@ -12,7 +12,10 @@
 use std::collections::VecDeque;
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, DeletePropagation, GroupVersionKind, OperationId, OperationProgress,
     OperationStatus, OperationUpdate, ResourceCapabilities, ResourceDetailResponse,
@@ -302,6 +305,55 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
     dialog.get_by_label("WARNING — Destructive action");
     dialog.get_by_label_contains("[PASS] Server dry-run");
     dialog.get_by_role_and_label(Role::Button, "Copy command");
+}
+
+#[test]
+fn destructive_review_snapshots_cover_compact_and_standard_viewports() {
+    for (name, size) in [
+        ("compact-640x720", egui::vec2(640.0, 720.0)),
+        ("standard-1280x720", egui::vec2(1_280.0, 720.0)),
+    ] {
+        let window = k10s_ui::workspace::WindowId(171);
+        let mut dialogs = OperationDialogs::default();
+        dialogs.open_delete(window, deployment("api-server"));
+        dialogs.drain_actions();
+        if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window)
+        {
+            delete.set_preflight(DestructivePreflight::fake_success());
+        }
+        let mut harness = Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
+                dialogs,
+            );
+        harness.run_steps(4);
+        let dialog = harness.get_by_role_and_label(Role::Window, "Delete resource");
+        for label in [
+            "1  Scope",
+            "2  Impact",
+            "3  Server dry run",
+            "4  Typed confirmation",
+            "5  Exact command",
+        ] {
+            dialog.get_by_label(label);
+        }
+        assert!(
+            dialog
+                .get_by_role_and_label(Role::Button, "Confirm delete")
+                .accesskit_node()
+                .is_disabled()
+        );
+        if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+            let path = format!("../../docs/screenshots/issue-171/after-confirmation-{name}.png");
+            harness
+                .render()
+                .expect("render confirmation")
+                .save(path)
+                .expect("save confirmation screenshot");
+        }
+    }
 }
 
 #[test]

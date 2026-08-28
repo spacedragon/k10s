@@ -696,24 +696,31 @@ impl OperationDialogs {
             let mut close_requested = false;
             let mut submit_requested = false;
             let mut preflight_requested = false;
-            egui::Window::new(dialog_title(dialog))
+            let operation_window = egui::Window::new(dialog_title(dialog))
                 .id(egui::Id::new(("k10s.operation-dialog", window.0)))
                 .collapsible(false)
-                .resizable(false)
-                .show(ui, |ui| match dialog {
-                    ActiveDialog::Scale(scale) => {
-                        render_scale(ui, scale, &mut submit_requested, &mut close_requested);
-                    }
-                    ActiveDialog::Delete(delete) => {
-                        render_delete(
-                            ui,
-                            delete,
-                            &mut submit_requested,
-                            &mut preflight_requested,
-                            &mut close_requested,
-                        );
-                    }
-                });
+                .resizable(false);
+            let operation_window = if matches!(dialog, ActiveDialog::Delete(_)) {
+                operation_window
+                    .default_width(520.0)
+                    .max_width(ui.available_width().min(620.0))
+            } else {
+                operation_window
+            };
+            operation_window.show(ui, |ui| match dialog {
+                ActiveDialog::Scale(scale) => {
+                    render_scale(ui, scale, &mut submit_requested, &mut close_requested);
+                }
+                ActiveDialog::Delete(delete) => {
+                    render_delete(
+                        ui,
+                        delete,
+                        &mut submit_requested,
+                        &mut preflight_requested,
+                        &mut close_requested,
+                    );
+                }
+            });
             if submit_requested {
                 self.submit_active(window);
                 ui.ctx().request_repaint();
@@ -791,7 +798,8 @@ fn render_delete(
     close: &mut bool,
 ) {
     ui.heading("WARNING — Destructive action");
-    ui.label("Review the exact scope and server preflight before deleting.");
+    ui.label("Complete each safety check in order. Nothing runs until all five pass.");
+    ui.strong("1  Scope");
     egui::Grid::new("delete-scope")
         .num_columns(2)
         .show(ui, |ui| {
@@ -820,6 +828,12 @@ fn render_delete(
             }
         });
     ui.add_space(4.0);
+    ui.strong("2  Impact");
+    if let DestructivePreflight::Ready { impact, .. } = &dialog.preflight {
+        ui.label(impact);
+    } else {
+        ui.label("Deletes this exact object using the selected dependent policy.");
+    }
     ui.horizontal(|ui| {
         ui.label("Propagation");
         for (mode, label) in [
@@ -834,14 +848,12 @@ fn render_delete(
         }
     });
     ui.label(format!("Propagation policy: {:?}", dialog.propagation()));
+    ui.strong("3  Server dry run");
     match &dialog.preflight {
         DestructivePreflight::Pending => {
             ui.label("[PENDING] Waiting for authoritative server dry-run.");
         }
-        DestructivePreflight::Ready {
-            impact, dry_run, ..
-        } => {
-            ui.label(format!("[IMPACT] {impact}"));
+        DestructivePreflight::Ready { dry_run, .. } => {
             ui.label(
                 RichText::new(format!("[PASS] Server dry-run: {dry_run}"))
                     .color(egui::Color32::GREEN),
@@ -865,8 +877,12 @@ fn render_delete(
             );
         }
     }
+    ui.strong("4  Typed confirmation");
     ui.label(format!("Type {} to confirm.", dialog.target().name));
     let field = ui.text_edit_singleline(dialog.confirmation_buffer());
+    // A single-line editor surrenders focus while handling Enter, so
+    // `lost_focus` is part of the same safe, field-owned activation gesture.
+    let confirmation_focused = field.has_focus() || field.lost_focus();
     field.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::TextEdit,
@@ -875,8 +891,11 @@ fn render_delete(
         )
     });
     let command = dialog.kubectl_command();
-    ui.label("Equivalent kubectl command");
-    ui.horizontal(|ui| {
+    ui.strong("5  Exact command");
+    ui.label(
+        "Equivalent kubectl command (shown for review; the client submits the protocol operation)",
+    );
+    ui.vertical(|ui| {
         ui.monospace(&command);
         if ui.button("Copy command").clicked() {
             ui.ctx().copy_text(command);
@@ -904,7 +923,10 @@ fn render_delete(
             *submit = true;
         }
     });
-    if ui.input(|input| input.key_pressed(egui::Key::Enter)) && dialog.can_submit() {
+    if confirmation_focused
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && dialog.can_submit()
+    {
         *submit = true;
     }
 }

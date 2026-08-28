@@ -19,8 +19,8 @@ Window
                         Label value="Kubernetes context"
                           TextRun value="Kubernetes context"
                   GenericContainer
-                    Button label="Retry"
-                  Label value="Connection status: Connecting"
+                    Button label="Refresh"
+                  Label value="Connection status: Connected"
                     TextRun value="●"
         GenericContainer
           GenericContainer
@@ -28,10 +28,10 @@ Window
               Button label="Tile"
               Button label="Cascade"
               Button label="Focus"
-              Button label="Overview · ↻ Stale data"
+              Button label="Overview"
               GenericContainer
                 GenericContainer
-                  ComboBox value="More tasks (3)"
+                  ComboBox value="More tasks (1)"
         GenericContainer
           GenericContainer
             GenericContainer
@@ -68,12 +68,12 @@ Window
                   GenericContainer
                     GenericContainer
                       Button label="Deployments"
+                    Label value="1 open Deployments window"
+                      TextRun value="1"
                     Button label="Open another Deployments window"
                   GenericContainer
                     GenericContainer
                       Button label="Pods"
-                    Label value="2 open Pods windows"
-                      TextRun value="2"
                     Button label="Open another Pods window"
                   GenericContainer
                     GenericContainer
@@ -97,8 +97,10 @@ Window
                     Button label="Open another Custom Resources… window"
                 GenericContainer
                   Label value="▾"
+                    TextRun value="▾"
                   Button label="Network"
                   Label value="0 Network resources"
+                    TextRun value="0"
                 GenericContainer
                   Button label="Services"
                   GenericContainer
@@ -151,7 +153,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Pods"
+  Window label="Deployments"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -161,55 +163,11 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              Label value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
-                TextRun value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
-              Label value="Mutations are disabled; recovery controls unlock after reconnecting."
-                TextRun value="Mutations are disabled; recovery controls unlock after reconnecting."
+              Label value="◇ Ready · no resources"
+                TextRun value="◇ Ready · no resources"
+              Button label="Refresh list"
               GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
-              GenericContainer
-                TextInput label="Search pods" value=""
-                  TextRun value=""
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
-                Button label="Clear"
-                Button label="Hide details"
-              GenericContainer
-                ProgressIndicator
-                Label value="Loading pods"
-                  TextRun value="Loading pods"
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-  Window label="Pods"
-    GenericContainer
-      GenericContainer
-        GenericContainer
-          GenericContainer
-            Button label="Hide"
-            Button label="Close window"
-            Unknown
-          GenericContainer
-            GenericContainer
-              Label value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
-                TextRun value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
-              Label value="Mutations are disabled; recovery controls unlock after reconnecting."
-                TextRun value="Mutations are disabled; recovery controls unlock after reconnecting."
-              GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
-              GenericContainer
-                TextInput label="Search pods" value=""
+                TextInput label="Search deployments" value=""
                   TextRun value=""
                 GenericContainer
                   GenericContainer
@@ -219,55 +177,8 @@ Window
                       TextRun value="Namespace"
                 Button label="Hide details"
               GenericContainer
-                ProgressIndicator
-                Label value="Loading pods"
-                  TextRun value="Loading pods"
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-    Splitter
-  Window label="Detail"
-    GenericContainer
-      GenericContainer
-        GenericContainer
-          GenericContainer
-            Button label="Hide"
-            Button label="Close window"
-            Unknown
-          GenericContainer
-            GenericContainer
-              GenericContainer
-                Label value="Details"
-                  TextRun value="Details"
-                GenericContainer
-                  Label value="Pod / api-0"
-                    TextRun value="Pod / api-0"
-                  GenericContainer
-                    Label value="Kind Pod"
-                      TextRun value="Kind Pod"
-                    Label value="Namespace default"
-                      TextRun value="Namespace default"
-                    Label value="Context dev-local"
-                      TextRun value="Context dev-local"
-                  GenericContainer
-                    Label value="UID uid-dev-local-pod-default-api-0"
-                      TextRun value="UID uid-dev-local-pod-default-api-0"
-                    Label value="Refreshing…"
-                      TextRun value="Refreshing…"
-              GenericContainer
-                Button label="Tab Overview"
-                Button label="Tab Events"
-                Button label="Tab YAML"
-                Button label="Tab Logs"
-                Button label="Tab Shell"
-              GenericContainer
-                ProgressIndicator
-                Label value="Loading details"
-                  TextRun value="Loading details"
+                Label value="No Deployments in this view"
+                  TextRun value="No Deployments in this view"
     Splitter
     Splitter
     Splitter
