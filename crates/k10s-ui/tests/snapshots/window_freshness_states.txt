@@ -27,22 +27,15 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              GenericContainer
-                GenericContainer
-                  Label value="WINDOWS"
-                    TextRun value="WINDOWS"
-                  GenericContainer
-                    Button label="Focus Overview window"
-                  GenericContainer
-                    Button label="Focus Deployments window"
-                  GenericContainer
-                    Button label="Focus Pods window"
-                  GenericContainer
-                    Button label="Focus StatefulSets window"
-                  GenericContainer
-                    Button label="Focus DaemonSets window"
-                  GenericContainer
-                    Button label="Jobs window, focused"
+              Button label="Tile"
+              Button label="Cascade"
+              Button label="Focus"
+              Button label="Overview"
+              Button label="Deployments · all namespaces"
+              Button label="Pods · all namespaces"
+              Button label="StatefulSets · all namespaces"
+              Button label="DaemonSets · all namespaces"
+              Button label="Jobs · all namespaces · ● Active"
         GenericContainer
           GenericContainer
             GenericContainer

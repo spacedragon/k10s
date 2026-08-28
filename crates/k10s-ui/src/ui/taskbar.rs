@@ -1,56 +1,200 @@
-//! Compact window switcher anchored below the free canvas.
+//! Instance-addressable bottom taskbar and deterministic layout controls.
 
-use std::fmt::Debug;
-use std::hash::Hash;
+use crate::workspace::{
+    NamespaceScope, Window, WindowContent, WindowKind, WorkspaceCommand, WorkspaceState,
+};
 
-use egui::{RichText, WidgetInfo, WidgetType};
+use super::{ConnectionState, resource_window::RowIdentity};
 
-use crate::workspace::{WorkspaceCommand, WorkspaceState};
+const TASK_WIDTH: f32 = 172.0;
 
-pub(super) fn show<I>(
-    ui: &mut egui::Ui,
+fn dirty<I>(window: &Window<I>) -> bool {
+    match &window.content {
+        WindowContent::Resource(state) => state.detail.as_ref().is_some_and(|d| d.yaml.dirty),
+        WindowContent::Services(state) => state.detail.as_ref().is_some_and(|d| d.yaml.dirty),
+        WindowContent::Detail(detail) => detail.yaml.dirty,
+    }
+}
+
+fn identity<I: RowIdentity>(window: &Window<I>) -> String {
+    if let WindowContent::Detail(detail) = &window.content
+        && let Some(id) = detail.identity.as_row_identity()
+    {
+        return format!(
+            "{} · {}/{}",
+            id.gvk.kind,
+            id.namespace.as_deref().unwrap_or("cluster"),
+            id.name
+        );
+    }
+    let scope = match &window.content {
+        WindowContent::Resource(state) => Some(&state.namespace_scope),
+        WindowContent::Services(state) => Some(&state.namespace_scope),
+        WindowContent::Detail(_) => None,
+    };
+    match (window.kind, scope) {
+        (WindowKind::Workload(_), Some(NamespaceScope::Namespace(namespace))) => {
+            format!("{} · {namespace}", window.title)
+        }
+        (WindowKind::Workload(_), _) => format!("{} · all namespaces", window.title),
+        _ => window.title.clone(),
+    }
+}
+
+fn label<I: RowIdentity>(window: &Window<I>, active: bool, connection: ConnectionState) -> String {
+    let mut label = identity(window);
+    if active {
+        label.push_str(" · ● Active");
+    }
+    if dirty(window) {
+        label.push_str(" · ◆ Unsaved YAML");
+    }
+    if connection != ConnectionState::Connected {
+        label.push_str(" · ↻ Stale data");
+    }
+    label
+}
+
+pub(super) fn shortcuts<I: RowIdentity>(
+    ctx: &egui::Context,
     workspace: &WorkspaceState<I>,
     queued: &mut Vec<WorkspaceCommand<I>>,
-) where
-    I: Clone + Eq + Hash + Debug,
-{
-    let focused = workspace
-        .windows()
-        .iter()
-        .max_by_key(|window| window.z)
-        .map(|window| window.id);
-    egui::ScrollArea::horizontal()
-        .id_salt("k10s.taskbar.scroll")
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("WINDOWS")
-                        .small()
-                        .color(super::theme::MUTED_TEXT),
-                );
-                for window in workspace.windows() {
-                    let is_focused = focused == Some(window.id);
-                    ui.push_id(("k10s.taskbar.window", window.id.0), |ui| {
-                        let visible = if is_focused {
-                            format!("● {}", window.title)
-                        } else {
-                            format!("○ {}", window.title)
-                        };
-                        let accessible = if is_focused {
-                            format!("{} window, focused", window.title)
-                        } else {
-                            format!("Focus {} window", window.title)
-                        };
-                        let button = ui.selectable_label(is_focused, visible);
-                        button.widget_info(|| {
-                            WidgetInfo::labeled(WidgetType::Button, true, accessible.clone())
-                        });
-                        if button.on_hover_text(accessible).clicked() && !is_focused {
+) {
+    let keys = [
+        egui::Key::Num1,
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+        egui::Key::Num6,
+        egui::Key::Num7,
+        egui::Key::Num8,
+        egui::Key::Num9,
+    ];
+    for (index, key) in keys.into_iter().enumerate() {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, key))
+            && let Some(window) = workspace.windows().get(index)
+        {
+            queued.push(WorkspaceCommand::FocusWindow(window.id));
+        }
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
+        queued.push(WorkspaceCommand::CycleWindow);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::W))
+        && let Some(window) = workspace.windows().iter().max_by_key(|window| window.z)
+    {
+        queued.push(WorkspaceCommand::CloseWindow(window.id));
+    }
+}
+
+pub(super) fn show<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    workspace: &WorkspaceState<I>,
+    connection: ConnectionState,
+    canvas_size: [f32; 2],
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    ui.horizontal(|ui| {
+        if ui
+            .button("Tile")
+            .on_hover_text("Tile windows (usable minima; overflow when compact)")
+            .clicked()
+        {
+            queued.push(WorkspaceCommand::Tile(canvas_size));
+        }
+        if ui
+            .button("Cascade")
+            .on_hover_text("Toggle cascade / restore layout")
+            .clicked()
+        {
+            queued.push(WorkspaceCommand::Cascade(canvas_size));
+        }
+        if ui
+            .button("Focus")
+            .on_hover_text("Toggle focused window / restore layout")
+            .clicked()
+        {
+            queued.push(WorkspaceCommand::ToggleFocus(canvas_size));
+        }
+        ui.separator();
+
+        let active = workspace
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .map(|window| window.id);
+        let capacity = ((ui.available_width() - TASK_WIDTH) / TASK_WIDTH)
+            .floor()
+            .max(1.0) as usize;
+        for window in workspace.windows().iter().take(capacity) {
+            let text = label(window, active == Some(window.id), connection);
+            if ui
+                .selectable_label(active == Some(window.id), text)
+                .clicked()
+            {
+                queued.push(WorkspaceCommand::FocusWindow(window.id));
+            }
+        }
+        let overflow = workspace.windows().get(capacity..).unwrap_or_default();
+        if !overflow.is_empty() {
+            egui::ComboBox::from_id_salt("k10s.taskbar.overflow")
+                .selected_text(format!("More tasks ({})", overflow.len()))
+                .show_ui(ui, |ui| {
+                    for window in overflow {
+                        if ui
+                            .selectable_label(
+                                active == Some(window.id),
+                                label(window, active == Some(window.id), connection),
+                            )
+                            .clicked()
+                        {
                             queued.push(WorkspaceCommand::FocusWindow(window.id));
                         }
-                    });
-                }
-            });
-        });
+                    }
+                });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::WindowId;
+    use crate::workspace::{DetailState, WindowGeom};
+    use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+
+    #[test]
+    fn pinned_task_label_contains_kind_namespace_name_and_status_text() {
+        let mut window = Window {
+            id: WindowId(1),
+            kind: WindowKind::Detail,
+            title: "Detail".into(),
+            geometry: WindowGeom::staggered(0, [640.0, 420.0]),
+            layout_revision: 0,
+            z: 2,
+            content: WindowContent::Detail(DetailState::new(ResourceIdentity {
+                context: "dev".into(),
+                gvk: GroupVersionKind {
+                    group: "".into(),
+                    version: "v1".into(),
+                    kind: "Pod".into(),
+                },
+                namespace: Some("payments".into()),
+                name: "api-0".into(),
+                uid: "1".into(),
+            })),
+        };
+        assert_eq!(
+            label(&window, true, ConnectionState::Failed),
+            "Pod · payments/api-0 · ● Active · ↻ Stale data"
+        );
+        if let WindowContent::Detail(detail) = &mut window.content {
+            detail.yaml.dirty = true;
+        }
+        assert_eq!(
+            label(&window, true, ConnectionState::Connecting),
+            "Pod · payments/api-0 · ● Active · ◆ Unsaved YAML · ↻ Stale data"
+        );
+    }
 }

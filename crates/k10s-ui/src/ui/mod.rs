@@ -422,6 +422,7 @@ where
                 .and_then(|context| context.namespace.as_deref())
         });
         let mut refresh_requested = false;
+        taskbar::shortcuts(ui.ctx(), &self.workspace, &mut queued);
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
             .exact_size(theme::TOP_BAR_HEIGHT)
@@ -437,7 +438,17 @@ where
             .exact_size(theme::TASKBAR_HEIGHT)
             .frame(theme::taskbar_frame())
             .show(ui, |ui| {
-                taskbar::show(ui, &self.workspace, &mut queued);
+                let available = ui.ctx().content_rect();
+                taskbar::show(
+                    ui,
+                    &self.workspace,
+                    connection,
+                    [
+                        available.width(),
+                        available.height() - theme::TASKBAR_HEIGHT,
+                    ],
+                    &mut queued,
+                );
             });
 
         egui::Panel::left("k10s.launcher")

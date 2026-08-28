@@ -15,6 +15,7 @@ use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
 use k10s_ui::workspace::{LoadedWorkspaceSnapshot, WorkspaceSnapshot};
+use std::collections::BTreeMap;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -142,6 +143,7 @@ pub struct DesktopApp {
     /// Workspace-state persistence for session restore; `None` when no
     /// writable config directory exists on this host.
     state_store: Option<StateStore>,
+    context_state_store: Option<ContextStateStore>,
 }
 
 impl std::fmt::Debug for DesktopApp {
@@ -197,10 +199,24 @@ impl DesktopApp {
             }
             app.restore_workspace_snapshot(on_disk.snapshot);
         }
+        let mut context_state_store = state_store.as_ref().map(|store| {
+            ContextStateStore::new(
+                store
+                    .path
+                    .with_file_name("workspace-layouts-by-context.json"),
+            )
+        });
+        if let Some(layouts) = context_state_store
+            .as_mut()
+            .and_then(ContextStateStore::load)
+        {
+            app.restore_workspace_layouts(layouts);
+        }
         Ok(Self {
             app: Some(app),
             server: Some(server),
             state_store,
+            context_state_store,
         })
     }
 
@@ -211,6 +227,59 @@ impl DesktopApp {
             .as_ref()
             .expect("desktop server exists until drop")
             .local_addr()
+    }
+}
+
+/// Context-keyed companion to the legacy single-layout file. Keeping the
+/// legacy reader provides a migration fallback while new sessions restore
+/// each Kubernetes context independently.
+const CONTEXT_LAYOUTS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PersistedContextLayouts {
+    version: u32,
+    contexts: BTreeMap<String, WorkspaceSnapshot>,
+}
+
+#[derive(Debug)]
+struct ContextStateStore {
+    path: PathBuf,
+    last_saved: Option<BTreeMap<String, WorkspaceSnapshot>>,
+}
+
+impl ContextStateStore {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_saved: None,
+        }
+    }
+
+    fn load(&mut self) -> Option<BTreeMap<String, WorkspaceSnapshot>> {
+        let persisted: PersistedContextLayouts =
+            serde_json::from_str(&fs::read_to_string(&self.path).ok()?).ok()?;
+        if persisted.version != CONTEXT_LAYOUTS_VERSION {
+            return None;
+        }
+        self.last_saved = Some(persisted.contexts.clone());
+        Some(persisted.contexts)
+    }
+
+    fn save(&mut self, layouts: &BTreeMap<String, WorkspaceSnapshot>) {
+        if self.last_saved.as_ref() == Some(layouts) {
+            return;
+        }
+        let persisted = PersistedContextLayouts {
+            version: CONTEXT_LAYOUTS_VERSION,
+            contexts: layouts.clone(),
+        };
+        match serde_json::to_string(&persisted)
+            .map_err(io::Error::other)
+            .and_then(|json| write_state_file(&self.path, &json))
+        {
+            Ok(()) => self.last_saved = Some(layouts.clone()),
+            Err(error) => tracing::warn!("context workspace state save failed: {error}"),
+        }
     }
 }
 
@@ -405,6 +474,9 @@ impl eframe::App for DesktopApp {
         if let Some(store) = self.state_store.as_mut() {
             store.tick(&app.workspace_snapshot(), Instant::now());
         }
+        if let Some(store) = self.context_state_store.as_mut() {
+            store.save(&app.workspace_layouts());
+        }
         app.poll();
         context.request_repaint_after(Duration::from_millis(16));
     }
@@ -425,6 +497,11 @@ impl Drop for DesktopApp {
             && let Some(store) = self.state_store.as_mut()
         {
             store.flush(&app.workspace_snapshot());
+        }
+        if let Some(app) = self.app.as_ref()
+            && let Some(store) = self.context_state_store.as_mut()
+        {
+            store.save(&app.workspace_layouts());
         }
         drop(self.app.take());
         if let Some(mut server) = self.server.take() {
@@ -593,7 +670,9 @@ mod tests {
         LauncherItem, WindowGeom, WorkloadKind, WorkspaceCommand, WorkspaceState,
     };
 
-    use super::{DesktopApp, EmbeddedServerError, StateStore, launch_embedded_server_on};
+    use super::{
+        ContextStateStore, DesktopApp, EmbeddedServerError, StateStore, launch_embedded_server_on,
+    };
 
     #[test]
     fn listener_startup_error_is_delivered_to_the_launcher() {
@@ -656,6 +735,44 @@ mod tests {
         let loaded = reader.load().expect("load snapshot");
         assert_eq!(loaded.snapshot, snapshot);
         assert_eq!(loaded.migrated_from, None);
+    }
+
+    #[test]
+    fn context_state_store_round_trips_independent_versioned_layouts() {
+        let path = tmp_state_file("context-layouts");
+        let snapshot: k10s_ui::workspace::WorkspaceSnapshot =
+            serde_json::from_str(&sample_state_json()).expect("parse sample");
+        let mut compact = snapshot.clone();
+        compact.windows.truncate(1);
+        let layouts = std::collections::BTreeMap::from([
+            ("dev".to_owned(), snapshot.clone()),
+            ("prod".to_owned(), compact.clone()),
+        ]);
+
+        ContextStateStore::new(path.clone()).save(&layouts);
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("context state"))
+                .expect("valid context state");
+        assert_eq!(raw["version"], 1);
+        assert_eq!(
+            raw["contexts"]["dev"]["windows"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            raw["contexts"]["prod"]["windows"].as_array().unwrap().len(),
+            1
+        );
+
+        assert_eq!(ContextStateStore::new(path).load(), Some(layouts));
+    }
+
+    #[test]
+    fn context_state_store_ignores_unknown_versions_and_corrupt_files() {
+        let path = tmp_state_file("context-layouts-invalid");
+        std::fs::write(&path, r#"{"version":99,"contexts":{}}"#).unwrap();
+        assert!(ContextStateStore::new(path.clone()).load().is_none());
+        std::fs::write(&path, "not json").unwrap();
+        assert!(ContextStateStore::new(path).load().is_none());
     }
 
     #[test]

@@ -455,6 +455,8 @@ where
             context: String::new(),
             yaml_owner: std::collections::HashMap::new(),
             pending: None,
+            layout_checkpoint: None,
+            next_layout_revision: 0,
         };
 
         for window in &restorable {
@@ -491,6 +493,7 @@ where
                 kind,
                 title: window.title.clone(),
                 geometry,
+                layout_revision: 0,
                 z: window.z,
                 content,
             });

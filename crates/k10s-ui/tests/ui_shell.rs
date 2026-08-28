@@ -100,6 +100,26 @@ fn window_layer(id: WindowId) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(("k10s.window", id.0)))
 }
 
+fn rendered_window(harness: &Harness<'_, ShellFixture>, title: &str) -> egui::Rect {
+    harness.get_by_role_and_label(Role::Window, title).rect()
+}
+
+fn assert_rect_matches_geometry(
+    rect: egui::Rect,
+    canvas_origin: egui::Pos2,
+    geometry: k10s_ui::workspace::WindowGeom,
+) {
+    let expected = egui::Rect::from_min_size(
+        canvas_origin + egui::vec2(geometry.position[0], geometry.position[1]),
+        egui::vec2(geometry.size[0], geometry.size[1]),
+    );
+    assert!(
+        (rect.min - expected.min).length() <= 1.0
+            && (rect.size() - expected.size()).length() <= 1.0,
+        "rendered {rect:?} did not apply workspace geometry {expected:?}"
+    );
+}
+
 fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
     harness
         .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
@@ -168,7 +188,7 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
         "Overview is the only initial workspace window"
     );
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
-    harness.get_by_role_and_label(Role::Button, "Overview window, focused");
+    harness.get_by_role_and_label(Role::Button, "Overview · ● Active");
 }
 
 #[test]
@@ -219,7 +239,7 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
             "the window canvas must begin beyond the 196 px launcher at {size:?}: launcher={launcher:?}, window={window:?}"
         );
         let task = harness
-            .get_by_role_and_label(Role::Button, "Overview window, focused")
+            .get_by_role_and_label(Role::Button, "Overview · ● Active")
             .rect();
         assert!(
             task.top() >= size.y - 37.0 && task.bottom() <= size.y,
@@ -229,7 +249,161 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
 }
 
 #[test]
-fn compact_taskbar_scrolls_every_window_entry_into_view() {
+fn layout_commands_apply_to_already_rendered_window_rectangles() {
+    let mut harness = shell_harness_at(egui::vec2(1_280.0, 800.0));
+    for kind in [WorkloadKind::Pods, WorkloadKind::Jobs] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(kind));
+    }
+    harness.run_steps(4);
+
+    let canvas = [1_080.0, 700.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Tile(canvas));
+    harness.run_steps(4);
+
+    let tiled: Vec<_> = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .map(|window| (window.title.clone(), window.geometry))
+        .collect();
+    let first_rect = rendered_window(&harness, &tiled[0].0);
+    let canvas_origin = first_rect.min - egui::vec2(tiled[0].1.position[0], tiled[0].1.position[1]);
+    let tiled_rects: Vec<_> = tiled
+        .iter()
+        .map(|(title, geometry)| {
+            let rect = rendered_window(&harness, title);
+            assert_rect_matches_geometry(rect, canvas_origin, *geometry);
+            rect
+        })
+        .collect();
+    for (index, left) in tiled_rects.iter().enumerate() {
+        for right in tiled_rects.iter().skip(index + 1) {
+            let separated = left.right() <= right.left()
+                || right.right() <= left.left()
+                || left.bottom() <= right.top()
+                || right.bottom() <= left.top();
+            assert!(
+                separated,
+                "tiled rendered windows overlap: {left:?} {right:?}"
+            );
+        }
+    }
+    assert!(
+        tiled_rects.iter().any(|rect| rect.right() > 1_280.0),
+        "compact tiling keeps usable minima on an intentional overflow surface"
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    let focused = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .max_by_key(|window| window.z)
+        .expect("active window");
+    assert_rect_matches_geometry(
+        rendered_window(&harness, &focused.title),
+        canvas_origin,
+        focused.geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for window in harness.state().shell.workspace().windows() {
+        assert_rect_matches_geometry(
+            rendered_window(&harness, &window.title),
+            canvas_origin,
+            window.geometry,
+        );
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
+    }
+}
+
+#[test]
+fn live_snapshot_restore_reapplies_geometry_across_context_like_a_b_a_cycle() {
+    let mut harness = shell_harness();
+    harness.run_steps(4);
+
+    let mut layout_a = harness.state().shell.workspace().snapshot();
+    layout_a.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [12.0, 18.0],
+        size: [720.0, 500.0],
+        collapsed: false,
+    };
+    let mut layout_b = layout_a.clone();
+    layout_b.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [140.0, 96.0],
+        size: [800.0, 560.0],
+        collapsed: false,
+    };
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    let rect_a = rendered_window(&harness, "Overview");
+    let canvas_origin = rect_a.min - egui::vec2(12.0, 18.0);
+    assert_rect_matches_geometry(rect_a, canvas_origin, layout_a.windows[0].geometry);
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_b.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_b.windows[0].geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_a.windows[0].geometry,
+    );
+}
+
+#[test]
+fn compact_taskbar_overflow_remains_keyboard_reachable() {
     let mut harness = shell_harness_at(egui::vec2(640.0, 420.0));
     for kind in WorkloadKind::ALL {
         harness
@@ -241,26 +415,17 @@ fn compact_taskbar_scrolls_every_window_entry_into_view() {
     }
     harness.run_steps(4);
 
-    let final_entry =
-        harness.get_by_role_and_label(Role::Button, "Custom Resources window, focused");
-    assert!(
-        final_entry.rect().right() > 640.0,
-        "the capacity fixture must overflow before scrolling"
-    );
-    final_entry.scroll_to_me();
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+    });
+    overflow.focus();
     harness.run_steps(4);
 
-    let final_rect = harness
-        .get_by_role_and_label(Role::Button, "Custom Resources window, focused")
-        .rect();
-    assert!(
-        final_rect.left() >= 0.0 && final_rect.right() <= 640.0,
-        "the final taskbar entry must be horizontally reachable: {final_rect:?}"
-    );
-    assert!(
-        final_rect.top() >= 420.0 - 37.0 && final_rect.bottom() <= 420.0,
-        "the scrolled entry must remain inside the taskbar: {final_rect:?}"
-    );
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (7)")
+    });
+    assert!(overflow.is_focused());
+    assert!(overflow.rect().right() <= 640.0);
 }
 
 #[test]
@@ -455,7 +620,13 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
         .id;
     assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
 
-    harness.get_by_role_and_label(Role::Button, "Nodes").click();
+    harness
+        .get_by(|node| {
+            node.role() == Role::Button
+                && node.label().as_deref() == Some("Nodes")
+                && node.toggled() == Some(Toggled::True)
+        })
+        .click();
     harness.run_steps(4);
     let nodes: Vec<_> = harness
         .state()

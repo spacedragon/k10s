@@ -27,12 +27,10 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              GenericContainer
-                GenericContainer
-                  Label value="WINDOWS"
-                    TextRun value="WINDOWS"
-                  GenericContainer
-                    Button label="Overview window, focused"
+              Button label="Tile"
+              Button label="Cascade"
+              Button label="Focus"
+              Button label="Overview · ● Active"
         GenericContainer
           GenericContainer
             GenericContainer
