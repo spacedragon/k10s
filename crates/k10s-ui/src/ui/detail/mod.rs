@@ -119,7 +119,6 @@ pub(super) fn show<I>(
         return;
     };
     ui.horizontal(|ui| {
-        ui.heading(RichText::new("Details").strong());
         show_header(ui, identity, if gone { None } else { view });
         if integrated && !gone {
             if ui.button("Pop out ↗").clicked() {
@@ -141,6 +140,7 @@ pub(super) fn show<I>(
             }
         }
     });
+    ui.separator();
     ui.horizontal_wrapped(|ui| {
         for tab in tabs_for_kind(&detail_identity_gvk(detail)) {
             let active = *tab == detail.active_tab;
@@ -237,7 +237,7 @@ pub(super) fn show<I>(
         return;
     };
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let capabilities = view.capabilities;
         let identity = detail.identity.as_row_identity();
         if capabilities.can_scale {
@@ -458,7 +458,16 @@ pub(super) fn show_header(
     view: Option<&ResourceDetailResponse>,
 ) {
     ui.vertical(|ui| {
-        ui.heading(RichText::new(format!("{} / {}", identity.gvk.kind, identity.name)).strong());
+        ui.horizontal(|ui| {
+            ui.strong("Details");
+            ui.label(
+                RichText::new(identity.gvk.kind.to_uppercase())
+                    .small()
+                    .strong()
+                    .color(crate::ui::theme::ACCENT),
+            );
+            ui.heading(RichText::new(&identity.name).strong());
+        });
         ui.horizontal(|ui| {
             ui.label(format!("Kind {}", identity.gvk.kind));
             match identity.namespace.as_deref() {

@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use egui::{Key, KeyboardShortcut, Modifiers, RichText, TextEdit, WidgetInfo, WidgetType};
+use egui::{
+    Color32, Frame, Key, KeyboardShortcut, Modifiers, RichText, Stroke, TextEdit, WidgetInfo,
+    WidgetType,
+};
 use k10s_protocol::{Context, ResourceIdentity, ResourceListRow};
 
 use crate::workspace::{DetailTab, LauncherItem, WorkloadKind};
@@ -181,12 +184,26 @@ impl CommandPalette {
                     for (index, result) in results.iter().enumerate() {
                         if group != Some(result.group) {
                             group = Some(result.group);
-                            ui.add_space(6.0);
-                            ui.strong(result.group.label());
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(result.group.label()).small().strong().color(super::theme::ACCENT));
+                            ui.separator();
                         }
                         let selected = index == self.cursor;
                         let label = format!("{}  {}", result.icon, result.label);
-                        let response = ui.selectable_label(selected, label);
+                        let response = Frame::new()
+                            .fill(if selected { super::theme::SELECTED_ROW } else { Color32::TRANSPARENT })
+                            .stroke(if selected { Stroke::new(1.5, super::theme::ACCENT) } else { Stroke::NONE })
+                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(if selected { "▶" } else { " " });
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(label).strong());
+                                        ui.label(RichText::new(&result.metadata).color(super::theme::MUTED_TEXT));
+                                    }).response
+                                }).inner
+                            }).inner;
                         response.widget_info(|| {
                             WidgetInfo::selected(
                                 WidgetType::Button,
@@ -198,13 +215,15 @@ impl CommandPalette {
                         if response.clicked() {
                             chosen = Some((result.action.clone(), false));
                         }
-                        ui.indent(("palette-meta", index), |ui| {
-                            ui.label(RichText::new(&result.metadata).weak().small());
-                        });
                     }
                 });
                 ui.separator();
-                let help = ui.label("Up/Down or J/K navigate  ·  Enter open/focus  ·  Shift+Enter new window  ·  Esc close");
+                let help = ui.horizontal_wrapped(|ui| {
+                    for (key, action) in [("↑↓ / J K", "Navigate"), ("Enter", "Open / focus"), ("Shift+Enter", "New window"), ("Esc", "Close")] {
+                        ui.label(RichText::new(key).monospace().strong());
+                        ui.label(RichText::new(action).color(super::theme::MUTED_TEXT));
+                    }
+                }).response;
                 help.widget_info(|| {
                     WidgetInfo::labeled(WidgetType::Label, true, "Keyboard help: Up and Down or J and K navigate; Enter opens or focuses; Shift Enter opens a new window; Escape closes")
                 });

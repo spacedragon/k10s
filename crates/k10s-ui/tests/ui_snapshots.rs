@@ -328,7 +328,21 @@ fn deployments_list_window() {
         W::Deployments,
         vec![
             list_row("apps", "v1", "Deployment", "api-server", "2/2 ready"),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                "customer-notification-dispatcher-with-a-long-release-suffix",
+                "0/3 ready · ImagePullBackOff",
+            ),
             list_row("apps", "v1", "Deployment", "web-frontend", "20/20 ready"),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                "retired-data-migration",
+                "Completed · 1/1 succeeded",
+            ),
         ],
     );
     harness

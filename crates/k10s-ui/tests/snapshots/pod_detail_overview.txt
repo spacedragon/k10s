@@ -219,11 +219,14 @@ Window
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer
-                  Label value="Details"
-                    TextRun value="Details"
                   GenericContainer
-                    Label value="Pod / db-postgres-0"
-                      TextRun value="Pod / db-postgres-0"
+                    GenericContainer
+                      Label value="Details"
+                        TextRun value="Details"
+                      Label value="POD"
+                        TextRun value="POD"
+                      Label value="db-postgres-0"
+                        TextRun value="db-postgres-0"
                     GenericContainer
                       Label value="Kind Pod"
                         TextRun value="Kind Pod"

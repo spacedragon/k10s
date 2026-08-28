@@ -250,11 +250,14 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
-                Label value="Details"
-                  TextRun value="Details"
                 GenericContainer
-                  Label value="Pod / api-0"
-                    TextRun value="Pod / api-0"
+                  GenericContainer
+                    Label value="Details"
+                      TextRun value="Details"
+                    Label value="POD"
+                      TextRun value="POD"
+                    Label value="api-0"
+                      TextRun value="api-0"
                   GenericContainer
                     Label value="Kind Pod"
                       TextRun value="Kind Pod"

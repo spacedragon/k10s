@@ -365,13 +365,15 @@ async fn statefulsets_and_daemonsets_normalize_ready_counts() {
 }
 
 #[tokio::test]
-async fn pods_normalize_phase_and_crashloop() {
+async fn pods_normalize_phase_and_container_waiting_reasons() {
     let case = Case {
         label: "pods",
         gvk: gvk("", "v1", "Pod"),
         plural: "pods",
         namespace: Some("default"),
         list_body: r#"{"kind":"PodList","apiVersion":"v1","items":[
+          {"metadata":{"name":"image-pull","uid":"uid-image-pull","namespace":"default","creationTimestamp":"2026-08-21T04:00:00Z"},
+           "status":{"phase":"Pending","containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff"}}}]}},
           {"metadata":{"name":"init-loop","uid":"uid-init-loop","namespace":"default","creationTimestamp":"2026-08-21T03:00:00Z"},
            "status":{"phase":"Pending",
              "initContainerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}],
@@ -383,6 +385,15 @@ async fn pods_normalize_phase_and_crashloop() {
            "status":{"phase":"Running","containerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}
         ]}"#,
         expect: vec![
+            ExpectedRow {
+                name: "image-pull",
+                uid: "uid-image-pull",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "ImagePullBackOff",
+                created_at_prefix: "2026-08-21T04:00:00",
+                owner: None,
+            },
             ExpectedRow {
                 name: "init-loop",
                 uid: "uid-init-loop",
