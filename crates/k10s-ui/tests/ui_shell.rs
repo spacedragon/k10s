@@ -229,6 +229,41 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
 }
 
 #[test]
+fn compact_taskbar_scrolls_every_window_entry_into_view() {
+    let mut harness = shell_harness_at(egui::vec2(640.0, 420.0));
+    for kind in WorkloadKind::ALL {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(kind),
+            ));
+    }
+    harness.run_steps(4);
+
+    let final_entry =
+        harness.get_by_role_and_label(Role::Button, "Custom Resources window, focused");
+    assert!(
+        final_entry.rect().right() > 640.0,
+        "the capacity fixture must overflow before scrolling"
+    );
+    final_entry.scroll_to_me();
+    harness.run_steps(4);
+
+    let final_rect = harness
+        .get_by_role_and_label(Role::Button, "Custom Resources window, focused")
+        .rect();
+    assert!(
+        final_rect.left() >= 0.0 && final_rect.right() <= 640.0,
+        "the final taskbar entry must be horizontally reachable: {final_rect:?}"
+    );
+    assert!(
+        final_rect.top() >= 420.0 - 37.0 && final_rect.bottom() <= 420.0,
+        "the scrolled entry must remain inside the taskbar: {final_rect:?}"
+    );
+}
+
+#[test]
 fn top_bar_menus_expose_window_view_and_help_actions() {
     let mut harness = shell_harness();
 

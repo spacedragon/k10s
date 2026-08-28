@@ -27,12 +27,14 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              Label value="WINDOWS"
-                TextRun value="WINDOWS"
               GenericContainer
-                Button label="Focus Overview window"
-              GenericContainer
-                Button label="Nodes window, focused"
+                GenericContainer
+                  Label value="WINDOWS"
+                    TextRun value="WINDOWS"
+                  GenericContainer
+                    Button label="Focus Overview window"
+                  GenericContainer
+                    Button label="Nodes window, focused"
         GenericContainer
           GenericContainer
             GenericContainer
