@@ -24,8 +24,8 @@ use k10s_protocol::{
     ResourceTypeEntry, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
-    workspace::{LauncherItem, WindowId, WorkloadKind as W, WorkspaceCommand},
+    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
+    workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
 
 const CONTEXT: &str = "dev-local";
@@ -112,6 +112,7 @@ fn snapshot_tree(harness: &Harness<Fixture>, name: &str) {
             path.display()
         )
     });
+    let expected = expected.replace("\r\n", "\n");
     assert!(
         expected == actual,
         "accessibility snapshot {name} drifted.\n\
@@ -491,4 +492,102 @@ fn scale_dialog_with_conflict_reason() {
     }
     run_steps(&mut harness);
     snapshot_tree(&harness, "scale_dialog_conflict");
+}
+
+#[test]
+fn window_freshness_states() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(2_200.0, 1_500.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+    for kind in [
+        W::Deployments,
+        W::Pods,
+        W::StatefulSets,
+        W::DaemonSets,
+        W::Jobs,
+    ] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(kind),
+            ));
+    }
+    let deployments = workload_id(harness.state(), W::Deployments);
+    let pods = workload_id(harness.state(), W::Pods);
+    let stateful_sets = workload_id(harness.state(), W::StatefulSets);
+    let daemon_sets = workload_id(harness.state(), W::DaemonSets);
+    let jobs = workload_id(harness.state(), W::Jobs);
+    for (window, position) in [
+        (deployments, [10.0, 20.0]),
+        (pods, [1_010.0, 20.0]),
+        (stateful_sets, [10.0, 500.0]),
+        (daemon_sets, [1_010.0, 500.0]),
+        (jobs, [510.0, 980.0]),
+    ] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                window,
+                WindowGeom {
+                    position,
+                    size: [950.0, 430.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let feed = &mut harness.state_mut().feed;
+    feed.window_lists.insert(
+        deployments,
+        vec![list_row(
+            "apps",
+            "v1",
+            "Deployment",
+            "healthy-api",
+            "2/2 ready",
+        )],
+    );
+    feed.window_lists.insert(
+        pods,
+        vec![list_row("", "v1", "Pod", "cached-pod", "Running")],
+    );
+    feed.window_lists.insert(stateful_sets, Vec::new());
+    feed.window_lists.insert(daemon_sets, Vec::new());
+    feed.window_lists.insert(jobs, Vec::new());
+    feed.window_freshness.insert(
+        deployments,
+        WindowFreshness::Live {
+            last_sync_age: "4s ago".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        pods,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "37s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 2,
+        },
+    );
+    feed.window_freshness.insert(
+        stateful_sets,
+        WindowFreshness::Forbidden {
+            user: "alice@example.com".into(),
+            verb: "list".into(),
+            resource: "statefulsets.apps".into(),
+            scope: "--namespace=payments".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        daemon_sets,
+        WindowFreshness::Failed {
+            message: "watch ended unexpectedly".into(),
+        },
+    );
+    feed.window_freshness
+        .insert(jobs, WindowFreshness::ReadyEmpty);
+    run_steps(&mut harness);
+
+    snapshot_tree(&harness, "window_freshness_states");
 }

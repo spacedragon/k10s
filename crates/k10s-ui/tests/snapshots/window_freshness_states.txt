@@ -1,0 +1,354 @@
+Window
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  Button label="File"
+                  Button label="View"
+                  Button label="Help"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          ComboBox label="Kubernetes context" value="dev-local"
+                        Label value="Kubernetes context"
+                          TextRun value="Kubernetes context"
+                  GenericContainer
+                    Button label="Refresh"
+                  Label value="Connected"
+                    TextRun value="Connected"
+                  Label value="Connection status: Connected"
+                    TextRun value="●"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Button label="Overview"
+            GenericContainer
+              Button label="Nodes"
+            GenericContainer
+              Button label="Storage"
+            GenericContainer
+              Button label="Network"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    Button label="Services"
+            GenericContainer
+              Button label="Workloads"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Deployments"
+                      Label value="1 open Deployments window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another Deployments window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Pods"
+                      Label value="1 open Pods window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another Pods window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="StatefulSets"
+                      Label value="1 open StatefulSets window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another StatefulSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="DaemonSets"
+                      Label value="1 open DaemonSets window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another DaemonSets window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Jobs"
+                      Label value="1 open Jobs window"
+                        TextRun value="1"
+                      GenericContainer
+                        Button label="Open another Jobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="CronJobs"
+                      GenericContainer
+                        Button label="Open another CronJobs window"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Custom Resources…"
+                      GenericContainer
+                        Button label="Open another Custom Resources… window"
+        GenericContainer
+          GenericContainer
+  Window label="Overview"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  ProgressIndicator
+                  Label value="Loading cluster overview"
+                    TextRun value="Loading cluster overview"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Deployments"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="● Live · synced 4s ago"
+                TextRun value="● Live · synced 4s ago"
+              GenericContainer
+                TextInput label="Search deployments" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Namespace"
+                              TextRun value="Namespace"
+                            Button label="Sort deployments by namespace"
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Button label="Sort deployments by name"
+                          GenericContainer
+                            Label value="Status"
+                              TextRun value="Status"
+                            Button label="Sort deployments by status"
+                          GenericContainer
+                            Label value="Created"
+                              TextRun value="Created"
+                            Button label="Sort deployments by created"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="healthy-api"
+                          Label value="2/2 ready"
+                            TextRun value="2/2 ready"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Pods"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
+                TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
+              Label value="Mutations disabled while this window is stale"
+                TextRun value="Mutations disabled while this window is stale"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
+              GenericContainer
+                TextInput label="Search pods" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Namespace"
+                              TextRun value="Namespace"
+                            Button label="Sort pods by namespace"
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Button label="Sort pods by name"
+                          GenericContainer
+                            Label value="Status"
+                              TextRun value="Status"
+                            Button label="Sort pods by status"
+                          GenericContainer
+                            Label value="Created"
+                              TextRun value="Created"
+                            Button label="Sort pods by created"
+                          Label value="default"
+                            TextRun value="default"
+                          Button label="cached-pod"
+                          Label value="Running"
+                            TextRun value="Running"
+                          Label value="2026-08-21T00:00:00Z"
+                            TextRun value="2026-08-21T00:00:00Z"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="StatefulSets"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
+                TextRun value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
+              Label value="Ask a cluster administrator to grant this permission, then retry."
+                TextRun value="Ask a cluster administrator to grant this permission, then retry."
+              GenericContainer
+                Label value="kubectl auth can-i list statefulsets.apps --as=alice@example.com --namespace=payments"
+                  TextRun value="kubectl auth can-i list statefulsets.apps --as=alice@example.com --namespace=payments"
+                Button label="Copy auth can-i command"
+                Button label="Retry now"
+              GenericContainer
+                TextInput label="Search statefulsets" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                Label value="No StatefulSets in this view"
+                  TextRun value="No StatefulSets in this view"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="DaemonSets"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="✕ Failed · watch ended unexpectedly"
+                TextRun value="✕ Failed · watch ended unexpectedly"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
+              GenericContainer
+                TextInput label="Search daemonsets" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                Label value="No DaemonSets in this view"
+                  TextRun value="No DaemonSets in this view"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Jobs"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              Label value="◇ Ready · no resources"
+                TextRun value="◇ Ready · no resources"
+              Button label="Refresh list"
+              GenericContainer
+                TextInput label="Search jobs" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Hide details"
+              GenericContainer
+                Label value="No Jobs in this view"
+                  TextRun value="No Jobs in this view"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter

@@ -5,16 +5,16 @@
 //! parses `summary`. Port-forward controls do not exist in this task — the
 //! window is read-only.
 
-use egui::{RichText, ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
+use egui::{ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     ResourceListRow, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
 
 use crate::workspace::{ServiceWindowState, SortSpec, WindowId, WorkspaceCommand};
 
+use super::ConnectionState;
 use super::resource_window::ResourceFeed;
 use super::resource_window::RowIdentity;
-use super::{ConnectionState, theme};
 
 /// Column sort keys in display order.
 const COLUMNS: [(&str, &str); 6] = [
@@ -207,9 +207,18 @@ pub(super) fn show<I>(
 where
     I: RowIdentity,
 {
-    if connection != ConnectionState::Connected {
-        ui.label(RichText::new("Connection stale · showing last known rows").color(theme::WARNING));
-        ui.separator();
+    let fallback_freshness =
+        (connection != ConnectionState::Connected).then(|| super::WindowFreshness::StaleRetrying {
+            last_sync_age: "unknown".into(),
+            retry_in: "pending".into(),
+            attempt: 1,
+        });
+    if let Some(freshness) = feed
+        .window_freshness
+        .get(&window_id)
+        .or(fallback_freshness.as_ref())
+    {
+        super::resource_window::show_window_freshness(ui, window_id, freshness, resource_actions);
     }
 
     let compact_controls = ui.ctx().content_rect().width() < 700.0;
@@ -280,6 +289,14 @@ where
         });
         return false;
     };
+    if rows.is_empty() && !feed.window_freshness.contains_key(&window_id) {
+        super::resource_window::show_window_freshness(
+            ui,
+            window_id,
+            &super::WindowFreshness::ReadyEmpty,
+            resource_actions,
+        );
+    }
 
     // Namespace restriction and search filter authoritative rows locally;
     // sorting happens below against the filtered set.
@@ -353,6 +370,9 @@ where
                     dialogs,
                     feed,
                     Some(&state.port_drafts),
+                    feed.window_freshness
+                        .get(&window_id)
+                        .is_none_or(super::WindowFreshness::mutations_allowed),
                     resource_actions,
                     queued,
                 );

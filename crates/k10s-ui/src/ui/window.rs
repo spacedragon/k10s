@@ -246,6 +246,7 @@ where
                                 dialogs,
                                 feed,
                                 None,
+                                true,
                                 resource_actions,
                                 queued,
                             );

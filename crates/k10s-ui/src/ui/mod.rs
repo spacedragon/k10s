@@ -19,7 +19,7 @@ pub(crate) use detail::pod_container;
 
 pub use resource_window::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed, RowIdentity,
-    SafeUiError,
+    SafeUiError, WindowFreshness,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
@@ -99,6 +99,8 @@ pub enum ResourceAction {
     RetryPrimary(k10s_protocol::ResourceIdentity),
     RetryRelations(k10s_protocol::ResourceIdentity),
     RetryNamespaceCatalog,
+    RetryWindow(WindowId),
+    FullResyncWindow(WindowId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
