@@ -15,6 +15,7 @@ pub(super) const TEXT: Color32 = Color32::from_rgb(229, 232, 235);
 pub(super) const MUTED_TEXT: Color32 = Color32::from_rgb(171, 178, 186);
 pub(super) const ACCENT: Color32 = Color32::from_rgb(51, 169, 216);
 pub(super) const ACCENT_DARK: Color32 = Color32::from_rgb(24, 104, 140);
+pub(super) const SELECTED_ROW: Color32 = Color32::from_rgb(34, 52, 69);
 pub(super) const HEALTHY: Color32 = Color32::from_rgb(91, 214, 156);
 pub(super) const CONNECTING: Color32 = Color32::from_rgb(246, 200, 95);
 pub(super) const WARNING: Color32 = Color32::from_rgb(246, 200, 95);

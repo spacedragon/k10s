@@ -430,7 +430,13 @@ pub(crate) fn show(
                 RichText::new(error.to_owned()).color(egui::Color32::from_rgb(0xc0, 0x39, 0x2b)),
             );
         }
-        ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("LOG SOURCE")
+                .small()
+                .strong()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+        ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt(("logs.container", window_id.0))
                 .selected_text(format!("Container: {}", view.target().container))
                 .show_ui(ui, |ui| {
@@ -515,6 +521,15 @@ pub(crate) fn show(
                     }
                 }
             }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("VIEW")
+                .small()
+                .strong()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+        ui.horizontal_wrapped(|ui| {
             let mut find = view.find().unwrap_or_default().to_owned();
             let find_edit = ui.add(egui::TextEdit::singleline(&mut find).hint_text("Find"));
             find_edit.widget_info(|| {

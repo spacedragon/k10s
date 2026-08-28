@@ -189,11 +189,14 @@ Window
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer
-                  Label value="Details"
-                    TextRun value="Details"
                   GenericContainer
-                    Label value="Pod / db-postgres-0"
-                      TextRun value="Pod / db-postgres-0"
+                    GenericContainer
+                      Label value="Details"
+                        TextRun value="Details"
+                      Label value="POD"
+                        TextRun value="POD"
+                      Label value="db-postgres-0"
+                        TextRun value="db-postgres-0"
                     GenericContainer
                       Label value="Kind Pod"
                         TextRun value="Kind Pod"
@@ -221,6 +224,8 @@ Window
                   Button label="View logs"
                   Button label="Exec shell"
                   Button label="Edit YAML"
+                Label value="LOG SOURCE"
+                  TextRun value="LOG SOURCE"
                 GenericContainer
                   GenericContainer
                     GenericContainer
@@ -232,6 +237,9 @@ Window
                   Button label="Connect logs"
                   Label value="Disconnected"
                     TextRun value="Disconnected"
+                Label value="VIEW"
+                  TextRun value="VIEW"
+                GenericContainer
                   TextInput label="Find in logs" value=""
                     TextRun value=""
                   CheckBox label="Wrap"
