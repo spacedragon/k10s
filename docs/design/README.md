@@ -4,6 +4,17 @@ This directory preserves the standalone HTML mockups created while designing the
 
 Open any HTML file directly in a browser. The files include local shared assets and do not depend on the original brainstorming server.
 
+## Design 08 recovery
+
+The editable source historically referenced as `08-improvements.html` was
+never committed to this repository or any reachable branch. The surviving
+export, [design-08-reference.png](issue-159/design-08-reference.png), is
+therefore the authoritative visual artifact. The local
+[08-improvements.html](08-improvements.html) page presents that export without
+reconstruction or network dependencies. The behavioral specification and the
+decision log below remain authoritative for interactions that a raster export
+cannot express.
+
 ## Design decisions
 
 1. **Use default egui visual language.** The app uses egui's dark theme, native windows, tables, selectable labels, combo boxes, progress bars, tabs, text editors, and compact spacing. It avoids a custom web-dashboard design system.
@@ -34,6 +45,7 @@ Open any HTML file directly in a browser. The files include local shared assets 
 | [05-multi-window-workloads.html](05-multi-window-workloads.html) | Highlight/count/plus launcher and two Pods namespaces | Approved launcher behavior |
 | [06-resource-detail-workflows.html](06-resource-detail-workflows.html) | Deployment Pods, Pod Logs/Shell, YAML, and actions | Approved Detail content |
 | [07-detail-placement-comparison.html](07-detail-placement-comparison.html) | Independent versus integrated Detail comparison | Final decision: integrated default plus pop-out |
+| [08-improvements.html](08-improvements.html) | Authoritative viewer for the surviving final convergence target | Reference export; original editable source unavailable |
 
 ## Relationship to the implementation plan
 
