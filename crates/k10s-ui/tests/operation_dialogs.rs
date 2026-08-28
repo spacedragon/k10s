@@ -159,10 +159,12 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
         DialogAction::SubmitDelete {
             target,
             propagation,
+            resource_version,
             idempotency_key,
         } => {
             assert_eq!(target, deployment("api-server"));
             assert_eq!(propagation, DeletePropagation::Foreground);
+            assert_eq!(resource_version, "fake-revision");
             assert!(!idempotency_key.is_empty());
         }
         other => panic!("expected a delete action, got {other:?}"),
@@ -189,6 +191,24 @@ fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     dialog.connection_lost();
     assert_eq!(dialog.disabled_reason(), Some("not connected"));
     assert!(dialog.take_action().is_none());
+}
+
+#[test]
+fn reconnect_reissues_delete_preflight_exactly_once() {
+    let window = k10s_ui::workspace::WindowId(23);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    dialogs.drain_actions();
+
+    dialogs.set_connected(false);
+    dialogs.set_connected(true);
+    assert!(matches!(
+        dialogs.drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
+
+    dialogs.set_connected(true);
+    assert!(dialogs.drain_actions().is_empty());
 }
 
 #[test]
@@ -419,6 +439,7 @@ fn every_mutation_command_travels_with_an_exact_scope_identity_and_idempotency_k
         .begin_command(Command::Delete {
             target: deployment("api-server"),
             propagation: DeletePropagation::Foreground,
+            resource_version: "42".into(),
             idempotency_key: "idem-delete-1".into(),
         })
         .unwrap();

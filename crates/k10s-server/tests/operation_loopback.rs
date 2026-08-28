@@ -218,6 +218,7 @@ fn delete_payload(name: &str, propagation: DeletePropagation) -> Value {
     serde_json::to_value(k10s_protocol::DeleteRequest {
         identity: deployment_identity(name),
         propagation,
+        resource_version: "1".into(),
     })
     .unwrap()
 }

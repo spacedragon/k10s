@@ -218,6 +218,8 @@ pub struct DeleteRequest {
     pub identity: ResourceIdentity,
     /// How dependents are handled.
     pub propagation: DeletePropagation,
+    /// Resource version authorized by the successful server dry-run.
+    pub resource_version: String,
 }
 
 /// Query payload for an authoritative delete dry-run.
@@ -238,6 +240,8 @@ pub struct DeletePreflightResponse {
     pub identity: ResourceIdentity,
     /// Propagation policy evaluated by the API server.
     pub propagation: DeletePropagation,
+    /// Resource version against which the API server accepted the dry-run.
+    pub resource_version: String,
     /// Safe impact estimate derived by the backend.
     pub impact: String,
     /// Safe API-server dry-run result.
@@ -369,6 +373,7 @@ mod tests {
                 uid: "uid-p".into(),
             },
             propagation: DeletePropagation::Foreground,
+            resource_version: "42".into(),
         };
         let value = serde_json::to_value(&delete).unwrap();
         assert_eq!(value["propagation"], "foreground");

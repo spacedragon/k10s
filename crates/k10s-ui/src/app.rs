@@ -2224,6 +2224,16 @@ impl K10sApp {
                     target,
                     propagation,
                 } => {
+                    let superseded = self
+                        .pending_delete_preflights
+                        .iter()
+                        .filter_map(|(id, entry)| (entry.window == window).then_some(id.clone()))
+                        .collect::<Vec<_>>();
+                    for id in superseded {
+                        if let Some(entry) = self.pending_delete_preflights.remove(&id) {
+                            let _ = self.client.cancel(&entry.request);
+                        }
+                    }
                     let request = self.client.begin(Query::DeletePreflight(
                         k10s_protocol::DeletePreflightRequest {
                             identity: target.clone(),
@@ -2253,10 +2263,12 @@ impl K10sApp {
                 DialogAction::SubmitDelete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 } => Command::Delete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 },
             };
@@ -2309,6 +2321,7 @@ impl K10sApp {
                     crate::ui::dialogs::DestructivePreflight::Ready {
                         impact: response.impact,
                         dry_run: response.dry_run,
+                        resource_version: response.resource_version,
                     }
                 }
                 _ => {

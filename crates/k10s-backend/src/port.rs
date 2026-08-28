@@ -319,6 +319,7 @@ pub enum Command {
     Delete {
         target: ResourceRef,
         propagation: crate::operation::Propagation,
+        resource_version: String,
         idempotency_key: String,
     },
 }

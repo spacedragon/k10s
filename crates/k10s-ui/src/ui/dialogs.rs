@@ -21,7 +21,11 @@ pub enum DestructivePreflight {
     /// No exact-target server result has been received yet.
     Pending,
     /// The API server accepted the dry-run and returned an impact estimate.
-    Ready { impact: String, dry_run: String },
+    Ready {
+        impact: String,
+        dry_run: String,
+        resource_version: String,
+    },
     /// RBAC denied the dry-run.
     Forbidden(String),
     /// The target changed after the view was loaded.
@@ -37,6 +41,7 @@ impl DestructivePreflight {
         Self::Ready {
             impact: "Deletes this object; dependents follow the selected propagation policy."
                 .into(),
+            resource_version: "fake-revision".into(),
             dry_run: "Passed — the API server accepted the delete dry-run.".into(),
         }
     }
@@ -94,6 +99,8 @@ pub enum DialogAction {
         target: ResourceIdentity,
         /// How dependents are handled.
         propagation: DeletePropagation,
+        /// Resource version authorized by the successful dry-run.
+        resource_version: String,
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
@@ -393,9 +400,16 @@ impl DeleteDialog {
             return None;
         }
         self.consumed = true;
+        let DestructivePreflight::Ready {
+            resource_version, ..
+        } = &self.preflight
+        else {
+            unreachable!("submission is gated on a ready preflight")
+        };
         Some(DialogAction::SubmitDelete {
             target: self.target.clone(),
             propagation: self.propagation,
+            resource_version: resource_version.clone(),
             idempotency_key: self.idempotency_key.clone(),
         })
     }
@@ -583,7 +597,8 @@ impl OperationDialogs {
     /// a dialog opened before or across a reconnect always reflects the
     /// current transport state.
     pub fn set_connected(&mut self, connected: bool) {
-        for dialog in self.windows.values_mut() {
+        let mut refresh = Vec::new();
+        for (window, dialog) in &mut self.windows {
             match dialog {
                 ActiveDialog::Scale(scale) => {
                     if connected {
@@ -594,6 +609,9 @@ impl OperationDialogs {
                 }
                 ActiveDialog::Delete(delete) => {
                     if connected {
+                        if !delete.connected {
+                            refresh.push((*window, delete.target.clone(), delete.propagation));
+                        }
                         delete.reconnected();
                     } else {
                         delete.connection_lost();
@@ -601,6 +619,16 @@ impl OperationDialogs {
                 }
             }
         }
+        self.actions
+            .extend(refresh.into_iter().map(|(window, target, propagation)| {
+                (
+                    window,
+                    DialogAction::RequestDeletePreflight {
+                        target,
+                        propagation,
+                    },
+                )
+            }));
     }
 
     /// Drain every queued dialog action for submission.
@@ -767,7 +795,9 @@ fn render_delete(
         DestructivePreflight::Pending => {
             ui.label("[PENDING] Waiting for authoritative server dry-run.");
         }
-        DestructivePreflight::Ready { impact, dry_run } => {
+        DestructivePreflight::Ready {
+            impact, dry_run, ..
+        } => {
             ui.label(format!("[IMPACT] {impact}"));
             ui.label(
                 RichText::new(format!("[PASS] Server dry-run: {dry_run}"))

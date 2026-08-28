@@ -33,7 +33,7 @@ impl KubeAdapter {
             propagation_policy: Some(policy),
             preconditions: Some(Preconditions {
                 uid: Some(target.uid.clone()),
-                resource_version: Some(resource_version),
+                resource_version: Some(resource_version.clone()),
             }),
             ..DeleteParams::default()
         };
@@ -59,6 +59,7 @@ impl KubeAdapter {
                     uid: target.uid,
                 },
                 propagation,
+                resource_version,
                 impact: "Deletes this object; dependents follow the selected propagation policy."
                     .into(),
                 dry_run: "Passed — the API server accepted the delete dry-run.".into(),
@@ -160,9 +161,13 @@ impl KubeAdapter {
             Command::Delete {
                 target,
                 propagation,
+                resource_version: authorized_resource_version,
                 idempotency_key,
             } => {
-                let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
+                let fingerprint = format!(
+                    "delete/{}/{propagation:?}/{authorized_resource_version}",
+                    target.exact_identity_key()
+                );
                 if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
                     return Ok(id);
                 }
@@ -173,6 +178,11 @@ impl KubeAdapter {
                 let resource_version = current.resource_version().ok_or_else(|| {
                     BackendError::Conflict("the target has no resourceVersion".into())
                 })?;
+                if resource_version != authorized_resource_version {
+                    return Err(BackendError::Conflict(
+                        "the target changed after the delete dry-run".into(),
+                    ));
+                }
                 let policy = match propagation {
                     Propagation::Background => PropagationPolicy::Background,
                     Propagation::Foreground => PropagationPolicy::Foreground,
@@ -182,7 +192,7 @@ impl KubeAdapter {
                     propagation_policy: Some(policy),
                     preconditions: Some(Preconditions {
                         uid: Some(target.uid.clone()),
-                        resource_version: Some(resource_version),
+                        resource_version: Some(authorized_resource_version),
                     }),
                     ..DeleteParams::default()
                 };

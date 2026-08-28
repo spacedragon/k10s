@@ -289,6 +289,7 @@ pub enum Command {
         target: ResourceIdentity,
         /// How dependents are handled.
         propagation: DeletePropagation,
+        resource_version: String,
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
@@ -637,10 +638,12 @@ impl PendingAction {
             Self::Command(Command::Delete {
                 target,
                 propagation,
+                resource_version,
                 ..
             }) => encode(DeleteRequest {
                 identity: target.clone(),
                 propagation: *propagation,
+                resource_version: resource_version.clone(),
             }),
         }
     }
@@ -1716,6 +1719,7 @@ impl ClientState {
                         .map_err(|error| ClientError::Protocol(error.message))?;
                     if response.identity != request.identity
                         || response.propagation != request.propagation
+                        || response.resource_version.is_empty()
                     {
                         return Err(ClientError::Protocol(
                             "delete preflight response did not match its exact request".into(),

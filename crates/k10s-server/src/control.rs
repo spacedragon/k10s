@@ -1381,6 +1381,7 @@ fn parse_request(
                     Some(ParsedRequest::Execute(Command::Delete {
                         target: backend_reference(delete.identity),
                         propagation,
+                        resource_version: delete.resource_version,
                         idempotency_key: key,
                     }))
                 })

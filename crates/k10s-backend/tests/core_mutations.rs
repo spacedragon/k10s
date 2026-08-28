@@ -11,6 +11,7 @@ const DEPLOYMENT: &str = "/apis/apps/v1/namespaces/default/deployments/web";
 const SCALE: &str = "/apis/apps/v1/namespaces/default/deployments/web/scale";
 const OBJECT: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default","uid":"uid-web","resourceVersion":"42"},"spec":{"replicas":2}}"#;
 const RECREATED_OBJECT: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default","uid":"uid-recreated","resourceVersion":"84"},"spec":{"replicas":2}}"#;
+const UPDATED_OBJECT: &str = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default","uid":"uid-web","resourceVersion":"84"},"spec":{"replicas":3}}"#;
 const YAML: &str = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: default\n  uid: uid-web\n  resourceVersion: '42'\nspec:\n  replicas: 4\n";
 
 fn adapter(server: &RecordedApiServer) -> KubeAdapter {
@@ -76,10 +77,45 @@ async fn delete_preflight_is_an_exact_uid_rv_server_dry_run() {
         response.propagation,
         k10s_protocol::DeletePropagation::Foreground
     );
+    assert_eq!(response.resource_version, "42");
     let body = server.request_bodies(DEPLOYMENT).pop().unwrap();
     assert!(body.contains("\"dryRun\":[\"All\"]"));
     assert!(body.contains("uid-web"));
     assert!(body.contains("42"));
+}
+
+#[tokio::test]
+async fn delete_rejects_a_same_uid_revision_changed_after_preflight() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);
+    server.set_method_response("DELETE", DEPLOYMENT, 200, OBJECT);
+    let adapter = adapter(&server);
+    let QueryResult::DeletePreflight(preflight) = adapter
+        .query(Query::DeletePreflight {
+            target: target(),
+            propagation: Propagation::Foreground,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected delete preflight response")
+    };
+
+    server.set_method_response("GET", DEPLOYMENT, 200, UPDATED_OBJECT);
+    let result = adapter
+        .execute(Command::Delete {
+            target: target(),
+            propagation: Propagation::Foreground,
+            resource_version: preflight.resource_version,
+            idempotency_key: "stale-preflight".into(),
+        })
+        .await;
+    assert!(matches!(result, Err(BackendError::Conflict(_))));
+    assert_eq!(
+        server.hit_count(DEPLOYMENT),
+        3,
+        "the stale authority must fail after the second GET, before another DELETE"
+    );
 }
 
 #[tokio::test]
@@ -153,6 +189,7 @@ async fn delete_carries_uid_rv_preconditions_and_all_propagation_policies() {
             .execute(Command::Delete {
                 target: target(),
                 propagation,
+                resource_version: "42".into(),
                 idempotency_key: format!("delete-{propagation:?}"),
             })
             .await
@@ -180,6 +217,7 @@ async fn completed_delete_replays_before_a_live_target_preflight() {
     let command = Command::Delete {
         target: target(),
         propagation: Propagation::Foreground,
+        resource_version: "42".into(),
         idempotency_key: "delete-replay".into(),
     };
 
@@ -264,6 +302,7 @@ async fn authoritative_absence_releases_an_unknown_delete_scope() {
         .execute(Command::Delete {
             target: target(),
             propagation: Propagation::Background,
+            resource_version: "42".into(),
             idempotency_key: "unknown-delete".into(),
         })
         .await

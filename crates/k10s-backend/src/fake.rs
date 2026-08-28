@@ -930,9 +930,13 @@ impl FakeKubernetes {
         &self,
         target: ResourceRef,
         propagation: crate::operation::Propagation,
+        resource_version: String,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
-        let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
+        let fingerprint = format!(
+            "delete/{}/{propagation:?}/{resource_version}",
+            target.exact_identity_key()
+        );
         let mut state = self.lock();
         if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
             return Ok(existing);
@@ -959,6 +963,11 @@ impl FakeKubernetes {
             return Err(BackendError::Conflict(
                 "the target does not match the current object at this name; it was recreated"
                     .into(),
+            ));
+        }
+        if record.revision.to_string() != resource_version {
+            return Err(BackendError::Conflict(
+                "the target changed after the delete dry-run".into(),
             ));
         }
         let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
@@ -1431,6 +1440,7 @@ impl KubernetesAccess for FakeKubernetes {
                                 uid: target.uid,
                             },
                             propagation,
+                            resource_version: record.revision.to_string(),
                             impact: "Deletes this object; dependents follow the selected propagation policy.".into(),
                             dry_run: "Passed — the fake API server accepted the delete dry-run.".into(),
                         },
@@ -1629,8 +1639,12 @@ impl KubernetesAccess for FakeKubernetes {
                 Command::Delete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
-                } => self.delete(target, propagation, idempotency_key).await,
+                } => {
+                    self.delete(target, propagation, resource_version, idempotency_key)
+                        .await
+                }
                 Command::Restart {
                     target,
                     idempotency_key,

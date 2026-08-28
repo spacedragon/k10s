@@ -603,12 +603,23 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
         &dependent_patch,
     ]);
     let target = reference(&adapter, Gvk::core("v1", "ConfigMap"), "delete-me").await;
+    let QueryResult::DeletePreflight(preflight) = adapter
+        .query(Query::DeletePreflight {
+            target: target.clone(),
+            propagation: Propagation::Foreground,
+        })
+        .await
+        .expect("delete preflight")
+    else {
+        panic!("expected delete preflight response")
+    };
     run(
         &adapter,
         "delete",
         Command::Delete {
             target,
             propagation: Propagation::Foreground,
+            resource_version: preflight.resource_version,
             idempotency_key: "kind-foreground-delete".into(),
         },
     )
