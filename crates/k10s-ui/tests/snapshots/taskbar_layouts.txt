@@ -9,29 +9,36 @@ Window
                 GenericContainer
                   Button label="File"
                   Button label="View"
+                  Button label="Window"
                   Button label="Help"
+                GenericContainer
+                  Button label="Tile"
+                  Button label="Stack"
+                  Button label="Focus"
                 GenericContainer
                   GenericContainer
                     GenericContainer
                       GenericContainer
                         GenericContainer
                           ComboBox label="Kubernetes context" value="dev-local"
-                        Label value="Kubernetes context"
-                          TextRun value="Kubernetes context"
                   GenericContainer
                     Button label="Retry"
+                  Label value="v0.1.4"
+                    TextRun value="v0.1.4"
+                  Label value="Connecting"
+                    TextRun value="Connecting"
                   Label value="Connection status: Connecting"
                     TextRun value="●"
         GenericContainer
           GenericContainer
             GenericContainer
-              Button label="Tile"
-              Button label="Cascade"
-              Button label="Focus"
-              Button label="Overview · ↻ Stale data"
+              GenericContainer
+                Button label="Overview · ↻ Stale data"
+              GenericContainer
+                Button label="Pods · payments · ↻ Stale data"
               GenericContainer
                 GenericContainer
-                  ComboBox value="More tasks (3)"
+                  ComboBox value="More tasks (2)"
         GenericContainer
           GenericContainer
             GenericContainer

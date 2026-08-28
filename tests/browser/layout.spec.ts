@@ -42,6 +42,11 @@ test('remains usable at the supported 640x420 minimum viewport', async ({ page }
   await page.mouse.wheel(0, 1000);
   // Let egui complete its final layout pass before pixel capture.
   await page.waitForTimeout(500);
+  await page.screenshot({
+    animations: 'disabled',
+    fullPage: true,
+    path: 'docs/screenshots/issue-172/after-640x420.png',
+  });
   await expect(page).toHaveScreenshot('compact-workspace.png', {
     animations: 'disabled',
     fullPage: true,
@@ -60,10 +65,15 @@ test('matches the fixed 1280x800 shell composition', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await connect(page);
   await expectCanvasFitsViewport(page);
+  await page.getByRole('button', { name: 'Deployments', exact: true }).dispatchEvent('click');
+  await expect(page.getByRole('table', { name: 'Deployments' })).toBeVisible();
+  await page.getByRole('button', { name: 'Pods', exact: true }).dispatchEvent('click');
+  await expect(page.getByRole('table', { name: 'Pods' })).toBeVisible();
+  await page.waitForTimeout(500);
   await page.screenshot({
     animations: 'disabled',
     fullPage: true,
-    path: 'docs/screenshots/issue-152-shell-1280x800.png',
+    path: 'docs/screenshots/issue-172/after-1280x800.png',
   });
 });
 

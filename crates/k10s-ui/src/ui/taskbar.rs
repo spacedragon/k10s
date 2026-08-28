@@ -5,6 +5,7 @@ use crate::workspace::{
 };
 
 use super::{ConnectionState, resource_window::RowIdentity};
+use egui::{Button, WidgetInfo, WidgetType};
 
 const TASK_WIDTH: f32 = 172.0;
 
@@ -92,47 +93,27 @@ pub(super) fn show<I: RowIdentity>(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState<I>,
     connection: ConnectionState,
-    canvas_size: [f32; 2],
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     ui.horizontal(|ui| {
-        if ui
-            .button("Tile")
-            .on_hover_text("Tile windows (usable minima; overflow when compact)")
-            .clicked()
-        {
-            queued.push(WorkspaceCommand::Tile(canvas_size));
-        }
-        if ui
-            .button("Cascade")
-            .on_hover_text("Toggle cascade / restore layout")
-            .clicked()
-        {
-            queued.push(WorkspaceCommand::Cascade(canvas_size));
-        }
-        if ui
-            .button("Focus")
-            .on_hover_text("Toggle focused window / restore layout")
-            .clicked()
-        {
-            queued.push(WorkspaceCommand::ToggleFocus(canvas_size));
-        }
-        ui.separator();
-
         let active = workspace
             .windows()
             .iter()
             .max_by_key(|window| window.z)
             .map(|window| window.id);
-        let capacity = ((ui.available_width() - TASK_WIDTH) / TASK_WIDTH)
+        // Base capacity on the viewport rather than the horizontal layout's
+        // transient cursor so the final slot is always reserved for overflow.
+        let capacity = ((ui.max_rect().width() - TASK_WIDTH) / TASK_WIDTH)
             .floor()
             .max(1.0) as usize;
         for window in workspace.windows().iter().take(capacity) {
             let text = label(window, active == Some(window.id), connection);
-            if ui
-                .selectable_label(active == Some(window.id), text)
-                .clicked()
-            {
+            let response = ui.add_sized(
+                [TASK_WIDTH, ui.spacing().interact_size.y],
+                Button::selectable(active == Some(window.id), &text),
+            );
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &text));
+            if response.on_hover_text(&text).clicked() {
                 queued.push(WorkspaceCommand::FocusWindow(window.id));
             }
         }

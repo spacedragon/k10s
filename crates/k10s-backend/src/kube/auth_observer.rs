@@ -213,7 +213,7 @@ impl fmt::Display for ContextUnavailableMarker {
 
 impl std::error::Error for ContextUnavailableMarker {}
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #[cfg(unix)]
     use std::process::{ExitStatus, Output};
