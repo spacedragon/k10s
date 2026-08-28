@@ -5,8 +5,10 @@
 use k10s_protocol::{ClientKind, StreamTarget, StreamTicketResponse, StreamType};
 use k10s_ui::client::{ConnectTarget, Query};
 use k10s_ui::ui::tools::{
-    LogsPhase, LogsTool, MAX_LINE_CHARS, ShellAction, ShellPhase, ShellTool, TRUNCATION_MARKER,
+    LogsPhase, LogsTool, LogsViews, MAX_LINE_CHARS, ShellAction, ShellPhase, ShellTool,
+    TRUNCATION_MARKER,
 };
+use k10s_ui::workspace::WindowId;
 
 fn logs_tool() -> LogsTool {
     LogsTool::new(
@@ -56,6 +58,19 @@ fn log_source_toolbar_state_controls_container_history_wrap_and_export() {
     tool.append("first");
     tool.append("second");
     assert_eq!(tool.export_text(), "first\nsecond");
+}
+
+#[test]
+fn selected_container_survives_default_target_reconciliation() {
+    let window = WindowId(42);
+    let mut views = LogsViews::default();
+    let default_target = logs_tool().target().clone();
+    views
+        .ensure(window, default_target.clone())
+        .select_container("metrics");
+
+    let reconciled = views.ensure(window, default_target);
+    assert_eq!(reconciled.target().container, "metrics");
 }
 
 #[test]

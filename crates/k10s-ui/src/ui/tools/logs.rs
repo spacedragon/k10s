@@ -332,10 +332,14 @@ impl LogsViews {
     /// Lazily ensure the view for `window`, bound to `target`.
     ///
     /// The view is rebound whenever its window's pinned identity resolves
-    /// to a different pod/container: history from one pod must never be
-    /// displayed under another pod's identity.
+    /// to a different pod. Container choice belongs to this viewer and must
+    /// survive the manifest-default target supplied by subsequent renders.
     pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut LogsTool {
-        if self.target_of(window).as_ref() != Some(&target) {
+        if self
+            .target_of(window)
+            .as_ref()
+            .is_none_or(|current| !same_workload(current, &target))
+        {
             self.views
                 .insert(window, LogsTool::new(target.clone(), DEFAULT_TAIL_CAPACITY));
         }
@@ -385,6 +389,15 @@ impl LogsViews {
     }
 }
 
+/// Container choice is viewer state; the remaining fields identify the pod
+/// whose history must be discarded when the workspace selection changes.
+pub(crate) fn same_workload(left: &StreamTarget, right: &StreamTarget) -> bool {
+    left.context == right.context
+        && left.namespace == right.namespace
+        && left.pod == right.pod
+        && left.uid == right.uid
+}
+
 /// Tail capacity used by detail-view log panes.
 pub const DEFAULT_TAIL_CAPACITY: usize = 512;
 
@@ -404,6 +417,13 @@ pub(crate) fn show(
     let mut connect_requested = false;
     {
         let view = views.ensure(window_id, target.clone());
+        if !containers.is_empty()
+            && !containers
+                .iter()
+                .any(|container| container == &view.target().container)
+        {
+            view.select_container(&containers[0]);
+        }
         view.apply_source_defaults(default_previous);
         if let Some(error) = view.last_error() {
             ui.label(
@@ -567,11 +587,14 @@ pub(crate) fn show(
             });
     }
     if connect_requested {
+        let selected_target = views
+            .target_of(window_id)
+            .expect("a rendered logs view has a target");
         views.queue(
             window_id,
             LogsAction::OpenLogs {
                 window: window_id,
-                target,
+                target: selected_target,
                 since_seconds: views.get(window_id).and_then(LogsTool::since_seconds),
                 previous: views.get(window_id).is_some_and(LogsTool::previous),
             },
