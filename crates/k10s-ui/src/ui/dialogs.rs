@@ -639,6 +639,7 @@ impl OperationDialogs {
     /// Render every open dialog. Queues actions; never blocks.
     pub fn show(&mut self, ui: &mut egui::Ui, mut mutations_allowed: impl FnMut(WindowId) -> bool) {
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        let mut refresh = Vec::new();
         for window in windows {
             let connected = mutations_allowed(window);
             let Some(dialog) = self.windows.get_mut(&window) else {
@@ -654,6 +655,9 @@ impl OperationDialogs {
                 }
                 ActiveDialog::Delete(delete) => {
                     if connected {
+                        if !delete.connected {
+                            refresh.push((window, delete.target.clone(), delete.propagation));
+                        }
                         delete.reconnected()
                     } else {
                         delete.connection_lost()
@@ -693,6 +697,16 @@ impl OperationDialogs {
                 ui.ctx().request_repaint();
             }
         }
+        self.actions
+            .extend(refresh.into_iter().map(|(window, target, propagation)| {
+                (
+                    window,
+                    DialogAction::RequestDeletePreflight {
+                        target,
+                        propagation,
+                    },
+                )
+            }));
     }
 }
 

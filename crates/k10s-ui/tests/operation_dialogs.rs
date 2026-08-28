@@ -257,7 +257,7 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .build_ui_state(
-            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true),
+            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, |_| true),
             dialogs,
         );
     assert!(matches!(
