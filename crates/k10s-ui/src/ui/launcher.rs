@@ -62,73 +62,78 @@ pub(super) fn show<I>(
     let query = state.filter.trim().to_ascii_lowercase();
     let matches = |label: &str| query.is_empty() || label.to_ascii_lowercase().contains(&query);
     let counts = response.map(|value| value.launcher).unwrap_or_default();
-    ui.small("CLUSTER");
-    if matches("Overview") {
-        singleton(ui, workspace, queued, LauncherItem::Overview, "Overview");
-    }
-    if matches("Events") {
-        resource(
-            ui,
-            workspace,
-            queued,
-            WorkloadKind::Events,
-            Some((counts.events_warning, "warn")),
-        );
-    }
-    if matches("Namespaces") {
-        resource(ui, workspace, queued, WorkloadKind::Namespaces, None);
-    }
-    if matches("Nodes") {
-        singleton(ui, workspace, queued, LauncherItem::Nodes, "Nodes");
-    }
-    group(
-        ui,
-        "Workloads",
-        counts.workloads,
-        &mut state.workloads_open,
-        &query,
-        WorkloadKind::ALL,
-        workspace,
-        queued,
-    );
-    group_with_services(
-        ui,
-        counts.network,
-        &mut state.network_open,
-        &query,
-        workspace,
-        queued,
-    );
-    group(
-        ui,
-        "Config",
-        counts.config,
-        &mut state.config_open,
-        &query,
-        WorkloadKind::CONFIG,
-        workspace,
-        queued,
-    );
-    group(
-        ui,
-        "Storage",
-        counts.storage,
-        &mut state.storage_open,
-        &query,
-        WorkloadKind::STORAGE,
-        workspace,
-        queued,
-    );
-    group(
-        ui,
-        "Access",
-        counts.access,
-        &mut state.access_open,
-        &query,
-        WorkloadKind::ACCESS,
-        workspace,
-        queued,
-    );
+    egui::ScrollArea::vertical()
+        .id_salt("resource-launcher")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.small("CLUSTER");
+            if matches("Overview") {
+                singleton(ui, workspace, queued, LauncherItem::Overview, "Overview");
+            }
+            if matches("Events") {
+                resource(
+                    ui,
+                    workspace,
+                    queued,
+                    WorkloadKind::Events,
+                    Some((counts.events_warning, "warn")),
+                );
+            }
+            if matches("Namespaces") {
+                resource(ui, workspace, queued, WorkloadKind::Namespaces, None);
+            }
+            if matches("Nodes") {
+                singleton(ui, workspace, queued, LauncherItem::Nodes, "Nodes");
+            }
+            group(
+                ui,
+                "Workloads",
+                counts.workloads,
+                &mut state.workloads_open,
+                &query,
+                WorkloadKind::ALL,
+                workspace,
+                queued,
+            );
+            group_with_services(
+                ui,
+                counts.network,
+                &mut state.network_open,
+                &query,
+                workspace,
+                queued,
+            );
+            group(
+                ui,
+                "Config",
+                counts.config,
+                &mut state.config_open,
+                &query,
+                WorkloadKind::CONFIG,
+                workspace,
+                queued,
+            );
+            group(
+                ui,
+                "Storage",
+                counts.storage,
+                &mut state.storage_open,
+                &query,
+                WorkloadKind::STORAGE,
+                workspace,
+                queued,
+            );
+            group(
+                ui,
+                "Access",
+                counts.access,
+                &mut state.access_open,
+                &query,
+                WorkloadKind::ACCESS,
+                workspace,
+                queued,
+            );
+        });
 }
 
 #[allow(clippy::too_many_arguments)]

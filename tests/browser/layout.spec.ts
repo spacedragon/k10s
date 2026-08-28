@@ -36,6 +36,10 @@ test('remains usable at the supported 640x420 minimum viewport', async ({ page }
     return canvas.width >= 640 && canvas.height >= 420;
   });
   expect(renderedPixels).toBeTruthy();
+  // The taxonomy exceeds the minimum viewport. Scroll the launcher to prove
+  // lower groups remain reachable instead of being clipped after CronJobs.
+  await page.mouse.move(100, 300);
+  await page.mouse.wheel(0, 1000);
   // Let egui complete its final layout pass before pixel capture.
   await page.waitForTimeout(500);
   await expect(page).toHaveScreenshot('compact-workspace.png', {

@@ -44,93 +44,95 @@ Window
                   TextRun value="KUBERNETES CONSOLE"
             TextInput label="Filter resources…" value=""
               TextRun value=""
-            Label value="CLUSTER"
-              TextRun value="CLUSTER"
-            Button label="Overview"
             GenericContainer
               GenericContainer
-                Button label="Events"
-              Button label="Open another Events window"
-            GenericContainer
-              GenericContainer
-                Button label="Namespaces"
-              Button label="Open another Namespaces window"
-            Button label="Nodes"
-            GenericContainer
-              Label value="▾"
-                TextRun value="▾"
-              Button label="Workloads"
-              Label value="0 Workloads resources"
-                TextRun value="0"
-            GenericContainer
-              GenericContainer
+                Label value="CLUSTER"
+                  TextRun value="CLUSTER"
+                Button label="Overview"
                 GenericContainer
-                  Button label="Deployments"
-                Button label="Open another Deployments window"
-              GenericContainer
+                  GenericContainer
+                    Button label="Events"
+                  Button label="Open another Events window"
                 GenericContainer
-                  Button label="Pods"
-                Label value="1 open Pods window"
-                  TextRun value="1"
-                Button label="Open another Pods window"
-              GenericContainer
+                  GenericContainer
+                    Button label="Namespaces"
+                  Button label="Open another Namespaces window"
+                Button label="Nodes"
                 GenericContainer
-                  Button label="StatefulSets"
-                Button label="Open another StatefulSets window"
-              GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Workloads"
+                  Label value="0 Workloads resources"
+                    TextRun value="0"
                 GenericContainer
-                  Button label="DaemonSets"
-                Button label="Open another DaemonSets window"
-              GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Deployments"
+                    Button label="Open another Deployments window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Pods"
+                    Label value="1 open Pods window"
+                      TextRun value="1"
+                    Button label="Open another Pods window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="StatefulSets"
+                    Button label="Open another StatefulSets window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="DaemonSets"
+                    Button label="Open another DaemonSets window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Jobs"
+                    Button label="Open another Jobs window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="CronJobs"
+                    Button label="Open another CronJobs window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Custom Resources…"
+                    Button label="Open another Custom Resources… window"
                 GenericContainer
-                  Button label="Jobs"
-                Button label="Open another Jobs window"
-              GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Network"
+                  Label value="0 Network resources"
+                    TextRun value="0"
                 GenericContainer
-                  Button label="CronJobs"
-                Button label="Open another CronJobs window"
-              GenericContainer
+                  Button label="Services"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Ingresses"
+                    Button label="Open another Ingresses window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Endpoints"
+                    Button label="Open another Endpoints window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="NetworkPolicies"
+                    Button label="Open another NetworkPolicies window"
                 GenericContainer
-                  Button label="Custom Resources…"
-                Button label="Open another Custom Resources… window"
-            GenericContainer
-              Label value="▾"
-                TextRun value="▾"
-              Button label="Network"
-              Label value="0 Network resources"
-                TextRun value="0"
-            GenericContainer
-              Button label="Services"
-              GenericContainer
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Config"
+                  Label value="0 Config resources"
+                    TextRun value="0"
                 GenericContainer
-                  Button label="Ingresses"
-                Button label="Open another Ingresses window"
-              GenericContainer
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Storage"
+                  Label value="0 Storage resources"
+                    TextRun value="0"
                 GenericContainer
-                  Button label="Endpoints"
-                Button label="Open another Endpoints window"
-              GenericContainer
-                GenericContainer
-                  Button label="NetworkPolicies"
-                Button label="Open another NetworkPolicies window"
-            GenericContainer
-              Label value="▸"
-                TextRun value="▸"
-              Button label="Config"
-              Label value="0 Config resources"
-                TextRun value="0"
-            GenericContainer
-              Label value="▸"
-                TextRun value="▸"
-              Button label="Storage"
-              Label value="0 Storage resources"
-                TextRun value="0"
-            GenericContainer
-              Label value="▸"
-                TextRun value="▸"
-              Button label="Access"
-              Label value="0 Access resources"
-                TextRun value="0"
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Access"
+                  Label value="0 Access resources"
+                    TextRun value="0"
         GenericContainer
           GenericContainer
   Window label="Overview"

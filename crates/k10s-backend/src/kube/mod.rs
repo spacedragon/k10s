@@ -45,6 +45,34 @@ use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
 use crate::runtime::supervisor::WatchSource;
 use crate::watch::WatchSelector;
 
+const INFRASTRUCTURE_KINDS: [&str; 20] = [
+    "Node",
+    "Pod",
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "Job",
+    "CronJob",
+    "Event",
+    "Service",
+    "Ingress",
+    "Endpoints",
+    "NetworkPolicy",
+    "ConfigMap",
+    "Secret",
+    "PersistentVolumeClaim",
+    "PersistentVolume",
+    "StorageClass",
+    "ServiceAccount",
+    "Role",
+    "RoleBinding",
+];
+
+fn is_infrastructure_descriptor(entry: &ApiResourceDescriptor) -> bool {
+    INFRASTRUCTURE_KINDS.contains(&entry.gvk.kind.as_str())
+        && (entry.gvk.kind != "Event" || entry.gvk.group.is_empty())
+}
+
 /// A test-only override choosing scripted watch sources per selection.
 ///
 /// Returning `None` falls back to the real kube-rs source so a script can
@@ -429,19 +457,10 @@ impl KubeAdapter {
             return Err(BackendError::NotFound);
         }
         let catalog = self.catalog_for(context).await?;
-        let overview_kinds = [
-            "Node",
-            "Pod",
-            "Deployment",
-            "StatefulSet",
-            "DaemonSet",
-            "Job",
-            "CronJob",
-        ];
         let descriptors = catalog
             .types
             .iter()
-            .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
+            .filter(|entry| is_infrastructure_descriptor(entry))
             .cloned()
             .collect::<Vec<_>>();
         let client = self.cluster_client(context).await?;
@@ -504,19 +523,10 @@ impl KubeAdapter {
             return Err(BackendError::NotFound);
         }
         let catalog = self.catalog_for(&context).await?;
-        let overview_kinds = [
-            "Node",
-            "Pod",
-            "Deployment",
-            "StatefulSet",
-            "DaemonSet",
-            "Job",
-            "CronJob",
-        ];
         let descriptors = catalog
             .types
             .iter()
-            .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
+            .filter(|entry| is_infrastructure_descriptor(entry))
             .cloned()
             .collect::<Vec<_>>();
         let client = self.cluster_client(&context).await?;
@@ -1513,8 +1523,56 @@ mod client_build_lock_tests {
 
     use futures_util::FutureExt;
 
-    use super::{CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks};
-    use crate::port::{BackendError, ResourceTypesData};
+    use super::{
+        CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks,
+        is_infrastructure_descriptor,
+    };
+    use crate::port::{ApiResourceDescriptor, BackendError, Gvk, ResourceTypesData};
+
+    fn descriptor(group: &str, kind: &str) -> ApiResourceDescriptor {
+        ApiResourceDescriptor {
+            gvk: Gvk::new(group, "v1", kind),
+            plural: format!("{}s", kind.to_ascii_lowercase()),
+            namespaced: kind != "Node",
+            supports_scale: false,
+            supports_watch: true,
+            supports_patch: false,
+            supports_create: false,
+            supports_delete: false,
+        }
+    }
+
+    #[test]
+    fn infrastructure_catalog_includes_every_launcher_count_kind_once() {
+        for (group, kind) in [
+            ("", "Event"),
+            ("", "Service"),
+            ("networking.k8s.io", "Ingress"),
+            ("", "Endpoints"),
+            ("networking.k8s.io", "NetworkPolicy"),
+            ("", "ConfigMap"),
+            ("", "Secret"),
+            ("", "PersistentVolumeClaim"),
+            ("", "PersistentVolume"),
+            ("storage.k8s.io", "StorageClass"),
+            ("", "ServiceAccount"),
+            ("rbac.authorization.k8s.io", "Role"),
+            ("rbac.authorization.k8s.io", "RoleBinding"),
+        ] {
+            assert!(
+                is_infrastructure_descriptor(&descriptor(group, kind)),
+                "{kind} must feed launcher counts"
+            );
+        }
+        assert!(!is_infrastructure_descriptor(&descriptor(
+            "events.k8s.io",
+            "Event"
+        )));
+        assert!(!is_infrastructure_descriptor(&descriptor(
+            "apps",
+            "ReplicaSet"
+        )));
+    }
 
     #[tokio::test]
     async fn one_context_build_never_blocks_another_context() {

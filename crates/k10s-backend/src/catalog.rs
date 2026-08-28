@@ -193,7 +193,13 @@ impl CatalogSnapshot {
                 reason: "Resource is not healthy".into(),
             })
             .collect::<Vec<_>>();
-        let event_warnings = attention.len() as u32;
+        let event_warnings = records
+            .iter()
+            .filter(|record| {
+                record.reference.gvk.kind == "Event"
+                    && record.summary.eq_ignore_ascii_case("Warning")
+            })
+            .count() as u32;
         let unhealthy_workloads = records
             .iter()
             .filter(|record| {
@@ -717,6 +723,8 @@ mod tests {
                 record("Pod", "broken-pod", Some("default"), "CrashLoopBackOff"),
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
+                record("Event", "image-pull", Some("default"), "Warning"),
+                record("Event", "scheduled", Some("default"), "Normal"),
             ],
             CatalogStorage::default(),
             Vec::new(),
@@ -729,7 +737,7 @@ mod tests {
         assert_eq!(snapshot.totals.pods, 2);
         assert_eq!(snapshot.totals.workloads, 2);
         assert_eq!(snapshot.attention.len(), 2);
-        assert_eq!(snapshot.launcher.events_warning, 2);
+        assert_eq!(snapshot.launcher.events_warning, 1);
         assert_eq!(snapshot.launcher.workloads, 2);
         assert_eq!(snapshot.launcher.network, 0);
         assert_eq!(snapshot.launcher.config, 0);
