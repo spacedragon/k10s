@@ -55,6 +55,39 @@ async fn terminal(adapter: &KubeAdapter, id: &str) -> OperationState {
 }
 
 #[tokio::test]
+async fn delete_preflight_is_an_exact_uid_rv_server_dry_run() {
+    let server = RecordedApiServer::standard();
+    server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);
+    server.set_method_response("DELETE", DEPLOYMENT, 200, OBJECT);
+    let adapter = adapter(&server);
+
+    let result = adapter
+        .query(Query::DeletePreflight {
+            target: target(),
+            propagation: Propagation::Foreground,
+        })
+        .await
+        .unwrap();
+    let QueryResult::DeletePreflight(response) = result else {
+        panic!("expected delete preflight response")
+    };
+    assert_eq!(response.identity.uid, "uid-web");
+    assert_eq!(
+        response.propagation,
+        k10s_protocol::DeletePropagation::Foreground
+    );
+    let uri = server
+        .request_uris(DEPLOYMENT)
+        .into_iter()
+        .find(|uri| uri.contains("dryRun"))
+        .expect("delete preflight reaches the API server as dry-run");
+    assert!(uri.contains("dryRun=All"));
+    let body = server.request_bodies(DEPLOYMENT).pop().unwrap();
+    assert!(body.contains("uid-web"));
+    assert!(body.contains("42"));
+}
+
+#[tokio::test]
 async fn scale_and_restart_use_exact_uid_rv_capability_and_native_payloads() {
     let server = RecordedApiServer::standard();
     server.set_method_response("GET", DEPLOYMENT, 200, OBJECT);

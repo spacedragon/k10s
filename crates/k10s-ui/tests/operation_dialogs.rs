@@ -132,6 +132,12 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
 
     assert_eq!(
         dialog.disabled_reason(),
+        Some("waiting for authoritative server dry-run")
+    );
+    dialog.set_preflight(DestructivePreflight::fake_success());
+
+    assert_eq!(
+        dialog.disabled_reason(),
         Some("type the resource name to confirm deletion")
     );
     assert!(!dialog.can_submit());
@@ -147,6 +153,7 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
     assert_eq!(dialog.propagation(), DeletePropagation::Background);
 
     dialog.set_propagation(DeletePropagation::Foreground);
+    dialog.set_preflight(DestructivePreflight::fake_success());
     let action = dialog.take_action().expect("confirmed deletes submit");
     match action {
         DialogAction::SubmitDelete {
@@ -166,6 +173,7 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
 #[test]
 fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     let mut dialog = DeleteDialog::for_target(deployment("api-server"));
+    dialog.set_preflight(DestructivePreflight::fake_success());
     for mode in [
         DeletePropagation::Foreground,
         DeletePropagation::Background,
@@ -173,6 +181,7 @@ fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     ] {
         dialog.set_propagation(mode);
         assert_eq!(dialog.propagation(), mode);
+        dialog.set_preflight(DestructivePreflight::fake_success());
     }
 
     dialog.set_confirmation("api-server");
@@ -231,6 +240,10 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
             |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true),
             dialogs,
         );
+    assert!(matches!(
+        harness.state_mut().drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
 
     let confirmation = harness.get_by_label("Confirm deletion");
     confirmation.focus();
@@ -243,6 +256,7 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
         harness.state_mut().active_mut(window)
     {
         delete.set_confirmation("api-server");
+        delete.set_preflight(DestructivePreflight::fake_success());
     }
     harness.run();
     harness.get_by_label("Confirm deletion").focus();
@@ -273,6 +287,16 @@ fn the_dialog_store_queues_one_action_per_window_for_the_application_layer() {
 
     dialogs.open_scale(window, deployment("web-frontend"), Some(20));
     dialogs.open_delete(window, deployment("web-frontend"));
+    assert!(matches!(
+        dialogs.drain_actions().as_slice(),
+        [(
+            _,
+            DialogAction::RequestDeletePreflight {
+                propagation: DeletePropagation::Background,
+                ..
+            }
+        )]
+    ));
     assert_eq!(
         dialogs.active(window),
         Some(k10s_ui::ui::dialogs::ActiveDialogKind::Delete),
@@ -281,6 +305,7 @@ fn the_dialog_store_queues_one_action_per_window_for_the_application_layer() {
 
     if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window) {
         delete.set_confirmation("web-frontend");
+        delete.set_preflight(DestructivePreflight::fake_success());
     }
     dialogs.submit_active(window);
     let actions = dialogs.drain_actions();

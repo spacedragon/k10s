@@ -18,6 +18,8 @@ use crate::workspace::WindowId;
 /// Authoritative preflight outcome shown by every destructive confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestructivePreflight {
+    /// No exact-target server result has been received yet.
+    Pending,
     /// The API server accepted the dry-run and returned an impact estimate.
     Ready { impact: String, dry_run: String },
     /// RBAC denied the dry-run.
@@ -59,6 +61,7 @@ impl DestructivePreflight {
 
     fn blocking_reason(&self) -> Option<&str> {
         match self {
+            Self::Pending => Some("waiting for authoritative server dry-run"),
             Self::Ready { .. } => None,
             Self::Forbidden(reason) | Self::Conflict(reason) | Self::DryRunFailed(reason) => {
                 Some(reason)
@@ -71,6 +74,11 @@ impl DestructivePreflight {
 /// layer after rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogAction {
+    /// Request an authoritative delete dry-run for this exact target/policy.
+    RequestDeletePreflight {
+        target: ResourceIdentity,
+        propagation: DeletePropagation,
+    },
     /// Scale the target to the requested replica count.
     SubmitScale {
         /// Exact target identity including its immutable UID.
@@ -283,7 +291,7 @@ impl DeleteDialog {
             target,
             connected: true,
             stale_reason: None,
-            preflight: DestructivePreflight::fake_success(),
+            preflight: DestructivePreflight::Pending,
             consumed: false,
             submitted_operation: None,
             failure: None,
@@ -309,6 +317,7 @@ impl DeleteDialog {
     /// Select the propagation mode.
     pub fn set_propagation(&mut self, propagation: DeletePropagation) {
         self.propagation = propagation;
+        self.preflight = DestructivePreflight::Pending;
     }
 
     /// Currently selected propagation mode.
@@ -394,6 +403,7 @@ impl DeleteDialog {
     /// Notify the dialog that the transport was lost.
     pub fn connection_lost(&mut self) {
         self.connected = false;
+        self.preflight = DestructivePreflight::Pending;
     }
 
     /// Notify the dialog that the transport is available again.
@@ -495,6 +505,13 @@ impl OperationDialogs {
 
     /// Open (or replace) the delete dialog on `window`.
     pub fn open_delete(&mut self, window: WindowId, target: ResourceIdentity) {
+        self.actions.push((
+            window,
+            DialogAction::RequestDeletePreflight {
+                target: target.clone(),
+                propagation: DeletePropagation::Background,
+            },
+        ));
         self.windows.insert(
             window,
             ActiveDialog::Delete(DeleteDialog::for_target(target)),
@@ -537,6 +554,18 @@ impl OperationDialogs {
         };
         if let Some(action) = action {
             self.actions.push((window, action));
+        }
+    }
+
+    fn request_delete_preflight(&mut self, window: WindowId) {
+        if let Some(ActiveDialog::Delete(dialog)) = self.windows.get(&window) {
+            self.actions.push((
+                window,
+                DialogAction::RequestDeletePreflight {
+                    target: dialog.target.clone(),
+                    propagation: dialog.propagation,
+                },
+            ));
         }
     }
 
@@ -605,6 +634,7 @@ impl OperationDialogs {
             }
             let mut close_requested = false;
             let mut submit_requested = false;
+            let mut preflight_requested = false;
             egui::Window::new(dialog_title(dialog))
                 .id(egui::Id::new(("k10s.operation-dialog", window.0)))
                 .collapsible(false)
@@ -614,12 +644,21 @@ impl OperationDialogs {
                         render_scale(ui, scale, &mut submit_requested, &mut close_requested);
                     }
                     ActiveDialog::Delete(delete) => {
-                        render_delete(ui, delete, &mut submit_requested, &mut close_requested);
+                        render_delete(
+                            ui,
+                            delete,
+                            &mut submit_requested,
+                            &mut preflight_requested,
+                            &mut close_requested,
+                        );
                     }
                 });
             if submit_requested {
                 self.submit_active(window);
                 ui.ctx().request_repaint();
+            }
+            if preflight_requested {
+                self.request_delete_preflight(window);
             }
             if close_requested {
                 self.windows.remove(&window);
@@ -677,6 +716,7 @@ fn render_delete(
     ui: &mut egui::Ui,
     dialog: &mut DeleteDialog,
     submit: &mut bool,
+    request_preflight: &mut bool,
     close: &mut bool,
 ) {
     ui.heading("WARNING — Destructive action");
@@ -718,11 +758,15 @@ fn render_delete(
         ] {
             if ui.radio(dialog.propagation() == mode, label).clicked() {
                 dialog.set_propagation(mode);
+                *request_preflight = true;
             }
         }
     });
     ui.label(format!("Propagation policy: {:?}", dialog.propagation()));
     match &dialog.preflight {
+        DestructivePreflight::Pending => {
+            ui.label("[PENDING] Waiting for authoritative server dry-run.");
+        }
         DestructivePreflight::Ready { impact, dry_run } => {
             ui.label(format!("[IMPACT] {impact}"));
             ui.label(
