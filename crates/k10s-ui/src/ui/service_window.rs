@@ -194,6 +194,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     scratch: &mut super::resource_window::ResourceUiState,
     window_id: WindowId,
+    focused: bool,
     state: &mut ServiceWindowState<I>,
     feed: &ResourceFeed,
     context_namespace: Option<&str>,
@@ -366,6 +367,7 @@ where
                         window_id,
                         detail,
                         &presentation,
+                        focused,
                         true,
                         state.prior_split_ratio.is_some(),
                         yaml,
@@ -380,7 +382,7 @@ where
         },
     );
 
-    if detail_shown && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+    if detail_shown && focused && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         if state.prior_split_ratio.is_some() {
             queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
         } else {

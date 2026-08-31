@@ -48,6 +48,7 @@ pub(super) fn show<I: RowIdentity>(
     _detail: &DetailState<I>,
     input: &DetailPresentationInput<'_>,
     frame: &mut DetailFrameProjection<'_>,
+    runtime_actions: &mut Vec<super::DetailRuntimeAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     let Some(pod) = PodDetailProjection::from_input(input) else {
@@ -57,11 +58,11 @@ pub(super) fn show<I: RowIdentity>(
 
     if ui.available_width() >= 760.0 {
         ui.columns(2, |columns| {
-            show_operational(&mut columns[0], window_id, &pod, queued);
+            show_operational(&mut columns[0], window_id, &pod, runtime_actions, queued);
             show_metadata(&mut columns[1], window_id, &pod, frame, queued);
         });
     } else {
-        show_operational(ui, window_id, &pod, queued);
+        show_operational(ui, window_id, &pod, runtime_actions, queued);
         let label = if frame.expansion.metadata {
             "Hide Pod metadata"
         } else {
@@ -356,6 +357,7 @@ fn show_operational<I: RowIdentity>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     pod: &PodDetailProjection,
+    runtime_actions: &mut Vec<super::DetailRuntimeAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     if let Some(failure) = &pod.failure {
@@ -375,6 +377,7 @@ fn show_operational<I: RowIdentity>(
             failure.container, failure.reason, exit
         ));
         if ui.button("Previous logs").clicked() {
+            runtime_actions.push(super::DetailRuntimeAction::PreviousLogs(window_id));
             queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Logs));
         }
     }

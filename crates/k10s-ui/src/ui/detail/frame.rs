@@ -77,43 +77,18 @@ pub(super) fn show<I: RowIdentity>(
             .max_rect(vitals_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    {
-        let ui = &mut vitals_ui;
-        for metric in &projection.visible_vitals {
-            vital(ui, metric);
-        }
-        if wide || projection.expansion.more_vitals {
-            for metric in &projection.overflow_vitals {
-                vital(ui, metric);
-            }
-        } else if let Some(kind) = projection.vital_expansion_label
-            && !projection.overflow_vitals.is_empty()
-            && ui.button(format!("Show more {kind} vitals")).clicked()
-        {
-            projection.expansion.more_vitals = true;
-        }
-        if !wide
-            && projection.expansion.more_vitals
-            && let Some(kind) = projection.vital_expansion_label
-            && ui.button(format!("Hide more {kind} vitals")).clicked()
-        {
-            projection.expansion.more_vitals = false;
-        }
-        let freshness = match projection.freshness {
-            Some(crate::ui::WindowFreshness::Live { last_sync_age }) => {
-                format!("Freshness · live ({last_sync_age})")
-            }
-            Some(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Freshness · stale".into(),
-            Some(crate::ui::WindowFreshness::Reconnecting { .. }) => {
-                "Freshness · reconnecting".into()
-            }
-            Some(crate::ui::WindowFreshness::Forbidden { .. }) => "Freshness · forbidden".into(),
-            Some(crate::ui::WindowFreshness::Failed { .. }) => "Freshness · failed".into(),
-            Some(crate::ui::WindowFreshness::ReadyEmpty) => "Freshness · ready".into(),
-            None if input.gone => "Freshness · gone".into(),
-            None => "Freshness · unavailable".into(),
-        };
-        ui.label(freshness);
+    if wide {
+        show_vital_strip(&mut vitals_ui, &mut projection, input.gone, true);
+    } else {
+        ScrollArea::horizontal()
+            .id_salt(("k10s.detail.vitals.scroll", window_id.0))
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+            .stick_to_right(true)
+            .show(&mut vitals_ui, |ui| {
+                ui.horizontal(|ui| {
+                    show_vital_strip(ui, &mut projection, input.gone, false);
+                });
+            });
     }
     if !input.mutations_allowed
         && (projection.actions.can_scale
@@ -279,6 +254,47 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
         None => format!("{} · {}", vital.label, vital.value),
     };
     ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
+}
+
+fn show_vital_strip(
+    ui: &mut egui::Ui,
+    projection: &mut DetailFrameProjection<'_>,
+    gone: bool,
+    wide: bool,
+) {
+    for metric in &projection.visible_vitals {
+        vital(ui, metric);
+    }
+    if wide || projection.expansion.more_vitals {
+        for metric in &projection.overflow_vitals {
+            vital(ui, metric);
+        }
+    } else if let Some(kind) = projection.vital_expansion_label
+        && !projection.overflow_vitals.is_empty()
+        && ui.button(format!("Show more {kind} vitals")).clicked()
+    {
+        projection.expansion.more_vitals = true;
+    }
+    if !wide
+        && projection.expansion.more_vitals
+        && let Some(kind) = projection.vital_expansion_label
+        && ui.button(format!("Hide more {kind} vitals")).clicked()
+    {
+        projection.expansion.more_vitals = false;
+    }
+    let freshness = match projection.freshness {
+        Some(crate::ui::WindowFreshness::Live { last_sync_age }) => {
+            format!("Freshness · live ({last_sync_age})")
+        }
+        Some(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Freshness · stale".into(),
+        Some(crate::ui::WindowFreshness::Reconnecting { .. }) => "Freshness · reconnecting".into(),
+        Some(crate::ui::WindowFreshness::Forbidden { .. }) => "Freshness · forbidden".into(),
+        Some(crate::ui::WindowFreshness::Failed { .. }) => "Freshness · failed".into(),
+        Some(crate::ui::WindowFreshness::ReadyEmpty) => "Freshness · ready".into(),
+        None if gone => "Freshness · gone".into(),
+        None => "Freshness · unavailable".into(),
+    };
+    ui.label(freshness);
 }
 
 fn vital_color(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {

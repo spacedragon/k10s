@@ -93,6 +93,11 @@ enum DetailShortcut {
     OpenOwner,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailRuntimeAction {
+    PreviousLogs(WindowId),
+}
+
 fn shortcut_for_key(
     key: egui::Key,
     tabs: &[DetailTab],
@@ -158,6 +163,7 @@ pub(super) fn show<I>(
     window_id: WindowId,
     detail: &DetailState<I>,
     presentation: &presentation::DetailPresentationInput<'_>,
+    shortcut_owner: bool,
     integrated: bool,
     detail_maximized: bool,
     yaml: &mut tools::YamlEditors,
@@ -172,7 +178,7 @@ pub(super) fn show<I>(
     if detail.identity.as_row_identity().is_none() {
         return;
     }
-    if !ui.ctx().memory(|memory| memory.focused().is_some()) {
+    if shortcut_owner && !ui.ctx().memory(|memory| memory.focused().is_some()) {
         let tabs = tabs_for_kind(&detail_identity_gvk(detail));
         let verified_owner = presentation.verified_owner();
         let shortcut = ui.input(|input| {
@@ -208,6 +214,7 @@ pub(super) fn show<I>(
     }
 
     let mut body_queued = Vec::new();
+    let mut runtime_actions = Vec::new();
     frame::show(
         ui,
         window_id,
@@ -283,7 +290,15 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).version == "v1"
             {
                 if detail.active_tab == DetailTab::Overview {
-                    pod::show(ui, window_id, detail, presentation, frame, &mut body_queued);
+                    pod::show(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        frame,
+                        &mut runtime_actions,
+                        &mut body_queued,
+                    );
                 } else {
                     show_generic_body(
                         ui,
@@ -342,6 +357,17 @@ pub(super) fn show<I>(
             }
         },
     );
+    for action in runtime_actions {
+        match action {
+            DetailRuntimeAction::PreviousLogs(window_id) => {
+                if let presentation::DetailPrimary::Loaded(view) = presentation.primary
+                    && let Some(target) = stream_target(detail, view)
+                {
+                    streams.logs.ensure(window_id, target).set_previous(true);
+                }
+            }
+        }
+    }
     queued.extend(body_queued);
 }
 

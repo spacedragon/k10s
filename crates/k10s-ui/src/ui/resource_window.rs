@@ -507,6 +507,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     scratch: &mut ResourceUiState,
     window_id: WindowId,
+    focused: bool,
     kind: WorkloadKind,
     state: &mut ResourceWindowState<I>,
     yaml: &mut super::tools::YamlEditors,
@@ -721,6 +722,7 @@ pub(super) fn show<I>(
                         window_id,
                         detail,
                         &presentation,
+                        focused,
                         true,
                         state.prior_split_ratio.is_some(),
                         yaml,
@@ -735,7 +737,7 @@ pub(super) fn show<I>(
         },
     );
 
-    if detail_shown {
+    if detail_shown && focused {
         let auto_focus =
             state.detail.as_ref().is_some_and(|detail| {
                 matches!(detail.active_tab, DetailTab::Logs | DetailTab::Shell)

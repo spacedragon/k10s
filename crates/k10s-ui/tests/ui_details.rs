@@ -536,9 +536,6 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     detail.get_by_label("Strategy · RollingUpdate");
     detail.get_by_label("Age · 3d");
-    detail
-        .get_by_role_and_label(Role::Button, "Hide more Deployment vitals")
-        .click();
     harness
         .state_mut()
         .shell
@@ -734,6 +731,175 @@ fn detail_verified_owner_shortcut_executes_the_advertised_command() {
             .iter()
             .any(|window| matches!(&window.content, WindowContent::Detail(detail) if detail.identity == expected_owner))
     );
+}
+
+#[test]
+fn global_detail_shortcuts_belong_only_to_the_top_workspace_detail() {
+    let mut harness = harness();
+    for name in ["db-postgres-0", "web-frontend-7d9f8-00001"] {
+        harness
+            .state_mut()
+            .feed
+            .details
+            .insert(identity("Pod", name), typed_pod_detail(name));
+    }
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+
+    let integrated = workload_window_id(harness.state().shell.workspace(), WorkloadKind::Pods);
+    let pinned_identity = identity("Pod", "web-frontend-7d9f8-00001");
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(
+            pinned_identity.clone(),
+        ));
+    let dedicated = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| {
+            matches!(&window.content, WindowContent::Detail(detail) if detail.identity == pinned_identity)
+        })
+        .expect("dedicated detail is open")
+        .id;
+    harness.run_steps(3);
+    surrender_text_focus(&mut harness);
+
+    harness.key_press(egui::Key::Y);
+    harness.run_steps(2);
+    assert_eq!(
+        detail_tab(harness.state().shell.workspace(), dedicated),
+        WorkspaceDetailTab::Yaml
+    );
+    assert_eq!(
+        detail_tab(harness.state().shell.workspace(), integrated),
+        WorkspaceDetailTab::Overview
+    );
+
+    surrender_text_focus(&mut harness);
+    harness.key_down(egui::Key::C);
+    harness.step();
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            egui::OutputCommand::CopyText(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied, vec!["web-frontend-7d9f8-00001"]);
+    harness.key_up(egui::Key::C);
+    harness.step();
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            dedicated,
+            WorkspaceDetailTab::Logs,
+        ));
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
+        .get_by_role_and_label(Role::TextInput, "Find in logs")
+        .click();
+    harness.key_press(egui::Key::Y);
+    harness.run_steps(2);
+    assert_eq!(
+        detail_tab(harness.state().shell.workspace(), dedicated),
+        WorkspaceDetailTab::Logs
+    );
+    assert_eq!(
+        detail_tab(harness.state().shell.workspace(), integrated),
+        WorkspaceDetailTab::Overview
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::CloseWindow(dedicated));
+    harness.run_steps(3);
+    surrender_text_focus(&mut harness);
+    harness.key_press(egui::Key::E);
+    harness.run_steps(2);
+    assert_eq!(
+        detail_tab(harness.state().shell.workspace(), integrated),
+        WorkspaceDetailTab::Events
+    );
+}
+
+#[test]
+fn owner_shortcut_opens_only_the_active_details_verified_owner() {
+    let mut harness = harness();
+    let mut integrated_response = typed_pod_detail("db-postgres-0");
+    integrated_response.owner_references.push(OwnerReference {
+        gvk: GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "ReplicaSet".into(),
+        },
+        name: "db-owner".into(),
+        uid: "uid-db-owner".into(),
+        controller: true,
+    });
+    let mut dedicated_response = typed_pod_detail("web-frontend-7d9f8-00001");
+    dedicated_response.owner_references.push(OwnerReference {
+        gvk: GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "ReplicaSet".into(),
+        },
+        name: "web-owner".into(),
+        uid: "uid-web-owner".into(),
+        controller: true,
+    });
+    for response in [integrated_response, dedicated_response] {
+        harness
+            .state_mut()
+            .feed
+            .details
+            .insert(response.identity.clone(), response);
+    }
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity(
+            "Pod",
+            "web-frontend-7d9f8-00001",
+        )));
+    harness.run_steps(3);
+    surrender_text_focus(&mut harness);
+
+    harness.key_press(egui::Key::O);
+    harness.run_steps(2);
+    let pinned_names = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .filter_map(|window| match &window.content {
+            WindowContent::Detail(detail) => Some(detail.identity.name.as_str()),
+            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(pinned_names.contains(&"web-owner"));
+    assert!(!pinned_names.contains(&"db-owner"));
 }
 
 #[test]
@@ -1405,6 +1571,41 @@ fn integrated_tab(workspace: &WorkspaceState<ResourceIdentity>) -> WorkspaceDeta
         .and_then(|resource| resource.detail.as_ref())
         .map(|detail| detail.active_tab)
         .expect("integrated detail exists")
+}
+
+fn detail_tab(
+    workspace: &WorkspaceState<ResourceIdentity>,
+    window_id: k10s_ui::workspace::WindowId,
+) -> WorkspaceDetailTab {
+    match &workspace
+        .window(window_id)
+        .expect("detail owner is open")
+        .content
+    {
+        WindowContent::Detail(detail) => detail.active_tab,
+        WindowContent::Resource(resource) => {
+            resource
+                .detail
+                .as_ref()
+                .expect("integrated detail is open")
+                .active_tab
+        }
+        WindowContent::Services(service) => {
+            service
+                .detail
+                .as_ref()
+                .expect("integrated service detail is open")
+                .active_tab
+        }
+    }
+}
+
+fn surrender_text_focus(harness: &mut Harness<'static, Fixture>) {
+    if let Some(focused) = harness.ctx.memory(|memory| memory.focused()) {
+        harness
+            .ctx
+            .memory_mut(|memory| memory.surrender_focus(focused));
+    }
 }
 
 fn open(harness: &mut Harness<'static, Fixture>, item: LauncherItem) {

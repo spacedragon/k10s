@@ -251,16 +251,19 @@ Window
                 Label value="Pod · default / api-0"
                   TextRun value="Pod · default / api-0"
               GenericContainer
-                Label value="Status ● —"
-                  TextRun value="Status ● —"
-                Label value="Ready · —"
-                  TextRun value="Ready · —"
-                Label value="Restarts · —"
-                  TextRun value="Restarts · —"
-                Label value="Age · —"
-                  TextRun value="Age · —"
-                Button label="Show more Pod vitals"
-                Label value="Freshness · unavailable"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Label value="Status ● —"
+                        TextRun value="Status ● —"
+                      Label value="Ready · —"
+                        TextRun value="Ready · —"
+                      Label value="Restarts · —"
+                        TextRun value="Restarts · —"
+                      Label value="Age · —"
+                        TextRun value="Age · —"
+                      Button label="Show more Pod vitals"
+                      Label value="Freshness · unavailable"
               GenericContainer
                 GenericContainer
                   GenericContainer

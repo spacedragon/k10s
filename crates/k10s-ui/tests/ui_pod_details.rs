@@ -97,6 +97,45 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
         }),
     };
     let mut harness = harness(1_100.0, response);
+    let window_id = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Detail)
+        .expect("dedicated Pod detail remains open")
+        .id;
+    let other_window = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.id != window_id)
+        .expect("another workspace window is open")
+        .id;
+    let target = k10s_protocol::StreamTarget {
+        context: CONTEXT.into(),
+        namespace: "default".into(),
+        pod: "web-0".into(),
+        uid: "pod-web-0-uid".into(),
+        container: "web".into(),
+    };
+    harness
+        .state_mut()
+        .shell
+        .stream_stores_mut()
+        .logs
+        .ensure(window_id, target.clone())
+        .apply_source_defaults(false);
+    harness
+        .state_mut()
+        .shell
+        .stream_stores_mut()
+        .logs
+        .ensure(other_window, target)
+        .apply_source_defaults(false);
     let detail = pod_window(&harness);
 
     for label in [
@@ -124,6 +163,26 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
         })
         .expect("dedicated Pod detail remains open");
     assert_eq!(active_tab, DetailTab::Logs);
+    assert!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .logs
+            .get(window_id)
+            .expect("active log viewer remains bound")
+            .previous()
+    );
+    assert!(
+        !harness
+            .state()
+            .shell
+            .stream_stores()
+            .logs
+            .get(other_window)
+            .expect("other log viewer remains bound")
+            .previous()
+    );
     pod_window(&harness).get_by_role_and_label(Role::CheckBox, "Previous");
 }
 
@@ -387,6 +446,81 @@ fn pod_layout_759_is_operational_first_with_collapsed_metadata_and_vitals() {
     detail.get_by_role_and_label(Role::Button, "Hide Pod metadata");
     detail.get_by_label("PLACEMENT");
     detail.get_by_label("IDENTITY");
+}
+
+#[test]
+fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable_on_one_row() {
+    let mut harness = harness(700.0, healthy_detail());
+    let window_id = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Detail)
+        .expect("dedicated Pod detail remains open")
+        .id;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [20.0, 20.0],
+                size: [240.0, 500.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(5);
+
+    let detail = pod_window(&harness);
+    assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
+    let show_more = detail.get_by_role_and_label(Role::Button, "Show more Pod vitals");
+    show_more.scroll_to_me();
+    harness.run_steps(2);
+    let detail = pod_window(&harness);
+    let show_more = detail.get_by_role_and_label(Role::Button, "Show more Pod vitals");
+    assert!(detail.rect().intersects(show_more.rect()));
+    show_more.click();
+    harness.run_steps(3);
+
+    for label in [
+        "Node · worker-a",
+        "Pod IP · 10.244.0.9",
+        "Freshness · unavailable",
+    ] {
+        pod_window(&harness).get_by_label(label).scroll_to_me();
+        harness.run_steps(2);
+        let detail = pod_window(&harness);
+        let node = detail.get_by_label(label);
+        assert!(
+            detail.rect().intersects(node.rect()),
+            "{label} must be reachable"
+        );
+    }
+    let detail = pod_window(&harness);
+    let hide_more = detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
+    hide_more.scroll_to_me();
+    harness.run_steps(2);
+    let detail = pod_window(&harness);
+    let hide_more = detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
+    assert!(detail.rect().intersects(hide_more.rect()));
+    assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
+
+    let status_center = detail.get_by_label("Status ● Running").rect().center().y;
+    for rect in [
+        detail.get_by_label("Freshness · unavailable").rect(),
+        hide_more.rect(),
+    ] {
+        assert!(
+            (rect.center().y - status_center).abs() < 0.1,
+            "vital strip controls must share one vertical row"
+        );
+    }
 }
 
 #[test]
