@@ -1,6 +1,7 @@
 //! Axum-based control server and embeddable runtime for k10s.
 
 mod auth;
+mod compatibility;
 mod config;
 mod control;
 mod exec;

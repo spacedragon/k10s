@@ -89,6 +89,7 @@ pub use subscription::{
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Minor protocol version.
 ///
-/// v1.2 added kind-specific resource projections and the port-forward
-/// session lifecycle payloads.
-pub const PROTOCOL_MINOR: u16 = 2;
+/// v1.2 added the Service resource projection and port-forward session
+/// lifecycle payloads. v1.3 added Pod, Deployment, and ReplicaSet
+/// projections, per-container metrics, and restart capability metadata.
+pub const PROTOCOL_MINOR: u16 = 3;

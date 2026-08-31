@@ -184,7 +184,9 @@ pub struct ResourceListRow {
     pub summary: String,
     /// Creation time formatted as RFC 3339.
     pub created_at: String,
-    /// Kind-specific structured projection, added in protocol v1.2.
+    /// Kind-specific structured projection. Service projections were added
+    /// in protocol v1.2; Pod, Deployment, and ReplicaSet projections were
+    /// added in protocol v1.3.
     ///
     /// Populated only for kinds with a designed projection; other kinds and
     /// legacy payloads decode as [`None`].
@@ -710,7 +712,9 @@ pub struct ResourceDetailResponse {
     /// read-only and used as the base of guarded edits. Authored entirely by
     /// the backend; clients never synthesize it.
     pub manifest: String,
-    /// Kind-specific structured projection, added in protocol v1.2.
+    /// Kind-specific structured projection. Service projections were added
+    /// in protocol v1.2; Pod, Deployment, and ReplicaSet projections were
+    /// added in protocol v1.3.
     ///
     /// Populated only for kinds with a designed projection; other kinds and
     /// legacy payloads decode as [`None`].
