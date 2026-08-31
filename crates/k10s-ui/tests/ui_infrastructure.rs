@@ -58,6 +58,20 @@ fn harness() -> Harness<'static, Fixture> {
         .build_ui_state(render, Fixture::default())
 }
 
+fn large_attention_response() -> InfrastructureResponse {
+    let mut response = full_response();
+    response.attention = (0..80)
+        .map(|index| AttentionRow {
+            namespace: Some("default".into()),
+            kind: "Deployment".into(),
+            name: format!("attention-row-{index:03}"),
+            status: "Degraded".into(),
+            reason: format!("attention reason {index:03}"),
+        })
+        .collect();
+    response
+}
+
 #[test]
 fn launcher_inventory_badges_share_loading_zero_warning_and_unavailable_contract() {
     let mut harness = harness();
@@ -248,6 +262,450 @@ fn overview_renders_totals_capacity_health_attention_and_refresh_timestamp() {
     ] {
         overview.get_by_role_and_label(Role::ProgressIndicator, progress_text);
     }
+}
+
+#[test]
+fn overview_attention_rows_scroll_inside_the_window() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+
+    let mut snapshot = harness.state().shell.workspace().snapshot();
+    let overview = snapshot
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [32.0, 24.0];
+    overview.geometry.size = [920.0, 620.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+    harness.state_mut().response = large_attention_response();
+    harness.state_mut().response.metrics.detail =
+        "Wrapping metrics detail remains inside Overview. ".repeat(6);
+    harness.run_steps(4);
+
+    let (overview_before, summary_before, health_before) = {
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let overview_before = overview.rect();
+        assert!(overview_before.left() >= 0.0 && overview_before.top() >= 0.0);
+        assert!(overview_before.right() <= 1_280.0 && overview_before.bottom() <= 800.0);
+        assert!(
+            overview_before.width() <= 923.0 && overview_before.height() <= 621.0,
+            "restored 920x620 Overview grew to {overview_before:?}"
+        );
+
+        let late = overview.get_by_label("attention-row-079");
+        assert!(
+            !overview_before.intersects(late.rect()),
+            "the late attention row should initially be clipped"
+        );
+        let metrics_detail = overview.get_by_label(&harness.state().response.metrics.detail);
+        assert!(
+            overview_before.contains_rect(metrics_detail.rect()),
+            "the wrapping metrics footer should remain inside Overview"
+        );
+        (
+            overview_before,
+            overview.get_by_label("2 nodes").rect(),
+            overview.get_by_label("Workload health").rect(),
+        )
+    };
+
+    let mut late_visible = false;
+    for _ in 0..24 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            overview.get_by_label("attention-row-000").scroll_down();
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let late = overview.get_by_label("attention-row-079");
+        if overview.rect().intersects(late.rect()) {
+            late_visible = true;
+            break;
+        }
+    }
+    assert!(
+        late_visible,
+        "vertical scrolling should reveal the late attention row"
+    );
+
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    let overview_after = overview.rect();
+    let summary_after = overview.get_by_label("2 nodes").rect();
+    let health_after = overview.get_by_label("Workload health").rect();
+    for (before, after, label) in [
+        (overview_before, overview_after, "Overview"),
+        (summary_before, summary_after, "summary"),
+        (health_before, health_after, "Workload health"),
+    ] {
+        assert!(
+            (before.min - after.min).length() <= 1.0 && (before.max - after.max).length() <= 1.0,
+            "{label} rectangle moved while the attention list scrolled"
+        );
+    }
+    overview.get_by_role_and_label(Role::Button, "Refresh overview");
+    overview.get_by_label("Metrics: Available");
+}
+
+#[test]
+fn compact_overview_keeps_large_attention_content_reachable() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(720.0, 420.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+
+    let mut snapshot = harness.state().shell.workspace().snapshot();
+    let overview = snapshot
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [0.0, 0.0];
+    overview.geometry.size = [480.0, 320.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+    harness.state_mut().response = large_attention_response();
+    harness.run_steps(4);
+
+    let overview_before = harness
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(overview_before.left() >= 0.0 && overview_before.top() >= 0.0);
+    assert!(overview_before.right() <= 720.0 && overview_before.bottom() <= 420.0);
+    assert!(
+        overview_before.width() <= 483.0 && overview_before.height() <= 325.0,
+        "restored 480x320 Overview grew to {overview_before:?}"
+    );
+    let summary_before = harness.get_by_label("2 nodes").rect();
+    assert!(overview_before.intersects(summary_before));
+    for label in ["Needs attention", "Metrics: Available"] {
+        let rect = harness.get_by_label(label).rect();
+        assert!(
+            !overview_before.intersects(rect),
+            "{label} should initially be clipped, but was at {rect:?}"
+        );
+    }
+
+    for wanted in ["Needs attention", "Metrics: Available"] {
+        let mut visible = false;
+        for _ in 0..64 {
+            {
+                let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+                let target = [
+                    "2 nodes",
+                    "Cluster capacity",
+                    "Workload health",
+                    "Needs attention",
+                    "Metrics: Available",
+                ]
+                .into_iter()
+                .map(|label| overview.get_by_label(label))
+                .find(|node| overview.rect().intersects(node.rect()))
+                .expect("outer fallback keeps fixed content scrollable");
+                let target_center = target.rect().center();
+                harness
+                    .input_mut()
+                    .events
+                    .push(egui::Event::PointerMoved(target_center));
+                harness.input_mut().events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -100.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_steps(2);
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            if overview
+                .rect()
+                .intersects(overview.get_by_label(wanted).rect())
+            {
+                visible = true;
+                break;
+            }
+        }
+        assert!(visible, "outer scrolling should reveal {wanted}");
+        assert_eq!(
+            overview_before,
+            harness
+                .get_by_role_and_label(Role::Window, "Overview")
+                .rect(),
+            "outer scrolling changed the Overview rectangle"
+        );
+    }
+
+    let mut first_row_visible = false;
+    for _ in 0..64 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            let footer = overview.get_by_label("Metrics: Available");
+            let footer_center = footer.rect().center();
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(footer_center));
+            harness.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 100.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let heading = overview.get_by_label("Needs attention").rect();
+        let first = overview.get_by_label("attention-row-000").rect();
+        if overview.rect().contains(first.center())
+            && first.center().y >= heading.bottom() + 4.0
+            && first.center().y <= heading.bottom() + 72.0
+        {
+            first_row_visible = true;
+            break;
+        }
+    }
+    assert!(
+        first_row_visible,
+        "outer scrolling should reveal the attention viewport"
+    );
+    {
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let heading_center = overview.get_by_label("Workload health").rect().center();
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(heading_center));
+        harness.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -100.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    harness.run_steps(2);
+
+    let mut late_row_visible = false;
+    for _ in 0..64 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            let heading = overview.get_by_label("Needs attention").rect();
+            let row_labels = (0..80)
+                .map(|index| format!("attention-row-{index:03}"))
+                .collect::<Vec<_>>();
+            let visible_row = row_labels
+                .iter()
+                .map(|label| overview.get_by_label(label))
+                .find(|row| {
+                    let rect = row.rect();
+                    overview.rect().contains(rect.center())
+                        && rect.center().y >= heading.bottom() + 4.0
+                        && rect.center().y <= heading.bottom() + 72.0
+                })
+                .expect("inner scroll events must target a visible attention row");
+            visible_row.hover();
+            visible_row.scroll_down();
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let heading = overview.get_by_label("Needs attention").rect();
+        let late = overview.get_by_label("attention-row-079").rect();
+        if overview.rect().contains(late.center())
+            && late.center().y >= heading.bottom() + 4.0
+            && late.center().y <= heading.bottom() + 72.0
+        {
+            late_row_visible = true;
+            break;
+        }
+    }
+    assert!(
+        late_row_visible,
+        "inner scrolling should reveal the late attention row"
+    );
+    assert_eq!(
+        overview_before,
+        harness
+            .get_by_role_and_label(Role::Window, "Overview")
+            .rect(),
+        "nested scrolling changed the Overview rectangle"
+    );
+}
+
+#[test]
+fn overview_resize_reselects_layout_from_current_geometry() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_280.0, 720.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+    harness.state_mut().response = large_attention_response();
+
+    let mut compact = harness.state().shell.workspace().snapshot();
+    let overview = compact
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [0.0, 0.0];
+    overview.geometry.size = [480.0, 350.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(compact));
+    harness.run_steps(1);
+    let first_render = harness
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(
+        first_render.height() <= 355.0 && first_render.bottom() <= 720.0,
+        "first render near the compact threshold grew beyond its geometry: {first_render:?}"
+    );
+    harness.run_steps(3);
+
+    let mut wide = harness.state().shell.workspace().snapshot();
+    let overview = wide
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [24.0, 20.0];
+    overview.geometry.size = [920.0, 620.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(wide));
+    harness.run_steps(4);
+
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    let window_before = overview.rect();
+    let summary_before = overview.get_by_label("2 nodes").rect();
+    let footer = overview.get_by_label("Metrics: Available").rect();
+    assert!(
+        window_before.contains_rect(footer),
+        "the current wide geometry should select a fixed-top layout with visible footer: window={window_before:?}, footer={footer:?}"
+    );
+    assert!(window_before.contains_rect(summary_before));
+
+    let mut late_visible = false;
+    for _ in 0..32 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            let first = overview.get_by_label("attention-row-000");
+            first.hover();
+            first.scroll_down();
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        if overview
+            .rect()
+            .intersects(overview.get_by_label("attention-row-079").rect())
+        {
+            late_visible = true;
+            break;
+        }
+    }
+    assert!(
+        late_visible,
+        "wide geometry should expose the inner attention scroll"
+    );
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    assert_eq!(window_before, overview.rect());
+    assert_eq!(summary_before, overview.get_by_label("2 nodes").rect());
+}
+
+#[test]
+fn narrow_overview_budgets_the_real_wrapped_metrics_footer() {
+    let mut fixture = Fixture {
+        response: large_attention_response(),
+        ..Fixture::default()
+    };
+    fixture.response.metrics.detail =
+        "Every node and workload metric remains independently available for inspection. ".repeat(5);
+    fixture.response.metrics.source =
+        "aggregated metrics production example internal very long source name".into();
+    fixture.response.metrics.source_updated_at =
+        Some("2026 08 31 23 59 59 with additional clock synchronization context".into());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(720.0, 800.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    let mut snapshot = harness.state().shell.workspace().snapshot();
+    let overview = snapshot
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [0.0, 0.0];
+    overview.geometry.size = [480.0, 600.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+    harness.run_steps(4);
+
+    let window_before = harness
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(
+        window_before.bottom() <= 800.0
+            && window_before.height() <= 605.0
+            && window_before.width() <= 483.0
+    );
+    let detail = harness.state().response.metrics.detail.clone();
+    assert!(
+        !window_before.contains_rect(harness.get_by_label(&detail).rect()),
+        "the real wrapped footer should initially be clipped by the bounded fallback"
+    );
+    let mut detail_visible = false;
+    for _ in 0..64 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            if overview
+                .rect()
+                .contains_rect(overview.get_by_label(&detail).rect())
+            {
+                detail_visible = true;
+                break;
+            }
+            let target = [
+                "2 nodes",
+                "Cluster capacity",
+                "Workload health",
+                "Needs attention",
+            ]
+            .into_iter()
+            .map(|label| overview.get_by_label(label))
+            .find(|node| overview.rect().intersects(node.rect()))
+            .expect("a visible outer-scroll descendant remains available");
+            let center = target.rect().center();
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(center));
+            harness.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -100.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run_steps(2);
+    }
+    assert!(
+        detail_visible,
+        "the actual wrapped metrics footer should be reachable"
+    );
+    assert_eq!(
+        window_before,
+        harness
+            .get_by_role_and_label(Role::Window, "Overview")
+            .rect()
+    );
 }
 
 #[test]
