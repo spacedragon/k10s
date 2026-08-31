@@ -38,6 +38,8 @@ pub struct LogsTool {
     tail_capacity: usize,
     lines: VecDeque<String>,
     phase: LogsPhase,
+    /// Whether this source still owns its single automatic connection claim.
+    auto_connect_available: bool,
     paused: bool,
     follow: bool,
     previous: bool,
@@ -66,6 +68,7 @@ impl LogsTool {
             tail_capacity: tail_capacity.max(1),
             lines: VecDeque::new(),
             phase: LogsPhase::Disconnected,
+            auto_connect_available: true,
             paused: false,
             follow: true,
             previous: false,
@@ -93,6 +96,35 @@ impl LogsTool {
         self.phase
     }
 
+    /// Atomically claim this source's one automatic connection attempt.
+    pub fn begin_auto_connect(&mut self) -> bool {
+        if self.phase != LogsPhase::Disconnected || !self.auto_connect_available {
+            return false;
+        }
+        self.auto_connect_available = false;
+        self.phase = LogsPhase::Connecting;
+        self.last_error = None;
+        self.follow = true;
+        true
+    }
+
+    /// Whether a consumed or failed attempt can be retried explicitly.
+    #[must_use]
+    pub fn can_retry(&self) -> bool {
+        self.phase == LogsPhase::Disconnected && !self.auto_connect_available
+    }
+
+    /// Start one user-requested retry for the current source.
+    pub fn retry(&mut self) -> bool {
+        if !self.can_retry() {
+            return false;
+        }
+        self.phase = LogsPhase::Connecting;
+        self.last_error = None;
+        self.follow = true;
+        true
+    }
+
     /// Whether incoming chunks are currently being dropped.
     #[must_use]
     pub fn is_paused(&self) -> bool {
@@ -113,7 +145,7 @@ impl LogsTool {
     pub fn set_previous(&mut self, previous: bool) {
         if self.previous != previous {
             self.previous = previous;
-            self.phase = LogsPhase::Disconnected;
+            self.reset_source_attempt();
         }
     }
 
@@ -132,7 +164,7 @@ impl LogsTool {
     pub fn set_since_seconds(&mut self, since_seconds: Option<i64>) {
         if self.since_seconds != since_seconds {
             self.since_seconds = since_seconds;
-            self.phase = LogsPhase::Disconnected;
+            self.reset_source_attempt();
         }
     }
 
@@ -148,9 +180,8 @@ impl LogsTool {
     pub fn select_container(&mut self, container: &str) {
         if self.target.container != container {
             self.target.container = container.to_owned();
-            self.phase = LogsPhase::Disconnected;
             self.lines.clear();
-            self.last_error = None;
+            self.reset_source_attempt();
         }
     }
 
@@ -208,6 +239,7 @@ impl LogsTool {
         if self.phase != LogsPhase::Disconnected {
             self.phase = LogsPhase::Disconnected;
         }
+        self.auto_connect_available = false;
         self.last_error = Some(reason.to_owned());
     }
 
@@ -220,8 +252,10 @@ impl LogsTool {
     /// Begin attaching: the application opens the dedicated socket next.
     pub fn connect(&mut self) {
         if self.phase == LogsPhase::Disconnected {
+            self.auto_connect_available = false;
             self.phase = LogsPhase::Connecting;
             self.last_error = None;
+            self.follow = true;
         }
     }
 
@@ -301,7 +335,17 @@ impl LogsTool {
     /// user can still read what streamed before the drop.
     pub fn connection_lost(&mut self) {
         self.phase = LogsPhase::Disconnected;
+        self.auto_connect_available = false;
         self.paused = false;
+        self.last_error = Some("log stream disconnected".to_owned());
+    }
+
+    fn reset_source_attempt(&mut self) {
+        self.phase = LogsPhase::Disconnected;
+        self.auto_connect_available = true;
+        self.follow = true;
+        self.paused = false;
+        self.last_error = None;
     }
 }
 
