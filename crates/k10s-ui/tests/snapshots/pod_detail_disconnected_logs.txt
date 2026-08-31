@@ -223,6 +223,8 @@ Window
                   Button label="View logs"
                   Button label="Exec shell"
                   Button label="Edit YAML"
+                Label value="log stream disconnected"
+                  TextRun value="log stream disconnected"
                 Label value="LOG SOURCE"
                   TextRun value="LOG SOURCE"
                 GenericContainer
@@ -233,7 +235,7 @@ Window
                   GenericContainer
                     GenericContainer
                       ComboBox value="Since: 5m"
-                  Button label="Connect logs"
+                  Button label="Retry logs"
                   Label value="Disconnected"
                     TextRun value="Disconnected"
                 Label value="VIEW"
