@@ -185,7 +185,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer

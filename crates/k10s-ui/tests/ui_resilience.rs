@@ -1017,7 +1017,8 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
     );
 
     // The tree order defines keyboard focus order: the search field comes
-    // before the toolbar controls, which come before sort headers and rows.
+    // before the sort headers and rows. Workload details are selection-driven,
+    // so there is no separate detail-visibility control in the toolbar.
     let labels: Vec<String> = harness
         .get_by_role_and_label(Role::Window, "Deployments")
         .children_recursive()
@@ -1028,10 +1029,6 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
         .iter()
         .position(|label| label == "Search deployments")
         .expect("search field is labelled");
-    let clear_or_toggle = labels
-        .iter()
-        .position(|label| label == "Show details" || label == "Hide details")
-        .expect("detail toggle present");
     let sort = labels
         .iter()
         .position(|label| label == "Sort deployments by created")
@@ -1040,8 +1037,7 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
         .iter()
         .position(|label| label == "api-server")
         .expect("row button present");
-    assert!(search < clear_or_toggle);
-    assert!(clear_or_toggle < sort);
+    assert!(search < sort);
     assert!(sort < row, "toolbar precedes table controls");
 
     // Keyboard focus starts on nothing and Tab walks forward.

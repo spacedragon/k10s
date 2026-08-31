@@ -209,7 +209,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -273,7 +272,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -339,7 +337,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 Label value="No StatefulSets in this view"
                   TextRun value="No StatefulSets in this view"
@@ -375,7 +372,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 Label value="No DaemonSets in this view"
                   TextRun value="No DaemonSets in this view"
@@ -409,7 +405,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 Label value="No Jobs in this view"
                   TextRun value="No Jobs in this view"
@@ -447,7 +442,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -505,7 +499,6 @@ Window
                     Label value="Namespace"
                       TextRun value="Namespace"
                 Button label="Clear filters"
-                Button label="Hide details"
               GenericContainer
                 GenericContainer
                   Label value="[?]"

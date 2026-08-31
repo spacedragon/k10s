@@ -1043,7 +1043,7 @@ fn workspace_resource_namespace(
 }
 
 #[test]
-fn detail_pane_selection_hide_restore_respects_split_minima() {
+fn selection_driven_detail_panel_respects_split_minima() {
     let mut harness = harness();
     open(
         &mut harness,
@@ -1084,22 +1084,7 @@ fn detail_pane_selection_hide_restore_respects_split_minima() {
     window.get_by_label("web-frontend-7d9f8-00001");
     window.get_by_label("Details");
 
-    // Hiding keeps the selection; restoring brings the detail back.
-    window
-        .get_by_role_and_label(Role::Button, "Hide details")
-        .click();
-    harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    assert!(window.query_by_label("Details").is_none());
-    window.get_by_label("web-frontend-7d9f8-00001");
-    window
-        .get_by_role_and_label(Role::Button, "Show details")
-        .click();
-    harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Pod");
-
+    // Clearing selection removes the contextual bottom panel.
     window
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();
