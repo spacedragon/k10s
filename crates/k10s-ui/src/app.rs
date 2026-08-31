@@ -3087,32 +3087,42 @@ impl K10sApp {
             };
             let generation = self
                 .log_generations
-                .entry(window)
-                .and_modify(|generation| {
-                    *generation = generation
-                        .checked_add(1)
-                        .expect("log attempt generation exhausted")
-                })
-                .or_insert(1)
-                .to_owned();
+                .get(&window)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(1)
+                .expect("log attempt generation exhausted");
             for entry in self.pending_stream_tickets.values() {
-                if entry.window == window && entry.route == StreamRoute::Logs {
-                    let _ = self.client.cancel(&entry.request)?;
+                if entry.window == window
+                    && entry.route == StreamRoute::Logs
+                    && let Err(error) = self.client.cancel(&entry.request)
+                {
+                    self.restore_log_view_for_existing_session(window);
+                    return Err(error);
                 }
             }
+            let request = match self.client.begin(Query::StreamTicket {
+                target,
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+                since_seconds,
+                previous,
+            }) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.restore_log_view_for_existing_session(window);
+                    return Err(error);
+                }
+            };
+            // Nothing below this point is fallible: the replacement ticket
+            // and generation become authoritative together.
             if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Logs)) {
                 session.disconnect();
             }
             self.log_session_sources.remove(&window);
             self.log_session_generations.remove(&window);
             self.log_sources.insert(window, source.clone());
-            let request = self.client.begin(Query::StreamTicket {
-                target,
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
-                since_seconds,
-                previous,
-            })?;
+            self.log_generations.insert(window, generation);
             // The tool moves to Connecting immediately; the Ready signal
             // completes the attach.
             if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
@@ -3168,6 +3178,16 @@ impl K10sApp {
         }
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+    }
+
+    fn restore_log_view_for_existing_session(&mut self, window: WindowId) {
+        if self
+            .stream_sessions
+            .contains_key(&(window, StreamRoute::Logs))
+            && let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window)
+        {
+            view.attach();
+        }
     }
 
     /// Complete in-flight stream ticket requests and open their sockets.
@@ -4792,7 +4812,7 @@ mod tests {
         panic!("client request capacity did not exhaust");
     }
 
-    fn saturate_cancel_outbound(app: &mut K10sApp) {
+    pub(super) fn saturate_cancel_outbound(app: &mut K10sApp) {
         let mut requests = Vec::new();
         for _ in 0..1_000 {
             match app.client.begin(Query::Bootstrap) {
@@ -7232,6 +7252,69 @@ mod stream_lifecycle_tests {
         let _ = app.handle_event(super::tests::server_message(&grant(old_id, "old")), 2, 0);
         app.finish_stream_tickets();
         assert_eq!(app.log_session_generations[&window], new_generation);
+    }
+
+    #[test]
+    fn failed_log_cancel_preflight_preserves_live_attempt_and_signal_projection() {
+        let (mut app, _state) = super::tests::ready_app();
+        let pod = pod("cancel-full");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for(&pod.name);
+        queue_logs(&mut app, window, target.clone(), Some(300), false);
+        let generation = app.log_generations[&window];
+        let source = app.log_sources[&window].clone();
+
+        let (tx, rx) = mpsc::channel();
+        let view = app
+            .shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, target.clone());
+        view.attach();
+        let mut session = StreamSession::new(StreamRoute::Logs, target.clone(), false);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+        app.log_session_sources.insert(window, source);
+        app.log_session_generations.insert(window, generation);
+
+        super::tests::saturate_cancel_outbound(&mut app);
+        let view = app.shell.stream_stores_mut().logs.get_mut(window).unwrap();
+        view.connection_lost();
+        assert!(view.retry());
+        app.shell.stream_stores_mut().logs.queue(
+            window,
+            LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
+        );
+        assert!(app.process_stream_requests().is_err());
+        assert_eq!(app.log_generations[&window], generation);
+        assert!(
+            app.stream_sessions
+                .contains_key(&(window, StreamRoute::Logs))
+        );
+
+        tx.send(WsEvent::Message(WsMessage::Binary(
+            k10s_protocol::encode_stream_payload(
+                k10s_protocol::payload_kind::STDOUT,
+                b"still-current",
+            ),
+        )))
+        .unwrap();
+        app.poll_stream_sessions();
+        assert_eq!(
+            app.shell
+                .stream_stores()
+                .logs
+                .get(window)
+                .unwrap()
+                .export_text(),
+            "still-current"
+        );
     }
 
     #[test]
