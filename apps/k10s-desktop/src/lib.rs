@@ -235,10 +235,38 @@ impl DesktopApp {
 /// each Kubernetes context independently.
 const CONTEXT_LAYOUTS_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct PersistedContextLayouts {
     version: u32,
     contexts: BTreeMap<String, WorkspaceSnapshot>,
+    #[serde(skip)]
+    migrated: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for PersistedContextLayouts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            version: u32,
+            contexts: BTreeMap<String, LoadedWorkspaceSnapshot>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let migrated = wire
+            .contexts
+            .values()
+            .any(|snapshot| snapshot.migrated_from.is_some());
+        Ok(Self {
+            version: wire.version,
+            contexts: wire
+                .contexts
+                .into_iter()
+                .map(|(context, loaded)| (context, loaded.snapshot))
+                .collect(),
+            migrated,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -261,7 +289,9 @@ impl ContextStateStore {
         if persisted.version != CONTEXT_LAYOUTS_VERSION {
             return None;
         }
-        self.last_saved = Some(persisted.contexts.clone());
+        if !persisted.migrated {
+            self.last_saved = Some(persisted.contexts.clone());
+        }
         Some(persisted.contexts)
     }
 
@@ -272,6 +302,7 @@ impl ContextStateStore {
         let persisted = PersistedContextLayouts {
             version: CONTEXT_LAYOUTS_VERSION,
             contexts: layouts.clone(),
+            migrated: false,
         };
         match serde_json::to_string(&persisted)
             .map_err(io::Error::other)
@@ -790,6 +821,37 @@ mod tests {
         assert!(ContextStateStore::new(path.clone()).load().is_none());
         std::fs::write(&path, "not json").unwrap();
         assert!(ContextStateStore::new(path).load().is_none());
+    }
+
+    #[test]
+    fn context_state_store_rewrites_migrated_nested_snapshots() {
+        let path = tmp_state_file("context-layouts-migrate-v2");
+        let snapshot = serde_json::json!({
+            "version": 2,
+            "next_id": 2,
+            "next_z": 3,
+            "windows": [{
+                "kind": "overview",
+                "title": "Overview",
+                "geometry": {"position": [8.0, 9.0], "size": [801.0, 602.0], "collapsed": false},
+                "z": 1,
+                "view": null
+            }]
+        });
+        std::fs::write(
+            &path,
+            serde_json::json!({"version": 1, "contexts": {"dev": snapshot}}).to_string(),
+        )
+        .unwrap();
+
+        let mut store = ContextStateStore::new(path.clone());
+        let layouts = store.load().expect("migrate nested v2 snapshot");
+        store.save(&layouts);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["contexts"]["dev"]["version"], 3);
+        assert_eq!(json["contexts"]["dev"]["free_window_resizing"], false);
     }
 
     #[test]
