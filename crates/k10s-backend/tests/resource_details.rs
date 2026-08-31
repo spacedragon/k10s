@@ -949,7 +949,10 @@ async fn replica_set_details_carry_only_authoritative_rollout_fields() {
             "spec": {
                 "replicas": 4,
                 "selector": {"matchLabels": {"app": "web"}},
-                "template": {"spec": {"containers": [{"name": "web", "image": "example/web:v3"}]}},
+                "template": {"spec": {"containers": [
+                    {"name": "web", "image": "example/web:v3"},
+                    {"name": "sidecar"}
+                ]}},
             },
             "status": {"readyReplicas": 3},
         })
@@ -970,6 +973,19 @@ async fn replica_set_details_carry_only_authoritative_rollout_fields() {
     assert_eq!(projection.revision, 12);
     assert_eq!(projection.replicas, Some(4));
     assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.images,
+        vec![
+            k10s_protocol::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_protocol::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
     assert_eq!(
         projection.created_at.as_deref(),
         Some("2026-08-21T00:01:00Z")

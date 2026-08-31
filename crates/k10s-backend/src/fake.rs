@@ -2037,12 +2037,14 @@ fn fake_replica_set_projection(
     replicas: u32,
     ready_replicas: u32,
     created_at: String,
+    images: Vec<ContainerImageProjection>,
 ) -> ResourceProjection {
     ResourceProjection::ReplicaSet(ReplicaSetProjection {
         revision,
         replicas: Some(replicas),
         ready_replicas: Some(ready_replicas),
         created_at: Some(created_at),
+        images,
     })
 }
 
@@ -2171,6 +2173,10 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 20,
                 20,
                 rfc3339(FAKE_EPOCH_SECS + 600),
+                vec![ContainerImageProjection {
+                    name: "web".into(),
+                    image: Some("example/web-frontend:v1".into()),
+                }],
             )),
             ..seed(
                 600,

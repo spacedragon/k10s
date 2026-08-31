@@ -488,7 +488,7 @@ async fn replica_sets_normalize_only_authoritative_deployment_revisions() {
         plural: "replicasets",
         namespace: Some("default"),
         list_body: r#"{"kind":"ReplicaSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"43"},"items":[
-          {"metadata":{"name":"web-12","uid":"uid-web-12","namespace":"default","creationTimestamp":"2026-08-20T01:00:00Z","annotations":{"deployment.kubernetes.io/revision":"12"}},"spec":{"replicas":4,"selector":{"matchLabels":{"app":"web"}},"template":{"spec":{"containers":[{"name":"web","image":"example/web:v3"}]}}},"status":{"readyReplicas":3}},
+          {"metadata":{"name":"web-12","uid":"uid-web-12","namespace":"default","creationTimestamp":"2026-08-20T01:00:00Z","annotations":{"deployment.kubernetes.io/revision":"12"}},"spec":{"replicas":4,"selector":{"matchLabels":{"app":"web"}},"template":{"spec":{"containers":[{"name":"web","image":"example/web:v3"},{"name":"sidecar"}]}}},"status":{"readyReplicas":3}},
           {"metadata":{"name":"unrevised","uid":"uid-unrevised","namespace":"default","creationTimestamp":"2026-08-21T01:00:00Z"},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"web"}},"template":{"spec":{"containers":[{"name":"web","image":"example/web:v4"}]}}},"status":{"readyReplicas":1}}
         ]}"#,
         expect: vec![
@@ -527,6 +527,19 @@ async fn replica_sets_normalize_only_authoritative_deployment_revisions() {
     assert_eq!(projection.replicas, Some(4));
     assert_eq!(projection.ready_replicas, Some(3));
     assert_eq!(
+        projection.images,
+        vec![
+            k10s_backend::port::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_backend::port::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
+    assert_eq!(
         projection.created_at.as_deref(),
         Some("2026-08-20T01:00:00Z")
     );
@@ -540,6 +553,19 @@ async fn replica_sets_normalize_only_authoritative_deployment_revisions() {
     };
     assert_eq!(projection.revision, 12);
     assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.images,
+        vec![
+            k10s_protocol::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_protocol::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1396,6 +1422,13 @@ async fn fake_designed_kinds_carry_structured_projections() {
     assert_eq!(projection.revision, 7);
     assert_eq!(projection.replicas, Some(20));
     assert_eq!(projection.ready_replicas, Some(20));
+    assert_eq!(
+        projection.images,
+        vec![k10s_protocol::ContainerImageProjection {
+            name: "web".into(),
+            image: Some("example/web-frontend:v1".into()),
+        }]
+    );
 
     let result = kernel
         .query(Query::ResourceList {
@@ -1558,10 +1591,16 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
         replicas: Some(4),
         ready_replicas: Some(3),
         created_at: Some("2026-08-20T01:00:00Z".into()),
-        images: vec![ContainerImageProjection {
-            name: "web".into(),
-            image: Some("example/web:v2".into()),
-        }],
+        images: vec![
+            ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v2".into()),
+            },
+            ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ],
     };
 
     let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
@@ -1677,10 +1716,16 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
             replicas: Some(4),
             ready_replicas: Some(3),
             created_at: Some("2026-08-20T01:00:00Z".into()),
-            images: vec![WireContainerImage {
-                name: "web".into(),
-                image: Some("example/web:v2".into()),
-            }],
+            images: vec![
+                WireContainerImage {
+                    name: "web".into(),
+                    image: Some("example/web:v2".into()),
+                },
+                WireContainerImage {
+                    name: "sidecar".into(),
+                    image: None,
+                }
+            ],
         }))
     );
 }

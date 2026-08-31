@@ -93,6 +93,22 @@ pub(super) fn replica_set_projection(replica_set: &ReplicaSet) -> Option<Resourc
             .creation_timestamp
             .as_ref()
             .map(|time| time.0.to_string()),
+        images: replica_set
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.as_ref())
+            .and_then(|template| template.spec.as_ref())
+            .map(|template| {
+                template
+                    .containers
+                    .iter()
+                    .map(|container| ContainerImageProjection {
+                        name: container.name.clone(),
+                        image: container.image.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }))
 }
 
