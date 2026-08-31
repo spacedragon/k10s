@@ -255,7 +255,7 @@ async fn cluster_scoped_node_detail_reads_by_exact_identity() {
 /// are listed, and only objects whose *controller* owner UID chain reaches the
 /// target resolve. Labels never decide ownership, and a reused name with a
 /// different UID stays unrelated.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn deployment_relations_follow_owner_uids_without_catalog_sweep() {
     let server = RecordedApiServer::standard();
     let replicaset_list_path = "/apis/apps/v1/namespaces/default/replicasets";
