@@ -758,6 +758,7 @@ impl ResourceMetricsResult {
                     memory_bytes: sample.memory_bytes,
                     collected_at: sample.collected_at,
                 },
+                containers: Vec::new(),
             },
         }
     }
@@ -824,6 +825,53 @@ fn map_row(record: &ResourceRecord) -> ResourceListRow {
 #[must_use]
 fn map_projection(projection: &ResourceProjection) -> WireProjection {
     match projection {
+        ResourceProjection::Pod(pod) => WireProjection::Pod(k10s_protocol::PodProjection {
+            phase: pod.phase.clone(),
+            ready_containers: pod.ready_containers,
+            total_containers: pod.total_containers,
+            restart_count: pod.restart_count,
+            containers: pod.containers.iter().map(map_pod_container).collect(),
+            conditions: pod.conditions.iter().map(map_condition).collect(),
+            node_name: pod.node_name.clone(),
+            pod_ip: pod.pod_ip.clone(),
+            labels: pod.labels.clone(),
+            annotations: pod.annotations.clone(),
+            created_at: pod.created_at.clone(),
+        }),
+        ResourceProjection::Deployment(deployment) => {
+            WireProjection::Deployment(k10s_protocol::DeploymentProjection {
+                desired_replicas: deployment.desired_replicas,
+                ready_replicas: deployment.ready_replicas,
+                updated_replicas: deployment.updated_replicas,
+                available_replicas: deployment.available_replicas,
+                strategy: deployment.strategy.clone(),
+                selector: deployment.selector.clone(),
+                max_surge: deployment.max_surge.clone(),
+                max_unavailable: deployment.max_unavailable.clone(),
+                conditions: deployment.conditions.iter().map(map_condition).collect(),
+                template_containers: deployment
+                    .template_containers
+                    .iter()
+                    .map(|container| k10s_protocol::ContainerImageProjection {
+                        name: container.name.clone(),
+                        image: container.image.clone(),
+                    })
+                    .collect(),
+                template_labels: deployment.template_labels.clone(),
+                template_annotations: deployment.template_annotations.clone(),
+                labels: deployment.labels.clone(),
+                annotations: deployment.annotations.clone(),
+                created_at: deployment.created_at.clone(),
+            })
+        }
+        ResourceProjection::ReplicaSet(replica_set) => {
+            WireProjection::ReplicaSet(k10s_protocol::ReplicaSetProjection {
+                revision: replica_set.revision,
+                replicas: replica_set.replicas,
+                ready_replicas: replica_set.ready_replicas,
+                created_at: replica_set.created_at.clone(),
+            })
+        }
         ResourceProjection::Service(service) => {
             WireProjection::Service(k10s_protocol::ServiceProjection {
                 service_type: service.service_type.clone(),
@@ -840,6 +888,58 @@ fn map_projection(projection: &ResourceProjection) -> WireProjection {
                 ports: service.ports.iter().map(map_service_port).collect(),
             })
         }
+    }
+}
+
+/// Map one backend condition onto its protocol-facing payload.
+#[must_use]
+fn map_condition(
+    condition: &crate::port::ResourceConditionProjection,
+) -> k10s_protocol::ResourceConditionProjection {
+    k10s_protocol::ResourceConditionProjection {
+        condition_type: condition.condition_type.clone(),
+        status: condition.status.clone(),
+        reason: condition.reason.clone(),
+        message: condition.message.clone(),
+        last_transition_time: condition.last_transition_time.clone(),
+    }
+}
+
+/// Map one backend Pod container onto its protocol-facing payload.
+#[must_use]
+fn map_pod_container(
+    container: &crate::port::PodContainerProjection,
+) -> k10s_protocol::PodContainerProjection {
+    k10s_protocol::PodContainerProjection {
+        name: container.name.clone(),
+        image: container.image.clone(),
+        state: container.state.as_ref().map(|state| match state {
+            crate::port::ContainerStateProjection::Running => {
+                k10s_protocol::ContainerStateProjection::Running
+            }
+            crate::port::ContainerStateProjection::Waiting { reason } => {
+                k10s_protocol::ContainerStateProjection::Waiting {
+                    reason: reason.clone(),
+                }
+            }
+            crate::port::ContainerStateProjection::Terminated(termination) => {
+                k10s_protocol::ContainerStateProjection::Terminated(map_termination(termination))
+            }
+        }),
+        ready: container.ready,
+        restart_count: container.restart_count,
+        last_termination: container.last_termination.as_ref().map(map_termination),
+    }
+}
+
+/// Map one backend container termination onto its protocol-facing payload.
+#[must_use]
+fn map_termination(
+    termination: &crate::port::ContainerTerminationProjection,
+) -> k10s_protocol::ContainerTerminationProjection {
+    k10s_protocol::ContainerTerminationProjection {
+        exit_code: termination.exit_code,
+        reason: termination.reason.clone(),
     }
 }
 
@@ -869,13 +969,14 @@ fn capabilities_for_gvk(gvk: &Gvk) -> ResourceCapabilities {
     let mut capabilities = ResourceCapabilities::default();
     match WorkloadKind::from_gvk(&map_gvk(gvk)) {
         Some(WorkloadKind::Deployment | WorkloadKind::StatefulSet | WorkloadKind::DaemonSet) => {
-            capabilities.can_scale = true
+            capabilities.can_scale = true;
+            capabilities.can_restart = true;
         }
         Some(WorkloadKind::Pod) => {
             capabilities.can_view_logs = true;
             capabilities.can_exec = true;
         }
-        _ => {}
+        Some(WorkloadKind::ReplicaSet | WorkloadKind::Job | WorkloadKind::CronJob) | None => {}
     }
     capabilities
 }

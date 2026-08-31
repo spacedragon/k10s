@@ -529,8 +529,153 @@ pub enum RecordEventsCondition {
 /// maps them onto the protocol-facing payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceProjection {
+    /// Normalized core/v1 Pod view model.
+    Pod(PodProjection),
+    /// Normalized apps/v1 Deployment view model.
+    Deployment(DeploymentProjection),
+    /// Normalized apps/v1 ReplicaSet rollout-history row.
+    ReplicaSet(ReplicaSetProjection),
     /// Normalized core/v1 Service view model.
     Service(ServiceProjection),
+}
+
+/// A normalized condition shared by Pod and Deployment projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceConditionProjection {
+    /// Kubernetes condition type, such as `Ready` or `Progressing`.
+    pub condition_type: String,
+    /// Kubernetes condition status (`True`, `False`, or `Unknown`).
+    pub status: String,
+    /// Machine-readable reason when the source reported one.
+    pub reason: Option<String>,
+    /// Human-readable condition detail when the source reported one.
+    pub message: Option<String>,
+    /// Last transition time formatted as RFC 3339, when reported.
+    pub last_transition_time: Option<String>,
+}
+
+/// Current lifecycle state of one Pod container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerStateProjection {
+    /// The container is currently running.
+    Running,
+    /// The container is waiting to start or restart.
+    Waiting {
+        /// Authoritative waiting reason, such as `CrashLoopBackOff`.
+        reason: Option<String>,
+    },
+    /// The current container instance has terminated.
+    Terminated(ContainerTerminationProjection),
+}
+
+/// The most recent terminated instance of a restarted container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerTerminationProjection {
+    /// Process exit code reported by the container runtime.
+    pub exit_code: i32,
+    /// Authoritative termination reason, when reported.
+    pub reason: Option<String>,
+}
+
+/// One normalized Pod container status row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodContainerProjection {
+    /// Exact container name used to join authoritative metrics samples.
+    pub name: String,
+    /// Declared container image, absent when Kubernetes did not report it.
+    pub image: Option<String>,
+    /// Current lifecycle state, absent when container status is unavailable.
+    pub state: Option<ContainerStateProjection>,
+    /// Current readiness reported by container status.
+    pub ready: Option<bool>,
+    /// Current restart count reported by container status.
+    pub restart_count: Option<u32>,
+    /// Most recent terminated instance, when a restart history exists.
+    pub last_termination: Option<ContainerTerminationProjection>,
+}
+
+/// A normalized Pod projection used by list and detail responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodProjection {
+    /// Current Pod phase, absent when status is incomplete.
+    pub phase: Option<String>,
+    /// Number of ready containers, absent when status is incomplete.
+    pub ready_containers: Option<u32>,
+    /// Number of declared containers, absent when the spec is incomplete.
+    pub total_containers: Option<u32>,
+    /// Sum of authoritative container restart counts, when available.
+    pub restart_count: Option<u32>,
+    /// Containers in declaration order with status joined by exact name.
+    pub containers: Vec<PodContainerProjection>,
+    /// Pod conditions in backend-normalized deterministic order.
+    pub conditions: Vec<ResourceConditionProjection>,
+    /// Scheduled node name, absent while unscheduled or unavailable.
+    pub node_name: Option<String>,
+    /// Primary Pod IP, absent while unassigned or unavailable.
+    pub pod_ip: Option<String>,
+    /// Pod labels sorted by key.
+    pub labels: BTreeMap<String, String>,
+    /// Pod annotations sorted by key.
+    pub annotations: BTreeMap<String, String>,
+    /// Creation time formatted as RFC 3339, when available.
+    pub created_at: Option<String>,
+}
+
+/// One name/image pair from a workload Pod template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerImageProjection {
+    /// Exact container name from the template.
+    pub name: String,
+    /// Declared image, absent when Kubernetes did not report it.
+    pub image: Option<String>,
+}
+
+/// A normalized Deployment projection used by list and detail responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentProjection {
+    /// Desired replicas, absent when the spec is incomplete.
+    pub desired_replicas: Option<u32>,
+    /// Ready replicas, absent when status is incomplete.
+    pub ready_replicas: Option<u32>,
+    /// Replicas updated to the current template, when reported.
+    pub updated_replicas: Option<u32>,
+    /// Available replicas, absent when status is incomplete.
+    pub available_replicas: Option<u32>,
+    /// Deployment strategy, such as `RollingUpdate` or `Recreate`.
+    pub strategy: Option<String>,
+    /// Match labels from the Deployment selector, sorted by key.
+    pub selector: BTreeMap<String, String>,
+    /// Rolling-update maximum surge, normalized from integer or percentage.
+    pub max_surge: Option<String>,
+    /// Rolling-update maximum unavailable, normalized from integer or percentage.
+    pub max_unavailable: Option<String>,
+    /// Deployment conditions in backend-normalized deterministic order.
+    pub conditions: Vec<ResourceConditionProjection>,
+    /// Container images declared by the Pod template.
+    pub template_containers: Vec<ContainerImageProjection>,
+    /// Pod-template labels sorted by key.
+    pub template_labels: BTreeMap<String, String>,
+    /// Pod-template annotations sorted by key.
+    pub template_annotations: BTreeMap<String, String>,
+    /// Deployment labels sorted by key, including manager metadata.
+    pub labels: BTreeMap<String, String>,
+    /// Deployment annotations sorted by key, including manager metadata.
+    pub annotations: BTreeMap<String, String>,
+    /// Creation time formatted as RFC 3339, when available.
+    pub created_at: Option<String>,
+}
+
+/// A normalized ReplicaSet projection used by rollout-history rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaSetProjection {
+    /// Parsed Deployment revision; rows without one never use this projection.
+    pub revision: u64,
+    /// Desired replicas, absent when the spec is incomplete.
+    pub replicas: Option<u32>,
+    /// Ready replicas, absent when status is incomplete.
+    pub ready_replicas: Option<u32>,
+    /// Creation time formatted as RFC 3339, when available.
+    pub created_at: Option<String>,
 }
 
 /// Normalized core/v1 Service projection.

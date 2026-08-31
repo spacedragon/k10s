@@ -728,11 +728,16 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(
                 keys,
-                ["identity", "metrics"]
+                ["containers", "identity", "metrics"]
                     .map(str::to_owned)
                     .into_iter()
                     .collect(),
                 "{label}: resource-metrics top-level keys drifted"
+            );
+            assert_eq!(
+                payload["containers"].as_array().map(Vec::len),
+                Some(0),
+                "{label}: adapters without normalized container samples default empty"
             );
         }
         // Per-case availability agrees, and the present-key sets match.

@@ -913,3 +913,53 @@ async fn service_details_carry_structured_projection() {
         .expect("deployment detail resolves");
     assert!(deployment_detail.projection.is_none());
 }
+
+/// Restart capability must mirror the existing mutation allow-list exactly:
+/// only the three pod-template workloads accepted by `Command::Restart`
+/// advertise the action.
+#[test]
+fn restart_capability_matches_supported_workload_kinds() {
+    use std::collections::BTreeMap;
+
+    use k10s_backend::kernel::ResourceDetailResult;
+    use k10s_backend::{RecordEventsCondition, ResourceRecord};
+
+    let cases = [
+        (Gvk::new("apps", "v1", "Deployment"), true),
+        (Gvk::new("apps", "v1", "StatefulSet"), true),
+        (Gvk::new("apps", "v1", "DaemonSet"), true),
+        (Gvk::new("apps", "v1", "ReplicaSet"), false),
+        (Gvk::new("batch", "v1", "Job"), false),
+        (Gvk::new("batch", "v1", "CronJob"), false),
+        (Gvk::core("v1", "Pod"), false),
+        (Gvk::core("v1", "Service"), false),
+    ];
+
+    for (gvk, expected) in cases {
+        let kind = gvk.kind.clone();
+        let detail = ResourceDetailResult::new(ResourceRecord {
+            reference: ResourceRef {
+                context: CONTEXT.into(),
+                gvk,
+                namespace: Some(NS.into()),
+                name: "target".into(),
+                uid: format!("uid-{kind}"),
+            },
+            revision: 1,
+            labels: BTreeMap::new(),
+            summary: "ready".into(),
+            created_at: "2026-08-21T00:00:00Z".into(),
+            owner_references: Vec::new(),
+            events: Vec::new(),
+            events_condition: RecordEventsCondition::Available,
+            manifest: String::new(),
+            projection: None,
+        })
+        .wire_payload();
+
+        assert_eq!(
+            detail.capabilities.can_restart, expected,
+            "restart capability drifted for {kind}"
+        );
+    }
+}
