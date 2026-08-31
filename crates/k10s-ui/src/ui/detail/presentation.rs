@@ -36,6 +36,49 @@ pub(crate) struct DetailExpansionState {
 pub(crate) struct DetailVital {
     pub label: &'static str,
     pub value: String,
+    pub tone: DetailVitalTone,
+    pub shape: Option<DetailVitalShape>,
+}
+
+impl DetailVital {
+    pub(crate) fn new(label: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            label,
+            value: value.into(),
+            tone: DetailVitalTone::default(),
+            shape: None,
+        }
+    }
+}
+
+/// Semantic color applied to a detail vital.
+#[allow(dead_code)] // Frozen extension surface for the final kind renderers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailVitalTone {
+    #[default]
+    Neutral,
+    Healthy,
+    Warning,
+    Danger,
+}
+
+/// Visible marker paired with a detail vital's semantic color.
+#[allow(dead_code)] // Frozen extension surface for the final kind renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailVitalShape {
+    Dot,
+    Triangle,
+    Cross,
+}
+
+impl DetailVitalShape {
+    pub(crate) const fn glyph(self) -> &'static str {
+        match self {
+            Self::Dot => "●",
+            Self::Triangle => "▲",
+            Self::Cross => "✕",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,10 +237,7 @@ fn typed_vitals(
         Some(ResourceProjection::Pod(pod)) => (
             vec![
                 vital("Status", pod.phase.as_deref()),
-                DetailVital {
-                    label: "Ready",
-                    value: pair(pod.ready_containers, pod.total_containers),
-                },
+                DetailVital::new("Ready", pair(pod.ready_containers, pod.total_containers)),
                 vital_number("Restarts", pod.restart_count),
                 vital("Age", pod.created_at.as_deref()),
             ],
@@ -209,20 +249,20 @@ fn typed_vitals(
         ),
         Some(ResourceProjection::Deployment(deployment)) => (
             vec![
-                DetailVital {
-                    label: "Rollout",
-                    value: deployment
+                DetailVital::new(
+                    "Rollout",
+                    deployment
                         .conditions
                         .iter()
                         .find(|condition| condition.condition_type == "Progressing")
                         .and_then(|condition| condition.reason.as_deref())
                         .unwrap_or("—")
                         .to_owned(),
-                },
-                DetailVital {
-                    label: "Ready",
-                    value: pair(deployment.ready_replicas, deployment.desired_replicas),
-                },
+                ),
+                DetailVital::new(
+                    "Ready",
+                    pair(deployment.ready_replicas, deployment.desired_replicas),
+                ),
                 vital_number("Up-to-date", deployment.updated_replicas),
                 vital_number("Available", deployment.available_replicas),
             ],
@@ -239,10 +279,7 @@ fn typed_vitals(
             (
                 vec![
                     vital("Status", None),
-                    DetailVital {
-                        label: "Ready",
-                        value: "—".into(),
-                    },
+                    DetailVital::new("Ready", "—"),
                     vital_number("Restarts", None),
                     vital("Age", None),
                 ],
@@ -257,10 +294,7 @@ fn typed_vitals(
             (
                 vec![
                     vital("Rollout", None),
-                    DetailVital {
-                        label: "Ready",
-                        value: "—".into(),
-                    },
+                    DetailVital::new("Ready", "—"),
                     vital_number("Up-to-date", None),
                     vital_number("Available", None),
                 ],
@@ -277,17 +311,14 @@ fn typed_vitals(
 }
 
 fn vital(label: &'static str, value: Option<&str>) -> DetailVital {
-    DetailVital {
-        label,
-        value: value.unwrap_or("—").to_owned(),
-    }
+    DetailVital::new(label, value.unwrap_or("—"))
 }
 
 fn vital_number(label: &'static str, value: Option<u32>) -> DetailVital {
-    DetailVital {
+    DetailVital::new(
         label,
-        value: value.map_or_else(|| "—".to_owned(), |value| value.to_string()),
-    }
+        value.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+    )
 }
 
 fn pair(left: Option<u32>, right: Option<u32>) -> String {

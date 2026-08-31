@@ -10,6 +10,7 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use super::presentation::{
     DetailExpansionState, DetailFrameProjection, DetailPresentationInput, DetailPrimary,
+    DetailVital, DetailVitalTone,
 };
 use crate::ui::resource_window::RowIdentity;
 
@@ -30,6 +31,7 @@ pub(super) fn show<I: RowIdentity>(
     detail_maximized: bool,
     tabs: &[DetailTab],
     queued: &mut Vec<WorkspaceCommand<I>>,
+    configure: impl FnOnce(&mut DetailFrameProjection<'_>),
     mut content: impl FnMut(&mut egui::Ui, DetailPrimary<'_>, bool, &mut DetailFrameProjection<'_>),
 ) {
     let expansion_id = egui::Id::new(("k10s.detail.expansion", window_id.0));
@@ -38,6 +40,7 @@ pub(super) fn show<I: RowIdentity>(
         .data_mut(|data| data.get_temp::<DetailExpansionState>(expansion_id))
         .unwrap_or_default();
     let mut projection = input.frame_projection(expansion);
+    configure(&mut projection);
     ui.horizontal(|ui| {
         ui.label(RichText::new(title(projection.identity)).strong().heading());
         if integrated && !input.gone {
@@ -77,11 +80,11 @@ pub(super) fn show<I: RowIdentity>(
     {
         let ui = &mut vitals_ui;
         for metric in &projection.visible_vitals {
-            vital(ui, metric.label, &metric.value);
+            vital(ui, metric);
         }
         if wide || projection.expansion.more_vitals {
             for metric in &projection.overflow_vitals {
-                vital(ui, metric.label, &metric.value);
+                vital(ui, metric);
             }
         } else if let Some(kind) = projection.vital_expansion_label
             && !projection.overflow_vitals.is_empty()
@@ -110,7 +113,7 @@ pub(super) fn show<I: RowIdentity>(
             None if input.gone => "Freshness · gone".into(),
             None => "Freshness · unavailable".into(),
         };
-        vital(ui, "", &freshness);
+        ui.label(freshness);
     }
     if !input.mutations_allowed
         && (projection.actions.can_scale
@@ -270,13 +273,21 @@ pub(super) fn show<I: RowIdentity>(
     });
 }
 
-fn vital(ui: &mut egui::Ui, label: &str, value: &str) {
-    let text = if label.is_empty() {
-        value.to_owned()
-    } else {
-        format!("{label} · {value}")
+fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
+    let text = match vital.shape {
+        Some(shape) => format!("{} · {} {}", vital.label, shape.glyph(), vital.value),
+        None => format!("{} · {}", vital.label, vital.value),
     };
-    ui.label(text);
+    ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
+}
+
+fn vital_color(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {
+    match tone {
+        DetailVitalTone::Neutral => visuals.text_color(),
+        DetailVitalTone::Healthy => crate::ui::theme::HEALTHY,
+        DetailVitalTone::Warning => crate::ui::theme::WARNING,
+        DetailVitalTone::Danger => crate::ui::theme::DANGER,
+    }
 }
 
 fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -284,5 +295,104 @@ fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.to_owned()));
     if response.clicked() {
         ui.ctx().copy_text(value.to_owned());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::{Harness, kittest::Queryable as _};
+    use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+
+    use super::*;
+    use crate::ui::detail::presentation::{
+        DetailMetrics, DetailVital, DetailVitalShape, DetailVitalTone,
+    };
+
+    #[test]
+    fn semantic_vital_shapes_are_visible_and_tones_use_theme_palette() {
+        assert_eq!(DetailVitalShape::Dot.glyph(), "●");
+        assert_eq!(DetailVitalShape::Triangle.glyph(), "▲");
+        assert_eq!(DetailVitalShape::Cross.glyph(), "✕");
+
+        let visuals = egui::Visuals::dark();
+        assert_eq!(
+            vital_color(&visuals, DetailVitalTone::Neutral),
+            visuals.text_color()
+        );
+        assert_eq!(
+            vital_color(&visuals, DetailVitalTone::Healthy),
+            crate::ui::theme::HEALTHY
+        );
+        assert_eq!(
+            vital_color(&visuals, DetailVitalTone::Warning),
+            crate::ui::theme::WARNING
+        );
+        assert_eq!(
+            vital_color(&visuals, DetailVitalTone::Danger),
+            crate::ui::theme::DANGER
+        );
+    }
+
+    #[test]
+    fn configure_hook_changes_accessible_vital_before_body_rendering() {
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web-0".into(),
+            uid: "uid-web-0".into(),
+        };
+        let detail = DetailState::new(identity.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 500.0))
+            .build_ui(move |ui| {
+                let input = DetailPresentationInput {
+                    identity: &identity,
+                    primary: DetailPrimary::Loading,
+                    metrics: DetailMetrics {
+                        status: Some("Pending"),
+                        age: Some("2m"),
+                    },
+                    resource_metrics: None,
+                    relations: None,
+                    freshness: None,
+                    gone: false,
+                    mutations_allowed: false,
+                    port_forward_available: false,
+                    port_forward_sessions: &[],
+                    port_forward_error: None,
+                };
+                show(
+                    ui,
+                    WindowId(77),
+                    &detail,
+                    &input,
+                    false,
+                    false,
+                    &[],
+                    &mut Vec::new(),
+                    |projection| {
+                        projection.visible_vitals = vec![DetailVital {
+                            label: "Status",
+                            value: "Configured".into(),
+                            tone: DetailVitalTone::Danger,
+                            shape: Some(DetailVitalShape::Cross),
+                        }];
+                    },
+                    |ui, _, actions, projection| {
+                        if !actions {
+                            ui.label(format!(
+                                "Body observed {}",
+                                projection.visible_vitals[0].value
+                            ));
+                        }
+                    },
+                );
+            });
+        harness.run_steps(2);
+
+        harness.get_by_label("Status · ✕ Configured");
+        harness.get_by_label("Body observed Configured");
+        assert!(harness.query_by_label("Status · Pending").is_none());
     }
 }

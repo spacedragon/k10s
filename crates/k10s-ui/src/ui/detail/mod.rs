@@ -217,6 +217,7 @@ pub(super) fn show<I>(
         detail_maximized,
         tabs_for_kind(&detail_identity_gvk(detail)),
         queued,
+        |_| {},
         |ui, primary, actions, frame| {
             let view = match primary {
                 presentation::DetailPrimary::Loading => {
