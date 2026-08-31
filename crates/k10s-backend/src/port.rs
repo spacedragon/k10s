@@ -704,6 +704,8 @@ pub struct ReplicaSetProjection {
     pub ready_replicas: Option<u32>,
     /// Creation time formatted as RFC 3339, when available.
     pub created_at: Option<String>,
+    /// Container images declared by this ReplicaSet's Pod template.
+    pub images: Vec<ContainerImageProjection>,
 }
 
 /// Normalized core/v1 Service projection.

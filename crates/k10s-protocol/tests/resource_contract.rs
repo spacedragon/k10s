@@ -419,6 +419,10 @@ fn detail_resource_projections_round_trip_typed_payloads() {
         replicas: Some(3),
         ready_replicas: Some(3),
         created_at: Some("2026-08-20T00:00:00Z".into()),
+        images: vec![ContainerImageProjection {
+            name: "web".into(),
+            image: Some("ghcr.io/example/web:1.2.2".into()),
+        }],
     });
 
     for (projection, kind) in [
@@ -470,12 +474,34 @@ fn detail_resource_projections_round_trip_typed_payloads() {
             "replicaSet" => {
                 assert_eq!(encoded["revision"], json!(4));
                 assert_eq!(encoded["readyReplicas"], json!(3));
+                assert_eq!(encoded["images"][0]["name"], json!("web"));
+                assert_eq!(
+                    encoded["images"][0]["image"],
+                    json!("ghcr.io/example/web:1.2.2")
+                );
             }
             _ => unreachable!(),
         }
         let decoded: ResourceProjection = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, projection);
     }
+}
+
+#[test]
+fn legacy_replica_set_projection_defaults_images_to_empty() {
+    let decoded: ResourceProjection = serde_json::from_value(json!({
+        "kind": "replicaSet",
+        "revision": 3,
+        "replicas": 2,
+        "readyReplicas": 2,
+        "createdAt": "2026-08-19T00:00:00Z"
+    }))
+    .unwrap();
+
+    let ResourceProjection::ReplicaSet(replica_set) = decoded else {
+        panic!("expected ReplicaSet projection");
+    };
+    assert!(replica_set.images.is_empty());
 }
 
 #[test]

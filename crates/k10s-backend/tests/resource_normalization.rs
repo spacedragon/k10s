@@ -1275,6 +1275,10 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
         replicas: Some(4),
         ready_replicas: Some(3),
         created_at: Some("2026-08-20T01:00:00Z".into()),
+        images: vec![ContainerImageProjection {
+            name: "web".into(),
+            image: Some("example/web:v2".into()),
+        }],
     };
 
     let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
@@ -1390,6 +1394,10 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
             replicas: Some(4),
             ready_replicas: Some(3),
             created_at: Some("2026-08-20T01:00:00Z".into()),
+            images: vec![WireContainerImage {
+                name: "web".into(),
+                image: Some("example/web:v2".into()),
+            }],
         }))
     );
 }

@@ -903,6 +903,14 @@ fn map_projection(projection: &ResourceProjection) -> WireProjection {
                 replicas: replica_set.replicas,
                 ready_replicas: replica_set.ready_replicas,
                 created_at: replica_set.created_at.clone(),
+                images: replica_set
+                    .images
+                    .iter()
+                    .map(|container| k10s_protocol::ContainerImageProjection {
+                        name: container.name.clone(),
+                        image: container.image.clone(),
+                    })
+                    .collect(),
             })
         }
         ResourceProjection::Service(service) => {

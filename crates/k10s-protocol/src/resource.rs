@@ -433,6 +433,9 @@ pub struct ReplicaSetProjection {
     /// Creation time formatted as RFC 3339, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// Container images declared by this ReplicaSet's Pod template.
+    #[serde(default)]
+    pub images: Vec<ContainerImageProjection>,
 }
 
 /// Normalized core/v1 Service projection.
