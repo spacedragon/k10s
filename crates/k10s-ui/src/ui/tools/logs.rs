@@ -458,7 +458,7 @@ pub(crate) fn show(
         ui.label("Select a pod to stream logs");
         return;
     };
-    let mut connect_requested = false;
+    let mut open_requested = false;
     {
         let view = views.ensure(window_id, target.clone());
         if !containers.is_empty()
@@ -519,17 +519,12 @@ pub(crate) fn show(
                         }
                     }
                 });
+            open_requested |= view.begin_auto_connect();
             match view.phase() {
                 LogsPhase::Disconnected => {
-                    let button = ui.button("Connect logs");
-                    button.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            "Connect logs".to_owned(),
-                        )
-                    });
-                    connect_requested = button.clicked();
+                    if view.can_retry() && ui.button("Retry logs").clicked() {
+                        open_requested = view.retry();
+                    }
                     ui.label(RichText::new("Disconnected").weak());
                 }
                 LogsPhase::Connecting => {
@@ -546,10 +541,6 @@ pub(crate) fn show(
                     }
                     if view.is_paused() {
                         ui.label(RichText::new("Paused").weak());
-                    }
-                    let follow = view.follows();
-                    if ui.checkbox(&mut { follow }, "Follow").changed() {
-                        view.set_follow(!follow);
                     }
                     let since_label = if view.since_active() {
                         "Show all"
@@ -645,7 +636,7 @@ pub(crate) fn show(
                 }
             });
     }
-    if connect_requested {
+    if open_requested {
         let selected_target = views
             .target_of(window_id)
             .expect("a rendered logs view has a target");
