@@ -315,6 +315,260 @@ async fn deployments_normalize_ready_counts() {
 }
 
 #[tokio::test]
+async fn deployments_normalize_rollout_detail_fields_from_typed_metadata_spec_and_status() {
+    let case = Case {
+        label: "deployment rollout detail fields",
+        gvk: gvk("apps", "v1", "Deployment"),
+        plural: "deployments",
+        namespace: Some("default"),
+        list_body: r#"{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{"resourceVersion":"42"},"items":[
+          {"metadata":{"name":"complete","uid":"uid-complete","namespace":"default","creationTimestamp":"2026-08-20T00:00:00Z","labels":{"app":"web","app.kubernetes.io/managed-by":"Helm"},"annotations":{"meta.helm.sh/release-name":"web","meta.helm.sh/release-namespace":"default"}},
+           "spec":{"replicas":3,"selector":{"matchLabels":{"app":"web","tier":"frontend"}},"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":1}},"template":{"metadata":{"labels":{"app":"web","tier":"frontend"},"annotations":{"checksum/config":"abc"}},"spec":{"containers":[{"name":"web","image":"example/web:v3"},{"name":"sidecar"}]}}},
+           "status":{"readyReplicas":3,"updatedReplicas":3,"availableReplicas":3,"conditions":[{"type":"Available","status":"True","reason":"MinimumReplicasAvailable","message":"Deployment has minimum availability.","lastTransitionTime":"2026-08-20T00:01:00Z"},{"type":"Progressing","status":"True","reason":"NewReplicaSetAvailable","message":"ReplicaSet web-123 has successfully progressed.","lastTransitionTime":"2026-08-20T00:02:00Z"}]}},
+          {"metadata":{"name":"failed","uid":"uid-failed","namespace":"default","creationTimestamp":"2026-08-22T00:00:00Z"},
+           "spec":{"replicas":3,"selector":{"matchLabels":{"app":"broken"}},"strategy":{"type":"Recreate"},"template":{"metadata":{},"spec":{"containers":[{"name":"broken","image":"example/broken:v1"}]}}},
+           "status":{"readyReplicas":0,"updatedReplicas":1,"availableReplicas":0,"conditions":[{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded","message":"ReplicaSet has not progressed.","lastTransitionTime":"2026-08-22T00:10:00Z"}]}},
+          {"metadata":{"name":"progressing","uid":"uid-progressing","namespace":"default","creationTimestamp":"2026-08-21T00:00:00Z","labels":{"app":"api"},"annotations":{"example.io/trace":"enabled"}},
+           "spec":{"replicas":4,"selector":{"matchLabels":{"app":"api"}},"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":2,"maxUnavailable":"20%"}},"template":{"metadata":{"labels":{"app":"api"},"annotations":{"example.io/revision":"next"}},"spec":{"containers":[{"name":"api","image":"example/api:v2"}]}}},
+           "status":{"readyReplicas":2,"updatedReplicas":2,"availableReplicas":2,"conditions":[{"type":"Progressing","status":"True","reason":"ReplicaSetUpdated","message":"ReplicaSet web-456 is progressing.","lastTransitionTime":"2026-08-21T00:03:00Z"}]}}
+        ]}"#,
+        expect: vec![
+            ExpectedRow {
+                name: "complete",
+                uid: "uid-complete",
+                namespace: Some("default"),
+                labels: &[("app", "web"), ("app.kubernetes.io/managed-by", "Helm")],
+                summary: "3/3 ready",
+                created_at_prefix: "2026-08-20T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "failed",
+                uid: "uid-failed",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "0/3 ready",
+                created_at_prefix: "2026-08-22T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "progressing",
+                uid: "uid-progressing",
+                namespace: Some("default"),
+                labels: &[("app", "api")],
+                summary: "2/4 ready",
+                created_at_prefix: "2026-08-21T00:00:00",
+                owner: None,
+            },
+        ],
+    };
+    let data = run_case(&case).await;
+    assert_rows(&case, &data);
+
+    let complete = &data.rows[0];
+    let Some(k10s_backend::ResourceProjection::Deployment(projection)) = &complete.projection
+    else {
+        panic!("complete deployment carries a structured projection");
+    };
+    assert_eq!(projection.desired_replicas, Some(3));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(projection.updated_replicas, Some(3));
+    assert_eq!(projection.available_replicas, Some(3));
+    assert_eq!(projection.strategy.as_deref(), Some("RollingUpdate"));
+    assert_eq!(
+        projection.selector.get("tier").map(String::as_str),
+        Some("frontend")
+    );
+    assert_eq!(projection.max_surge.as_deref(), Some("25%"));
+    assert_eq!(projection.max_unavailable.as_deref(), Some("1"));
+    assert_eq!(projection.template_containers.len(), 2);
+    assert_eq!(projection.template_containers[0].name, "web");
+    assert_eq!(
+        projection.template_containers[0].image.as_deref(),
+        Some("example/web:v3")
+    );
+    assert_eq!(projection.template_containers[1].image, None);
+    assert_eq!(
+        projection.template_labels.get("app").map(String::as_str),
+        Some("web")
+    );
+    assert_eq!(
+        projection
+            .template_annotations
+            .get("checksum/config")
+            .map(String::as_str),
+        Some("abc")
+    );
+    assert_eq!(
+        projection
+            .labels
+            .get("app.kubernetes.io/managed-by")
+            .map(String::as_str),
+        Some("Helm")
+    );
+    assert_eq!(
+        projection
+            .annotations
+            .get("meta.helm.sh/release-name")
+            .map(String::as_str),
+        Some("web")
+    );
+    assert_eq!(
+        projection.created_at.as_deref(),
+        Some("2026-08-20T00:00:00Z")
+    );
+    assert_eq!(projection.conditions.len(), 2);
+    assert_eq!(
+        projection.conditions[1].reason.as_deref(),
+        Some("NewReplicaSetAvailable")
+    );
+    assert_eq!(
+        projection.conditions[1].message.as_deref(),
+        Some("ReplicaSet web-123 has successfully progressed.")
+    );
+    assert_eq!(
+        projection.conditions[1].last_transition_time.as_deref(),
+        Some("2026-08-20T00:02:00Z")
+    );
+
+    let failed = &data.rows[1];
+    let Some(k10s_backend::ResourceProjection::Deployment(projection)) = &failed.projection else {
+        panic!("failed deployment carries a structured projection");
+    };
+    assert_eq!(projection.strategy.as_deref(), Some("Recreate"));
+    assert_eq!(projection.max_surge, None);
+    assert_eq!(projection.max_unavailable, None);
+    assert!(projection.selector.contains_key("app"));
+    assert!(projection.template_labels.is_empty());
+    assert!(projection.template_annotations.is_empty());
+    assert!(projection.labels.is_empty());
+    assert!(projection.annotations.is_empty());
+    assert_eq!(
+        projection.conditions[0].reason.as_deref(),
+        Some("ProgressDeadlineExceeded")
+    );
+
+    let progressing = &data.rows[2];
+    let Some(k10s_backend::ResourceProjection::Deployment(projection)) = &progressing.projection
+    else {
+        panic!("progressing deployment carries a structured projection");
+    };
+    assert_eq!(projection.max_surge.as_deref(), Some("2"));
+    assert_eq!(projection.max_unavailable.as_deref(), Some("20%"));
+    assert_eq!(
+        projection.conditions[0].reason.as_deref(),
+        Some("ReplicaSetUpdated")
+    );
+
+    let payload = run_case_wire(&case).await;
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) =
+        &payload.rows[0].projection
+    else {
+        panic!("wire list carries the deployment projection");
+    };
+    assert_eq!(projection.max_surge.as_deref(), Some("25%"));
+    assert_eq!(
+        projection.template_containers[0].image.as_deref(),
+        Some("example/web:v3")
+    );
+    assert_eq!(
+        projection
+            .annotations
+            .get("meta.helm.sh/release-name")
+            .map(String::as_str),
+        Some("web")
+    );
+}
+
+#[tokio::test]
+async fn replica_sets_normalize_only_authoritative_deployment_revisions() {
+    let case = Case {
+        label: "replica set rollout history",
+        gvk: gvk("apps", "v1", "ReplicaSet"),
+        plural: "replicasets",
+        namespace: Some("default"),
+        list_body: r#"{"kind":"ReplicaSetList","apiVersion":"apps/v1","metadata":{"resourceVersion":"43"},"items":[
+          {"metadata":{"name":"web-12","uid":"uid-web-12","namespace":"default","creationTimestamp":"2026-08-20T01:00:00Z","annotations":{"deployment.kubernetes.io/revision":"12"}},"spec":{"replicas":4,"selector":{"matchLabels":{"app":"web"}},"template":{"spec":{"containers":[{"name":"web","image":"example/web:v3"},{"name":"sidecar"}]}}},"status":{"readyReplicas":3}},
+          {"metadata":{"name":"unrevised","uid":"uid-unrevised","namespace":"default","creationTimestamp":"2026-08-21T01:00:00Z"},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"web"}},"template":{"spec":{"containers":[{"name":"web","image":"example/web:v4"}]}}},"status":{"readyReplicas":1}}
+        ]}"#,
+        expect: vec![
+            ExpectedRow {
+                name: "unrevised",
+                uid: "uid-unrevised",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "",
+                created_at_prefix: "2026-08-21T01:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "web-12",
+                uid: "uid-web-12",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "",
+                created_at_prefix: "2026-08-20T01:00:00",
+                owner: None,
+            },
+        ],
+    };
+    let data = run_case(&case).await;
+    assert_rows(&case, &data);
+
+    assert!(
+        data.rows[0].projection.is_none(),
+        "a row without the authoritative annotation remains valid without a guessed revision"
+    );
+    let Some(k10s_backend::ResourceProjection::ReplicaSet(projection)) = &data.rows[1].projection
+    else {
+        panic!("annotated replica set carries a rollout projection");
+    };
+    assert_eq!(projection.revision, 12);
+    assert_eq!(projection.replicas, Some(4));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.images,
+        vec![
+            k10s_backend::port::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_backend::port::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
+    assert_eq!(
+        projection.created_at.as_deref(),
+        Some("2026-08-20T01:00:00Z")
+    );
+
+    let payload = run_case_wire(&case).await;
+    assert!(payload.rows[0].projection.is_none());
+    let Some(k10s_protocol::ResourceProjection::ReplicaSet(projection)) =
+        &payload.rows[1].projection
+    else {
+        panic!("wire list carries an annotated replica set projection");
+    };
+    assert_eq!(projection.revision, 12);
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.images,
+        vec![
+            k10s_protocol::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_protocol::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn statefulsets_and_daemonsets_normalize_ready_counts() {
     let cases = [
         Case {
@@ -1062,10 +1316,10 @@ async fn services_normalize_declared_ports_and_structured_projections() {
     }
 }
 
-/// The fake adapter exposes Services with structured projections while rows
-/// of every other kind keep `projection: None`.
+/// The fake adapter exposes the same designed structured projections as the
+/// real adapter.
 #[tokio::test]
-async fn fake_services_carry_projections_and_other_kinds_do_not() {
+async fn fake_designed_kinds_carry_structured_projections() {
     use k10s_backend::FakeKubernetes;
 
     let adapter = FakeKubernetes::standard();
@@ -1113,7 +1367,8 @@ async fn fake_services_carry_projections_and_other_kinds_do_not() {
     };
     assert_eq!(projection.ports.len(), 2, "declared UDP port stays visible");
 
-    // Rows of kinds without a designed projection keep `projection: None`.
+    // Deployments carry deterministic rollout data in both fake list and
+    // detail responses, matching the real adapter's designed projection.
     let result = kernel
         .query(Query::ResourceList {
             context: "dev-local".into(),
@@ -1125,13 +1380,74 @@ async fn fake_services_carry_projections_and_other_kinds_do_not() {
     let KernelQueryResult::ResourceList(list) = result else {
         panic!("expected a resource list")
     };
-    for row in list.wire_payload().rows {
-        assert!(
-            row.projection.is_none(),
-            "{} must not carry a projection",
-            row.identity.name
-        );
-    }
+    let deployment_rows = list.wire_payload().rows;
+    let web_deployment = deployment_rows
+        .iter()
+        .find(|row| row.identity.name == "web-frontend")
+        .expect("web-frontend deployment seeded");
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) =
+        &web_deployment.projection
+    else {
+        panic!("web-frontend carries a Deployment projection")
+    };
+    assert_eq!(projection.desired_replicas, Some(20));
+    assert_eq!(projection.ready_replicas, Some(20));
+    assert_eq!(projection.template_containers[0].name, "web");
+    assert_eq!(
+        projection.template_containers[0].image.as_deref(),
+        Some("example/web-frontend:v1")
+    );
+
+    let result = kernel
+        .query(Query::ResourceList {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "ReplicaSet"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("replica set list succeeds");
+    let KernelQueryResult::ResourceList(list) = result else {
+        panic!("expected a resource list")
+    };
+    let replica_set = list
+        .wire_payload()
+        .rows
+        .into_iter()
+        .find(|row| row.identity.name == "web-frontend-7d9f8")
+        .expect("web-frontend ReplicaSet seeded");
+    let Some(k10s_protocol::ResourceProjection::ReplicaSet(projection)) = replica_set.projection
+    else {
+        panic!("web-frontend ReplicaSet carries a rollout projection")
+    };
+    assert_eq!(projection.revision, 7);
+    assert_eq!(projection.replicas, Some(20));
+    assert_eq!(projection.ready_replicas, Some(20));
+    assert_eq!(
+        projection.images,
+        vec![k10s_protocol::ContainerImageProjection {
+            name: "web".into(),
+            image: Some("example/web-frontend:v1".into()),
+        }]
+    );
+
+    let result = kernel
+        .query(Query::ResourceList {
+            context: "prod-readonly".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("read-only deployment list succeeds");
+    let KernelQueryResult::ResourceList(list) = result else {
+        panic!("expected a resource list")
+    };
+    let payload = list.wire_payload();
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) =
+        &payload.rows[0].projection
+    else {
+        panic!("read-only deployment carries a Deployment projection")
+    };
+    assert_eq!(projection.desired_replicas, Some(3));
 }
 
 /// Backend-owned structured projections map field-for-field onto the frozen
@@ -1275,10 +1591,16 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
         replicas: Some(4),
         ready_replicas: Some(3),
         created_at: Some("2026-08-20T01:00:00Z".into()),
-        images: vec![ContainerImageProjection {
-            name: "web".into(),
-            image: Some("example/web:v2".into()),
-        }],
+        images: vec![
+            ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v2".into()),
+            },
+            ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ],
     };
 
     let kernel = BackendKernel::new(k10s_backend::FakeKubernetes::standard());
@@ -1394,10 +1716,16 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
             replicas: Some(4),
             ready_replicas: Some(3),
             created_at: Some("2026-08-20T01:00:00Z".into()),
-            images: vec![WireContainerImage {
-                name: "web".into(),
-                image: Some("example/web:v2".into()),
-            }],
+            images: vec![
+                WireContainerImage {
+                    name: "web".into(),
+                    image: Some("example/web:v2".into()),
+                },
+                WireContainerImage {
+                    name: "sidecar".into(),
+                    image: None,
+                }
+            ],
         }))
     );
 }

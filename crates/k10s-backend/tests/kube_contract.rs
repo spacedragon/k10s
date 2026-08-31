@@ -11,7 +11,7 @@ use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{
     BackendKernel, ContextInfo, FakeKubernetes, KernelQueryResult, KubeAdapter, Query, Subscribe,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Real-kubeconfig fixture carrying credential material that must never reach
 /// the wire.
@@ -501,6 +501,7 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
                 "identity",
                 "manifest",
                 "ownerReferences",
+                "projection",
                 "related",
                 "revision",
                 "sections"
@@ -564,6 +565,35 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
         assert!(!text.contains("\"resourceVersion\""), "{label}: rv leaked");
         assert!(text.contains("manifest"), "{label}: manifest missing");
     }
+
+    assert_eq!(
+        kube_payload["projection"],
+        json!({
+            "kind": "deployment",
+            "desiredReplicas": 2,
+            "readyReplicas": 2,
+            "selector": {},
+            "conditions": [],
+            "templateContainers": [],
+            "templateLabels": {},
+            "templateAnnotations": {},
+            "labels": {"app": "web"},
+            "annotations": {},
+            "createdAt": "2026-08-21T00:00:00Z",
+        }),
+        "recorded kube Deployment detail preserves only typed source fields"
+    );
+    assert_eq!(fake_payload["projection"]["kind"], "deployment");
+    assert_eq!(fake_payload["projection"]["desiredReplicas"], 20);
+    assert_eq!(fake_payload["projection"]["readyReplicas"], 20);
+    assert_eq!(
+        fake_payload["projection"]["templateContainers"],
+        json!([{"name": "web", "image": "example/web-frontend:v1"}])
+    );
+    assert_eq!(
+        fake_payload["projection"]["conditions"][0]["reason"],
+        "MinimumReplicasAvailable"
+    );
 
     // Relations are deliberately independent so detail shape never inherits
     // the latency of a catalog-wide owner traversal.

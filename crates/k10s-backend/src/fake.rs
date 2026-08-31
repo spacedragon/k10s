@@ -18,10 +18,11 @@ use tokio::sync::broadcast;
 
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
-    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerMetricsSample,
-    ContainerStateProjection, ContainerTerminationProjection, ContextInfo, Gvk, KubernetesAccess,
-    MetricsSample, OperationId, OwnerRef, PodContainerProjection, PodProjection, Query,
-    QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,
+    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerImageProjection,
+    ContainerMetricsSample, ContainerStateProjection, ContainerTerminationProjection, ContextInfo,
+    DeploymentProjection, Gvk, KubernetesAccess, MetricsSample, OperationId, OwnerRef,
+    PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
+    RelatedRecordGroup, ReplicaSetProjection, ResourceConditionProjection, ResourceListData,
     ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
     ServiceProjection, StreamInput, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
@@ -924,9 +925,16 @@ impl FakeKubernetes {
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         // The desired count becomes observable backend state wherever the
-        // summary carries one (e.g. `20/20 ready` → `3/20 ready`).
+        // summary carries one (e.g. `20/20 ready` → `20/3 ready`).
         if let Some(next) = scaled_summary(&state.records[index].summary, replicas) {
             state.records[index].summary = next;
+        }
+        if let Some(ResourceProjection::Deployment(projection)) =
+            &mut state.records[index].projection
+        {
+            // Scaling changes the desired count. Readiness and the other
+            // status-derived counts remain the last observed fake state.
+            projection.desired_replicas = Some(replicas);
         }
         let changed = state.records[index].clone();
         let reference = changed.reference.clone();
@@ -1993,6 +2001,60 @@ fn replicaset_gvk() -> Gvk {
     Gvk::new("apps", "v1", "ReplicaSet")
 }
 
+/// Deterministic Deployment data for the fake adapter's structured rows.
+fn fake_deployment_projection(
+    desired_replicas: u32,
+    ready_replicas: u32,
+    container_name: &str,
+    image: &str,
+    labels: BTreeMap<String, String>,
+    created_at: String,
+) -> ResourceProjection {
+    ResourceProjection::Deployment(DeploymentProjection {
+        desired_replicas: Some(desired_replicas),
+        ready_replicas: Some(ready_replicas),
+        updated_replicas: Some(ready_replicas),
+        available_replicas: Some(ready_replicas),
+        strategy: Some("RollingUpdate".into()),
+        selector: labels.clone(),
+        max_surge: Some("25%".into()),
+        max_unavailable: Some("25%".into()),
+        conditions: vec![ResourceConditionProjection {
+            condition_type: "Available".into(),
+            status: "True".into(),
+            reason: Some("MinimumReplicasAvailable".into()),
+            message: Some("Deployment has minimum availability.".into()),
+            last_transition_time: Some(created_at.clone()),
+        }],
+        template_containers: vec![ContainerImageProjection {
+            name: container_name.into(),
+            image: Some(image.into()),
+        }],
+        template_labels: labels.clone(),
+        template_annotations: BTreeMap::new(),
+        labels,
+        annotations: BTreeMap::new(),
+        created_at: Some(created_at),
+    })
+}
+
+/// Deterministic ReplicaSet rollout-history data for the fake adapter.
+fn fake_replica_set_projection(
+    revision: u64,
+    replicas: u32,
+    ready_replicas: u32,
+    created_at: String,
+    images: Vec<ContainerImageProjection>,
+) -> ResourceProjection {
+    ResourceProjection::ReplicaSet(ReplicaSetProjection {
+        revision,
+        replicas: Some(replicas),
+        ready_replicas: Some(ready_replicas),
+        created_at: Some(created_at),
+        images,
+    })
+}
+
 fn build_dev_local_records() -> Vec<ResourceRecord> {
     fn seed<'a>(
         offset_secs: u64,
@@ -2067,22 +2129,45 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
     }
 
     let mut records = vec![
-        record(seed(
-            0,
-            "2/2 ready",
-            deployment_gvk(),
-            Some("default"),
-            "api-server",
-            &[("app", "api")],
-        )),
-        record(seed(
-            300,
-            "20/20 ready",
-            deployment_gvk(),
-            Some("default"),
-            "web-frontend",
-            &[("app", "web"), ("tier", "frontend")],
-        )),
+        record(RecordSeed {
+            projection: Some(fake_deployment_projection(
+                2,
+                2,
+                "api",
+                "example/api-server:v1",
+                BTreeMap::from([("app".into(), "api".into())]),
+                rfc3339(FAKE_EPOCH_SECS),
+            )),
+            ..seed(
+                0,
+                "2/2 ready",
+                deployment_gvk(),
+                Some("default"),
+                "api-server",
+                &[("app", "api")],
+            )
+        }),
+        record(RecordSeed {
+            projection: Some(fake_deployment_projection(
+                20,
+                20,
+                "web",
+                "example/web-frontend:v1",
+                BTreeMap::from([
+                    ("app".into(), "web".into()),
+                    ("tier".into(), "frontend".into()),
+                ]),
+                rfc3339(FAKE_EPOCH_SECS + 300),
+            )),
+            ..seed(
+                300,
+                "20/20 ready",
+                deployment_gvk(),
+                Some("default"),
+                "web-frontend",
+                &[("app", "web"), ("tier", "frontend")],
+            )
+        }),
         record(RecordSeed {
             owner_references: vec![OwnerRef {
                 gvk: deployment_gvk(),
@@ -2090,6 +2175,16 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 uid: uid("dev-local", "Deployment", Some("default"), "web-frontend"),
                 controller: true,
             }],
+            projection: Some(fake_replica_set_projection(
+                7,
+                20,
+                20,
+                rfc3339(FAKE_EPOCH_SECS + 600),
+                vec![ContainerImageProjection {
+                    name: "web".into(),
+                    image: Some("example/web-frontend:v1".into()),
+                }],
+            )),
             ..seed(
                 600,
                 "20 desired",
@@ -2426,15 +2521,24 @@ fn build_prod_records() -> Vec<ResourceRecord> {
         name: "edge-gateway",
         labels: &[("app", "edge")],
         owner_references: Vec::new(),
-        projection: None,
+        projection: Some(fake_deployment_projection(
+            3,
+            3,
+            "edge",
+            "example/edge-gateway:v1",
+            BTreeMap::from([("app".into(), "edge".into())]),
+            rfc3339(FAKE_EPOCH_SECS + 6_000),
+        )),
     })]
 }
 
-/// Replace the desired count of a `N/M ...` style status summary.
+/// Replace the desired count of a `ready/desired ...` status summary.
 fn scaled_summary(summary: &str, replicas: u32) -> Option<String> {
-    let (desired, rest) = summary.split_once('/')?;
+    let (ready, desired_and_suffix) = summary.split_once('/')?;
+    ready.parse::<u32>().ok()?;
+    let (desired, suffix) = desired_and_suffix.split_once(' ')?;
     desired.parse::<u32>().ok()?;
-    Some(format!("{replicas}/{rest}"))
+    Some(format!("{ready}/{replicas} {suffix}"))
 }
 
 /// Format unix seconds as an RFC 3339 UTC timestamp without external crates.
