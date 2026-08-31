@@ -445,6 +445,16 @@ pub(crate) fn same_workload(left: &StreamTarget, right: &StreamTarget) -> bool {
 /// Tail capacity used by detail-view log panes.
 pub const DEFAULT_TAIL_CAPACITY: usize = 512;
 
+const BOTTOM_TOLERANCE: f32 = 2.0;
+
+fn is_at_bottom(actual_offset: f32, max_offset: f32) -> bool {
+    actual_offset >= max_offset.max(0.0) - BOTTOM_TOLERANCE
+}
+
+fn update_follow_from_scroll(view: &mut LogsTool, actual_offset: f32, max_offset: f32) {
+    view.set_follow(is_at_bottom(actual_offset, max_offset));
+}
+
 /// Render the connected Logs tab content for one detail view.
 pub(crate) fn show(
     ui: &mut egui::Ui,
@@ -593,8 +603,10 @@ pub(crate) fn show(
                 .color(crate::ui::theme::WARNING),
             );
         }
-        ScrollArea::vertical()
+        let was_following = view.follows();
+        let scroll_output = ScrollArea::vertical()
             .id_salt(("logs.stream", window_id.0))
+            .stick_to_bottom(was_following)
             .show(ui, |ui| {
                 // An active Find filters the retained buffer; otherwise the
                 // since/tail-filtered view is shown.
@@ -629,12 +641,10 @@ pub(crate) fn show(
                             .weak(),
                     );
                 }
-                // Follow autoscrolls to the newest line; a disengaged
-                // follow leaves the scroll position to the user.
-                if view.follows() && !view.is_paused() {
-                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-                }
             });
+        let max_offset =
+            (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
+        update_follow_from_scroll(view, scroll_output.state.offset.y, max_offset);
     }
     if open_requested {
         let selected_target = views
@@ -649,5 +659,52 @@ pub(crate) fn show(
                 previous: views.get(window_id).is_some_and(LogsTool::previous),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogsTool, is_at_bottom, update_follow_from_scroll};
+    use k10s_protocol::StreamTarget;
+
+    fn target() -> StreamTarget {
+        StreamTarget {
+            context: "test".to_owned(),
+            namespace: "default".to_owned(),
+            pod: "pod".to_owned(),
+            container: "container".to_owned(),
+            uid: "uid".to_owned(),
+        }
+    }
+
+    #[test]
+    fn bottom_detection_accepts_exact_bottom() {
+        assert!(is_at_bottom(80.0, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_accepts_offset_within_two_logical_pixels() {
+        assert!(is_at_bottom(78.0, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_rejects_offset_beyond_two_logical_pixels() {
+        assert!(!is_at_bottom(77.9, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_clamps_negative_max_offset_for_short_content() {
+        assert!(is_at_bottom(0.0, -20.0));
+    }
+
+    #[test]
+    fn scroll_position_disengages_and_restores_follow() {
+        let mut logs = LogsTool::new(target(), 10);
+
+        update_follow_from_scroll(&mut logs, 40.0, 100.0);
+        assert!(!logs.follows());
+
+        update_follow_from_scroll(&mut logs, 100.0, 100.0);
+        assert!(logs.follows());
     }
 }
