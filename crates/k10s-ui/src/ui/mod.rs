@@ -19,8 +19,8 @@ mod window;
 pub(crate) use detail::pod_container;
 
 pub use resource_window::{
-    DetailAuthority, NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed,
-    RowIdentity, SafeUiError, WindowFreshness,
+    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
+    ResourceFeed, RowIdentity, SafeUiError, WindowFreshness,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
@@ -514,10 +514,10 @@ where
         let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
         self.dialogs.retain(|id| live_windows.contains(&id));
         self.dialogs
-            .show(ui, connection == ConnectionState::Connected, |window| {
-                feed.window_freshness
-                    .get(&window)
-                    .is_none_or(resource_window::WindowFreshness::mutations_allowed)
+            .show(ui, connection == ConnectionState::Connected, |_, target| {
+                feed.detail_authority
+                    .get(target)
+                    .is_some_and(resource_window::DetailAuthority::mutations_allowed)
             });
 
         if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {

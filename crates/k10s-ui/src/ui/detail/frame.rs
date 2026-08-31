@@ -1,7 +1,10 @@
 //! Fixed shared detail chrome: identity, vitals, controls, tabs, one body
 //! scroll region, and a footer. Kind modules only supply the body content.
 
-use egui::{Align, Layout, RichText, ScrollArea, Sense, UiBuilder, WidgetInfo, WidgetType};
+use egui::containers::scroll_area::ScrollBarVisibility;
+use egui::{
+    Align, Layout, RichText, ScrollArea, Sense, UiBuilder, WidgetInfo, WidgetText, WidgetType,
+};
 
 use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
@@ -125,64 +128,101 @@ pub(super) fn show<I: RowIdentity>(
         egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
         Sense::hover(),
     );
+    let gap = ui.spacing().item_spacing.x;
+    let usable_width = (tab_row.width() - gap).max(0.0);
+    let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
+    let tab_width = usable_width - action_width;
+    let tabs_rect = egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
+    let actions_rect = egui::Rect::from_min_max(
+        egui::pos2(tabs_rect.right() + gap, tab_row.top()),
+        tab_row.max,
+    );
     let mut tabs_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.tabs", window_id.0))
-            .max_rect(tab_row)
+            .max_rect(tabs_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    for tab in tabs {
-        let active = *tab == detail.active_tab;
-        let response = tabs_ui.selectable_label(active, super::tab_label(*tab));
-        response.widget_info(|| {
-            WidgetInfo::labeled(
-                WidgetType::Button,
-                true,
-                format!("Tab {}", super::tab_label(*tab)),
-            )
+    tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
+    ScrollArea::horizontal()
+        .id_salt(("k10s.detail.tabs.scroll", window_id.0))
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .show(&mut tabs_ui, |ui| {
+            ui.horizontal(|ui| {
+                for tab in tabs {
+                    let active = *tab == detail.active_tab;
+                    let response = ui.selectable_label(active, super::tab_label(*tab));
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(
+                            WidgetType::Button,
+                            true,
+                            format!("Tab {}", super::tab_label(*tab)),
+                        )
+                    });
+                    if response.clicked() && !active {
+                        queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                    }
+                }
+            });
         });
-        if response.clicked() && !active {
-            queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
-        }
-    }
     let owner = projection.actions.verified_owner;
     let mut actions_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.actions", window_id.0))
-            .max_rect(tab_row)
+            .max_rect(actions_rect)
             .layout(Layout::right_to_left(Align::Center)),
     );
-    {
-        let ui = &mut actions_ui;
-        ui.spacing_mut().item_spacing.x = 4.0;
-        content(ui, input.primary, true, &mut projection);
-        let namespace = projection.identity.namespace.as_deref();
-        let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
-        if owner.is_some() || namespace.is_some() || uid.is_some() {
-            ui.menu_button("Actions", |ui| {
-                if let Some(owner) = owner {
-                    let label = format!("Open owner {}", owner.name);
-                    if ui.button(&label).clicked() {
-                        queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                            &super::presentation::owner_identity(projection.identity, owner),
-                        )));
-                        ui.close();
-                    }
+    actions_ui.set_clip_rect(actions_ui.clip_rect().intersect(actions_rect));
+    ScrollArea::horizontal()
+        .id_salt(("k10s.detail.actions.scroll", window_id.0))
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .stick_to_right(true)
+        .show(&mut actions_ui, |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                content(ui, input.primary, true, &mut projection);
+                let namespace = projection.identity.namespace.as_deref();
+                let uid = (!projection.identity.uid.is_empty())
+                    .then_some(projection.identity.uid.as_str());
+                if owner.is_some() || namespace.is_some() || uid.is_some() {
+                    ui.menu_button("Actions", |ui| {
+                        if let Some(owner) = owner {
+                            let label = format!("Open owner {}", owner.name);
+                            if ui.button(&label).clicked() {
+                                queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                                    I::from_row_identity(&super::presentation::owner_identity(
+                                        projection.identity,
+                                        owner,
+                                    )),
+                                ));
+                                ui.close();
+                            }
+                        }
+                        if let Some(namespace) = namespace {
+                            copy(ui, "Copy namespace", namespace);
+                        }
+                        if let Some(uid) = uid {
+                            copy(ui, "Copy UID", uid);
+                        }
+                    });
                 }
-                if let Some(namespace) = namespace {
-                    copy(ui, "Copy namespace", namespace);
-                }
-                if let Some(uid) = uid {
-                    copy(ui, "Copy UID", uid);
-                }
+                copy(ui, "Copy name", &projection.identity.name);
             });
-        }
-        copy(ui, "Copy name", &projection.identity.name);
-    }
+        });
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
-    let footer_height =
-        ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y * 2.0 + 1.0;
+    let footer_text = RichText::new(format!(
+        "Shortcuts: {} · Esc restore/close",
+        projection.shortcut_labels.join(" · ")
+    ))
+    .weak();
+    let footer_galley = WidgetText::from(footer_text.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        remaining.width(),
+        egui::TextStyle::Body,
+    );
+    let footer_height = footer_galley.size().y + ui.spacing().item_spacing.y * 2.0 + 1.0;
     let footer_top = (remaining.bottom() - footer_height).max(remaining.top());
     let body_rect =
         egui::Rect::from_min_max(remaining.min, egui::pos2(remaining.right(), footer_top));
@@ -200,6 +240,12 @@ pub(super) fn show<I: RowIdentity>(
         .accesskit_node_builder(body_ui.unique_id(), |node| {
             node.set_role(egui::accesskit::Role::ScrollView);
             node.set_label("Detail body");
+            node.set_bounds(egui::accesskit::Rect {
+                x0: body_rect.left().into(),
+                y0: body_rect.top().into(),
+                x1: body_rect.right().into(),
+                y1: body_rect.bottom().into(),
+            });
         });
     ScrollArea::vertical()
         .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
@@ -218,13 +264,7 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::top_down(Align::Min)),
     );
     footer_ui.separator();
-    footer_ui.label(
-        RichText::new(format!(
-            "Shortcuts: {} · Esc restore/close",
-            projection.shortcut_labels.join(" · ")
-        ))
-        .weak(),
-    );
+    footer_ui.add(egui::Label::new(footer_text).wrap());
     ui.ctx().data_mut(|data| {
         data.insert_temp(expansion_id, projection.expansion);
     });

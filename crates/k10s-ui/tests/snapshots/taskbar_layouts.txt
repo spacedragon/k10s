@@ -262,14 +262,20 @@ Window
                 Button label="Show more Pod vitals"
                 Label value="Freshness · unavailable"
               GenericContainer
-                Button label="Tab Overview"
-                Button label="Tab Events"
-                Button label="Tab YAML"
-                Button label="Tab Logs"
-                Button label="Tab Shell"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Tab Overview"
+                      Button label="Tab Events"
+                      Button label="Tab YAML"
+                      Button label="Tab Logs"
+                      Button label="Tab Shell"
               GenericContainer
-                Button label="Actions"
-                Button label="Copy name"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Actions"
+                      Button label="Copy name"
               ScrollView label="Detail body"
                 GenericContainer
                   GenericContainer

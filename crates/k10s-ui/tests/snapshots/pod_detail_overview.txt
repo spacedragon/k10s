@@ -238,15 +238,21 @@ Window
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
-                  Button label="Tab Overview"
-                  Button label="Tab Events"
-                  Button label="Tab YAML"
-                  Button label="Tab Logs"
-                  Button label="Tab Shell"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Tab Overview"
+                        Button label="Tab Events"
+                        Button label="Tab YAML"
+                        Button label="Tab Logs"
+                        Button label="Tab Shell"
                 GenericContainer
-                  Button label="Delete…"
-                  Button label="Actions"
-                  Button label="Copy name"
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Delete…"
+                        Button label="Actions"
+                        Button label="Copy name"
                 ScrollView label="Detail body"
                   GenericContainer
                     GenericContainer

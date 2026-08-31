@@ -16,8 +16,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, PrimaryDetailState, RelationState, ResourceAction,
-        ResourceFeed, SafeUiError, UiShell, WindowFreshness,
+        ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, RelationState,
+        ResourceAction, ResourceFeed, SafeUiError, UiShell, WindowFreshness,
     },
     workspace::{
         DetailTab as WorkspaceDetailTab, LauncherItem, WindowContent, WindowGeom, WindowKind,
@@ -236,6 +236,72 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
             )
             .rect()
     );
+}
+
+#[test]
+fn compact_frame_chrome_has_disjoint_contained_hitboxes_and_reserved_footer() {
+    let mut harness = harness();
+    let response = typed_deployment_detail("web-frontend");
+    let identity = response.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), response);
+    harness.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity));
+    let window_id = detail_window(harness.state().shell.workspace()).id;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [32.0, 32.0],
+                size: [320.0, 280.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(5);
+
+    let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    let window_rect = detail.rect();
+    // Compare controls that remain visible at this width. Offscreen controls
+    // inside a clipped horizontal viewport intentionally have no AccessKit
+    // rectangle.
+    let tab = detail
+        .get_by_role_and_label(Role::Button, "Tab Overview")
+        .rect();
+    let action = detail.get_by_role_and_label(Role::Button, "Scale…").rect();
+    for rect in [tab, action] {
+        assert!(
+            window_rect.contains_rect(rect),
+            "compact detail hitbox {rect:?} must stay inside {window_rect:?}"
+        );
+    }
+    assert!(
+        !tab.intersects(action),
+        "compact tab hitbox {tab:?} overlaps action hitbox {action:?}"
+    );
+    let footer = detail
+        .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close")
+        .rect();
+    let body = detail
+        .get_by_role_and_label(Role::ScrollView, "Detail body")
+        .rect();
+    assert!(window_rect.contains_rect(footer));
+    assert!(!body.intersects(footer));
 }
 
 #[test]
@@ -701,6 +767,7 @@ fn dedicated_detail_uses_identity_bound_authority_not_arbitrary_source_windows()
                 retry_in: "3s".into(),
                 attempt: 1,
             },
+            lifecycle: DetailLifecycle::Present,
         },
     );
     // A second source advertises live data for the same identity. Dedicated
@@ -763,6 +830,158 @@ fn dedicated_detail_without_identity_bound_authority_fails_closed() {
             .accesskit_node()
             .is_disabled()
     );
+}
+
+#[test]
+fn dedicated_dialog_opened_live_cannot_submit_after_exact_authority_is_revoked() {
+    let mut harness = harness();
+    let response = typed_deployment_detail("web-frontend");
+    let identity = response.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), response);
+    harness.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()));
+    let window = detail_window(harness.state().shell.workspace()).id;
+    harness
+        .state_mut()
+        .shell
+        .dialogs_mut()
+        .open_scale(window, identity.clone(), Some(20));
+    harness.run_steps(3);
+    assert!(
+        !harness
+            .get_by_role_and_label(Role::Window, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Apply scale")
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    harness.state_mut().feed.detail_authority.remove(&identity);
+    harness.run_steps(2);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Apply scale")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness
+        .state_mut()
+        .shell
+        .dialogs_mut()
+        .submit_active(window);
+    assert!(harness.state_mut().shell.drain_dialog_actions().is_empty());
+}
+
+#[test]
+fn unrelated_authoritative_list_does_not_mark_dedicated_identity_gone() {
+    let mut harness = harness();
+    let target = identity("Deployment", "web-frontend");
+    harness.state_mut().feed.lists.insert(
+        WorkloadKind::Deployments,
+        vec![list_row(
+            "apps",
+            "v1",
+            "Deployment",
+            "unrelated-api",
+            "2/2 ready",
+        )],
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target));
+    harness.run_steps(4);
+
+    let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    assert!(
+        detail
+            .query_by_label("This resource no longer exists")
+            .is_none()
+    );
+    detail.get_by_label("Loading details");
+}
+
+#[test]
+fn exact_gone_lifecycle_wins_over_cached_detail_response() {
+    let mut harness = harness();
+    let response = typed_deployment_detail("web-frontend");
+    let target = response.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(target.clone(), response);
+    harness.state_mut().feed.detail_authority.insert(
+        target.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::ReadyEmpty,
+            lifecycle: DetailLifecycle::Gone,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target));
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Deployment · default / web-frontend")
+        .get_by_label("This resource no longer exists");
+}
+
+#[test]
+fn recreated_name_with_new_uid_does_not_revive_gone_dedicated_identity() {
+    let mut harness = harness();
+    let old = identity("Deployment", "web-frontend");
+    let mut recreated = old.clone();
+    recreated.uid = "uid-recreated-web-frontend".into();
+    harness.state_mut().feed.detail_authority.insert(
+        old.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::ReadyEmpty,
+            lifecycle: DetailLifecycle::Gone,
+        },
+    );
+    harness.state_mut().feed.detail_authority.insert(
+        recreated.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    let mut row = list_row("apps", "v1", "Deployment", "web-frontend", "1/1 ready");
+    row.identity = recreated;
+    harness
+        .state_mut()
+        .feed
+        .lists
+        .insert(WorkloadKind::Deployments, vec![row]);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(old));
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Deployment · default / web-frontend")
+        .get_by_label("This resource no longer exists");
 }
 
 #[test]

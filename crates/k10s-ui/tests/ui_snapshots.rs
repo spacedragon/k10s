@@ -24,7 +24,9 @@ use k10s_protocol::{
     ResourceTypeEntry, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
+    ui::{
+        ConnectionState, DetailAuthority, DetailLifecycle, ResourceFeed, UiShell, WindowFreshness,
+    },
     workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
 
@@ -484,6 +486,7 @@ fn pod_detail_disconnected_logs() {
 #[test]
 fn scale_dialog_with_conflict_reason() {
     let mut harness = harness();
+    let target = list_row("apps", "v1", "Deployment", "api-server", "2/2 ready").identity;
     harness.state_mut().feed.lists.insert(
         W::Deployments,
         vec![list_row(
@@ -494,6 +497,15 @@ fn scale_dialog_with_conflict_reason() {
             "2/2 ready",
         )],
     );
+    harness.state_mut().feed.detail_authority.insert(
+        target.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
     harness
         .state_mut()
         .shell
@@ -503,11 +515,11 @@ fn scale_dialog_with_conflict_reason() {
     run_steps(&mut harness);
     let id = workload_id(harness.state(), W::Deployments);
 
-    harness.state_mut().shell.dialogs_mut().open_scale(
-        id,
-        list_row("apps", "v1", "Deployment", "api-server", "2/2 ready").identity,
-        Some(2),
-    );
+    harness
+        .state_mut()
+        .shell
+        .dialogs_mut()
+        .open_scale(id, target, Some(2));
     if let Some(mut dialog) = harness.state_mut().shell.dialogs_mut().active_mut(id) {
         dialog.operation_failed("the target changed since validation");
     }

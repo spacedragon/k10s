@@ -272,7 +272,11 @@ where
                             .identity
                             .as_row_identity()
                             .and_then(|identity| feed.detail_authority.get(identity));
-                        let freshness = authority.map(|authority| &authority.freshness);
+                        let freshness = authority
+                            .filter(|authority| {
+                                authority.lifecycle == resource_window::DetailLifecycle::Present
+                            })
+                            .map(|authority| &authority.freshness);
                         if let Some(presentation) =
                             super::detail::presentation::DetailPresentationInput::from_feed(
                                 detail,
@@ -360,34 +364,9 @@ fn dedicated_detail_gone<I: resource_window::RowIdentity>(
     detail: &crate::workspace::DetailState<I>,
     feed: &resource_window::ResourceFeed,
 ) -> bool {
-    let Some(identity) = detail.identity.as_row_identity() else {
-        return false;
-    };
-    let known = feed.details.contains_key(identity)
-        || feed.primary_details.contains_key(identity)
-        || feed.metrics.contains_key(identity)
-        || feed
-            .lists
-            .values()
-            .flatten()
-            .any(|row| &row.identity == identity)
-        || feed
-            .window_lists
-            .values()
-            .flatten()
-            .any(|row| &row.identity == identity)
-        || feed
-            .services
-            .as_ref()
-            .is_some_and(|rows| rows.iter().any(|row| &row.identity == identity))
-        || feed
-            .window_services
-            .values()
-            .flatten()
-            .any(|row| &row.identity == identity);
-    !known
-        && (!feed.lists.is_empty()
-            || feed.services.is_some()
-            || !feed.window_lists.is_empty()
-            || !feed.window_services.is_empty())
+    detail
+        .identity
+        .as_row_identity()
+        .and_then(|identity| feed.detail_authority.get(identity))
+        .is_some_and(|authority| authority.lifecycle == resource_window::DetailLifecycle::Gone)
 }

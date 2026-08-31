@@ -525,6 +525,15 @@ enum ActiveDialog {
     Delete(DeleteDialog),
 }
 
+impl ActiveDialog {
+    fn target(&self) -> &ResourceIdentity {
+        match self {
+            Self::Scale(dialog) => dialog.target(),
+            Self::Delete(dialog) => dialog.target(),
+        }
+    }
+}
+
 impl OperationDialogs {
     /// Open (or replace) the scale dialog on `window`.
     pub fn open_scale(
@@ -663,15 +672,15 @@ impl OperationDialogs {
         &mut self,
         ui: &mut egui::Ui,
         connected: bool,
-        mut mutations_allowed: impl FnMut(WindowId) -> bool,
+        mut mutations_allowed: impl FnMut(WindowId, &ResourceIdentity) -> bool,
     ) {
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
         let mut refresh = Vec::new();
         for window in windows {
-            let mutations_allowed = mutations_allowed(window);
             let Some(dialog) = self.windows.get_mut(&window) else {
                 continue;
             };
+            let mutations_allowed = mutations_allowed(window, dialog.target());
             match dialog {
                 ActiveDialog::Scale(scale) => {
                     if connected && mutations_allowed {

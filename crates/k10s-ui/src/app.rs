@@ -21,8 +21,8 @@ use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
-    DetailAuthority, NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction,
-    ResourceFeed, SafeUiError, WindowFreshness,
+    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
+    ResourceAction, ResourceFeed, SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
     NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
@@ -163,6 +163,10 @@ pub struct K10sApp {
     /// Backend-resolved details for every identity a window pinned, keyed by
     /// stable identity; rebuilt from `operation.status`-style queries.
     details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
+    /// Last accepted exact-identity lifecycle from resource watch deltas.
+    /// Gone entries outlive cached detail responses so dedicated windows do
+    /// not infer existence from stale read-only data.
+    detail_lifecycles: BTreeMap<ResourceIdentity, DetailLifecycle>,
     primary_details: BTreeMap<ResourceIdentity, PrimaryDetailState>,
     /// In-flight detail requests per identity.
     detail_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
@@ -334,6 +338,7 @@ impl K10sApp {
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
+            detail_lifecycles: BTreeMap::new(),
             primary_details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
             relations: BTreeMap::new(),
@@ -1424,7 +1429,7 @@ impl K10sApp {
                     }
                 }
                 if applied
-                    && let Some((subscription, identity, revision)) = resource_delta
+                    && let Some((subscription, identity, revision, lifecycle)) = resource_delta
                     && self
                         .client
                         .resource_list(&subscription)
@@ -1434,6 +1439,7 @@ impl K10sApp {
                     self.shell
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
+                    self.detail_lifecycles.insert(identity, lifecycle);
                 }
                 if applied
                     && let Some(subscription) = stream_subscription_id.as_ref()
@@ -1850,6 +1856,7 @@ impl K10sApp {
 
     fn enter_resource_recovery(&mut self) {
         self.details.clear();
+        self.detail_lifecycles.clear();
         self.primary_details.clear();
         self.detail_requests.clear();
         self.relations.clear();
@@ -1964,23 +1971,40 @@ impl K10sApp {
                     .push(freshness);
             }
         }
-        let detail_authority = authority_sources
-            .into_iter()
-            .map(|(identity, sources)| {
-                let freshness = if sources.len() == 1 {
-                    sources[0].clone()
-                } else if sources.iter().all(|source| source.mutations_allowed()) {
-                    WindowFreshness::Live {
-                        last_sync_age: "all sources live".into(),
-                    }
-                } else {
-                    WindowFreshness::Failed {
-                        message: "one or more authoritative sources are not live".into(),
-                    }
-                };
-                (identity, DetailAuthority { freshness })
+        let mut detail_authority: std::collections::HashMap<_, _> = self
+            .detail_lifecycles
+            .iter()
+            .filter(|(_, lifecycle)| **lifecycle == DetailLifecycle::Gone)
+            .map(|(identity, lifecycle)| {
+                (
+                    identity.clone(),
+                    DetailAuthority {
+                        freshness: WindowFreshness::ReadyEmpty,
+                        lifecycle: *lifecycle,
+                    },
+                )
             })
             .collect();
+        detail_authority.extend(authority_sources.into_iter().map(|(identity, sources)| {
+            let freshness = if sources.len() == 1 {
+                sources[0].clone()
+            } else if sources.iter().all(|source| source.mutations_allowed()) {
+                WindowFreshness::Live {
+                    last_sync_age: "all sources live".into(),
+                }
+            } else {
+                WindowFreshness::Failed {
+                    message: "one or more authoritative sources are not live".into(),
+                }
+            };
+            (
+                identity,
+                DetailAuthority {
+                    freshness,
+                    lifecycle: DetailLifecycle::Present,
+                },
+            )
+        }));
         ResourceFeed {
             window_freshness,
             detail_authority,
@@ -2282,14 +2306,26 @@ impl K10sApp {
         }
     }
 
+    /// Require current exact-identity authority at the final application
+    /// dispatch boundary. Rendering may have happened several frames before
+    /// an action is drained, so the dialog's earlier enabled state is never
+    /// sufficient authority on its own.
+    fn mutation_authority_allows(&self, target: &ResourceIdentity) -> bool {
+        self.build_resource_feed()
+            .detail_authority
+            .get(target)
+            .is_some_and(DetailAuthority::mutations_allowed)
+    }
+
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
-            if self
-                .window_freshness_overrides
-                .get(&window)
-                .is_some_and(|freshness| !freshness.mutations_allowed())
-            {
+            let target = match &action {
+                DialogAction::RequestDeletePreflight { target, .. }
+                | DialogAction::SubmitScale { target, .. }
+                | DialogAction::SubmitDelete { target, .. } => target,
+            };
+            if !self.mutation_authority_allows(target) {
                 if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
                     dialog.operation_failed("window is not live; retry the list before mutating");
                 }
@@ -2441,6 +2477,9 @@ impl K10sApp {
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
             ResourceAction::Restart { window, target } => {
+                if !self.mutation_authority_allows(&target) {
+                    return;
+                }
                 let idempotency_key = format!(
                     "restart:{}:{}:{}",
                     target.uid,
@@ -2993,6 +3032,7 @@ impl K10sApp {
             self.cancel_relation_request(&identity);
         }
         self.details.clear();
+        self.detail_lifecycles.clear();
         self.primary_details.clear();
         self.relations.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
@@ -3320,6 +3360,7 @@ fn resource_delta_projection(
     k10s_protocol::SubscriptionId,
     ResourceIdentity,
     k10s_protocol::BackendRevision,
+    DetailLifecycle,
 )> {
     let subscription = frame.subscription_id.clone()?;
     let k10s_protocol::ServerPayload::Event(event) = frame.decode_payload().ok()? else {
@@ -3329,11 +3370,21 @@ fn resource_delta_projection(
         k10s_protocol::RESOURCE_EVENT_CHANGED => {
             let delta: k10s_protocol::ResourceChanged =
                 serde_json::from_value(event.payload).ok()?;
-            Some((subscription, delta.identity, delta.row.revision))
+            Some((
+                subscription,
+                delta.identity,
+                delta.row.revision,
+                DetailLifecycle::Present,
+            ))
         }
         k10s_protocol::RESOURCE_EVENT_GONE => {
             let delta: k10s_protocol::ResourceGone = serde_json::from_value(event.payload).ok()?;
-            Some((subscription, delta.identity, delta.revision))
+            Some((
+                subscription,
+                delta.identity,
+                delta.revision,
+                DetailLifecycle::Gone,
+            ))
         }
         _ => None,
     }
@@ -3845,6 +3896,139 @@ mod tests {
         assert!(
             absent_editor.is_dirty(),
             "removed-target local edits survive resync invalidation"
+        );
+    }
+
+    #[test]
+    fn only_accepted_exact_watch_revision_updates_detail_lifecycle() {
+        let (mut app, _) = test_app(Vec::new());
+        app.client.apply(welcome()).unwrap();
+        let subscription = app
+            .client
+            .subscribe_resource("dev", "apps", "v1", "Deployment", None)
+            .unwrap();
+        let subscription_id = subscription.id().clone();
+        let identity = ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web-old".into(),
+        };
+        let row = |identity: ResourceIdentity, revision| ResourceListRow {
+            identity,
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let frame = |kind, sequence, payload| ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        for (kind, sequence, payload) in [
+            (
+                ServerKind::Subscribed,
+                1,
+                serde_json::to_value(Subscribed).unwrap(),
+            ),
+            (
+                ServerKind::SnapshotBegin,
+                2,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            (
+                ServerKind::SnapshotChunk,
+                3,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(10),
+                        rows: vec![row(identity.clone(), 10)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+            (
+                ServerKind::SnapshotEnd,
+                4,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "initial".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.handle_event(server_message(&frame(kind, sequence, payload)), 0, 0)
+                .unwrap();
+        }
+
+        let gone = |revision: u64| {
+            serde_json::to_value(Event {
+                event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                revision: Some(revision.to_string()),
+                payload: serde_json::to_value(ResourceGone {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(revision),
+                })
+                .unwrap(),
+            })
+            .unwrap()
+        };
+        app.handle_event(server_message(&frame(ServerKind::Event, 5, gone(9))), 0, 0)
+            .unwrap();
+        assert!(!app.detail_lifecycles.contains_key(&identity));
+
+        app.handle_event(server_message(&frame(ServerKind::Event, 6, gone(11))), 0, 0)
+            .unwrap();
+        assert_eq!(
+            app.detail_lifecycles.get(&identity),
+            Some(&super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            app.build_resource_feed()
+                .detail_authority
+                .get(&identity)
+                .map(|authority| authority.lifecycle),
+            Some(super::DetailLifecycle::Gone)
+        );
+
+        let mut recreated = identity.clone();
+        recreated.uid = "uid-web-new".into();
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::Event,
+                7,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("12".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: recreated.clone(),
+                        row: row(recreated.clone(), 12),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.detail_lifecycles.get(&identity),
+            Some(&super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            app.detail_lifecycles.get(&recreated),
+            Some(&super::DetailLifecycle::Present)
         );
     }
 
@@ -4750,6 +4934,44 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
         window
+    }
+
+    #[test]
+    fn revoked_dialog_authority_cannot_reach_app_mutation_dispatch() {
+        let (mut app, _) = ready_app();
+        let target = deployment_identity("web-frontend");
+        let window = pin_deployment_without_request(&mut app, &target);
+        app.window_retained_rows.insert(
+            window,
+            vec![ResourceListRow {
+                identity: target.clone(),
+                revision: BackendRevision::new(1),
+                labels: Default::default(),
+                summary: "20/20 ready".into(),
+                created_at: String::new(),
+                projection: None,
+            }],
+        );
+        app.window_freshness_overrides.insert(
+            window,
+            WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+        );
+        assert!(app.mutation_authority_allows(&target));
+        app.shell.dialogs_mut().open_scale(window, target, Some(20));
+
+        // The dialog was valid when opened, then exact authority disappeared
+        // before submission reached the application layer.
+        app.window_retained_rows.remove(&window);
+        app.window_freshness_overrides.remove(&window);
+        app.shell.dialogs_mut().submit_active(window);
+        app.process_dialog_actions().unwrap();
+
+        assert!(
+            app.pending_mutations.is_empty(),
+            "revoked authority must block the command before client dispatch"
+        );
     }
 
     fn exhaust_request_capacity(app: &mut K10sApp) {

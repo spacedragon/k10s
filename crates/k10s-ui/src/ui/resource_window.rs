@@ -147,15 +147,22 @@ pub enum RelationState {
 /// UI-owned freshness and mutation authority for one exact pinned identity.
 /// Dedicated Detail windows consume only this projection and never infer
 /// authority by searching arbitrary list windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailLifecycle {
+    Present,
+    Gone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailAuthority {
     pub freshness: WindowFreshness,
+    pub lifecycle: DetailLifecycle,
 }
 
 impl DetailAuthority {
     #[must_use]
     pub fn mutations_allowed(&self) -> bool {
-        self.freshness.mutations_allowed()
+        self.lifecycle == DetailLifecycle::Present && self.freshness.mutations_allowed()
     }
 }
 
