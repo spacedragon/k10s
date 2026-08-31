@@ -4,7 +4,7 @@
 //! resource projections. Display summaries, generic detail sections, and YAML
 //! are deliberately outside this module's data path.
 
-use egui::{Grid, RichText, WidgetInfo, WidgetType};
+use egui::{Grid, RichText, ScrollArea, WidgetInfo, WidgetType, accesskit::Role};
 use k10s_protocol::{
     DeploymentProjection, EventRow, EventsCondition, GroupVersionKind, ReplicaSetProjection,
     ResourceIdentity, ResourceListRow, ResourceProjection,
@@ -12,6 +12,7 @@ use k10s_protocol::{
 
 use crate::ui::resource_window::RowIdentity;
 use crate::workspace::{DetailState, WindowId, WorkspaceCommand};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use super::presentation::{
     DetailFrameProjection, DetailPresentationInput, DetailPrimary, DetailVitalShape,
@@ -28,6 +29,20 @@ pub(super) fn configure_frame(
     frame: &mut DetailFrameProjection<'_>,
 ) {
     let Some(deployment) = deployment_of(input) else {
+        for vital in frame
+            .visible_vitals
+            .iter_mut()
+            .chain(frame.overflow_vitals.iter_mut())
+        {
+            if matches!(
+                vital.label,
+                "Rollout" | "Ready" | "Up-to-date" | "Available" | "Strategy" | "Age"
+            ) {
+                vital.value = "—".into();
+                vital.shape = None;
+                vital.tone = DetailVitalTone::Neutral;
+            }
+        }
         return;
     };
     let rollout = rollout(deployment);
@@ -92,6 +107,7 @@ pub(super) fn show_with_actions<I: RowIdentity>(
                 window_id,
                 input.identity,
                 &projection,
+                input.now,
                 resource_actions,
                 queued,
             );
@@ -109,6 +125,7 @@ pub(super) fn show_with_actions<I: RowIdentity>(
             window_id,
             input.identity,
             &projection,
+            input.now,
             resource_actions,
             queued,
         );
@@ -136,9 +153,7 @@ impl<'a> DeploymentDetailProjection<'a> {
         let DetailPrimary::Loaded(view) = input.primary else {
             return None;
         };
-        let Some(ResourceProjection::Deployment(deployment)) = view.projection.as_ref() else {
-            return None;
-        };
+        let deployment = deployment_of(input)?;
         Some(Self {
             deployment,
             events_condition: view.events_condition,
@@ -313,6 +328,7 @@ fn operational_column<I: RowIdentity>(
     window_id: WindowId,
     identity: &ResourceIdentity,
     projection: &DeploymentDetailProjection<'_>,
+    now: SystemTime,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
@@ -349,7 +365,7 @@ fn operational_column<I: RowIdentity>(
                 ui.label(format!("Refresh failed: {}", error.message()));
                 relation_retry(ui, identity, resource_actions);
             }
-            pods_table(ui, window_id, pods, queued);
+            pods_table(ui, window_id, pods, now, queued);
             ui.separator();
             rollout_history(ui, window_id, history);
         }
@@ -372,6 +388,7 @@ fn pods_table<I: RowIdentity>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     pods: &[&ResourceListRow],
+    now: SystemTime,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     ui.heading(format!("PODS · {}", pods.len()));
@@ -379,39 +396,46 @@ fn pods_table<I: RowIdentity>(
         ui.label("No related Pods");
         return;
     }
-    Grid::new(("k10s.detail.deployment.pods", window_id.0))
-        .num_columns(6)
-        .striped(true)
-        .show(ui, |ui| {
-            for header in ["Name", "Ready", "Status", "Restarts", "Node", "Age"] {
-                ui.label(RichText::new(header).strong());
-            }
-            ui.end_row();
-            for row in pods {
-                let namespace = row.identity.namespace.as_deref().unwrap_or("—");
-                let label = format!("Pod · {namespace} / {}", row.identity.name);
-                let open = ui.button(&label);
-                open.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
-                if open.clicked() {
-                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                        &row.identity,
-                    )));
+    horizontal_table(ui, window_id, "pods", "Deployment Pods table", |ui| {
+        Grid::new(("k10s.detail.deployment.pods", window_id.0))
+            .num_columns(6)
+            .striped(true)
+            .show(ui, |ui| {
+                for header in ["Name", "Ready", "Status", "Restarts", "Node", "Age"] {
+                    ui.label(RichText::new(header).strong());
                 }
-                let pod = match row.projection.as_ref() {
-                    Some(ResourceProjection::Pod(pod)) => Some(pod),
-                    _ => None,
-                };
-                ui.label(
-                    pod.and_then(|pod| pair(pod.ready_containers, pod.total_containers))
-                        .unwrap_or_else(|| "—".into()),
-                );
-                pod_status(ui, pod.and_then(|pod| pod.phase.as_deref()));
-                ui.label(number(pod.and_then(|pod| pod.restart_count)));
-                ui.label(value(pod.and_then(|pod| pod.node_name.as_deref())));
-                ui.label(value(pod.and_then(|pod| pod.created_at.as_deref())));
                 ui.end_row();
-            }
-        });
+                for row in pods {
+                    let namespace = row.identity.namespace.as_deref().unwrap_or("—");
+                    let label = format!("Pod · {namespace} / {}", row.identity.name);
+                    let open = ui.button(&label);
+                    open.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Button, true, label.clone())
+                    });
+                    if open.clicked() {
+                        queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                            &row.identity,
+                        )));
+                    }
+                    let pod = match row.projection.as_ref() {
+                        Some(ResourceProjection::Pod(pod)) => Some(pod),
+                        _ => None,
+                    };
+                    ui.label(
+                        pod.and_then(|pod| pair(pod.ready_containers, pod.total_containers))
+                            .unwrap_or_else(|| "—".into()),
+                    );
+                    pod_status(ui, pod.and_then(|pod| pod.phase.as_deref()));
+                    ui.label(number(pod.and_then(|pod| pod.restart_count)));
+                    ui.label(value(pod.and_then(|pod| pod.node_name.as_deref())));
+                    ui.label(format_age(
+                        pod.and_then(|pod| pod.created_at.as_deref()),
+                        now,
+                    ));
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 fn pod_status(ui: &mut egui::Ui, phase: Option<&str>) {
@@ -433,39 +457,126 @@ fn rollout_history(ui: &mut egui::Ui, window_id: WindowId, history: &[ReplicaSet
         ui.label("No rollout history");
         return;
     }
-    Grid::new(("k10s.detail.deployment.history", window_id.0))
-        .num_columns(5)
-        .striped(true)
-        .show(ui, |ui| {
-            for header in ["Revision", "ReplicaSet", "Images", "Replicas", "Created"] {
-                ui.label(RichText::new(header).strong());
-            }
-            ui.end_row();
-            for history in history {
-                ui.label(format!(
-                    "Revision {} · {}",
-                    history.replica_set.revision, history.row.identity.name
-                ));
-                ui.label(&history.row.identity.name);
-                ui.label(format!(
-                    "Images · {}",
-                    image_list(&history.replica_set.images)
-                ));
-                ui.label(format!(
-                    "Replicas · {}",
-                    pair(
-                        history.replica_set.ready_replicas,
-                        history.replica_set.replicas
-                    )
-                    .map_or_else(|| "—".into(), |pair| format!("{pair} ready"))
-                ));
-                ui.label(format!(
-                    "Created · {}",
-                    value(history.replica_set.created_at.as_deref())
-                ));
-                ui.end_row();
-            }
+    horizontal_table(
+        ui,
+        window_id,
+        "history",
+        "Deployment rollout history table",
+        |ui| {
+            Grid::new(("k10s.detail.deployment.history", window_id.0))
+                .num_columns(5)
+                .striped(true)
+                .show(ui, |ui| {
+                    for header in ["Revision", "ReplicaSet", "Images", "Replicas", "Created"] {
+                        ui.label(RichText::new(header).strong());
+                    }
+                    ui.end_row();
+                    for history in history {
+                        ui.label(format!(
+                            "Revision {} · {}",
+                            history.replica_set.revision, history.row.identity.name
+                        ));
+                        ui.label(&history.row.identity.name);
+                        ui.label(format!(
+                            "Images · {}",
+                            image_list(&history.replica_set.images)
+                        ));
+                        ui.label(format!(
+                            "Replicas · {}",
+                            pair(
+                                history.replica_set.ready_replicas,
+                                history.replica_set.replicas
+                            )
+                            .map_or_else(|| "—".into(), |pair| format!("{pair} ready"))
+                        ));
+                        ui.label(format!(
+                            "Created · {}",
+                            value(history.replica_set.created_at.as_deref())
+                        ));
+                        ui.end_row();
+                    }
+                });
+        },
+    );
+}
+
+fn horizontal_table(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    name: &'static str,
+    accessible_label: &'static str,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let table = ui.push_id(("k10s.detail.deployment.table", name, window_id.0), |ui| {
+        ScrollArea::horizontal()
+            .id_salt(("k10s.detail.deployment.table.scroll", name, window_id.0))
+            .auto_shrink([false, true])
+            .show(ui, content);
+    });
+    let rect = table.response.rect;
+    ui.ctx().accesskit_node_builder(table.response.id, |node| {
+        node.set_role(Role::Table);
+        node.set_label(accessible_label);
+        node.set_bounds(egui::accesskit::Rect {
+            x0: rect.left().into(),
+            y0: rect.top().into(),
+            x1: rect.right().into(),
+            y1: rect.bottom().into(),
         });
+    });
+}
+
+fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+
+    let Some(created_at) = created_at else {
+        return "—".into();
+    };
+    let Ok(created_at) = created_at.parse::<jiff::Timestamp>() else {
+        return "—".into();
+    };
+    let Ok(now_since_epoch) = now.duration_since(UNIX_EPOCH) else {
+        return "—".into();
+    };
+    let Ok(now_seconds) = i64::try_from(now_since_epoch.as_secs()) else {
+        return "—".into();
+    };
+    let Ok(now) = jiff::Timestamp::new(now_seconds, now_since_epoch.subsec_nanos() as i32) else {
+        return "—".into();
+    };
+    let age = now.duration_since(created_at);
+    if age.is_negative() {
+        return "—".into();
+    }
+    let age = age.as_secs();
+    if age >= WEEK {
+        return format!("{}d", age / DAY);
+    }
+    if age >= DAY {
+        let days = age / DAY;
+        let hours = age % DAY / HOUR;
+        return if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d {hours}h")
+        };
+    }
+    if age >= HOUR {
+        let hours = age / HOUR;
+        let minutes = age % HOUR / MINUTE;
+        return if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {minutes}m")
+        };
+    }
+    if age >= MINUTE {
+        return format!("{}m", age / MINUTE);
+    }
+    format!("{}s", age)
 }
 
 fn rollout_events(ui: &mut egui::Ui, condition: EventsCondition, events: &[EventRow]) {
@@ -658,6 +769,9 @@ fn deployment_of<'a>(input: &'a DetailPresentationInput<'a>) -> Option<&'a Deplo
     let DetailPrimary::Loaded(view) = input.primary else {
         return None;
     };
+    if view.identity != *input.identity {
+        return None;
+    }
     match view.projection.as_ref() {
         Some(ResourceProjection::Deployment(deployment)) => Some(deployment),
         _ => None,
@@ -729,10 +843,17 @@ mod shared_seam_tests {
 
 #[cfg(test)]
 mod tests {
-    use egui_kittest::Harness;
-    use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+    use egui_kittest::{Harness, kittest::Queryable as _};
+    use k10s_protocol::{
+        BackendRevision, DeploymentProjection, EventsCondition, GroupVersionKind, PodProjection,
+        RelatedGroup, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
+        ResourceListRow, ResourceProjection, ResourceRelationsResponse,
+    };
 
     use super::super::presentation::{DetailMetrics, DetailPresentationInput, DetailPrimary};
+    use crate::ui::RelationState;
     use crate::workspace::{DetailState, WindowId};
 
     #[test]
@@ -782,5 +903,140 @@ mod tests {
             assert!(resource_actions.is_empty());
         });
         harness.run();
+    }
+
+    #[test]
+    fn pod_age_uses_the_injected_clock_and_typed_rfc3339_creation_time_only() {
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        };
+        let view = ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: "generic-created-at-must-not-render".into(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events_condition: EventsCondition::Available,
+            events: Vec::new(),
+            related: Vec::new(),
+            capabilities: ResourceCapabilities::default(),
+            manifest: String::new(),
+            projection: Some(ResourceProjection::Deployment(DeploymentProjection {
+                desired_replicas: None,
+                ready_replicas: None,
+                updated_replicas: None,
+                available_replicas: None,
+                strategy: None,
+                selector: BTreeMap::new(),
+                max_surge: None,
+                max_unavailable: None,
+                conditions: Vec::new(),
+                template_containers: Vec::new(),
+                template_labels: BTreeMap::new(),
+                template_annotations: BTreeMap::new(),
+                labels: BTreeMap::new(),
+                annotations: BTreeMap::new(),
+                created_at: None,
+            })),
+        };
+        let relations = RelationState::Loaded {
+            response: Arc::new(ResourceRelationsResponse {
+                identity: identity.clone(),
+                revision: BackendRevision::new(2),
+                groups: vec![RelatedGroup {
+                    title: "Pods".into(),
+                    gvk: GroupVersionKind::core("v1", "Pod"),
+                    rows: vec![ResourceListRow {
+                        identity: ResourceIdentity {
+                            context: "dev-local".into(),
+                            gvk: GroupVersionKind::core("v1", "Pod"),
+                            namespace: Some("default".into()),
+                            name: "web-0".into(),
+                            uid: "uid-web-0".into(),
+                        },
+                        revision: BackendRevision::new(2),
+                        labels: BTreeMap::new(),
+                        summary: "row-summary-must-not-render".into(),
+                        created_at: "row-created-at-must-not-render".into(),
+                        projection: Some(ResourceProjection::Pod(PodProjection {
+                            phase: None,
+                            ready_containers: None,
+                            total_containers: None,
+                            restart_count: None,
+                            containers: Vec::new(),
+                            conditions: Vec::new(),
+                            node_name: None,
+                            pod_ip: None,
+                            host_ip: None,
+                            qos_class: None,
+                            priority: None,
+                            service_account: None,
+                            restart_policy: None,
+                            ports: Vec::new(),
+                            labels: BTreeMap::new(),
+                            annotations: BTreeMap::new(),
+                            created_at: Some("1970-02-01T23:42:00Z".into()),
+                        })),
+                    }],
+                }],
+            }),
+            loaded_at_ms: 0,
+            refreshing: false,
+            refresh_error: None,
+        };
+        let detail = DetailState::new(identity.clone());
+        let mut harness = Harness::builder().build_ui(move |ui| {
+            let input = DetailPresentationInput {
+                identity: &identity,
+                primary: DetailPrimary::Loaded(&view),
+                metrics: DetailMetrics {
+                    status: None,
+                    age: None,
+                },
+                resource_metrics: None,
+                relations: Some(&relations),
+                freshness: None,
+                now: web_time::UNIX_EPOCH + Duration::from_secs(32 * 24 * 60 * 60),
+                gone: false,
+                mutations_allowed: false,
+                port_forward_available: false,
+                port_forward_sessions: &[],
+                port_forward_error: None,
+            };
+            let mut frame = input.frame_projection(Default::default());
+            let mut queued = Vec::new();
+            let mut resource_actions = Vec::new();
+            super::show(
+                ui,
+                WindowId(10),
+                &detail,
+                &input,
+                &mut frame,
+                &mut resource_actions,
+                &mut queued,
+            );
+        });
+        harness.run();
+
+        harness.get_by_label("18m");
+        assert!(harness.query_by_label("1970-02-01T23:42:00Z").is_none());
+        assert!(
+            harness
+                .query_by_label("row-created-at-must-not-render")
+                .is_none()
+        );
+        assert!(
+            harness
+                .query_by_label("row-summary-must-not-render")
+                .is_none()
+        );
     }
 }

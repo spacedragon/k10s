@@ -286,6 +286,16 @@ fn open_detail(
     size: [f32; 2],
 ) {
     let identity = detail.identity.clone();
+    open_detail_for(harness, identity, detail, relation, size);
+}
+
+fn open_detail_for(
+    harness: &mut Harness<'static, Fixture>,
+    identity: ResourceIdentity,
+    detail: ResourceDetailResponse,
+    relation: Option<RelationState>,
+    size: [f32; 2],
+) {
     harness
         .state_mut()
         .feed
@@ -332,6 +342,43 @@ fn open_detail(
             },
         ));
     harness.run_steps(5);
+}
+
+#[test]
+fn deployment_primary_same_name_different_uid_fails_closed_without_body_or_vitals() {
+    let identity = deployment_identity(NAME);
+    let mut mismatched = detail_with(Some(projection(vec![condition(
+        "Progressing",
+        "True",
+        Some("MISMATCHED_PRIMARY_MUST_NOT_RENDER"),
+    )])));
+    mismatched.identity.uid = "uid-recreated-checkout".into();
+
+    let mut harness = harness(egui::vec2(1_120.0, 760.0));
+    open_detail_for(&mut harness, identity, mismatched, None, [980.0, 620.0]);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    window.get_by_label("Structured details unavailable");
+    for unavailable in [
+        "Rollout · —",
+        "Ready · —",
+        "Up-to-date · —",
+        "Available · —",
+        "Strategy · —",
+        "Age · —",
+    ] {
+        window.get_by_label(unavailable);
+    }
+    for leaked in [
+        "Rollout ● MISMATCHED_PRIMARY_MUST_NOT_RENDER",
+        "Ready · 3/3",
+        "Up-to-date · 3",
+        "Available · 3",
+        "Strategy · RollingUpdate",
+        "TEMPLATE",
+    ] {
+        assert!(window.query_by_label(leaked).is_none(), "leaked {leaked}");
+    }
 }
 
 #[test]
@@ -566,6 +613,66 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("TEMPLATE");
     window.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
+}
+
+#[test]
+fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner() {
+    // Window chrome consumes 24 points, so these exercise a 760-point wide
+    // body and a deliberately narrow 420-point body.
+    for window_width in [784.0, 444.0] {
+        let mut harness = harness(egui::vec2(1_120.0, 760.0));
+        let detail = detail_with(Some(projection(Vec::new())));
+        let identity = detail.identity.clone();
+        open_detail(
+            &mut harness,
+            detail,
+            Some(exact_relations(&identity)),
+            [window_width, 620.0],
+        );
+
+        assert_eq!(
+            harness
+                .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
+                .query_all_by_role(Role::ScrollView)
+                .count(),
+            1
+        );
+
+        for (table_label, last_column) in [
+            ("Deployment rollout history table", "Created"),
+            ("Deployment Pods table", "Age"),
+        ] {
+            harness
+                .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
+                .get_by_role_and_label(Role::Table, table_label)
+                .scroll_to_me();
+            harness.run_steps(2);
+            let table_center = harness
+                .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
+                .get_by_role_and_label(Role::Table, table_label)
+                .rect()
+                .center();
+            harness.hover_at(table_center);
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(-400.0, 0.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(2);
+
+            let window =
+                harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+            let table = window.get_by_role_and_label(Role::Table, table_label);
+            let last_column = window.get_by_label(last_column);
+            assert!(
+                table.rect().intersects(last_column.rect()),
+                "{table_label} must make its last column reachable at window width {window_width}: table={:?}, column={:?}",
+                table.rect(),
+                last_column.rect(),
+            );
+        }
+    }
 }
 
 #[test]
