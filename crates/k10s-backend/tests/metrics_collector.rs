@@ -30,7 +30,7 @@ const NS: &str = "default";
 
 // Recorded request paths.
 const CORE_NODES: &str = "/api/v1/nodes";
-const CORE_PODS: &str = "/api/v1/pods";
+const CORE_PODS: &str = "/api/v1/namespaces/default/pods";
 const NODE_METRICS: &str = "/apis/metrics.k8s.io/v1beta1/nodes";
 const POD_METRICS: &str = "/apis/metrics.k8s.io/v1beta1/pods";
 

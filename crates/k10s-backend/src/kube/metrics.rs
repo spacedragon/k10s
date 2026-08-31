@@ -13,7 +13,7 @@
 //! while keeping the last-known collection time visible so staleness can be
 //! shown instead of disguised.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use kube::api::ListParams;
@@ -119,7 +119,12 @@ async fn collect_once(client: &kube::Client, context: &str) -> MetricsSnapshot {
                     .unwrap_or(true)
             });
             let pod_identities = if needs_inventory {
-                core_pod_identities(client).await
+                let namespaces = pod_cut
+                    .iter()
+                    .filter_map(|item| item.metadata.namespace.clone())
+                    .filter(|namespace| !namespace.is_empty())
+                    .collect::<BTreeSet<_>>();
+                core_pod_identities(client, namespaces).await
             } else {
                 Some(BTreeMap::new())
             };
@@ -206,37 +211,45 @@ impl CorePodIdentity {
 
 /// Read the exact core Pod inventory used to bind UID-less PodMetrics items.
 /// Any unreadable or ambiguous inventory fails closed for those items.
-async fn core_pod_identities(client: &kube::Client) -> Option<BTreeMap<String, CorePodIdentity>> {
-    let api = dynamic_api(
-        client.clone(),
-        Gvk::core("v1", "Pod"),
-        "pods".to_owned(),
-        true,
-        None,
-    );
-    let listed = api.list(&ListParams::default()).await.ok()?;
+async fn core_pod_identities(
+    client: &kube::Client,
+    namespaces: BTreeSet<String>,
+) -> Option<BTreeMap<String, CorePodIdentity>> {
     let mut identities = BTreeMap::new();
-    for object in listed.items {
-        let namespace = object.metadata.namespace.clone()?;
-        let name = object.metadata.name.clone()?;
-        let uid = object.metadata.uid.clone().filter(|uid| !uid.is_empty())?;
-        let value = serde_json::to_value(&object).ok()?;
-        let created_at_unix = value
-            .get("metadata")?
-            .get("creationTimestamp")?
-            .as_str()
-            .and_then(parse_rfc3339_unix)?;
-        if identities
-            .insert(
-                format!("{namespace}/{name}"),
-                CorePodIdentity {
-                    uid,
-                    created_at_unix,
-                },
-            )
-            .is_some()
-        {
-            return None;
+    for namespace in namespaces {
+        let api = dynamic_api(
+            client.clone(),
+            Gvk::core("v1", "Pod"),
+            "pods".to_owned(),
+            true,
+            Some(namespace.clone()),
+        );
+        let listed = api.list(&ListParams::default()).await.ok()?;
+        for object in listed.items {
+            let object_namespace = object.metadata.namespace.clone()?;
+            if object_namespace != namespace {
+                return None;
+            }
+            let name = object.metadata.name.clone()?;
+            let uid = object.metadata.uid.clone().filter(|uid| !uid.is_empty())?;
+            let value = serde_json::to_value(&object).ok()?;
+            let created_at_unix = value
+                .get("metadata")?
+                .get("creationTimestamp")?
+                .as_str()
+                .and_then(parse_rfc3339_unix)?;
+            if identities
+                .insert(
+                    format!("{namespace}/{name}"),
+                    CorePodIdentity {
+                        uid,
+                        created_at_unix,
+                    },
+                )
+                .is_some()
+            {
+                return None;
+            }
         }
     }
     Some(identities)
