@@ -17,7 +17,7 @@ use super::window::{WindowGeom, WindowKind, WorkloadKind};
 use super::{Window, WindowContent, WindowId, WorkspaceState};
 
 /// Snapshot format version written to and read from the desktop state file.
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 /// Upper bound for persisted allocation counters. Real workspaces hand out
 /// a handful of ids per session; values near this ceiling are corruption,
@@ -162,6 +162,8 @@ pub struct WorkspaceSnapshot {
     pub next_id: u64,
     /// Next z-order value to hand out above every restored window.
     pub next_z: u64,
+    /// Whether workspace windows may be resized without preserving aspect ratio.
+    pub free_window_resizing: bool,
     /// The restorable windows in their persisted order.
     pub windows: Vec<PersistedWindow>,
 }
@@ -180,13 +182,17 @@ struct VersionEnvelope {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
     next_id: u64,
     next_z: u64,
     windows: Vec<V1Window>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Window {
     kind: PersistedWindowKind,
     title: String,
@@ -211,13 +217,28 @@ struct V1ListView {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
     next_id: u64,
     next_z: u64,
     windows: Vec<V2Window>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
+    next_id: u64,
+    next_z: u64,
+    free_window_resizing: bool,
+    windows: Vec<V3Window>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2Window {
     kind: PersistedWindowKind,
     title: String,
@@ -225,6 +246,17 @@ struct V2Window {
     #[serde(default)]
     z: u64,
     view: Option<V2ListView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3Window {
+    kind: PersistedWindowKind,
+    title: String,
+    geometry: WindowGeom,
+    #[serde(default)]
+    z: u64,
+    view: Option<V3ListView>,
 }
 
 #[derive(Deserialize)]
@@ -241,12 +273,27 @@ struct V2ListView {
     custom_kind: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3ListView {
+    namespace_scope: NamespaceScope,
+    search: String,
+    filters: BTreeMap<String, String>,
+    sort: Option<SortSpec>,
+    #[serde(default = "default_split_ratio")]
+    split_ratio: f32,
+    #[serde(default = "default_true")]
+    detail_visible: bool,
+    custom_kind: Option<String>,
+}
+
 impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         let envelope: VersionEnvelope =
             serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-        let (next_id, next_z, windows, migrated_from) = match envelope.version {
+        let (next_id, next_z, free_window_resizing, windows, migrated_from) = match envelope.version
+        {
             1 => {
                 let raw: V1Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -272,9 +319,9 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                         }),
                     })
                     .collect();
-                (raw.next_id, raw.next_z, windows, Some(1))
+                (raw.next_id, raw.next_z, false, windows, Some(1))
             }
-            SNAPSHOT_VERSION => {
+            2 => {
                 let raw: V2Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 let windows = raw
@@ -296,7 +343,37 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                         }),
                     })
                     .collect();
-                (raw.next_id, raw.next_z, windows, None)
+                (raw.next_id, raw.next_z, false, windows, Some(2))
+            }
+            SNAPSHOT_VERSION => {
+                let raw: V3Snapshot =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let windows = raw
+                    .windows
+                    .into_iter()
+                    .map(|window| PersistedWindow {
+                        kind: window.kind,
+                        title: window.title,
+                        geometry: window.geometry,
+                        z: window.z,
+                        view: window.view.map(|view| PersistedListView {
+                            namespace_scope: view.namespace_scope,
+                            search: view.search,
+                            filters: view.filters,
+                            sort: view.sort,
+                            split_ratio: view.split_ratio,
+                            detail_visible: view.detail_visible,
+                            custom_kind: view.custom_kind,
+                        }),
+                    })
+                    .collect();
+                (
+                    raw.next_id,
+                    raw.next_z,
+                    raw.free_window_resizing,
+                    windows,
+                    None,
+                )
             }
             version => {
                 return Err(serde::de::Error::custom(format!(
@@ -309,6 +386,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                 version: SNAPSHOT_VERSION,
                 next_id,
                 next_z,
+                free_window_resizing,
                 windows,
             },
             migrated_from,
@@ -416,6 +494,7 @@ where
             version: SNAPSHOT_VERSION,
             next_id: self.next_id,
             next_z: self.next_z,
+            free_window_resizing: self.free_window_resizing,
             windows,
         }
     }
@@ -450,6 +529,7 @@ where
 
         let mut state = Self {
             windows: Vec::new(),
+            free_window_resizing: snapshot.free_window_resizing,
             next_id: 1,
             next_z: 0,
             context: String::new(),

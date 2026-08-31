@@ -10,6 +10,8 @@ use super::{
     ConnectionState, InfrastructureLoad, infrastructure::InfrastructureUiState, resource_window,
 };
 
+const WINDOW_CHROME_SIZE: Vec2 = Vec2::new(24.0, 48.0);
+
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
 }
@@ -55,6 +57,7 @@ where
             ui,
             canvas,
             window,
+            workspace.free_window_resizing(),
             focused == Some(window.id),
             infrastructure,
             resources,
@@ -109,6 +112,7 @@ fn show_window<I>(
     ui: &mut egui::Ui,
     canvas: Rect,
     state: &Window<I>,
+    free_window_resizing: bool,
     focused: bool,
     infrastructure: &mut InfrastructureUiState,
     resources: &mut resource_window::ResourceUiState,
@@ -160,8 +164,12 @@ where
         .default_open(!state.geometry.collapsed)
         .current_pos(position)
         .default_size(state.geometry.size)
-        .min_size(min_size)
         .frame(super::theme::window_frame(focused));
+    window = if free_window_resizing {
+        window.min_size(Vec2::ZERO).scroll(true)
+    } else {
+        window.min_size(min_size)
+    };
     let layout_fits_canvas = state.geometry.position[0] + state.geometry.size[0] <= canvas.width()
         && state.geometry.position[1] + state.geometry.size[1] <= canvas.height();
     if state.layout_revision == 0 || layout_fits_canvas {
@@ -175,7 +183,9 @@ where
         window = window.fixed_pos(position).fixed_size(state.geometry.size);
     }
     let response = window.show(ui.ctx(), |ui| {
-        ui.set_min_size(min_size - Vec2::new(24.0, 48.0));
+        if !free_window_resizing {
+            ui.set_min_size(min_size - WINDOW_CHROME_SIZE);
+        }
         if let (Some(resource), WindowKind::Workload(kind)) = (resource_state.as_mut(), state.kind)
         {
             super::resource_window::show(

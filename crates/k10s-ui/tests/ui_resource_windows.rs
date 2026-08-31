@@ -1,6 +1,6 @@
 //! Connected workload windows: seven kinds, independent per-window state,
 //! the searchable GVK picker for cluster-scoped custom resources, the
-//! 640×420 window minimum, split-pane minima, hide/restore, selection,
+//! conditional window size policy, split-pane minima, hide/restore, selection,
 //! and snapshot resync preserving filters and selections.
 
 use egui::accesskit::Role;
@@ -743,8 +743,64 @@ fn namespace_combobox_remains_reachable_in_compact_viewport() {
     );
 }
 
+fn set_geometry(fixture: &mut Fixture, id: WindowId, size: [f32; 2]) {
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [10.0, 30.0],
+                size,
+                collapsed: false,
+            },
+        ));
+}
+
+fn window_id(fixture: &Fixture, kind: WindowKind) -> WindowId {
+    fixture
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == kind)
+        .expect("window is open")
+        .id
+}
+
+fn assert_normal_size(rect: egui::Rect, minimum: egui::Vec2) {
+    assert!(
+        rect.width() >= minimum.x - 1.0 && rect.height() >= minimum.y - 1.0,
+        "window rect {rect:?} must respect the {minimum:?} minimum"
+    );
+}
+
+fn assert_compact_size(rect: egui::Rect) {
+    assert!(
+        rect.width() < 300.0 && rect.height() < 220.0,
+        "window rect {rect:?} must preserve the requested compact size"
+    );
+}
+
+fn resize_window_toward_compact(
+    harness: &mut Harness<'static, Fixture>,
+    title: &str,
+) -> egui::Rect {
+    let rect = harness.get_by_role_and_label(Role::Window, title).rect();
+    let grab = rect.max;
+    let target = rect.min + egui::vec2(240.0, 160.0);
+    harness.hover_at(grab);
+    harness.run_steps(1);
+    harness.drag_at(grab);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Window, title).rect()
+}
+
 #[test]
-fn workload_windows_enforce_the_640x420_minimum_size() {
+fn normal_mode_enforces_workload_minimum() {
     let mut harness = harness();
     harness
         .state_mut()
@@ -754,25 +810,130 @@ fn workload_windows_enforce_the_640x420_minimum_size() {
         ));
     let id = workload_id(harness.state(), WorkspaceWorkload::Deployments);
     // Applied before the first frame so the window never renders larger.
+    set_geometry(harness.state_mut(), id, [240.0, 160.0]);
+    harness.run_steps(4);
+
+    assert_normal_size(
+        harness
+            .get_by_role_and_label(Role::Window, "Deployments")
+            .rect(),
+        egui::vec2(640.0, 420.0),
+    );
+}
+
+#[test]
+fn free_mode_preserves_compact_workload_geometry() {
+    let mut harness = harness();
     harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            id,
-            WindowGeom {
-                position: [10.0, 30.0],
-                size: [240.0, 160.0],
-                collapsed: false,
-            },
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
         ));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    let id = workload_id(harness.state(), WorkspaceWorkload::Deployments);
+    set_geometry(harness.state_mut(), id, [240.0, 160.0]);
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    let rect = window.rect();
-    assert!(
-        rect.width() >= 639.0 && rect.height() >= 419.0,
-        "window rect {rect:?} must respect the 640x420 minimum"
+    assert_compact_size(
+        harness
+            .get_by_role_and_label(Role::Window, "Deployments")
+            .rect(),
     );
+}
+
+#[test]
+fn normal_and_free_modes_apply_overview_size_policy() {
+    let mut normal = harness();
+    let id = window_id(normal.state(), WindowKind::Overview);
+    set_geometry(normal.state_mut(), id, [240.0, 160.0]);
+    normal.run_steps(4);
+    assert_normal_size(
+        resize_window_toward_compact(&mut normal, "Overview"),
+        egui::vec2(480.0, 320.0),
+    );
+
+    let mut free = harness();
+    free.state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    let id = window_id(free.state(), WindowKind::Overview);
+    set_geometry(free.state_mut(), id, [240.0, 160.0]);
+    free.run_steps(4);
+    assert_compact_size(resize_window_toward_compact(&mut free, "Overview"));
+}
+
+#[test]
+fn normal_and_free_modes_apply_detail_size_policy() {
+    fn fixture(free: bool) -> Fixture {
+        let mut fixture = Fixture::default();
+        if free {
+            fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+        }
+        let identity = fixture.feed.lists[&WorkspaceWorkload::Pods][0]
+            .identity
+            .clone();
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity));
+        let id = window_id(&fixture, WindowKind::Detail);
+        set_geometry(&mut fixture, id, [240.0, 160.0]);
+        fixture
+    }
+
+    let mut normal = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture(false));
+    normal.run_steps(4);
+    assert_normal_size(
+        normal.get_by_role_and_label(Role::Window, "Detail").rect(),
+        egui::vec2(640.0, 420.0),
+    );
+
+    let mut free = Harness::builder()
+        .with_size(egui::vec2(1_440.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture(true));
+    free.run_steps(4);
+    assert_compact_size(free.get_by_role_and_label(Role::Window, "Detail").rect());
+}
+
+#[test]
+fn window_size_policy_handles_an_undersized_canvas() {
+    fn compact_harness(free: bool) -> Harness<'static, Fixture> {
+        let mut fixture = Fixture::default();
+        if free {
+            fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+        }
+        let id = window_id(&fixture, WindowKind::Overview);
+        set_geometry(&mut fixture, id, [240.0, 160.0]);
+        Harness::builder()
+            .with_size(egui::vec2(430.0, 280.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(render, fixture)
+    }
+
+    let mut normal = compact_harness(false);
+    normal.run_steps(4);
+    let rect = normal
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(
+        rect.width() >= 460.0 && rect.height() >= 310.0,
+        "undersized canvas must keep the Overview class minimum practical, got {rect:?}"
+    );
+
+    let mut free = compact_harness(true);
+    free.run_steps(4);
+    assert_compact_size(free.get_by_role_and_label(Role::Window, "Overview").rect());
 }
 
 #[test]

@@ -235,10 +235,38 @@ impl DesktopApp {
 /// each Kubernetes context independently.
 const CONTEXT_LAYOUTS_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct PersistedContextLayouts {
     version: u32,
     contexts: BTreeMap<String, WorkspaceSnapshot>,
+    #[serde(skip)]
+    migrated: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for PersistedContextLayouts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            version: u32,
+            contexts: BTreeMap<String, LoadedWorkspaceSnapshot>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let migrated = wire
+            .contexts
+            .values()
+            .any(|snapshot| snapshot.migrated_from.is_some());
+        Ok(Self {
+            version: wire.version,
+            contexts: wire
+                .contexts
+                .into_iter()
+                .map(|(context, loaded)| (context, loaded.snapshot))
+                .collect(),
+            migrated,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -261,7 +289,9 @@ impl ContextStateStore {
         if persisted.version != CONTEXT_LAYOUTS_VERSION {
             return None;
         }
-        self.last_saved = Some(persisted.contexts.clone());
+        if !persisted.migrated {
+            self.last_saved = Some(persisted.contexts.clone());
+        }
         Some(persisted.contexts)
     }
 
@@ -272,6 +302,7 @@ impl ContextStateStore {
         let persisted = PersistedContextLayouts {
             version: CONTEXT_LAYOUTS_VERSION,
             contexts: layouts.clone(),
+            migrated: false,
         };
         match serde_json::to_string(&persisted)
             .map_err(io::Error::other)
@@ -738,6 +769,23 @@ mod tests {
     }
 
     #[test]
+    fn state_store_round_trips_free_resize_true() {
+        let path = tmp_state_file("roundtrip-free-resize");
+        let mut workspace: WorkspaceState<Dummy> = WorkspaceState::new();
+        workspace.apply(WorkspaceCommand::ToggleFreeWindowResizing);
+        let mut store = StateStore::at(path.clone());
+        store.flush(&workspace.snapshot());
+
+        let loaded = StateStore::at(path).load().expect("load snapshot");
+        assert!(loaded.snapshot.free_window_resizing);
+        assert!(
+            WorkspaceState::<Dummy>::from_snapshot(&loaded.snapshot)
+                .unwrap()
+                .free_window_resizing()
+        );
+    }
+
+    #[test]
     fn context_state_store_round_trips_independent_versioned_layouts() {
         let path = tmp_state_file("context-layouts");
         let snapshot: k10s_ui::workspace::WorkspaceSnapshot =
@@ -773,6 +821,37 @@ mod tests {
         assert!(ContextStateStore::new(path.clone()).load().is_none());
         std::fs::write(&path, "not json").unwrap();
         assert!(ContextStateStore::new(path).load().is_none());
+    }
+
+    #[test]
+    fn context_state_store_rewrites_migrated_nested_snapshots() {
+        let path = tmp_state_file("context-layouts-migrate-v2");
+        let snapshot = serde_json::json!({
+            "version": 2,
+            "next_id": 2,
+            "next_z": 3,
+            "windows": [{
+                "kind": "overview",
+                "title": "Overview",
+                "geometry": {"position": [8.0, 9.0], "size": [801.0, 602.0], "collapsed": false},
+                "z": 1,
+                "view": null
+            }]
+        });
+        std::fs::write(
+            &path,
+            serde_json::json!({"version": 1, "contexts": {"dev": snapshot}}).to_string(),
+        )
+        .unwrap();
+
+        let mut store = ContextStateStore::new(path.clone());
+        let layouts = store.load().expect("migrate nested v2 snapshot");
+        store.save(&layouts);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["contexts"]["dev"]["version"], 3);
+        assert_eq!(json["contexts"]["dev"]["free_window_resizing"], false);
     }
 
     #[test]
@@ -815,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn migrated_v1_state_is_rewritten_as_v2_after_debounce() {
+    fn migrated_v1_state_is_rewritten_as_v3_after_debounce() {
         let path = tmp_state_file("migrate-v1");
         let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":null}}]}"#;
         std::fs::write(&path, raw).unwrap();
@@ -827,12 +906,44 @@ mod tests {
         store.tick(&loaded.snapshot, Instant::now());
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["version"], 3);
+        assert_eq!(json["free_window_resizing"], false);
+        assert_eq!(
+            json["windows"][0]["geometry"]["position"],
+            serde_json::json!([1.0, 2.0])
+        );
         assert_eq!(
             json["windows"][0]["view"]["namespace_scope"],
             serde_json::json!({"kind":"namespace","value":"prod"})
         );
         assert_eq!(json["windows"][0]["view"]["search"], "web");
+    }
+
+    #[test]
+    fn migrated_v2_state_is_rewritten_as_v3_after_debounce() {
+        let path = tmp_state_file("migrate-v2");
+        let raw = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[8.0,9.0],"size":[801.0,602.0],"collapsed":true},"z":1,"view":{"namespace_scope":{"kind":"all_namespaces"},"search":"needle","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":null}}]}"#;
+        std::fs::write(&path, raw).unwrap();
+        let mut store = StateStore::at(path.clone());
+        let loaded = store.load().expect("migrate v2");
+        assert_eq!(loaded.migrated_from, Some(2));
+        store.tick(&loaded.snapshot, Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        store.tick(&loaded.snapshot, Instant::now());
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["version"], 3);
+        assert_eq!(json["free_window_resizing"], false);
+        assert_eq!(
+            json["windows"][0]["geometry"]["position"],
+            serde_json::json!([8.0, 9.0])
+        );
+        assert_eq!(
+            json["windows"][0]["geometry"]["size"],
+            serde_json::json!([801.0, 602.0])
+        );
+        assert_eq!(json["windows"][0]["view"]["search"], "needle");
+        assert_eq!(json["windows"][0]["view"]["filters"]["phase"], "Running");
     }
 
     #[test]
@@ -954,6 +1065,17 @@ mod tests {
             .as_mut()
             .expect("app alive")
             .web_activate_workload(WorkloadKind::Jobs);
+        let mut toggled = desktop
+            .app
+            .as_ref()
+            .expect("app alive")
+            .workspace_snapshot();
+        toggled.free_window_resizing = !toggled.free_window_resizing;
+        desktop
+            .app
+            .as_mut()
+            .expect("app alive")
+            .restore_workspace_snapshot(toggled);
         assert_eq!(
             desktop
                 .app
@@ -964,7 +1086,6 @@ mod tests {
                 .len(),
             3
         );
-
         // Dropping the app persists the final layout through Drop.
         drop(desktop);
 
@@ -976,6 +1097,7 @@ mod tests {
             3,
             "the final three-window layout is on disk"
         );
+        assert!(on_disk.free_window_resizing);
     }
 
     #[test]

@@ -483,6 +483,33 @@ fn top_bar_menus_expose_window_view_and_help_actions() {
 }
 
 #[test]
+fn view_menu_toggles_free_window_resizing() {
+    let mut harness = shell_harness();
+
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_steps(2);
+    let free_resizing = harness.get_by_role_and_label(Role::CheckBox, "Free window resizing");
+    assert_eq!(
+        free_resizing.accesskit_node().toggled(),
+        Some(Toggled::False)
+    );
+
+    free_resizing.click();
+    harness.run_steps(4);
+    assert!(harness.state().shell.workspace().free_window_resizing());
+
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Free window resizing")
+            .accesskit_node()
+            .toggled(),
+        Some(Toggled::True)
+    );
+}
+
+#[test]
 fn global_layout_controls_are_keyboard_focusable_and_dispatch_workspace_commands() {
     let mut harness = shell_harness();
     harness
