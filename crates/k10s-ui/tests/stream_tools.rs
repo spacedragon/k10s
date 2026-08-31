@@ -61,6 +61,11 @@ fn failed_automatic_connection_requires_one_explicit_retry() {
     assert!(tool.follows());
     assert_eq!(tool.last_error(), None);
     assert!(!tool.retry(), "explicit retry also starts only once");
+    assert!(
+        tool.take_scroll_reset(),
+        "retry must request one renderer-side bottom reset"
+    );
+    assert!(!tool.take_scroll_reset(), "the reset is consumed once");
 }
 
 #[test]
@@ -86,6 +91,8 @@ fn changing_each_log_source_restores_auto_connect_and_follow() {
     container.set_follow(false);
     container.select_container("metrics");
     assert!(container.follows());
+    assert!(container.take_scroll_reset());
+    assert!(!container.take_scroll_reset());
     assert!(container.begin_auto_connect());
 
     let mut previous = logs_tool();
@@ -96,6 +103,7 @@ fn changing_each_log_source_restores_auto_connect_and_follow() {
     previous.set_follow(false);
     previous.set_previous(true);
     assert!(previous.follows());
+    assert!(previous.take_scroll_reset());
     assert!(previous.begin_auto_connect());
     assert_eq!(previous.export_text(), "retained across previous change");
 
@@ -107,6 +115,7 @@ fn changing_each_log_source_restores_auto_connect_and_follow() {
     since.set_follow(false);
     since.set_since_seconds(Some(900));
     assert!(since.follows());
+    assert!(since.take_scroll_reset());
     assert!(since.begin_auto_connect());
     assert_eq!(since.export_text(), "retained across since change");
 }

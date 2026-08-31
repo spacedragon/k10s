@@ -120,6 +120,8 @@ pub struct K10sApp {
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
+    log_sources: BTreeMap<WindowId, LogSource>,
+    log_session_sources: BTreeMap<WindowId, LogSource>,
     /// Canonical resource watches retained by visible workspace demand;
     /// rebuilt automatically on reconnect by shared client recovery.
     resource_subscriptions: BTreeMap<SubscriptionKey, RetainedSubscription>,
@@ -184,6 +186,14 @@ struct PendingStreamTicket {
     request: PendingRequest,
     route: StreamRoute,
     window: WindowId,
+    log_source: Option<LogSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogSource {
+    target: StreamTarget,
+    since_seconds: Option<i64>,
+    previous: bool,
 }
 
 /// A window's in-flight workload mutation (scale or delete).
@@ -312,6 +322,8 @@ impl K10sApp {
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
+            log_sources: BTreeMap::new(),
+            log_session_sources: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
             window_freshness_overrides: BTreeMap::new(),
@@ -1364,6 +1376,11 @@ impl K10sApp {
                                 .and_then(|id| self.pending_stream_tickets.remove(id))
                             {
                                 let reason = server_error.safe_message.clone();
+                                if entry.log_source.as_ref().is_some_and(|source| {
+                                    self.log_sources.get(&entry.window) != Some(source)
+                                }) {
+                                    return Ok(());
+                                }
                                 match entry.route {
                                     StreamRoute::Logs => {
                                         if let Some(view) = self
@@ -2963,6 +2980,8 @@ impl K10sApp {
             }
         }
         self.pending_stream_tickets.clear();
+        self.log_sources.clear();
+        self.log_session_sources.clear();
         self.shell.stream_stores_mut().connection_lost();
     }
 
@@ -3050,6 +3069,21 @@ impl K10sApp {
                 previous,
                 ..
             } = action;
+            let source = LogSource {
+                target: target.clone(),
+                since_seconds,
+                previous,
+            };
+            for entry in self.pending_stream_tickets.values() {
+                if entry.window == window && entry.route == StreamRoute::Logs {
+                    let _ = self.client.cancel(&entry.request)?;
+                }
+            }
+            if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Logs)) {
+                session.disconnect();
+            }
+            self.log_session_sources.remove(&window);
+            self.log_sources.insert(window, source.clone());
             let request = self.client.begin(Query::StreamTicket {
                 target,
                 stream_type: k10s_protocol::StreamType::Logs,
@@ -3068,6 +3102,7 @@ impl K10sApp {
                     request,
                     route: StreamRoute::Logs,
                     window,
+                    log_source: Some(source),
                 },
             );
         }
@@ -3089,6 +3124,7 @@ impl K10sApp {
                     request,
                     route: StreamRoute::Exec,
                     window,
+                    log_source: None,
                 },
             );
         }
@@ -3125,19 +3161,35 @@ impl K10sApp {
                 request,
                 route,
                 window,
+                log_source,
             } = entry;
-            if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && let Err(error) = session_open(
+            let source_current = log_source
+                .as_ref()
+                .is_none_or(|source| self.log_sources.get(&window) == Some(source));
+            if !source_current {
+                let _ = self.client.take(request);
+                continue;
+            }
+            if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request) {
+                let result = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
                     *granted,
                     &self.connection_url,
                     &self.access_token,
-                )
-            {
-                let reason = format!("could not open stream socket: {error}");
-                fail_stream_tool(&mut self.shell, window, route, &reason);
+                );
+                match result {
+                    Ok(()) => {
+                        if let Some(source) = log_source {
+                            self.log_session_sources.insert(window, source);
+                        }
+                    }
+                    Err(error) => {
+                        let reason = format!("could not open stream socket: {error}");
+                        fail_stream_tool(&mut self.shell, window, route, &reason);
+                    }
+                }
             }
         }
     }
@@ -3162,6 +3214,9 @@ impl K10sApp {
             let bound_target = session.target().clone();
             let target_current =
                 self.current_stream_target(window, route).as_ref() == Some(&bound_target);
+            let source_current = route != StreamRoute::Logs
+                || self.log_session_sources.get(&window) == self.log_sources.get(&window);
+            let target_current = target_current && source_current;
             // Guard transitions are collected while the tool stores are
             // borrowed and applied afterwards.
             let mut guard_connected = false;
@@ -3507,7 +3562,7 @@ mod tests {
         (app, state)
     }
 
-    fn server_message(frame: &ServerFrame) -> WsEvent {
+    pub(super) fn server_message(frame: &ServerFrame) -> WsEvent {
         WsEvent::Message(WsMessage::Text(serde_json::to_string(frame).unwrap()))
     }
 
@@ -4584,7 +4639,7 @@ mod tests {
         assert!(harness.state().infrastructure_request.is_none());
     }
 
-    fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+    pub(super) fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
         let bootstrap =
             ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
         let (mut app, state) = test_app(vec![ConnectionScript {
@@ -6918,7 +6973,7 @@ mod stream_lifecycle_tests {
     use super::K10sApp;
     use super::tests::test_app;
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::{LogsPhase, ShellPhase};
+    use crate::ui::tools::{LogsAction, LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -7034,6 +7089,113 @@ mod stream_lifecycle_tests {
         app.stream_sessions
             .insert((window, StreamRoute::Exec), session);
         tx
+    }
+
+    fn queue_logs(
+        app: &mut K10sApp,
+        window: crate::workspace::WindowId,
+        target: StreamTarget,
+        since_seconds: Option<i64>,
+        previous: bool,
+    ) {
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, target.clone());
+        app.shell.stream_stores_mut().logs.queue(
+            window,
+            LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds,
+                previous,
+            },
+        );
+        app.process_stream_requests().unwrap();
+    }
+
+    #[test]
+    fn newer_log_source_supersedes_pending_ticket_before_reversed_completion() {
+        let (mut app, _state) = super::tests::ready_app();
+        let pod = pod("web");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for(&pod.name);
+
+        queue_logs(&mut app, window, target.clone(), Some(300), false);
+        let old_id = app.pending_stream_tickets.keys().next().unwrap().clone();
+        queue_logs(&mut app, window, target.clone(), Some(900), true);
+        let new_id = app
+            .pending_stream_tickets
+            .keys()
+            .find(|id| **id != old_id)
+            .unwrap()
+            .clone();
+
+        let grant = |id, ticket: &str| {
+            k10s_protocol::ServerFrame::response(
+                id,
+                k10s_protocol::StreamTicketResponse {
+                    ticket_id: ticket.into(),
+                    target: target.clone(),
+                    stream_type: StreamType::Logs,
+                    tty: false,
+                },
+            )
+        };
+        app.handle_event(super::tests::server_message(&grant(new_id, "new")), 1, 0)
+            .unwrap();
+        app.finish_stream_tickets();
+        assert_eq!(
+            app.log_session_sources.get(&window).unwrap().since_seconds,
+            Some(900)
+        );
+        assert!(app.log_session_sources.get(&window).unwrap().previous);
+
+        let _ = app.handle_event(super::tests::server_message(&grant(old_id, "old")), 2, 0);
+        app.finish_stream_tickets();
+        assert_eq!(
+            app.log_session_sources.get(&window).unwrap().since_seconds,
+            Some(900)
+        );
+        assert!(app.log_session_sources.get(&window).unwrap().previous);
+    }
+
+    #[test]
+    fn previous_or_since_change_retires_same_target_log_session() {
+        let (mut app, _state) = super::tests::ready_app();
+        let pod = pod("web");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for(&pod.name);
+        app.stream_sessions.insert(
+            (window, StreamRoute::Logs),
+            StreamSession::new(StreamRoute::Logs, target.clone(), false),
+        );
+        app.log_sources.insert(
+            window,
+            super::LogSource {
+                target: target.clone(),
+                since_seconds: Some(300),
+                previous: false,
+            },
+        );
+        app.log_session_sources.insert(
+            window,
+            super::LogSource {
+                target: target.clone(),
+                since_seconds: Some(300),
+                previous: false,
+            },
+        );
+
+        queue_logs(&mut app, window, target, Some(900), true);
+
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(window, StreamRoute::Logs))
+        );
+        let source = app.log_sources.get(&window).unwrap();
+        assert_eq!(source.since_seconds, Some(900));
+        assert!(source.previous);
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub struct LogsTool {
     auto_connect_available: bool,
     paused: bool,
     follow: bool,
+    /// One-shot request for the renderer to discard persisted scroll state.
+    scroll_reset: bool,
     previous: bool,
     source_defaults_applied: bool,
     since_seconds: Option<i64>,
@@ -71,6 +73,7 @@ impl LogsTool {
             auto_connect_available: true,
             paused: false,
             follow: true,
+            scroll_reset: true,
             previous: false,
             source_defaults_applied: false,
             since_seconds: Some(300),
@@ -122,6 +125,7 @@ impl LogsTool {
         self.phase = LogsPhase::Connecting;
         self.last_error = None;
         self.follow = true;
+        self.scroll_reset = true;
         true
     }
 
@@ -305,6 +309,11 @@ impl LogsTool {
         self.follow = follow;
     }
 
+    /// Consume a fresh-connection/source-change request to align at bottom.
+    pub fn take_scroll_reset(&mut self) -> bool {
+        std::mem::take(&mut self.scroll_reset)
+    }
+
     /// Set or clear the case-insensitive find filter.
     pub fn set_find(&mut self, query: Option<&str>) {
         self.find = match query {
@@ -344,6 +353,7 @@ impl LogsTool {
         self.phase = LogsPhase::Disconnected;
         self.auto_connect_available = true;
         self.follow = true;
+        self.scroll_reset = true;
         self.paused = false;
         self.last_error = None;
     }
@@ -620,6 +630,10 @@ pub(crate) fn show(
             );
         }
         let was_following = view.follows();
+        let scroll_id = ui.make_persistent_id(("logs.stream", window_id.0));
+        if view.take_scroll_reset() {
+            egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
+        }
         let scroll_output = ScrollArea::vertical()
             .id_salt(("logs.stream", window_id.0))
             .stick_to_bottom(was_following)
@@ -782,5 +796,30 @@ mod tests {
             appended.offset.y
         );
         assert_eq!(appended.offset.y, appended_max);
+    }
+
+    #[test]
+    fn retry_resets_scrolled_up_frame_to_exact_bottom_and_keeps_following_append() {
+        let ctx = Context::default();
+        let id = Id::new("logs-retry-scroll-reset");
+        let (initial, initial_max, scroll_id) = render_scroll(&ctx, id, 20, false);
+        let mut scrolled_up = initial;
+        scrolled_up.offset.y = initial_max - 12.0;
+        scrolled_up.store(&ctx, scroll_id);
+
+        let mut logs = LogsTool::new(target(), 10);
+        assert!(logs.begin_auto_connect());
+        assert!(logs.take_scroll_reset());
+        logs.fail("disconnected");
+        assert!(logs.retry());
+        assert!(logs.take_scroll_reset());
+        egui::scroll_area::State::default().store(&ctx, scroll_id);
+
+        let (reset, reset_max, _) = render_scroll(&ctx, id, 20, logs.follows());
+        assert_eq!(reset.offset.y, reset_max);
+        logs.set_follow(normalize_bottom_state(&ctx, scroll_id, reset, reset_max));
+        let (appended, appended_max, _) = render_scroll(&ctx, id, 24, logs.follows());
+        assert_eq!(appended.offset.y, appended_max);
+        assert!(logs.follows());
     }
 }
