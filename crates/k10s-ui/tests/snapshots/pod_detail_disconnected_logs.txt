@@ -194,8 +194,8 @@ Window
                     Button label="Restore split"
                     Button label="Pop out ↗"
                 GenericContainer
-                  Label value="Status · —"
-                    TextRun value="Status · —"
+                  Label value="Status ● —"
+                    TextRun value="Status ● —"
                   Label value="Ready · —"
                     TextRun value="Ready · —"
                   Label value="Restarts · —"

@@ -217,7 +217,14 @@ pub(super) fn show<I>(
         detail_maximized,
         tabs_for_kind(&detail_identity_gvk(detail)),
         queued,
-        |_| {},
+        |frame| {
+            let gvk = detail_identity_gvk(detail);
+            if gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Pod" {
+                pod::configure_frame(presentation, frame);
+            } else if gvk.group == "apps" && gvk.version == "v1" && gvk.kind == "Deployment" {
+                deployment::configure_frame(presentation, frame);
+            }
+        },
         |ui, primary, actions, frame| {
             let view = match primary {
                 presentation::DetailPrimary::Loading => {

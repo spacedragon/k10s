@@ -429,7 +429,7 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
 
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
     for label in [
-        "Status · Running",
+        "Status ● Running",
         "Ready · 1/1",
         "Restarts · 2",
         "Age · 2h",
@@ -450,6 +450,43 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
             .query_by_role_and_label(Role::Button, "Show metadata")
             .is_none()
     );
+}
+
+#[test]
+fn kind_configurators_run_before_shared_vital_accessibility_paint() {
+    let mut pod_harness = harness();
+    let pod = typed_pod_detail("db-postgres-0");
+    let pod_identity = pod.identity.clone();
+    pod_harness
+        .state_mut()
+        .feed
+        .details
+        .insert(pod_identity.clone(), pod);
+    pod_harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pod_identity));
+    pod_harness.run_steps(4);
+    pod_harness
+        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
+        .get_by_label("Status ● Running");
+
+    let mut deployment_harness = harness();
+    let deployment = typed_deployment_detail("web-frontend");
+    let deployment_identity = deployment.identity.clone();
+    deployment_harness
+        .state_mut()
+        .feed
+        .details
+        .insert(deployment_identity.clone(), deployment);
+    deployment_harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(deployment_identity));
+    deployment_harness.run_steps(4);
+    deployment_harness
+        .get_by_role_and_label(Role::Window, "Deployment · default / web-frontend")
+        .get_by_label("Rollout ● NewReplicaSetAvailable");
 }
 
 #[test]
@@ -482,7 +519,7 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     for label in [
-        "Rollout · NewReplicaSetAvailable",
+        "Rollout ● NewReplicaSetAvailable",
         "Ready · 18/20",
         "Up-to-date · 19",
         "Available · 17",

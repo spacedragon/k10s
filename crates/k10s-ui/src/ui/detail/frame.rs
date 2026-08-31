@@ -275,7 +275,7 @@ pub(super) fn show<I: RowIdentity>(
 
 fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
     let text = match vital.shape {
-        Some(shape) => format!("{} · {} {}", vital.label, shape.glyph(), vital.value),
+        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), vital.value),
         None => format!("{} · {}", vital.label, vital.value),
     };
     ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
@@ -391,7 +391,7 @@ mod tests {
             });
         harness.run_steps(2);
 
-        harness.get_by_label("Status · ✕ Configured");
+        harness.get_by_label("Status ✕ Configured");
         harness.get_by_label("Body observed Configured");
         assert!(harness.query_by_label("Status · Pending").is_none());
     }

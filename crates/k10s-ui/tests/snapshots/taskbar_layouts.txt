@@ -251,8 +251,8 @@ Window
                 Label value="Pod · default / api-0"
                   TextRun value="Pod · default / api-0"
               GenericContainer
-                Label value="Status · —"
-                  TextRun value="Status · —"
+                Label value="Status ● —"
+                  TextRun value="Status ● —"
                 Label value="Ready · —"
                   TextRun value="Ready · —"
                 Label value="Restarts · —"
