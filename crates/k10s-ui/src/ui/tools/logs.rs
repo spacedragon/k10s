@@ -451,8 +451,24 @@ fn is_at_bottom(actual_offset: f32, max_offset: f32) -> bool {
     actual_offset >= max_offset.max(0.0) - BOTTOM_TOLERANCE
 }
 
-fn update_follow_from_scroll(view: &mut LogsTool, actual_offset: f32, max_offset: f32) {
-    view.set_follow(is_at_bottom(actual_offset, max_offset));
+fn normalize_bottom_state(
+    ctx: &egui::Context,
+    id: egui::Id,
+    state: egui::scroll_area::State,
+    max_offset: f32,
+) -> bool {
+    if !is_at_bottom(state.offset.y, max_offset) {
+        return false;
+    }
+    let max_offset = max_offset.max(0.0);
+    if state.offset.y == max_offset {
+        return true;
+    }
+
+    let mut normalized = egui::scroll_area::State::default();
+    normalized.offset = egui::vec2(state.offset.x, max_offset);
+    normalized.store(ctx, id);
+    true
 }
 
 /// Render the connected Logs tab content for one detail view.
@@ -644,7 +660,12 @@ pub(crate) fn show(
             });
         let max_offset =
             (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
-        update_follow_from_scroll(view, scroll_output.state.offset.y, max_offset);
+        view.set_follow(normalize_bottom_state(
+            ui.ctx(),
+            scroll_output.id,
+            scroll_output.state,
+            max_offset,
+        ));
     }
     if open_requested {
         let selected_target = views
@@ -664,7 +685,8 @@ pub(crate) fn show(
 
 #[cfg(test)]
 mod tests {
-    use super::{LogsTool, is_at_bottom, update_follow_from_scroll};
+    use super::{LogsTool, is_at_bottom, normalize_bottom_state};
+    use egui::{Context, Id, RawInput, Rect, ScrollArea, Vec2, pos2, vec2};
     use k10s_protocol::StreamTarget;
 
     fn target() -> StreamTarget {
@@ -701,10 +723,64 @@ mod tests {
     fn scroll_position_disengages_and_restores_follow() {
         let mut logs = LogsTool::new(target(), 10);
 
-        update_follow_from_scroll(&mut logs, 40.0, 100.0);
+        logs.set_follow(is_at_bottom(40.0, 100.0));
         assert!(!logs.follows());
 
-        update_follow_from_scroll(&mut logs, 100.0, 100.0);
+        logs.set_follow(is_at_bottom(100.0, 100.0));
         assert!(logs.follows());
+    }
+
+    fn render_scroll(
+        ctx: &Context,
+        id: Id,
+        rows: usize,
+        stick_to_bottom: bool,
+    ) -> (egui::scroll_area::State, f32, Id) {
+        let mut rendered = None;
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(240.0, 160.0))),
+            ..RawInput::default()
+        };
+        let mut frame_output = ctx.run_ui(input, |ui| {
+            let output = ScrollArea::vertical()
+                .id_salt(id)
+                .max_height(100.0)
+                .stick_to_bottom(stick_to_bottom)
+                .show(ui, |ui| {
+                    for row in 0..rows {
+                        ui.label(format!("log line {row}"));
+                    }
+                });
+            let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+            rendered = Some((output.state, max_offset, output.id));
+        });
+        frame_output.textures_delta.clear();
+        rendered.expect("scroll area rendered")
+    }
+
+    #[test]
+    fn near_bottom_state_sticks_to_new_content_after_normalization() {
+        let ctx = Context::default();
+        let id = Id::new("logs-scroll-regression");
+        let (initial, initial_max, scroll_id) = render_scroll(&ctx, id, 20, false);
+
+        let mut near_bottom = initial;
+        near_bottom.offset = Vec2::new(0.0, initial_max - 1.0);
+        near_bottom.store(&ctx, scroll_id);
+
+        assert!(normalize_bottom_state(
+            &ctx,
+            scroll_id,
+            near_bottom,
+            initial_max
+        ));
+        let (appended, appended_max, _) = render_scroll(&ctx, id, 24, true);
+
+        assert!(
+            appended.offset.y > initial_max,
+            "appended offset {} did not advance beyond initial max {initial_max}; appended max {appended_max}",
+            appended.offset.y
+        );
+        assert_eq!(appended.offset.y, appended_max);
     }
 }
