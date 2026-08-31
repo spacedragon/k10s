@@ -343,10 +343,11 @@ fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
     let Ok(now) = jiff::Timestamp::new(now_seconds, now_since_epoch.subsec_nanos() as i32) else {
         return "—".to_owned();
     };
-    let age = now.duration_since(created_at).as_secs();
-    if age < 0 {
+    let age = now.duration_since(created_at);
+    if age.is_negative() {
         return "—".to_owned();
     }
+    let age = age.as_secs();
     if age >= WEEK {
         return format!("{}d", age / DAY);
     }
@@ -443,6 +444,22 @@ mod tests {
         assert_eq!(
             super::format_age(Some("1970-02-02T00:00:01Z"), fixed_now()),
             "—"
+        );
+    }
+
+    #[test]
+    fn age_formatter_distinguishes_subsecond_future_now_and_past() {
+        assert_eq!(
+            super::format_age(Some("1970-02-02T00:00:00.000000001Z"), fixed_now()),
+            "—"
+        );
+        assert_eq!(
+            super::format_age(Some("1970-02-02T00:00:00Z"), fixed_now()),
+            "<1m"
+        );
+        assert_eq!(
+            super::format_age(Some("1970-02-01T23:59:59.999999999Z"), fixed_now()),
+            "<1m"
         );
     }
 
