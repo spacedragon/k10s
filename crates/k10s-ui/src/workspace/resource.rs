@@ -67,7 +67,8 @@ pub struct ResourceWindowState<I> {
     /// Split to restore after a focused, detail-only view. This is transient
     /// interaction state and is intentionally omitted from snapshots.
     pub prior_split_ratio: Option<f32>,
-    /// Whether the detail pane is visible; hiding keeps the detail state.
+    /// Legacy snapshot compatibility. Workload detail visibility is derived
+    /// from `selection`; Services still support explicit pane visibility.
     pub detail_visible: bool,
     /// Selected type of a custom-resources window, as a canonical
     /// `group/version/kind` key; `None` shows the GVK picker.

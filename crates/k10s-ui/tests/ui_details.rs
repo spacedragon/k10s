@@ -455,6 +455,50 @@ fn tabs_and_actions_are_exact_per_kind() {
 }
 
 #[test]
+fn workload_detail_is_a_selection_driven_bottom_panel() {
+    let mut harness = harness();
+    harness.state_mut().feed.details.insert(
+        identity("Pod", "db-postgres-0"),
+        pod_detail("db-postgres-0"),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Pods),
+    );
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Show details")
+            .is_none()
+    );
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Hide details")
+            .is_none()
+    );
+
+    window
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Details");
+    window
+        .get_by_role_and_label(Role::Button, "Clear selection")
+        .click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .query_by_label("Details")
+            .is_none()
+    );
+}
+
+#[test]
 fn pod_edit_yaml_action_opens_the_read_only_manifest_before_editing() {
     let mut harness = harness();
     harness.state_mut().feed.details.insert(

@@ -179,7 +179,6 @@ Window
                     Label value="Namespace"
                       TextRun value="Namespace"
                 Button label="Clear"
-                Button label="Hide details"
               GenericContainer
                 GenericContainer
                   Label value="[?]"

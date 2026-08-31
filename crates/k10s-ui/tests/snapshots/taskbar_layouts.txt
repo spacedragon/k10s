@@ -187,7 +187,6 @@ Window
                     Label value="Namespace"
                       TextRun value="Namespace"
                 Button label="Clear"
-                Button label="Hide details"
               GenericContainer
                 ProgressIndicator
                 Label value="Loading pods"
@@ -226,7 +225,6 @@ Window
                       ComboBox label="Namespace" value="Namespace catalog not requested"
                     Label value="Namespace"
                       TextRun value="Namespace"
-                Button label="Hide details"
               GenericContainer
                 ProgressIndicator
                 Label value="Loading pods"
