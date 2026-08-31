@@ -8,8 +8,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use k10s_backend::{
-    BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, Gvk, KubernetesAccess,
-    OperationId, Query, QueryResult, Subscribe, SubscriptionHandle,
+    BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, Gvk, KernelQueryResult,
+    KubernetesAccess, OperationId, Query, QueryResult, ResourceProjection, Subscribe,
+    SubscriptionHandle,
 };
 use k10s_protocol::{
     RequestId, ServerFrame, ServerKind, decode_server_frame, validate_bootstrap_response,
@@ -179,6 +180,74 @@ async fn fake_scale_and_delete_execute_through_the_kernel() {
         .await
         .unwrap_err();
     assert_eq!(err, BackendError::Forbidden);
+}
+
+#[tokio::test]
+async fn fake_scale_keeps_deployment_projection_consistent_in_list_and_watch_rows() {
+    let kernel = BackendKernel::new(FakeKubernetes::standard());
+    let mut handle = kernel
+        .subscribe(Subscribe::ResourceWatch {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("deployment watch subscribes");
+    let mut events = handle.take_events().expect("watch carries events");
+    assert!(matches!(
+        events.recv().await.expect("initial snapshot arrives"),
+        BackendEvent::Snapshot(_)
+    ));
+
+    kernel
+        .execute(Command::Scale {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+            name: "api-server".into(),
+            uid: "uid-dev-local-deployment-default-api-server".into(),
+            replicas: 5,
+            idempotency_key: "idem-scale-projection".into(),
+        })
+        .await
+        .expect("scale succeeds");
+
+    let changed = match events.recv().await.expect("scale change arrives") {
+        BackendEvent::Changed(row) => row,
+        other => panic!("expected a changed deployment row, got {other:?}"),
+    };
+    assert_eq!(changed.summary, "2/5 ready");
+    let Some(ResourceProjection::Deployment(changed_projection)) = changed.projection else {
+        panic!("changed deployment carries a Deployment projection")
+    };
+    assert_eq!(changed_projection.desired_replicas, Some(5));
+    assert_eq!(changed_projection.ready_replicas, Some(2));
+    assert_eq!(changed_projection.updated_replicas, Some(2));
+    assert_eq!(changed_projection.available_replicas, Some(2));
+
+    let KernelQueryResult::ResourceList(list) = kernel
+        .query(Query::ResourceList {
+            context: "dev-local".into(),
+            gvk: Gvk::new("apps", "v1", "Deployment"),
+            namespace: Some("default".into()),
+        })
+        .await
+        .expect("deployment list succeeds")
+    else {
+        panic!("kernel returns a resource list")
+    };
+    let payload = list.wire_payload();
+    let row = payload
+        .rows
+        .iter()
+        .find(|row| row.identity.name == "api-server")
+        .expect("scaled deployment remains listed");
+    assert_eq!(row.summary, "2/5 ready");
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) = &row.projection else {
+        panic!("listed deployment carries a Deployment projection")
+    };
+    assert_eq!(projection.desired_replicas, Some(5));
+    assert_eq!(projection.ready_replicas, Some(2));
 }
 
 #[tokio::test]

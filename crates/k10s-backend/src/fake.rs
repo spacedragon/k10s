@@ -925,9 +925,16 @@ impl FakeKubernetes {
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         // The desired count becomes observable backend state wherever the
-        // summary carries one (e.g. `20/20 ready` → `3/20 ready`).
+        // summary carries one (e.g. `20/20 ready` → `20/3 ready`).
         if let Some(next) = scaled_summary(&state.records[index].summary, replicas) {
             state.records[index].summary = next;
+        }
+        if let Some(ResourceProjection::Deployment(projection)) =
+            &mut state.records[index].projection
+        {
+            // Scaling changes the desired count. Readiness and the other
+            // status-derived counts remain the last observed fake state.
+            projection.desired_replicas = Some(replicas);
         }
         let changed = state.records[index].clone();
         let reference = changed.reference.clone();
@@ -2525,11 +2532,13 @@ fn build_prod_records() -> Vec<ResourceRecord> {
     })]
 }
 
-/// Replace the desired count of a `N/M ...` style status summary.
+/// Replace the desired count of a `ready/desired ...` status summary.
 fn scaled_summary(summary: &str, replicas: u32) -> Option<String> {
-    let (desired, rest) = summary.split_once('/')?;
+    let (ready, desired_and_suffix) = summary.split_once('/')?;
+    ready.parse::<u32>().ok()?;
+    let (desired, suffix) = desired_and_suffix.split_once(' ')?;
     desired.parse::<u32>().ok()?;
-    Some(format!("{replicas}/{rest}"))
+    Some(format!("{ready}/{replicas} {suffix}"))
 }
 
 /// Format unix seconds as an RFC 3339 UTC timestamp without external crates.
