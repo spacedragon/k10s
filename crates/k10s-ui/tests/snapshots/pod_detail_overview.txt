@@ -217,50 +217,53 @@ Window
               Unknown
               GenericContainer
                 Button label="Clear selection"
+                Label value="Pod · default / db-postgres-0"
+                  TextRun value="Pod · default / db-postgres-0"
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Label value="Details"
-                        TextRun value="Details"
-                      Label value="POD"
-                        TextRun value="POD"
-                      Label value="db-postgres-0"
-                        TextRun value="db-postgres-0"
-                    GenericContainer
-                      Label value="Kind Pod"
-                        TextRun value="Kind Pod"
-                      Label value="Namespace default"
-                        TextRun value="Namespace default"
-                      Label value="Context dev-local"
-                        TextRun value="Context dev-local"
-                    GenericContainer
-                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                      Label value="Created 2026-08-21T00:50:10Z"
-                        TextRun value="Created 2026-08-21T00:50:10Z"
-                      Label value="Fresh · live"
-                        TextRun value="Fresh · live"
+                  Label value="Details"
+                    TextRun value="Details"
+                  Label value="Kind Pod"
+                    TextRun value="Kind Pod"
+                  Label value="Namespace default"
+                    TextRun value="Namespace default"
+                  Label value="Context dev-local"
+                    TextRun value="Context dev-local"
+                  Label value="UID uid-dev-local-pod-default-db-postgres-0"
+                    TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
+                GenericContainer
+                  Label value="Status · Running"
+                    TextRun value="Status · Running"
+                  Label value="Age · 2026-08-21T00:50:10Z"
+                    TextRun value="Age · 2026-08-21T00:50:10Z"
+                  Label value="Freshness · loading"
+                    TextRun value="Freshness · loading"
+                  Label value="Created 2026-08-21T00:50:10Z"
+                    TextRun value="Created 2026-08-21T00:50:10Z"
+                  Button label="Copy name"
+                  Button label="Copy namespace"
+                  Button label="Copy UID"
                   Button label="Pop out ↗"
                   Button label="Maximize"
-                GenericContainer
                   Button label="Tab Overview"
                   Button label="Tab Events"
                   Button label="Tab YAML"
                   Button label="Tab Logs"
                   Button label="Tab Shell"
                 GenericContainer
-                  Button label="Delete resource"
-                  Button label="View logs"
-                  Button label="Exec shell"
-                  Button label="Edit YAML"
-                GenericContainer
                   GenericContainer
+                    Label value="Structured details unavailable"
+                      TextRun value="Structured details unavailable"
+                    GenericContainer
+                      Button label="Delete resource"
+                      Button label="View logs"
+                      Button label="Exec shell"
+                      Button label="Edit YAML"
                     Label value="Overview"
                       TextRun value="Overview"
                     GenericContainer
                       GenericContainer
                         Label value="Status Running"
-                          TextRun value="Status Running"
+                ScrollBar
                 Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
                   TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
     Splitter

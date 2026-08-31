@@ -680,22 +680,30 @@ pub(super) fn show<I>(
                 if ui.button("Clear selection").clicked() {
                     queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
-                super::detail::show(
-                    ui,
-                    window_id,
-                    detail,
-                    gone,
-                    true,
-                    state.prior_split_ratio.is_some(),
-                    yaml,
-                    streams,
-                    dialogs,
-                    feed,
-                    None,
-                    effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
-                    resource_actions,
-                    queued,
-                );
+                if let Some(presentation) =
+                    super::detail::presentation::DetailPresentationInput::from_feed(
+                        detail,
+                        feed,
+                        gone,
+                        effective_freshness,
+                        effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
+                    )
+                {
+                    super::detail::show(
+                        ui,
+                        window_id,
+                        detail,
+                        &presentation,
+                        true,
+                        state.prior_split_ratio.is_some(),
+                        yaml,
+                        streams,
+                        dialogs,
+                        None,
+                        resource_actions,
+                        queued,
+                    );
+                }
             }
         },
     );

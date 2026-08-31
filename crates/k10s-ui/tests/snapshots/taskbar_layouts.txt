@@ -247,37 +247,42 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              Label value="Pod · default / api-0"
+                TextRun value="Pod · default / api-0"
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Label value="Details"
-                      TextRun value="Details"
-                    Label value="POD"
-                      TextRun value="POD"
-                    Label value="api-0"
-                      TextRun value="api-0"
-                  GenericContainer
-                    Label value="Kind Pod"
-                      TextRun value="Kind Pod"
-                    Label value="Namespace default"
-                      TextRun value="Namespace default"
-                    Label value="Context dev-local"
-                      TextRun value="Context dev-local"
-                  GenericContainer
-                    Label value="UID uid-dev-local-pod-default-api-0"
-                      TextRun value="UID uid-dev-local-pod-default-api-0"
-                    Label value="Refreshing…"
-                      TextRun value="Refreshing…"
+                Label value="Details"
+                  TextRun value="Details"
+                Label value="Kind Pod"
+                  TextRun value="Kind Pod"
+                Label value="Namespace default"
+                  TextRun value="Namespace default"
+                Label value="Context dev-local"
+                  TextRun value="Context dev-local"
+                Label value="UID uid-dev-local-pod-default-api-0"
+                  TextRun value="UID uid-dev-local-pod-default-api-0"
               GenericContainer
+                Label value="Status · —"
+                  TextRun value="Status · —"
+                Label value="Age · —"
+                  TextRun value="Age · —"
+                Label value="Freshness · loading"
+                  TextRun value="Freshness · loading"
+                Button label="Copy name"
+                Button label="Copy namespace"
+                Button label="Copy UID"
                 Button label="Tab Overview"
                 Button label="Tab Events"
                 Button label="Tab YAML"
                 Button label="Tab Logs"
                 Button label="Tab Shell"
               GenericContainer
-                ProgressIndicator
-                Label value="Loading details"
-                  TextRun value="Loading details"
+                GenericContainer
+                  GenericContainer
+                    ProgressIndicator
+                    Label value="Loading details"
+                      TextRun value="Loading details"
+              Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
     Splitter
     Splitter
     Splitter

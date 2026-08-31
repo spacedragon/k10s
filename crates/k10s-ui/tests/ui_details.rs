@@ -122,6 +122,26 @@ fn unavailable_events_are_explicitly_safe() {
 }
 
 #[test]
+fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
+    let mut harness = harness();
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Pod · default / db-postgres-0");
+    window.get_by_role_and_label(Role::Button, "Copy name");
+    window.get_by_role_and_label(Role::Button, "Copy namespace");
+    window.get_by_role_and_label(Role::Button, "Copy UID");
+    window.get_by_role_and_label(Role::Button, "Pop out ↗");
+    window.get_by_role_and_label(Role::Button, "Maximize");
+    window.get_by_label("Loading details");
+}
+
+#[test]
 fn crashloop_logs_default_to_previous_with_complete_toolbar() {
     let mut harness = harness();
     let pod = identity("Pod", "web-frontend-7d9f8-00001");

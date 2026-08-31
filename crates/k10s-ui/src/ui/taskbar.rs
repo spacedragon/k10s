@@ -22,7 +22,7 @@ fn identity<I: RowIdentity>(window: &Window<I>) -> String {
         && let Some(id) = detail.identity.as_row_identity()
     {
         return format!(
-            "{} · {}/{}",
+            "{} · {} / {}",
             id.gvk.kind,
             id.namespace.as_deref().unwrap_or("cluster"),
             id.name
@@ -168,14 +168,14 @@ mod tests {
         };
         assert_eq!(
             label(&window, true, ConnectionState::Failed),
-            "Pod · payments/api-0 · ● Active · ↻ Stale data"
+            "Pod · payments / api-0 · ● Active · ↻ Stale data"
         );
         if let WindowContent::Detail(detail) = &mut window.content {
             detail.yaml.dirty = true;
         }
         assert_eq!(
             label(&window, true, ConnectionState::Connecting),
-            "Pod · payments/api-0 · ● Active · ◆ Unsaved YAML · ↻ Stale data"
+            "Pod · payments / api-0 · ● Active · ◆ Unsaved YAML · ↻ Stale data"
         );
     }
 }

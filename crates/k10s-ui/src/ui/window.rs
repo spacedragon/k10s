@@ -254,20 +254,23 @@ where
                     // Dedicated windows render only their pinned
                     // identity; they never read the integrated
                     // selection of any list window.
-                    if let Some(detail) = detail_state.as_ref() {
+                    if let Some(detail) = detail_state.as_ref()
+                        && let Some(presentation) =
+                            super::detail::presentation::DetailPresentationInput::from_feed(
+                                detail, feed, false, None, true,
+                            )
+                    {
                         super::detail::show(
                             ui,
                             state.id,
                             detail,
-                            false,
+                            &presentation,
                             false,
                             false,
                             yaml,
                             streams,
                             dialogs,
-                            feed,
                             None,
-                            true,
                             resource_actions,
                             queued,
                         );
