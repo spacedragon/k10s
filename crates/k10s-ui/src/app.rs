@@ -2097,9 +2097,8 @@ impl K10sApp {
                     aggregate_freshness(
                         candidates
                             .into_iter()
-                            .filter_map(|(revision, lifecycle, freshness)| {
-                                (revision == newest && lifecycle == DetailLifecycle::Present)
-                                    .then_some(freshness)
+                            .filter_map(|(_, lifecycle, freshness)| {
+                                (lifecycle == DetailLifecycle::Present).then_some(freshness)
                             })
                             .collect(),
                     )
@@ -3777,15 +3776,18 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
 
-    use egui_kittest::{Harness, kittest::Queryable as _};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT as _, Queryable as _},
+    };
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
         BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
         ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
-        ResourceChanged, ResourceGone, ResourceIdentity, ResourceListRow, ResourceSnapshotPage,
-        ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin,
-        SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
-        ValidationTicket, Welcome, YamlOutcome, buffer_hash,
+        ResourceCapabilities, ResourceChanged, ResourceDetailResponse, ResourceGone,
+        ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus, Retryability,
+        ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+        SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
     use super::{
@@ -5382,6 +5384,55 @@ mod tests {
             .map(|authority| authority.lifecycle)
     }
 
+    fn freshness_arbitration_app(
+        older_source_freshness: WindowFreshness,
+    ) -> (K10sApp, WindowId, ResourceIdentity, ResourceIdentity) {
+        let (mut app, _) = ready_app();
+        let (older_window, older_source, _, newer_source) =
+            overlapping_deployment_sources(&mut app);
+        let target = deployment_identity("web-frontend");
+        let unrelated = deployment_identity("unrelated-api");
+        complete_resource_snapshot(
+            &mut app,
+            &older_source,
+            10,
+            vec![deployment_row(target.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &newer_source,
+            20,
+            vec![
+                deployment_row(target.clone(), 20),
+                deployment_row(unrelated.clone(), 20),
+            ],
+            true,
+        );
+        app.window_freshness_overrides
+            .insert(older_window, older_source_freshness);
+        (app, older_window, target, unrelated)
+    }
+
+    fn deployment_detail_fixture(identity: &ResourceIdentity) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(20),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_scale: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: "apiVersion: apps/v1\nkind: Deployment\n".into(),
+            projection: None,
+        }
+    }
+
     fn deployment_identity(name: &str) -> ResourceIdentity {
         ResourceIdentity {
             context: "dev-local".into(),
@@ -5481,6 +5532,120 @@ mod tests {
             !app.mutation_authority_allows(&identity),
             "final application dispatch must consume the ordered aggregate"
         );
+    }
+
+    #[test]
+    fn older_stale_source_disables_detail_frame_and_dialog_for_newer_live_identity() {
+        fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
+            app.render_ui(ui);
+        }
+
+        let (mut app, _, target, _) = freshness_arbitration_app(WindowFreshness::StaleRetrying {
+            last_sync_age: "30s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 1,
+        });
+        let detail = deployment_detail_fixture(&target);
+        app.details.insert(target.clone(), detail.clone());
+        app.primary_details
+            .insert(target.clone(), PrimaryDetailState::Loaded(detail));
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        let detail_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| {
+                matches!(
+                    &window.content,
+                    WindowContent::Detail(detail) if detail.identity == target
+                )
+            })
+            .map(|window| window.id)
+            .unwrap();
+        app.shell
+            .dialogs_mut()
+            .open_scale(detail_window, target, Some(20));
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_280.0, 800.0))
+            .build_ui_state(render, app);
+        for _ in 0..3 {
+            harness.step();
+        }
+
+        assert!(
+            harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::Window,
+                    "Deployment · default / web-frontend",
+                )
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Scale…")
+                .accesskit_node()
+                .is_disabled(),
+            "every contributing source must gate frame mutations"
+        );
+        assert!(
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::Window, "Scale workload")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Apply scale")
+                .accesskit_node()
+                .is_disabled(),
+            "every contributing source must gate the active dialog"
+        );
+    }
+
+    #[test]
+    fn older_forbidden_source_blocks_final_dispatch_for_newer_live_identity() {
+        let (mut app, window, target, _) = freshness_arbitration_app(WindowFreshness::Forbidden {
+            user: "alice@example.com".into(),
+            verb: "list".into(),
+            resource: "deployments".into(),
+            scope: "--all-namespaces".into(),
+        });
+        app.shell.dialogs_mut().open_scale(window, target, Some(20));
+        app.shell.dialogs_mut().submit_active(window);
+
+        app.process_dialog_actions().unwrap();
+
+        assert!(
+            app.pending_mutations.is_empty(),
+            "final dispatch must fail closed when any contributing source is forbidden"
+        );
+    }
+
+    #[test]
+    fn retiring_stale_source_restores_live_authority_without_affecting_unrelated_identity() {
+        let (mut app, stale_window, target, unrelated) =
+            freshness_arbitration_app(WindowFreshness::StaleRetrying {
+                last_sync_age: "30s ago".into(),
+                retry_in: "3s".into(),
+                attempt: 1,
+            });
+        assert!(!app.mutation_authority_allows(&target));
+        assert!(
+            app.mutation_authority_allows(&unrelated),
+            "a stale source that does not contain the exact identity is irrelevant"
+        );
+
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(stale_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        app.reconcile_selected_resource_streams();
+
+        assert!(
+            app.mutation_authority_allows(&target),
+            "retiring the stale contribution leaves the live source authoritative"
+        );
+        assert!(app.mutation_authority_allows(&unrelated));
     }
 
     #[test]
