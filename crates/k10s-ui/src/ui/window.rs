@@ -245,16 +245,10 @@ where
                     // identity; they never read the integrated
                     // selection of any list window.
                     if let Some(detail) = detail_state.as_ref() {
-                        let identity = detail.identity.as_row_identity();
-                        let primary_state =
-                            identity.and_then(|identity| feed.primary_details.get(identity));
-                        let view = identity.and_then(|identity| feed.details.get(identity));
                         super::detail::show(
                             ui,
                             state.id,
                             detail,
-                            primary_state,
-                            view,
                             false,
                             false,
                             false,
