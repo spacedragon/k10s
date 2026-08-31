@@ -111,9 +111,32 @@ async fn collect_once(client: &kube::Client, context: &str) -> MetricsSnapshot {
         )
         .await
         {
+            let needs_inventory = pod_cut.iter().any(|item| {
+                item.metadata
+                    .uid
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+            });
+            let pod_identities = if needs_inventory {
+                core_pod_identities(client).await
+            } else {
+                Some(BTreeMap::new())
+            };
             for item in pod_cut {
-                if let Some(((namespace, name), sample)) = normalize_pod_metrics(&item) {
-                    pod_usage.insert(format!("{namespace}/{name}"), sample);
+                if let Some(((namespace, name), mut sample)) = normalize_pod_metrics(&item) {
+                    let key = format!("{namespace}/{name}");
+                    if sample.pod_uid.is_none() {
+                        sample.pod_uid = pod_identities
+                            .as_ref()
+                            .and_then(|identities| identities.get(&key))
+                            .and_then(|identity| {
+                                identity.binds(&sample).then(|| identity.uid.clone())
+                            });
+                    }
+                    if sample.pod_uid.is_some() {
+                        pod_usage.insert(key, sample);
+                    }
                 }
                 absorb_time_meta(&item, &mut newest, &mut window);
             }
@@ -160,6 +183,63 @@ async fn list_metrics(client: &kube::Client, gvk: Gvk, plural: &str) -> RawCut {
 struct CoreNodes {
     node_names: Vec<String>,
     pod_capacity_total: Option<u64>,
+}
+
+/// Exact identity and lifetime boundary of one core Pod observed in this
+/// collection cycle.
+struct CorePodIdentity {
+    uid: String,
+    created_at_unix: u64,
+}
+
+impl CorePodIdentity {
+    /// A UID-less metrics item can belong to this Pod only when its sample was
+    /// taken after this exact Pod identity came into existence.
+    fn binds(&self, sample: &ResourceUsageSample) -> bool {
+        sample
+            .timestamp
+            .as_deref()
+            .and_then(parse_rfc3339_unix)
+            .is_some_and(|sampled_at| sampled_at >= self.created_at_unix)
+    }
+}
+
+/// Read the exact core Pod inventory used to bind UID-less PodMetrics items.
+/// Any unreadable or ambiguous inventory fails closed for those items.
+async fn core_pod_identities(client: &kube::Client) -> Option<BTreeMap<String, CorePodIdentity>> {
+    let api = dynamic_api(
+        client.clone(),
+        Gvk::core("v1", "Pod"),
+        "pods".to_owned(),
+        true,
+        None,
+    );
+    let listed = api.list(&ListParams::default()).await.ok()?;
+    let mut identities = BTreeMap::new();
+    for object in listed.items {
+        let namespace = object.metadata.namespace.clone()?;
+        let name = object.metadata.name.clone()?;
+        let uid = object.metadata.uid.clone().filter(|uid| !uid.is_empty())?;
+        let value = serde_json::to_value(&object).ok()?;
+        let created_at_unix = value
+            .get("metadata")?
+            .get("creationTimestamp")?
+            .as_str()
+            .and_then(parse_rfc3339_unix)?;
+        if identities
+            .insert(
+                format!("{namespace}/{name}"),
+                CorePodIdentity {
+                    uid,
+                    created_at_unix,
+                },
+            )
+            .is_some()
+        {
+            return None;
+        }
+    }
+    Some(identities)
 }
 
 /// Read the core Node list. Capacity derives exclusively from
@@ -256,6 +336,7 @@ fn normalize_node_metrics(item: &DynamicObject) -> Option<(String, ResourceUsage
     Some((
         name,
         ResourceUsageSample {
+            pod_uid: None,
             cpu_millicores: quantity_millicores(usage.get("cpu").and_then(as_text)),
             memory_bytes: quantity_bytes(usage.get("memory").and_then(as_text)),
             timestamp,
@@ -291,6 +372,7 @@ fn normalize_pod_metrics(item: &DynamicObject) -> Option<((String, String), Reso
     Some((
         (namespace, name),
         ResourceUsageSample {
+            pod_uid: item.metadata.uid.clone().filter(|uid| !uid.is_empty()),
             cpu_millicores: sum_complete(containers.iter().map(|container| {
                 quantity_millicores(
                     container
@@ -373,7 +455,7 @@ pub(crate) fn sample_for_reference(
     let Some(snapshot) = snapshot else {
         return default();
     };
-    if snapshot.state != MetricsApiState::Ready {
+    if snapshot.context != reference.context || snapshot.state != MetricsApiState::Ready {
         return default();
     }
     let namespace = reference.namespace.as_deref().unwrap_or_default();
@@ -383,6 +465,9 @@ pub(crate) fn sample_for_reference(
     else {
         return default();
     };
+    if usage.pod_uid.as_deref() != Some(reference.uid.as_str()) {
+        return default();
+    }
     // An unparseable per-sample timestamp has nothing honest to display.
     let Some(sampled) = usage.timestamp.as_deref().and_then(parse_rfc3339_unix) else {
         return default();
@@ -578,6 +663,103 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pod_reference(namespace: &str, name: &str, uid: &str) -> ResourceRef {
+        ResourceRef {
+            context: "test".into(),
+            gvk: Gvk::core("v1", "Pod"),
+            namespace: Some(namespace.into()),
+            name: name.into(),
+            uid: uid.into(),
+        }
+    }
+
+    fn pod_snapshot(
+        namespace: &str,
+        name: &str,
+        uid: Option<&str>,
+        timestamp: &str,
+    ) -> MetricsSnapshot {
+        MetricsSnapshot {
+            context: "test".into(),
+            collected_at: timestamp.into(),
+            source_updated_at: Some(timestamp.into()),
+            window_seconds: Some(30),
+            state: MetricsApiState::Ready,
+            node_usage: BTreeMap::new(),
+            pod_usage: [(
+                format!("{namespace}/{name}"),
+                ResourceUsageSample {
+                    pod_uid: uid.map(str::to_owned),
+                    cpu_millicores: Some(125),
+                    memory_bytes: Some(2_097_152),
+                    timestamp: Some(timestamp.into()),
+                    window_seconds: Some(30),
+                    containers: vec![ContainerUsageSample {
+                        name: "exact-container".into(),
+                        cpu_millicores: Some(125),
+                        memory_bytes: Some(2_097_152),
+                    }],
+                },
+            )]
+            .into_iter()
+            .collect(),
+            node_names: Vec::new(),
+            pod_capacity_total: None,
+        }
+    }
+
+    #[test]
+    fn resource_sample_requires_exact_namespace_name_and_uid() {
+        let timestamp = now_rfc3339();
+        let snapshot = pod_snapshot("default", "web", Some("uid-web"), &timestamp);
+
+        let exact =
+            sample_for_reference(Some(&snapshot), &pod_reference("default", "web", "uid-web"));
+        assert_eq!(exact.cpu_millicores, Some(125));
+        assert_eq!(exact.containers[0].name, "exact-container");
+
+        let mut foreign_context = pod_reference("default", "web", "uid-web");
+        foreign_context.context = "other-context".into();
+        for foreign in [
+            foreign_context,
+            pod_reference("other", "web", "uid-web"),
+            pod_reference("default", "other", "uid-web"),
+            pod_reference("default", "web", "uid-recreated"),
+        ] {
+            let sample = sample_for_reference(Some(&snapshot), &foreign);
+            assert_eq!(sample.cpu_millicores, None, "foreign identity {foreign:?}");
+            assert!(sample.containers.is_empty());
+        }
+    }
+
+    #[test]
+    fn resource_sample_without_bound_uid_fails_closed() {
+        let timestamp = now_rfc3339();
+        let snapshot = pod_snapshot("default", "web", None, &timestamp);
+
+        let sample =
+            sample_for_reference(Some(&snapshot), &pod_reference("default", "web", "uid-web"));
+
+        assert_eq!(sample.cpu_millicores, None);
+        assert_eq!(sample.memory_bytes, None);
+        assert_eq!(sample.collected_at, None);
+        assert!(sample.containers.is_empty());
+    }
+
+    #[test]
+    fn exact_stale_resource_sample_keeps_only_its_timestamp() {
+        const ANCIENT: &str = "2020-01-01T00:00:00Z";
+        let snapshot = pod_snapshot("default", "web", Some("uid-web"), ANCIENT);
+
+        let sample =
+            sample_for_reference(Some(&snapshot), &pod_reference("default", "web", "uid-web"));
+
+        assert_eq!(sample.cpu_millicores, None);
+        assert_eq!(sample.memory_bytes, None);
+        assert_eq!(sample.collected_at.as_deref(), Some(ANCIENT));
+        assert!(sample.containers.is_empty());
+    }
 
     #[test]
     fn cpu_quantities_parse_into_millicores() {

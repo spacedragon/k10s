@@ -87,6 +87,9 @@ pub enum MetricsApiState {
 /// One usage sample as reported; absent fields stay absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceUsageSample {
+    /// Exact Pod UID this sample was observed for. Node samples leave this
+    /// empty; Pod samples without an authoritative identity are withheld.
+    pub pod_uid: Option<String>,
     /// CPU usage in millicores, absent when not reported.
     pub cpu_millicores: Option<u64>,
     /// Working-set memory in bytes, absent when not reported.

@@ -658,9 +658,9 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
         200,
         &format!(
             r#"{{"kind":"PodMetricsList","apiVersion":"metrics.k8s.io/v1beta1","metadata":{{}},"items":[
-      {{"metadata":{{"name":"web","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+      {{"metadata":{{"name":"web","namespace":"default","uid":"uid-kube-web"}},"timestamp":"{sampled_at}","window":"30s",
        "containers":[{{"name":"app","usage":{{"cpu":"220m","memory":"134217728Ki"}}}}]}},
-      {{"metadata":{{"name":"half","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+      {{"metadata":{{"name":"half","namespace":"default","uid":"uid-kube-half"}},"timestamp":"{sampled_at}","window":"30s",
        "containers":[{{"name":"app","usage":{{"cpu":"90m"}}}}]}}
     ]}}"#
         ),
