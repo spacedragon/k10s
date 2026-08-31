@@ -73,10 +73,9 @@ pub(super) fn show(
         health_panel(ui, response);
     }
     ui.add_space(8.0);
-    // Keep the wrapping two-row footer in the finite window content region.
-    let footer_height = 2.0 * ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let footer_height = metrics_footer_height(ui, response);
     let fixed_height = ui.cursor().top() - content_top;
-    let panel_height = (content_height - fixed_height - 8.0 - footer_height).max(96.0 + 48.0);
+    let panel_height = (content_height - fixed_height - 8.0 - footer_height).max(96.0);
     attention_panel(ui, response, panel_height);
     ui.add_space(8.0);
     metrics_footer(ui, response);
@@ -160,17 +159,20 @@ fn health_panel(ui: &mut egui::Ui, response: &InfrastructureResponse) {
 }
 
 fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse, panel_height: f32) {
-    panel().show(ui, |ui| {
+    let frame = panel();
+    let frame_height = frame.total_margin().sum().y;
+    frame.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        // The frame consumes 18 points and the heading/spacing another 22.
-        // Reserve the horizontal scrollbar inside the framed allocation too.
-        let scrollbar_height = ui.style().spacing.scroll.bar_width
-            + ui.style().spacing.scroll.bar_inner_margin
-            + ui.style().spacing.scroll.bar_outer_margin;
-        let inner_scroll_height = (panel_height - 18.0 - 22.0 - scrollbar_height).max(96.0);
-        ui.set_height(panel_height - 18.0);
+        ui.set_height(panel_height - frame_height);
+        let chrome_top = ui.cursor().top();
         ui.strong("Needs attention");
         ui.add_space(4.0);
+        let heading_height = ui.cursor().top() - chrome_top;
+        let inner_scroll_height = (panel_height
+            - frame_height
+            - heading_height
+            - ui.style().spacing.scroll.allocated_width())
+        .max(96.0);
         if response.attention.is_empty() {
             ui.label("No unhealthy or pending resources");
         } else {
@@ -199,8 +201,8 @@ fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse, panel_h
     });
 }
 
-fn metrics_footer(ui: &mut egui::Ui, response: &InfrastructureResponse) {
-    let metrics_label = match response.metrics.condition {
+fn metrics_label(response: &InfrastructureResponse) -> String {
+    match response.metrics.condition {
         MetricsCondition::Forbidden => format!(
             "Metrics: {} · RBAC forbidden",
             response.metrics.availability
@@ -209,7 +211,37 @@ fn metrics_footer(ui: &mut egui::Ui, response: &InfrastructureResponse) {
         MetricsCondition::Fresh | MetricsCondition::Partial => {
             format!("Metrics: {}", response.metrics.availability)
         }
-    };
+    }
+}
+
+fn metrics_footer_height(ui: &egui::Ui, response: &InfrastructureResponse) -> f32 {
+    let available_width = ui.available_width();
+    let first_row = egui::WidgetText::from(metrics_label(response)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        available_width,
+        egui::TextStyle::Body,
+    );
+    let detail_row = egui::WidgetText::from(
+        RichText::new(format!(
+            "{}    |    Source: {}    |    Source updated: {}",
+            response.metrics.detail,
+            response.metrics.source,
+            response.metrics.source_updated_at.as_deref().unwrap_or("—")
+        ))
+        .weak(),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        available_width,
+        egui::TextStyle::Body,
+    );
+    first_row.size().y + 4.0 * ui.spacing().item_spacing.y + detail_row.size().y
+}
+
+fn metrics_footer(ui: &mut egui::Ui, response: &InfrastructureResponse) {
+    let metrics_label = metrics_label(response);
     ui.label(metrics_label)
         .on_hover_text(&response.metrics.detail);
     ui.horizontal_wrapped(|ui| {

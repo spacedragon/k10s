@@ -284,6 +284,8 @@ fn overview_attention_rows_scroll_inside_the_window() {
         .shell
         .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
     harness.state_mut().response = large_attention_response();
+    harness.state_mut().response.metrics.detail =
+        "Wrapping metrics detail remains inside Overview. ".repeat(6);
     harness.run_steps(4);
 
     let (overview_before, summary_before, health_before) = {
@@ -300,6 +302,11 @@ fn overview_attention_rows_scroll_inside_the_window() {
         assert!(
             !overview_before.intersects(late.rect()),
             "the late attention row should initially be clipped"
+        );
+        let metrics_detail = overview.get_by_label(&harness.state().response.metrics.detail);
+        assert!(
+            overview_before.contains_rect(metrics_detail.rect()),
+            "the wrapping metrics footer should remain inside Overview"
         );
         (
             overview_before,
