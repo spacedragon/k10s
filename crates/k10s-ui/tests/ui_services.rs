@@ -4,14 +4,20 @@
 //! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
     TargetPort, TransportProtocol,
 };
 use k10s_ui::{
-    ui::{ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell},
+    ui::{
+        ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
+        WindowFreshness,
+    },
     workspace::{WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
@@ -301,6 +307,44 @@ fn network_launcher_group_offers_the_services_singleton() {
 }
 
 #[test]
+fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actions() {
+    let mut harness = harness();
+    let service = harness.state().feed.services.as_ref().unwrap()[0]
+        .identity
+        .clone();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let integrated = harness.get_by_role_and_label(Role::Window, "Services");
+    integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
+    integrated.get_by_role_and_label(Role::Button, "Maximize");
+    integrated.get_by_label(
+        "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(service));
+    harness.run_steps(4);
+    let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none()
+    );
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none()
+    );
+}
+
+#[test]
 fn list_columns_render_strictly_from_projections() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
@@ -383,7 +427,38 @@ fn stale_connection_shows_the_banner() {
 
     harness
         .get_by_role_and_label(Role::Window, "Services")
-        .get_by_label("Connection stale · showing last known rows");
+        .get_by_label("[~] Reconnecting · last sync unknown · retry in pending · attempt 1");
+}
+
+#[test]
+fn stale_service_window_disables_its_yaml_launcher() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    harness.state_mut().feed.window_freshness.insert(
+        window,
+        WindowFreshness::Failed {
+            message: "watch ended".into(),
+        },
+    );
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Services")
+            .get_by_role_and_label(Role::Button, "Edit YAML")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 
 #[test]
@@ -590,6 +665,10 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
 #[test]
 fn gone_selection_renders_no_longer_exists() {
     let mut harness = harness();
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
     open_via_launcher(&mut harness);
     harness
         .get_by_role_and_label(Role::Window, "Services")
@@ -600,9 +679,31 @@ fn gone_selection_renders_no_longer_exists() {
     // The authoritative watch drops the pinned row.
     harness.state_mut().feed.services = Some(Vec::new());
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Services")
-        .get_by_label("This resource no longer exists");
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("This resource no longer exists");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none(),
+        "a cached gone detail cannot be popped into a stale dedicated window"
+    );
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none()
+    );
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .all(|window| window.kind != k10s_ui::workspace::WindowKind::Detail),
+        "modified Enter cannot pop a cached gone service"
+    );
 }
 
 #[test]

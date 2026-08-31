@@ -150,14 +150,28 @@ where
                         if namespaced {
                             ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                         }
-                        let name_button = if is_selected(row) {
-                            ui.button(egui::RichText::new(row.identity.name.clone()).strong())
+                        let selected = is_selected(row);
+                        let name = if selected {
+                            format!("▶ {}", row.identity.name)
                         } else {
-                            ui.button(row.identity.name.clone())
+                            format!("  {}", row.identity.name)
                         };
+                        let name_button = ui.add(
+                            egui::Button::new(if selected {
+                                egui::RichText::new(name).strong()
+                            } else {
+                                egui::RichText::new(name)
+                            })
+                            .selected(selected)
+                            .stroke(if selected {
+                                egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
+                            } else {
+                                egui::Stroke::NONE
+                            }),
+                        );
                         let label = row.identity.name.clone();
                         name_button.widget_info(move || {
-                            WidgetInfo::labeled(WidgetType::Button, true, label.clone())
+                            WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
                         });
                         if name_button.clicked() {
                             actions.selected = Some(identity_of(row));

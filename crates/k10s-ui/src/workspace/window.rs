@@ -16,6 +16,8 @@ pub struct WindowId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
+    Events,
+    Namespaces,
     Deployments,
     Pods,
     StatefulSets,
@@ -23,9 +25,45 @@ pub enum WorkloadKind {
     Jobs,
     CronJobs,
     CustomResources,
+    Ingresses,
+    Endpoints,
+    NetworkPolicies,
+    ConfigMaps,
+    Secrets,
+    PersistentVolumeClaims,
+    PersistentVolumes,
+    StorageClasses,
+    ServiceAccounts,
+    Roles,
+    RoleBindings,
 }
 
 impl WorkloadKind {
+    /// Every resource-backed launcher entry, including cluster, workload,
+    /// network, config, storage, and access resources.
+    pub const TAXONOMY: [WorkloadKind; 20] = [
+        WorkloadKind::Events,
+        WorkloadKind::Namespaces,
+        WorkloadKind::Deployments,
+        WorkloadKind::Pods,
+        WorkloadKind::StatefulSets,
+        WorkloadKind::DaemonSets,
+        WorkloadKind::Jobs,
+        WorkloadKind::CronJobs,
+        WorkloadKind::CustomResources,
+        WorkloadKind::Ingresses,
+        WorkloadKind::Endpoints,
+        WorkloadKind::NetworkPolicies,
+        WorkloadKind::ConfigMaps,
+        WorkloadKind::Secrets,
+        WorkloadKind::PersistentVolumeClaims,
+        WorkloadKind::PersistentVolumes,
+        WorkloadKind::StorageClasses,
+        WorkloadKind::ServiceAccounts,
+        WorkloadKind::Roles,
+        WorkloadKind::RoleBindings,
+    ];
+
     pub const ALL: [WorkloadKind; 7] = [
         WorkloadKind::Deployments,
         WorkloadKind::Pods,
@@ -36,9 +74,28 @@ impl WorkloadKind {
         WorkloadKind::CustomResources,
     ];
 
+    pub const NETWORK: [WorkloadKind; 3] = [
+        WorkloadKind::Ingresses,
+        WorkloadKind::Endpoints,
+        WorkloadKind::NetworkPolicies,
+    ];
+    pub const CONFIG: [WorkloadKind; 2] = [WorkloadKind::ConfigMaps, WorkloadKind::Secrets];
+    pub const STORAGE: [WorkloadKind; 3] = [
+        WorkloadKind::PersistentVolumeClaims,
+        WorkloadKind::PersistentVolumes,
+        WorkloadKind::StorageClasses,
+    ];
+    pub const ACCESS: [WorkloadKind; 3] = [
+        WorkloadKind::ServiceAccounts,
+        WorkloadKind::Roles,
+        WorkloadKind::RoleBindings,
+    ];
+
     /// Default window title for this kind.
     pub fn title(self) -> &'static str {
         match self {
+            WorkloadKind::Events => "Events",
+            WorkloadKind::Namespaces => "Namespaces",
             WorkloadKind::Deployments => "Deployments",
             WorkloadKind::Pods => "Pods",
             WorkloadKind::StatefulSets => "StatefulSets",
@@ -46,7 +103,27 @@ impl WorkloadKind {
             WorkloadKind::Jobs => "Jobs",
             WorkloadKind::CronJobs => "CronJobs",
             WorkloadKind::CustomResources => "Custom Resources",
+            WorkloadKind::Ingresses => "Ingresses",
+            WorkloadKind::Endpoints => "Endpoints",
+            WorkloadKind::NetworkPolicies => "NetworkPolicies",
+            WorkloadKind::ConfigMaps => "ConfigMaps",
+            WorkloadKind::Secrets => "Secrets",
+            WorkloadKind::PersistentVolumeClaims => "PersistentVolumeClaims",
+            WorkloadKind::PersistentVolumes => "PersistentVolumes",
+            WorkloadKind::StorageClasses => "StorageClasses",
+            WorkloadKind::ServiceAccounts => "ServiceAccounts",
+            WorkloadKind::Roles => "Roles",
+            WorkloadKind::RoleBindings => "RoleBindings",
         }
+    }
+
+    pub fn namespaced(self) -> bool {
+        !matches!(
+            self,
+            WorkloadKind::Namespaces
+                | WorkloadKind::PersistentVolumes
+                | WorkloadKind::StorageClasses
+        )
     }
 }
 
@@ -72,6 +149,14 @@ impl WindowKind {
             WindowKind::Services => "Services",
             WindowKind::Workload(kind) => kind.title(),
             WindowKind::Detail => "Detail",
+        }
+    }
+
+    /// Smallest usable outer size, shared by layout commands and rendering.
+    pub const fn min_size(self) -> [f32; 2] {
+        match self {
+            Self::Workload(_) | Self::Detail => [672.0, 424.0],
+            Self::Overview | Self::Nodes | Self::Storage | Self::Services => [480.0, 320.0],
         }
     }
 }
@@ -100,6 +185,44 @@ impl WindowGeom {
             collapsed: false,
         }
     }
+
+    /// Deterministic row-major grid. If the canvas cannot fit practical
+    /// minima, cells retain those minima and form an intentional overflow
+    /// surface instead of shrinking windows into unusable slivers.
+    pub fn tiled(index: usize, count: usize, canvas: [f32; 2], minimum: [f32; 2]) -> Self {
+        let columns = (count as f32).sqrt().ceil() as usize;
+        let rows = count.div_ceil(columns);
+        let width = (canvas[0] / columns as f32).max(minimum[0]);
+        let height = (canvas[1] / rows as f32).max(minimum[1]);
+        Self {
+            position: [
+                (index % columns) as f32 * width,
+                (index / columns) as f32 * height,
+            ],
+            size: [width, height],
+            collapsed: false,
+        }
+    }
+
+    pub fn cascade(index: usize, canvas: [f32; 2], minimum: [f32; 2]) -> Self {
+        let offset = index as f32 * 28.0;
+        Self {
+            position: [offset, offset],
+            size: [
+                (canvas[0] - offset).max(minimum[0]),
+                (canvas[1] - offset).max(minimum[1]),
+            ],
+            collapsed: false,
+        }
+    }
+
+    pub fn focused(canvas: [f32; 2], minimum: [f32; 2]) -> Self {
+        Self {
+            position: [0.0, 0.0],
+            size: [canvas[0].max(minimum[0]), canvas[1].max(minimum[1])],
+            collapsed: false,
+        }
+    }
 }
 
 /// Window-local content: a resource list, the singleton Services list, or
@@ -118,6 +241,8 @@ pub struct Window<I> {
     pub kind: WindowKind,
     pub title: String,
     pub geometry: WindowGeom,
+    /// Incremented when a layout command must override egui's remembered size.
+    pub layout_revision: u64,
     /// Z-order; higher means raised. Focus and opening bump this counter.
     pub z: u64,
     pub content: WindowContent<I>,

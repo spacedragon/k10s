@@ -5,8 +5,10 @@
 use k10s_protocol::{ClientKind, StreamTarget, StreamTicketResponse, StreamType};
 use k10s_ui::client::{ConnectTarget, Query};
 use k10s_ui::ui::tools::{
-    LogsPhase, LogsTool, MAX_LINE_CHARS, ShellAction, ShellPhase, ShellTool, TRUNCATION_MARKER,
+    LogsPhase, LogsTool, LogsViews, MAX_LINE_CHARS, ShellAction, ShellPhase, ShellTool,
+    TRUNCATION_MARKER,
 };
+use k10s_ui::workspace::WindowId;
 
 fn logs_tool() -> LogsTool {
     LogsTool::new(
@@ -36,6 +38,39 @@ fn logs_tail_truncation_keeps_the_newest_lines_and_counts_dropped() {
     let visible: Vec<_> = tool.visible_lines().map(String::as_str).collect();
     assert_eq!(visible, ["line-2", "line-3", "line-4"], "tail bound is 3");
     assert_eq!(tool.truncated_lines(), 1, "the oldest line was dropped");
+}
+
+#[test]
+fn log_source_toolbar_state_controls_container_history_wrap_and_export() {
+    let mut tool = logs_tool();
+    tool.set_previous(true);
+    tool.set_since_seconds(Some(900));
+    tool.set_wrap(true);
+    tool.select_container("metrics");
+
+    assert!(tool.previous());
+    assert_eq!(tool.since_seconds(), Some(900));
+    assert!(tool.wraps());
+    assert_eq!(tool.target().container, "metrics");
+
+    tool.connect();
+    tool.attach();
+    tool.append("first");
+    tool.append("second");
+    assert_eq!(tool.export_text(), "first\nsecond");
+}
+
+#[test]
+fn selected_container_survives_default_target_reconciliation() {
+    let window = WindowId(42);
+    let mut views = LogsViews::default();
+    let default_target = logs_tool().target().clone();
+    views
+        .ensure(window, default_target.clone())
+        .select_container("metrics");
+
+    let reconciled = views.ensure(window, default_target);
+    assert_eq!(reconciled.target().container, "metrics");
 }
 
 #[test]
@@ -316,6 +351,8 @@ fn client_state_encodes_stream_ticket_queries_safely() {
             target: target.clone(),
             stream_type: StreamType::Exec,
             tty: true,
+            since_seconds: None,
+            previous: false,
         })
         .unwrap();
     let frame = client.take_outbound().unwrap();

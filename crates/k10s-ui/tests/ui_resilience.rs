@@ -18,7 +18,7 @@ use k10s_protocol::{
     ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
+    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
     workspace::{
         BlockReason, BlockResolution, LauncherItem, WindowGeom, WindowId, WindowKind,
         WorkloadKind as WorkspaceWorkload, WorkspaceCommand, WorkspaceEvent,
@@ -319,7 +319,20 @@ fn stale_connections_banner_every_data_window_as_text() {
     );
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Connection stale · showing last known rows");
+    window.get_by_label("[~] Reconnecting · last sync unknown · retry in pending · attempt 1");
+    window.get_by_label("Mutations are disabled; recovery controls unlock after reconnecting.");
+    assert!(
+        window
+            .get_by_role_and_label(Role::Button, "Retry now")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        window
+            .get_by_role_and_label(Role::Button, "Full resync")
+            .accesskit_node()
+            .is_disabled()
+    );
     window.get_by_label("db-postgres-0");
 
     // Status must survive without color: the dot carries its state in its
@@ -338,6 +351,174 @@ fn stale_connections_banner_every_data_window_as_text() {
         })
         .expect("the status dot exposes its state as accessible text");
     harness.get_by_role_and_label(Role::Button, "Retry").click();
+}
+
+#[test]
+fn every_window_freshness_state_is_independent_and_recoverable() {
+    let mut harness = harness();
+    for kind in [
+        WorkspaceWorkload::Deployments,
+        WorkspaceWorkload::Pods,
+        WorkspaceWorkload::StatefulSets,
+        WorkspaceWorkload::DaemonSets,
+        WorkspaceWorkload::Jobs,
+    ] {
+        open(&mut harness, LauncherItem::Workload(kind));
+    }
+
+    let deployments = workload_id(harness.state(), WorkspaceWorkload::Deployments);
+    let pods = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    let stateful_sets = workload_id(harness.state(), WorkspaceWorkload::StatefulSets);
+    let daemon_sets = workload_id(harness.state(), WorkspaceWorkload::DaemonSets);
+    let jobs = workload_id(harness.state(), WorkspaceWorkload::Jobs);
+
+    let feed = &mut harness.state_mut().feed;
+    feed.window_lists.insert(
+        deployments,
+        vec![deployment_row("healthy-api", "2/2 ready")],
+    );
+    feed.window_lists
+        .insert(pods, vec![pod_row("cached-pod", "Running")]);
+    feed.window_lists.insert(stateful_sets, Vec::new());
+    feed.window_lists.insert(daemon_sets, Vec::new());
+    feed.window_lists.insert(jobs, Vec::new());
+    feed.window_freshness.insert(
+        deployments,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "37s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 2,
+        },
+    );
+    feed.window_freshness.insert(
+        pods,
+        WindowFreshness::Live {
+            last_sync_age: "4s ago".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        stateful_sets,
+        WindowFreshness::Forbidden {
+            user: "alice@example.com".into(),
+            verb: "list".into(),
+            resource: "statefulsets.apps".into(),
+            scope: "--namespace=payments".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        daemon_sets,
+        WindowFreshness::Failed {
+            message: "watch ended unexpectedly".into(),
+        },
+    );
+    feed.window_freshness
+        .insert(jobs, WindowFreshness::ReadyEmpty);
+    harness.run_steps(4);
+
+    let stale = harness.get_by_role_and_label(Role::Window, "Deployments");
+    stale.get_by_label("▲ Stale · last sync 37s ago · retry in 3s · attempt 2");
+    stale
+        .get_by_role_and_label(Role::Button, "Retry now")
+        .click();
+    let live = harness.get_by_role_and_label(Role::Window, "Pods");
+    live.get_by_label("● Live · synced 4s ago");
+    live.get_by_label("cached-pod");
+
+    let forbidden = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    forbidden.get_by_label(
+        "■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments",
+    );
+    forbidden.get_by_label(
+        "kubectl auth can-i list statefulsets.apps --as=alice@example.com --namespace=payments",
+    );
+    forbidden.get_by_role_and_label(Role::Button, "Copy auth can-i command");
+    harness
+        .get_by_role_and_label(Role::Window, "DaemonSets")
+        .get_by_label("✕ Failed · watch ended unexpectedly");
+    let ready_empty = harness.get_by_role_and_label(Role::Window, "Jobs");
+    ready_empty.get_by_label("◇ Ready · no resources");
+    ready_empty.get_by_role_and_label(Role::Button, "Refresh list");
+}
+
+#[test]
+fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Deployments),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Deployments);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(tall_detail_pane(window));
+    harness
+        .state_mut()
+        .feed
+        .window_lists
+        .insert(window, vec![deployment_row("stale-api", "2/2 ready")]);
+    harness.state_mut().feed.window_freshness.insert(
+        window,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "37s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 2,
+        },
+    );
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "stale-api")
+        .click();
+    harness.run_steps(2);
+    let detail = deployment_detail("stale-api");
+    let identity = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), detail);
+    // These surfaces were opened while live in the regression that prompted
+    // this test. Injecting them directly verifies that a later window-local
+    // failure gates already-open state, not only its launch buttons.
+    harness
+        .state_mut()
+        .shell
+        .dialogs_mut()
+        .open_scale(window, identity.clone(), Some(2));
+    harness.run_steps(2);
+
+    let deployment_window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(
+        deployment_window
+            .get_by_role_and_label(Role::Button, "Scale workload")
+            .accesskit_node()
+            .is_disabled()
+    );
+    deployment_window
+        .get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Apply scale")
+            .accesskit_node()
+            .is_disabled(),
+        "an already-open dialog follows the owning window freshness"
+    );
+
+    // The connection-derived fallback is the effective freshness when the
+    // application has not supplied a window-local projection yet.
+    harness.state_mut().feed.window_freshness.remove(&window);
+    harness.state_mut().connection = ConnectionState::Failed;
+    harness.run_steps(2);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Deployments")
+            .get_by_role_and_label(Role::Button, "Scale workload")
+            .accesskit_node()
+            .is_disabled(),
+        "the disconnected fallback gates cached detail controls"
+    );
 }
 
 #[test]
@@ -374,6 +555,7 @@ fn infrastructure_response(condition: MetricsCondition, detail: &str) -> Infrast
             workloads: 1,
             persistent_storage_bytes: 20 * GIB,
         },
+        launcher: Default::default(),
         cluster_cpu: CapacityUsage::new(Some(500), Some(4_000)),
         cluster_memory: CapacityUsage::new(Some(2 * GIB), Some(16 * GIB)),
         pod_capacity: CapacityUsage::new(Some(3), Some(110)),

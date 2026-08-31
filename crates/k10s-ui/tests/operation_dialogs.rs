@@ -11,6 +11,11 @@
 
 use std::collections::VecDeque;
 
+use egui::accesskit::Role;
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, DeletePropagation, GroupVersionKind, OperationId, OperationProgress,
     OperationStatus, OperationUpdate, ResourceCapabilities, ResourceDetailResponse,
@@ -20,7 +25,7 @@ use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, Command, ConnectTarget, Query, QueryResult,
 };
 use k10s_ui::ui::dialogs::{
-    DeleteDialog, DialogAction, DialogPhase, OperationDialogs, ScaleDialog,
+    DeleteDialog, DestructivePreflight, DialogAction, DialogPhase, OperationDialogs, ScaleDialog,
 };
 
 const CONTEXT: &str = "dev-local";
@@ -130,6 +135,12 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
 
     assert_eq!(
         dialog.disabled_reason(),
+        Some("waiting for authoritative server dry-run")
+    );
+    dialog.set_preflight(DestructivePreflight::fake_success());
+
+    assert_eq!(
+        dialog.disabled_reason(),
         Some("type the resource name to confirm deletion")
     );
     assert!(!dialog.can_submit());
@@ -145,15 +156,18 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
     assert_eq!(dialog.propagation(), DeletePropagation::Background);
 
     dialog.set_propagation(DeletePropagation::Foreground);
+    dialog.set_preflight(DestructivePreflight::fake_success());
     let action = dialog.take_action().expect("confirmed deletes submit");
     match action {
         DialogAction::SubmitDelete {
             target,
             propagation,
+            resource_version,
             idempotency_key,
         } => {
             assert_eq!(target, deployment("api-server"));
             assert_eq!(propagation, DeletePropagation::Foreground);
+            assert_eq!(resource_version, "fake-revision");
             assert!(!idempotency_key.is_empty());
         }
         other => panic!("expected a delete action, got {other:?}"),
@@ -164,6 +178,7 @@ fn delete_dialogs_require_typed_confirmation_and_carry_a_propagation_mode() {
 #[test]
 fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     let mut dialog = DeleteDialog::for_target(deployment("api-server"));
+    dialog.set_preflight(DestructivePreflight::fake_success());
     for mode in [
         DeletePropagation::Foreground,
         DeletePropagation::Background,
@@ -171,6 +186,7 @@ fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     ] {
         dialog.set_propagation(mode);
         assert_eq!(dialog.propagation(), mode);
+        dialog.set_preflight(DestructivePreflight::fake_success());
     }
 
     dialog.set_confirmation("api-server");
@@ -178,6 +194,204 @@ fn delete_dialogs_support_every_propagation_mode_and_disconnect_guards() {
     dialog.connection_lost();
     assert_eq!(dialog.disabled_reason(), Some("not connected"));
     assert!(dialog.take_action().is_none());
+}
+
+#[test]
+fn reconnect_reissues_delete_preflight_exactly_once() {
+    let window = k10s_ui::workspace::WindowId(23);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    dialogs.drain_actions();
+
+    dialogs.set_connected(false);
+    dialogs.set_connected(true);
+    assert!(matches!(
+        dialogs.drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
+
+    dialogs.set_connected(true);
+    assert!(dialogs.drain_actions().is_empty());
+}
+
+#[test]
+fn destructive_contract_exposes_exact_scope_preflight_and_kubectl_command() {
+    let mut dialog = DeleteDialog::for_target(deployment("api-server"));
+    assert_eq!(dialog.target().context, CONTEXT);
+    assert_eq!(dialog.target().namespace.as_deref(), Some("default"));
+    assert_eq!(dialog.target().gvk.kind, "Deployment");
+    assert_eq!(dialog.target().name, "api-server");
+    assert_eq!(
+        dialog.target().uid,
+        "uid-dev-local-deployment-default-api-server"
+    );
+    assert_eq!(dialog.propagation(), DeletePropagation::Background);
+    assert_eq!(
+        dialog.kubectl_command(),
+        "kubectl --context dev-local delete deployment api-server --namespace default --cascade=background --wait=false"
+    );
+
+    let mut quoted_target = deployment("api'server; rm -rf /");
+    quoted_target.context = "prod west; echo unsafe".to_owned();
+    quoted_target.namespace = Some("team's namespace".to_owned());
+    assert_eq!(
+        DeleteDialog::for_target(quoted_target).kubectl_command(),
+        "kubectl --context 'prod west; echo unsafe' delete deployment 'api'\"'\"'server; rm -rf /' --namespace 'team'\"'\"'s namespace' --cascade=background --wait=false"
+    );
+
+    dialog.set_confirmation("api-server");
+    for fixture in [
+        DestructivePreflight::fake_forbidden(),
+        DestructivePreflight::fake_conflict(),
+        DestructivePreflight::fake_dry_run_failure(),
+    ] {
+        dialog.set_preflight(fixture);
+        assert!(!dialog.can_submit(), "failed preflight must block delete");
+        assert!(dialog.disabled_reason().is_some());
+    }
+    dialog.set_preflight(DestructivePreflight::fake_success());
+    assert!(dialog.can_submit());
+
+    dialog.mark_stale("stale data — refresh the resource before deleting");
+    assert_eq!(
+        dialog.disabled_reason(),
+        Some("stale data — refresh the resource before deleting")
+    );
+    assert!(dialog.take_action().is_none());
+}
+
+#[test]
+fn destructive_dialog_enter_is_gated_and_submits_only_once() {
+    let window = k10s_ui::workspace::WindowId(17);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui_state(
+            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
+            dialogs,
+        );
+    assert!(matches!(
+        harness.state_mut().drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
+
+    let confirmation = harness.get_by_label("Confirm deletion");
+    confirmation.focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(harness.state_mut().drain_actions().is_empty());
+
+    if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) =
+        harness.state_mut().active_mut(window)
+    {
+        delete.set_confirmation("api-server");
+        delete.set_preflight(DestructivePreflight::fake_success());
+    }
+    harness.run();
+    harness.get_by_label("Confirm deletion").focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    let actions = harness.state_mut().drain_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0].1, DialogAction::SubmitDelete { .. }));
+
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(harness.state_mut().drain_actions().is_empty());
+    let dialog = harness.get_by_role_and_label(Role::Window, "Delete resource");
+    dialog.get_by_label("WARNING — Destructive action");
+    dialog.get_by_label_contains("[PASS] Server dry-run");
+    dialog.get_by_role_and_label(Role::Button, "Copy command");
+}
+
+#[test]
+fn destructive_review_snapshots_cover_compact_and_standard_viewports() {
+    for (name, size) in [
+        ("compact-640x720", egui::vec2(640.0, 720.0)),
+        ("standard-1280x720", egui::vec2(1_280.0, 720.0)),
+    ] {
+        let window = k10s_ui::workspace::WindowId(171);
+        let mut dialogs = OperationDialogs::default();
+        dialogs.open_delete(window, deployment("api-server"));
+        dialogs.drain_actions();
+        if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window)
+        {
+            delete.set_preflight(DestructivePreflight::fake_success());
+        }
+        let mut harness = Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
+                dialogs,
+            );
+        harness.run_steps(4);
+        let dialog = harness.get_by_role_and_label(Role::Window, "Delete resource");
+        for label in [
+            "1  Scope",
+            "2  Impact",
+            "3  Server dry run",
+            "4  Typed confirmation",
+            "5  Exact command",
+        ] {
+            dialog.get_by_label(label);
+        }
+        assert!(
+            dialog
+                .get_by_role_and_label(Role::Button, "Confirm delete")
+                .accesskit_node()
+                .is_disabled()
+        );
+        if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+            let path = format!("../../docs/screenshots/issue-171/after-confirmation-{name}.png");
+            harness
+                .render()
+                .expect("render confirmation")
+                .save(path)
+                .expect("save confirmation screenshot");
+        }
+    }
+}
+
+#[test]
+fn connected_stale_window_reports_stale_and_refreshes_before_delete() {
+    let window = k10s_ui::workspace::WindowId(18);
+    let mut dialogs = OperationDialogs::default();
+    dialogs.open_delete(window, deployment("api-server"));
+    dialogs.drain_actions();
+    if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window) {
+        delete.set_confirmation("api-server");
+        delete.set_preflight(DestructivePreflight::fake_success());
+    }
+
+    let mut harness = Harness::builder().build_ui_state(
+        move |ui, state: &mut (OperationDialogs, bool)| {
+            let mutations_allowed = state.1;
+            state.0.show(ui, true, |_| mutations_allowed);
+        },
+        (dialogs, false),
+    );
+    harness.run();
+    let state = harness.state_mut();
+    let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = state.0.active_mut(window)
+    else {
+        panic!("delete dialog must remain open");
+    };
+    assert_eq!(
+        delete.disabled_reason(),
+        Some("stale data - refresh the resource before deleting")
+    );
+    assert!(!delete.can_submit());
+
+    state.1 = true;
+    harness.run();
+    assert!(matches!(
+        harness.state_mut().0.drain_actions().as_slice(),
+        [(_, DialogAction::RequestDeletePreflight { .. })]
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +405,16 @@ fn the_dialog_store_queues_one_action_per_window_for_the_application_layer() {
 
     dialogs.open_scale(window, deployment("web-frontend"), Some(20));
     dialogs.open_delete(window, deployment("web-frontend"));
+    assert!(matches!(
+        dialogs.drain_actions().as_slice(),
+        [(
+            _,
+            DialogAction::RequestDeletePreflight {
+                propagation: DeletePropagation::Background,
+                ..
+            }
+        )]
+    ));
     assert_eq!(
         dialogs.active(window),
         Some(k10s_ui::ui::dialogs::ActiveDialogKind::Delete),
@@ -199,6 +423,7 @@ fn the_dialog_store_queues_one_action_per_window_for_the_application_layer() {
 
     if let Some(k10s_ui::ui::dialogs::DialogHandle::Delete(delete)) = dialogs.active_mut(window) {
         delete.set_confirmation("web-frontend");
+        delete.set_preflight(DestructivePreflight::fake_success());
     }
     dialogs.submit_active(window);
     let actions = dialogs.drain_actions();
@@ -312,6 +537,7 @@ fn every_mutation_command_travels_with_an_exact_scope_identity_and_idempotency_k
         .begin_command(Command::Delete {
             target: deployment("api-server"),
             propagation: DeletePropagation::Foreground,
+            resource_version: "42".into(),
             idempotency_key: "idem-delete-1".into(),
         })
         .unwrap();

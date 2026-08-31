@@ -13,13 +13,14 @@ use k10s_backend::{
 };
 use k10s_protocol::{
     ClientKind, ClientPayload, ContextPermissionsRequest, ContextSwitchRequest, CreateJobRequest,
-    CronJobSuspendRequest, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
-    InfrastructureRequest, OperationAccepted, OperationId, OperationStatusRequest, OperationUpdate,
-    REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH, REQUEST_RESOURCE_RELATIONS, RequestId,
-    ResourceIdentity, ResourceListRequest, ResourceRefRequest, ResourceTypesRequest,
-    RestartRequest, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind, SessionId,
-    ShutdownNotice, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId,
-    SubscriptionSelector, Welcome, YamlApplyRequest, YamlValidateRequest, decode_client_frame,
+    CronJobSuspendRequest, DeletePreflightRequest, DeletePropagation, DeleteRequest, ErrorCode,
+    ErrorFrame, ErrorScope, InfrastructureRequest, OperationAccepted, OperationId,
+    OperationStatusRequest, OperationUpdate, REQUEST_CONTEXT_PERMISSIONS, REQUEST_CONTEXT_SWITCH,
+    REQUEST_RESOURCE_RELATIONS, RequestId, ResourceIdentity, ResourceListRequest,
+    ResourceRefRequest, ResourceTypesRequest, RestartRequest, ResumeStatus, Retryability,
+    ScaleRequest, ServerFrame, ServerKind, SessionId, ShutdownNotice, SnapshotBegin, SnapshotChunk,
+    SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector, Welcome, YamlApplyRequest,
+    YamlValidateRequest, decode_client_frame,
 };
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -700,6 +701,11 @@ pub(crate) async fn serve_socket(
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
                                 Priority::P1,
                             ),
+                            Ok(RequestOutcome::Kernel(KernelQueryResult::DeletePreflight(value))) => send_frame(
+                                &task_outbound,
+                                ServerFrame::response(request_id.clone(), value),
+                                Priority::P1,
+                            ),
                             Ok(RequestOutcome::Kernel(KernelQueryResult::ResourceRelations(value))) => send_frame(
                                 &task_outbound,
                                 ServerFrame::response(request_id.clone(), value.wire_payload()),
@@ -1375,6 +1381,7 @@ fn parse_request(
                     Some(ParsedRequest::Execute(Command::Delete {
                         target: backend_reference(delete.identity),
                         propagation,
+                        resource_version: delete.resource_version,
                         idempotency_key: key,
                     }))
                 })
@@ -1384,6 +1391,21 @@ fn parse_request(
                         kind = k10s_protocol::REQUEST_WORKLOAD_DELETE
                     )
                 })
+        }
+        k10s_protocol::REQUEST_DELETE_PREFLIGHT => {
+            serde_json::from_value::<DeletePreflightRequest>(payload.clone())
+                .map(|request| {
+                    let propagation = match request.propagation {
+                        DeletePropagation::Background => k10s_backend::Propagation::Background,
+                        DeletePropagation::Foreground => k10s_backend::Propagation::Foreground,
+                        DeletePropagation::Orphan => k10s_backend::Propagation::Orphan,
+                    };
+                    Some(ParsedRequest::Query(Query::DeletePreflight {
+                        target: backend_reference(request.identity),
+                        propagation,
+                    }))
+                })
+                .map_err(|error| format!("invalid delete preflight payload: {error}"))
         }
         k10s_protocol::REQUEST_WORKLOAD_RESTART => {
             let Some(idempotency_key) = idempotency_key.filter(|key| !key.trim().is_empty()) else {
@@ -1531,6 +1553,7 @@ fn parse_request(
                             container: target.container.clone(),
                             tail_lines: parsed.tail_lines,
                             since_seconds: parsed.since_seconds,
+                            previous: parsed.previous,
                             timestamps: parsed.timestamps,
                             follow: parsed.follow,
                         },

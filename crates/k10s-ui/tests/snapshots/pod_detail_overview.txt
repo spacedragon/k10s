@@ -9,7 +9,12 @@ Window
                 GenericContainer
                   Button label="File"
                   Button label="View"
+                  Button label="Window"
                   Button label="Help"
+                GenericContainer
+                  Button label="Tile"
+                  Button label="Cascade"
+                  Button label="Focus"
                 GenericContainer
                   GenericContainer
                     GenericContainer
@@ -20,6 +25,8 @@ Window
                           TextRun value="Kubernetes context"
                   GenericContainer
                     Button label="Refresh"
+                  Label value="k10s v0.1.4"
+                    TextRun value="k10s v0.1.4"
                   Label value="Connected"
                     TextRun value="Connected"
                   Label value="Connection status: Connected"
@@ -27,65 +34,113 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              Button label="Overview"
-            GenericContainer
-              Button label="Nodes"
-            GenericContainer
-              Button label="Storage"
-            GenericContainer
-              Button label="Network"
               GenericContainer
+                Button label="Overview"
+              GenericContainer
+                Button label="Pods · all namespaces · ● Active"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Label value="◈"
+                TextRun value="◈"
+              GenericContainer
+                Label value="k10s"
+                  TextRun value="k10s"
+                Label value="KUBERNETES CONSOLE"
+                  TextRun value="KUBERNETES CONSOLE"
+            TextInput label="Filter resources…" value=""
+              TextRun value=""
+            GenericContainer
+              GenericContainer
+                Label value="CLUSTER"
+                  TextRun value="CLUSTER"
+                Button label="Overview"
                 GenericContainer
                   GenericContainer
-                    Button label="Services"
-            GenericContainer
-              Button label="Workloads"
-              GenericContainer
+                    Button label="Events"
+                  Label value="Loading Events inventory"
+                    TextRun value="…"
+                  Button label="Open another Events window"
+                GenericContainer
+                  GenericContainer
+                    Button label="Namespaces"
+                  Button label="Open another Namespaces window"
+                Button label="Nodes"
+                GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Workloads"
+                  Label value="Loading Workloads inventory"
+                    TextRun value="…"
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="Deployments"
-                      GenericContainer
-                        Button label="Open another Deployments window"
+                      Button label="Deployments"
+                    Button label="Open another Deployments window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="Pods"
-                      Label value="1 open Pods window"
-                        TextRun value="1"
-                      GenericContainer
-                        Button label="Open another Pods window"
+                      Button label="Pods"
+                    Label value="1 open Pods window"
+                      TextRun value="1"
+                    Button label="Open another Pods window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="StatefulSets"
-                      GenericContainer
-                        Button label="Open another StatefulSets window"
+                      Button label="StatefulSets"
+                    Button label="Open another StatefulSets window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="DaemonSets"
-                      GenericContainer
-                        Button label="Open another DaemonSets window"
+                      Button label="DaemonSets"
+                    Button label="Open another DaemonSets window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="Jobs"
-                      GenericContainer
-                        Button label="Open another Jobs window"
+                      Button label="Jobs"
+                    Button label="Open another Jobs window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="CronJobs"
-                      GenericContainer
-                        Button label="Open another CronJobs window"
+                      Button label="CronJobs"
+                    Button label="Open another CronJobs window"
                   GenericContainer
                     GenericContainer
-                      GenericContainer
-                        Button label="Custom Resources…"
-                      GenericContainer
-                        Button label="Open another Custom Resources… window"
+                      Button label="Custom Resources…"
+                    Button label="Open another Custom Resources… window"
+                GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Network"
+                  Label value="Loading Network inventory"
+                    TextRun value="…"
+                GenericContainer
+                  Button label="Services"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Ingresses"
+                    Button label="Open another Ingresses window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Endpoints"
+                    Button label="Open another Endpoints window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="NetworkPolicies"
+                    Button label="Open another NetworkPolicies window"
+                GenericContainer
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Config"
+                  Label value="Loading Config inventory"
+                    TextRun value="…"
+                GenericContainer
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Storage"
+                  Label value="Loading Storage inventory"
+                    TextRun value="…"
+                GenericContainer
+                  Label value="▸"
+                    TextRun value="▸"
+                  Button label="Access"
+                  Label value="Loading Access inventory"
+                    TextRun value="…"
         GenericContainer
           GenericContainer
   Window label="Overview"
@@ -164,22 +219,36 @@ Window
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer
-                  Label value="Details"
-                    TextRun value="Details"
+                  GenericContainer
+                    GenericContainer
+                      Label value="Details"
+                        TextRun value="Details"
+                      Label value="POD"
+                        TextRun value="POD"
+                      Label value="db-postgres-0"
+                        TextRun value="db-postgres-0"
+                    GenericContainer
+                      Label value="Kind Pod"
+                        TextRun value="Kind Pod"
+                      Label value="Namespace default"
+                        TextRun value="Namespace default"
+                      Label value="Context dev-local"
+                        TextRun value="Context dev-local"
+                    GenericContainer
+                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
+                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
+                      Label value="Created 2026-08-21T00:50:10Z"
+                        TextRun value="Created 2026-08-21T00:50:10Z"
+                      Label value="Fresh · live"
+                        TextRun value="Fresh · live"
+                  Button label="Pop out ↗"
+                  Button label="Maximize"
+                GenericContainer
                   Button label="Tab Overview"
                   Button label="Tab Events"
+                  Button label="Tab YAML"
                   Button label="Tab Logs"
                   Button label="Tab Shell"
-                Label value="db-postgres-0"
-                  TextRun value="db-postgres-0"
-                Label value="Kind Pod"
-                  TextRun value="Kind Pod"
-                Label value="Namespace default"
-                  TextRun value="Namespace default"
-                Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                  TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                Label value="Created 2026-08-21T00:50:10Z"
-                  TextRun value="Created 2026-08-21T00:50:10Z"
                 GenericContainer
                   Button label="Delete resource"
                   Button label="View logs"
@@ -193,6 +262,8 @@ Window
                       GenericContainer
                         Label value="Status Running"
                           TextRun value="Status Running"
+                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                  TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
     Splitter
     Splitter
     Splitter

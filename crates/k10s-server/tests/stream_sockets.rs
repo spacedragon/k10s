@@ -113,6 +113,7 @@ async fn issue_ticket(
             command: Vec::new(),
             tail_lines: None,
             since_seconds: None,
+            previous: false,
             timestamps: false,
             follow: false,
         })
@@ -495,6 +496,7 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             command: Vec::new(),
             tail_lines: None,
             since_seconds: None,
+            previous: false,
             timestamps: false,
             follow: false,
         })
@@ -520,6 +522,7 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             command: vec!["/bin/sh".into()],
             tail_lines: None,
             since_seconds: None,
+            previous: false,
             timestamps: false,
             follow: false,
         })
@@ -539,6 +542,7 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             command: vec!["/bin/sh".into()],
             tail_lines: None,
             since_seconds: None,
+            previous: false,
             timestamps: false,
             follow: false,
         })
@@ -560,6 +564,7 @@ async fn rbac_and_missing_binary_errors_are_typed_at_issuance() {
             command: vec!["/bin/sh".into()],
             tail_lines: None,
             since_seconds: None,
+            previous: false,
             timestamps: false,
             follow: false,
         })
@@ -802,6 +807,8 @@ async fn client_state_seam_issues_stream_tickets_without_token_urls() {
             target: web_target(WEB_CONTAINER),
             stream_type: StreamType::Logs,
             tty: false,
+            since_seconds: None,
+            previous: false,
         })
         .unwrap();
     while let Some(frame) = client.take_outbound() {

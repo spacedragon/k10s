@@ -11,6 +11,62 @@ use super::KubeAdapter;
 use super::watch::dynamic_api;
 
 impl KubeAdapter {
+    pub(super) async fn delete_preflight(
+        &self,
+        target: ResourceRef,
+        propagation: Propagation,
+    ) -> Result<crate::port::QueryResult, BackendError> {
+        let (api, current, descriptor) = self.mutation_target(&target).await?;
+        if !descriptor.supports_delete {
+            return Err(BackendError::unsupported("workload.delete.preflight"));
+        }
+        let resource_version = current
+            .resource_version()
+            .ok_or_else(|| BackendError::Conflict("the target has no resourceVersion".into()))?;
+        let policy = match propagation {
+            Propagation::Background => PropagationPolicy::Background,
+            Propagation::Foreground => PropagationPolicy::Foreground,
+            Propagation::Orphan => PropagationPolicy::Orphan,
+        };
+        let params = DeleteParams {
+            dry_run: true,
+            propagation_policy: Some(policy),
+            preconditions: Some(Preconditions {
+                uid: Some(target.uid.clone()),
+                resource_version: Some(resource_version.clone()),
+            }),
+            ..DeleteParams::default()
+        };
+        api.delete(&target.name, &params)
+            .await
+            .map_err(pre_submit_error)?;
+        let propagation = match propagation {
+            Propagation::Background => k10s_protocol::DeletePropagation::Background,
+            Propagation::Foreground => k10s_protocol::DeletePropagation::Foreground,
+            Propagation::Orphan => k10s_protocol::DeletePropagation::Orphan,
+        };
+        Ok(crate::port::QueryResult::DeletePreflight(
+            k10s_protocol::DeletePreflightResponse {
+                identity: k10s_protocol::ResourceIdentity {
+                    context: target.context,
+                    gvk: k10s_protocol::GroupVersionKind {
+                        group: target.gvk.group,
+                        version: target.gvk.version,
+                        kind: target.gvk.kind,
+                    },
+                    namespace: target.namespace,
+                    name: target.name,
+                    uid: target.uid,
+                },
+                propagation,
+                resource_version,
+                impact: "Deletes this object; dependents follow the selected propagation policy."
+                    .into(),
+                dry_run: "Passed — the API server accepted the delete dry-run.".into(),
+            },
+        ))
+    }
+
     pub(super) async fn execute_mutation(
         &self,
         command: Command,
@@ -105,9 +161,13 @@ impl KubeAdapter {
             Command::Delete {
                 target,
                 propagation,
+                resource_version: authorized_resource_version,
                 idempotency_key,
             } => {
-                let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
+                let fingerprint = format!(
+                    "delete/{}/{propagation:?}/{authorized_resource_version}",
+                    target.exact_identity_key()
+                );
                 if let Some(id) = self.operations.replay(&idempotency_key, &fingerprint)? {
                     return Ok(id);
                 }
@@ -118,6 +178,11 @@ impl KubeAdapter {
                 let resource_version = current.resource_version().ok_or_else(|| {
                     BackendError::Conflict("the target has no resourceVersion".into())
                 })?;
+                if resource_version != authorized_resource_version {
+                    return Err(BackendError::Conflict(
+                        "the target changed after the delete dry-run".into(),
+                    ));
+                }
                 let policy = match propagation {
                     Propagation::Background => PropagationPolicy::Background,
                     Propagation::Foreground => PropagationPolicy::Foreground,
@@ -127,7 +192,7 @@ impl KubeAdapter {
                     propagation_policy: Some(policy),
                     preconditions: Some(Preconditions {
                         uid: Some(target.uid.clone()),
-                        resource_version: Some(resource_version),
+                        resource_version: Some(authorized_resource_version),
                     }),
                     ..DeleteParams::default()
                 };

@@ -58,6 +58,54 @@ fn harness() -> Harness<'static, Fixture> {
         .build_ui_state(render, Fixture::default())
 }
 
+#[test]
+fn launcher_inventory_badges_share_loading_zero_warning_and_unavailable_contract() {
+    let mut harness = harness();
+
+    harness.get_by_label("6 Workloads resources");
+    harness.get_by_label("4 warning Events resources");
+
+    harness.state_mut().response.launcher = Default::default();
+    harness.run_steps(4);
+    for label in [
+        "0 Events resources",
+        "0 Workloads resources",
+        "0 Network resources",
+        "0 Config resources",
+        "0 Storage resources",
+        "0 Access resources",
+    ] {
+        harness.get_by_label(label);
+    }
+
+    harness.state_mut().show_response = false;
+    harness.state_mut().load = InfrastructureLoad::Loading;
+    harness.run_steps(4);
+    for label in [
+        "Events",
+        "Workloads",
+        "Network",
+        "Config",
+        "Storage",
+        "Access",
+    ] {
+        harness.get_by_label(&format!("Loading {label} inventory"));
+    }
+
+    harness.state_mut().load = InfrastructureLoad::Unavailable;
+    harness.run_steps(4);
+    for label in [
+        "Events",
+        "Workloads",
+        "Network",
+        "Config",
+        "Storage",
+        "Access",
+    ] {
+        harness.get_by_label(&format!("{label} inventory unavailable"));
+    }
+}
+
 fn full_response() -> InfrastructureResponse {
     InfrastructureResponse {
         context: CONTEXT.into(),
@@ -68,6 +116,14 @@ fn full_response() -> InfrastructureResponse {
             pods: 22,
             workloads: 6,
             persistent_storage_bytes: 60 * GIB,
+        },
+        launcher: k10s_protocol::LauncherCounts {
+            events_warning: 4,
+            workloads: 6,
+            network: 4,
+            config: 2,
+            storage: 3,
+            access: 4,
         },
         cluster_cpu: CapacityUsage::new(Some(3_200), Some(8_000)),
         cluster_memory: CapacityUsage::new(Some(12 * GIB), Some(32 * GIB)),

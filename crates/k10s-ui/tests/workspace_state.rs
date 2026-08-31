@@ -11,6 +11,136 @@ use k10s_ui::workspace::{
 };
 
 #[test]
+fn detail_maximize_restores_the_exact_prior_split() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    select(&mut state, window, TestIdentity::pod("web"));
+    events(&mut state, WorkspaceCommand::SetSplitRatio(window, 0.37));
+
+    events(&mut state, WorkspaceCommand::MaximizeDetailPane(window));
+    let focused = state.resource_state(window).unwrap();
+    assert_eq!(focused.prior_split_ratio, Some(0.37));
+    assert_eq!(focused.split_ratio, 0.37);
+
+    // Repeated automatic focus must not overwrite the user's real split.
+    events(&mut state, WorkspaceCommand::MaximizeDetailPane(window));
+    events(&mut state, WorkspaceCommand::RestoreDetailPane(window));
+    let restored = state.resource_state(window).unwrap();
+    assert_eq!(restored.prior_split_ratio, None);
+    assert_eq!(restored.split_ratio, 0.37);
+}
+
+#[test]
+fn tile_is_deterministic_non_overlapping_and_preserves_minima_in_overflow() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+    state.apply(WorkspaceCommand::Tile([800.0, 500.0]));
+    let geometries: Vec<_> = state.windows().iter().map(|w| w.geometry).collect();
+    assert_eq!(geometries[0].position, [0.0, 0.0]);
+    assert_eq!(geometries[1].position, [672.0, 0.0]);
+    assert_eq!(geometries[2].position, [0.0, 424.0]);
+    assert!(
+        geometries
+            .iter()
+            .all(|g| g.size[0] >= 672.0 && g.size[1] >= 424.0)
+    );
+    for (index, left) in geometries.iter().enumerate() {
+        for right in geometries.iter().skip(index + 1) {
+            let separated = left.position[0] + left.size[0] <= right.position[0]
+                || right.position[0] + right.size[0] <= left.position[0]
+                || left.position[1] + left.size[1] <= right.position[1]
+                || right.position[1] + right.size[1] <= left.position[1];
+            assert!(
+                separated,
+                "tiled windows must not overlap: {left:?} {right:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cycle_window_and_indexed_focus_use_the_registry_order() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+    let registry_ids: Vec<_> = state.windows().iter().map(|window| window.id).collect();
+
+    state.apply(WorkspaceCommand::FocusWindow(registry_ids[0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        registry_ids[0]
+    );
+    state.apply(WorkspaceCommand::CycleWindow);
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        registry_ids[2]
+    );
+    state.apply(WorkspaceCommand::CloseWindow(registry_ids[2]));
+    assert!(
+        !state
+            .windows()
+            .iter()
+            .any(|window| window.id == registry_ids[2])
+    );
+}
+
+#[test]
+fn cascade_and_focus_toggle_restore_exact_prior_geometry() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    state.apply(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+    let before: Vec<_> = state.windows().iter().map(|w| w.geometry).collect();
+    state.apply(WorkspaceCommand::Cascade([1200.0, 700.0]));
+    assert_ne!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+    state.apply(WorkspaceCommand::Cascade([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+    state.apply(WorkspaceCommand::ToggleFocus([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .max_by_key(|w| w.z)
+            .unwrap()
+            .geometry
+            .size,
+        [1200.0, 700.0]
+    );
+    state.apply(WorkspaceCommand::ToggleFocus([1200.0, 700.0]));
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .map(|w| w.geometry)
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
 fn namespace_scope_has_explicit_resolution_semantics() {
     assert_eq!(
         NamespaceScope::ContextDefault.resolve(Some("sea")),

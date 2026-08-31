@@ -58,16 +58,31 @@ pub enum WorkspaceCommand<I> {
     AddWorkloadInstance(WorkloadKind),
     /// Toggle whether workspace windows may be resized freely.
     ToggleFreeWindowResizing,
+    /// Command-palette modified activation: open another independent list.
+    AddListInstance(LauncherItem),
     /// Raise a window above the others.
     FocusWindow(WindowId),
     CloseWindow(WindowId),
     SetGeometry(WindowId, WindowGeom),
+    /// Arrange all windows in a deterministic grid inside `[width, height]`.
+    Tile([f32; 2]),
+    /// Toggle a deterministic cascade, restoring the prior geometry on repeat.
+    Cascade([f32; 2]),
+    /// Toggle focus mode for the active window, restoring all prior geometry.
+    ToggleFocus([f32; 2]),
+    /// Focus the next window in registry MRU order.
+    CycleWindow,
     SetNamespaceScope(WindowId, NamespaceScope),
     SetSearch(WindowId, String),
     SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
     SetSort(WindowId, Option<SortSpec>),
     SetSplitRatio(WindowId, f32),
+    /// Give the integrated detail the full content area while remembering
+    /// the user's current split for an explicit restore.
+    MaximizeDetailPane(WindowId),
+    /// Return from a focused detail view to the remembered split.
+    RestoreDetailPane(WindowId),
     ToggleDetailPane(WindowId),
     /// Pick (or clear) the resource type of a custom-resources window. The
     /// key is the canonical `group/version/kind` string of a picker entry.
@@ -151,6 +166,9 @@ pub struct WorkspaceState<I> {
     /// Writable-YAML ownership: at most one editor per resource identity.
     yaml_owner: HashMap<I, WindowId>,
     pending: Option<PendingNavigation<I>>,
+    layout_checkpoint: Option<Vec<(WindowId, WindowGeom)>>,
+    /// Monotonic live-render token; intentionally not persisted.
+    next_layout_revision: u64,
 }
 
 impl<I> Default for WorkspaceState<I>
@@ -177,6 +195,8 @@ where
             context: String::new(),
             yaml_owner: HashMap::new(),
             pending: None,
+            layout_checkpoint: None,
+            next_layout_revision: 0,
         };
         state.open_singleton(WindowKind::Overview);
         state
@@ -283,7 +303,12 @@ where
             // it back while a navigation guard is pending; mismatched or
             // malformed snapshots leave the current state untouched.
             WorkspaceCommand::RestoreSnapshot(snapshot) => {
-                if let Some(restored) = Self::from_snapshot(&snapshot) {
+                if let Some(mut restored) = Self::from_snapshot(&snapshot) {
+                    let revision = self.next_layout_revision.wrapping_add(1);
+                    restored.next_layout_revision = revision;
+                    for window in &mut restored.windows {
+                        window.layout_revision = revision;
+                    }
                     *self = restored;
                 }
                 Vec::new()
@@ -297,6 +322,14 @@ where
                 self.free_window_resizing = !self.free_window_resizing;
                 Vec::new()
             }
+            WorkspaceCommand::AddListInstance(item) => {
+                let id = match item {
+                    LauncherItem::Workload(kind) => self.open_workload(kind),
+                    LauncherItem::Services => self.open_singleton(WindowKind::Services),
+                    _ => return self.activate(item),
+                };
+                vec![WorkspaceEvent::Opened(id)]
+            }
             WorkspaceCommand::FocusWindow(id) => self.focus(id),
             WorkspaceCommand::CloseWindow(id) => self.close_window(id),
             WorkspaceCommand::SetGeometry(id, geometry) => {
@@ -305,6 +338,37 @@ where
                 }
                 Vec::new()
             }
+            WorkspaceCommand::Tile(size) => {
+                self.layout_checkpoint = None;
+                self.tile(size);
+                Vec::new()
+            }
+            WorkspaceCommand::Cascade(size) => {
+                self.toggle_layout(|window, index, _count| {
+                    WindowGeom::cascade(index, size, window.kind.min_size())
+                });
+                Vec::new()
+            }
+            WorkspaceCommand::ToggleFocus(size) => {
+                if self.restore_layout() {
+                    return Vec::new();
+                }
+                self.save_layout();
+                if let Some(active) = self
+                    .windows
+                    .iter()
+                    .max_by_key(|window| window.z)
+                    .map(|w| w.id)
+                {
+                    let revision = self.bump_layout_revision();
+                    if let Some(window) = self.window_mut(active) {
+                        window.geometry = WindowGeom::focused(size, window.kind.min_size());
+                        window.layout_revision = revision;
+                    }
+                }
+                Vec::new()
+            }
+            WorkspaceCommand::CycleWindow => self.cycle_window(),
             WorkspaceCommand::SetNamespaceScope(id, scope) => self.set_namespace_scope(id, scope),
             WorkspaceCommand::SetSearch(id, search) => {
                 self.with_resource_mut(id, |resource| resource.search = search.clone());
@@ -332,6 +396,30 @@ where
                 let clamped = ratio.clamp(0.0, 1.0);
                 self.with_resource_mut(id, move |resource| resource.split_ratio = clamped);
                 self.with_service_mut(id, move |service| service.split_ratio = clamped);
+                Vec::new()
+            }
+            WorkspaceCommand::MaximizeDetailPane(id) => {
+                self.with_resource_mut(id, |resource| {
+                    resource
+                        .prior_split_ratio
+                        .get_or_insert(resource.split_ratio);
+                });
+                self.with_service_mut(id, |service| {
+                    service.prior_split_ratio.get_or_insert(service.split_ratio);
+                });
+                Vec::new()
+            }
+            WorkspaceCommand::RestoreDetailPane(id) => {
+                self.with_resource_mut(id, |resource| {
+                    if let Some(ratio) = resource.prior_split_ratio.take() {
+                        resource.split_ratio = ratio;
+                    }
+                });
+                self.with_service_mut(id, |service| {
+                    if let Some(ratio) = service.prior_split_ratio.take() {
+                        service.split_ratio = ratio;
+                    }
+                });
                 Vec::new()
             }
             WorkspaceCommand::ToggleDetailPane(id) => {
@@ -420,7 +508,8 @@ where
         let existing = self
             .windows
             .iter()
-            .find(|window| window.kind == kind)
+            .filter(|window| window.kind == kind)
+            .max_by_key(|window| window.z)
             .map(|window| window.id);
         match existing {
             Some(id) => self.focus(id),
@@ -438,6 +527,83 @@ where
         self.next_z += 1;
         self.windows[index].z = self.next_z;
         vec![WorkspaceEvent::Focused(id)]
+    }
+
+    fn cycle_window(&mut self) -> Vec<WorkspaceEvent<I>> {
+        let mut ids: Vec<_> = self
+            .windows
+            .iter()
+            .map(|window| (window.z, window.id))
+            .collect();
+        ids.sort_by_key(|(z, _)| std::cmp::Reverse(*z));
+        match ids.as_slice() {
+            [] => Vec::new(),
+            [_] => self.focus(ids[0].1),
+            _ => self.focus(ids[1].1),
+        }
+    }
+
+    fn save_layout(&mut self) {
+        self.layout_checkpoint = Some(
+            self.windows
+                .iter()
+                .map(|window| (window.id, window.geometry))
+                .collect(),
+        );
+    }
+
+    fn bump_layout_revision(&mut self) -> u64 {
+        self.next_layout_revision = self.next_layout_revision.wrapping_add(1);
+        self.next_layout_revision
+    }
+
+    fn restore_layout(&mut self) -> bool {
+        let Some(saved) = self.layout_checkpoint.take() else {
+            return false;
+        };
+        let revision = self.bump_layout_revision();
+        for (id, geometry) in saved {
+            if let Some(window) = self.window_mut(id) {
+                window.geometry = geometry;
+                window.layout_revision = revision;
+            }
+        }
+        true
+    }
+
+    fn toggle_layout(&mut self, geometry: impl Fn(&Window<I>, usize, usize) -> WindowGeom) {
+        if self.restore_layout() {
+            return;
+        }
+        self.save_layout();
+        let count = self.windows.len();
+        let revision = self.bump_layout_revision();
+        for (index, window) in self.windows.iter_mut().enumerate() {
+            window.geometry = geometry(window, index, count);
+            window.layout_revision = revision;
+        }
+    }
+
+    fn tile(&mut self, size: [f32; 2]) {
+        let count = self.windows.len();
+        if count == 0 {
+            return;
+        }
+        let minimum = self
+            .windows
+            .iter()
+            .fold([0.0_f32, 0.0_f32], |minimum, window| {
+                let window_minimum = window.kind.min_size();
+                [
+                    minimum[0].max(window_minimum[0]),
+                    minimum[1].max(window_minimum[1]),
+                ]
+            });
+        let revision = self.bump_layout_revision();
+        for (index, window) in self.windows.iter_mut().enumerate() {
+            window.geometry = WindowGeom::tiled(index, count, size, minimum);
+            window.layout_revision = revision;
+        }
     }
 
     fn open_singleton(&mut self, kind: WindowKind) -> WindowId {
@@ -494,6 +660,7 @@ where
             kind,
             title,
             geometry,
+            layout_revision: 0,
             z,
             content,
         });

@@ -5,16 +5,16 @@
 //! parses `summary`. Port-forward controls do not exist in this task — the
 //! window is read-only.
 
-use egui::{RichText, ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
+use egui::{ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     ResourceListRow, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
 
 use crate::workspace::{ServiceWindowState, SortSpec, WindowId, WorkspaceCommand};
 
+use super::ConnectionState;
 use super::resource_window::ResourceFeed;
 use super::resource_window::RowIdentity;
-use super::{ConnectionState, theme};
 
 /// Column sort keys in display order.
 const COLUMNS: [(&str, &str); 6] = [
@@ -207,9 +207,18 @@ pub(super) fn show<I>(
 where
     I: RowIdentity,
 {
-    if connection != ConnectionState::Connected {
-        ui.label(RichText::new("Connection stale · showing last known rows").color(theme::WARNING));
-        ui.separator();
+    let fallback_freshness =
+        (connection != ConnectionState::Connected).then(|| super::WindowFreshness::Reconnecting {
+            last_sync_age: "unknown".into(),
+            retry_in: "pending".into(),
+            attempt: 1,
+        });
+    let effective_freshness = feed
+        .window_freshness
+        .get(&window_id)
+        .or(fallback_freshness.as_ref());
+    if let Some(freshness) = effective_freshness {
+        super::resource_window::show_window_freshness(ui, window_id, freshness, resource_actions);
     }
 
     let compact_controls = ui.ctx().content_rect().width() < 700.0;
@@ -280,6 +289,14 @@ where
         });
         return false;
     };
+    if rows.is_empty() && effective_freshness.is_none() {
+        super::resource_window::show_window_freshness(
+            ui,
+            window_id,
+            &super::WindowFreshness::ReadyEmpty,
+            resource_actions,
+        );
+    }
 
     // Namespace restriction and search filter authoritative rows locally;
     // sorting happens below against the filtered set.
@@ -321,6 +338,7 @@ where
         ui,
         &mut ratio,
         detail_shown,
+        state.prior_split_ratio.is_some(),
         |ui| {
             show_table(
                 ui,
@@ -348,17 +366,28 @@ where
                     primary_state,
                     detail_view,
                     gone,
+                    true,
+                    state.prior_split_ratio.is_some(),
                     yaml,
                     streams,
                     dialogs,
                     feed,
                     Some(&state.port_drafts),
+                    effective_freshness.is_none_or(super::WindowFreshness::mutations_allowed),
                     resource_actions,
                     queued,
                 );
             }
         },
     );
+
+    if detail_shown && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if state.prior_split_ratio.is_some() {
+            queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
+        } else {
+            queued.push(WorkspaceCommand::ClearSelection(window_id));
+        }
+    }
 
     if let Some(actions) = list_actions {
         if let Some(sort) = actions.sort {
@@ -370,6 +399,17 @@ where
         // Double-click and the row context menu pop a dedicated window out.
         if let Some(identity) = actions.popped_out {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        }
+    }
+
+    if let Some(identity) = state.selection.clone()
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        if ui.input(|input| input.modifiers.any()) && !gone {
+            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        } else if !state.detail_visible {
+            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 

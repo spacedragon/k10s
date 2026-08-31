@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
-    ClientFrame, Context, ContextAvailability, InfrastructureRequest, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceTypeEntry, ResourceTypesRequest, ServerFrame,
-    StreamTarget,
+    ClientFrame, Context, ContextAvailability, ErrorCode, InfrastructureRequest, RequestId,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+    ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
@@ -22,10 +22,11 @@ use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
-    SafeUiError,
+    SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
-    WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot, WorkspaceState,
+    NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
+    WorkspaceState,
 };
 
 /// Bounded production control-event inbox sized to absorb one large
@@ -125,6 +126,12 @@ pub struct K10sApp {
     /// Deterministic projection from every open list window to its shared
     /// canonical subscription.
     window_subscriptions: BTreeMap<WindowId, SubscriptionKey>,
+    window_freshness_overrides: BTreeMap<WindowId, WindowFreshness>,
+    /// Last authoritative rows retained when an individual watch is rejected.
+    /// The owning window keeps useful read-only context until retry succeeds.
+    window_retained_rows: BTreeMap<WindowId, Vec<ResourceListRow>>,
+    window_last_sync_ms: BTreeMap<WindowId, u64>,
+    rejected_subscription_keys: std::collections::BTreeSet<SubscriptionKey>,
     /// One cluster-scoped core/v1 Namespace watch shared by all namespaced
     /// list windows. It is deliberately not represented as a fake window.
     namespace_subscription: Option<(String, LiveSubscription)>,
@@ -145,6 +152,8 @@ pub struct K10sApp {
     types_request: Option<(String, PendingRequest)>,
     /// In-flight workload mutations awaiting their accepted operation.
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
+    /// Exact-target delete dry-runs awaiting authoritative server results.
+    pending_delete_preflights: BTreeMap<RequestId, PendingDeletePreflight>,
     /// In-flight context switch awaiting the backend's verdict; local state
     /// moves only after it succeeds.
     pending_switch: Option<PendingSwitch>,
@@ -163,6 +172,8 @@ pub struct K10sApp {
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
+    /// Restorable window layouts not currently active, keyed by kube context.
+    workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
     clock_started: Instant,
     jitter_counter: u64,
 }
@@ -180,6 +191,14 @@ struct PendingStreamTicket {
 struct PendingMutation {
     request: PendingRequest,
     window: WindowId,
+}
+
+#[derive(Debug)]
+struct PendingDeletePreflight {
+    request: PendingRequest,
+    window: WindowId,
+    target: ResourceIdentity,
+    propagation: k10s_protocol::DeletePropagation,
 }
 
 /// A context switch sent to the backend whose response has not arrived.
@@ -295,6 +314,10 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
+            window_freshness_overrides: BTreeMap::new(),
+            window_retained_rows: BTreeMap::new(),
+            window_last_sync_ms: BTreeMap::new(),
+            rejected_subscription_keys: std::collections::BTreeSet::new(),
             namespace_subscription: None,
             namespace_catalog: NamespaceCatalogState::NotDemanded,
             namespace_rejected_context: None,
@@ -307,6 +330,7 @@ impl K10sApp {
             types_context: None,
             types_request: None,
             pending_mutations: BTreeMap::new(),
+            pending_delete_preflights: BTreeMap::new(),
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
@@ -318,6 +342,7 @@ impl K10sApp {
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
+            workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
         })
@@ -383,6 +408,41 @@ impl K10sApp {
     #[must_use]
     pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
         self.shell.workspace().snapshot()
+    }
+
+    /// All known layouts, including the currently rendered context.
+    #[must_use]
+    pub fn workspace_layouts(&self) -> BTreeMap<String, WorkspaceSnapshot> {
+        let mut layouts = self.workspace_layouts.clone();
+        let context = self.shell.workspace().context();
+        if !context.is_empty() {
+            layouts.insert(context.to_owned(), self.workspace_snapshot());
+        }
+        layouts
+    }
+
+    /// Install context-keyed layouts loaded by a native host. The matching
+    /// layout is restored when bootstrap confirms or a switch enters it.
+    pub fn restore_workspace_layouts(&mut self, layouts: BTreeMap<String, WorkspaceSnapshot>) {
+        self.workspace_layouts = layouts;
+    }
+
+    fn commit_context_layout(&mut self, to: String) {
+        let from = self.shell.workspace().context().to_owned();
+        if !from.is_empty() && from != to {
+            self.workspace_layouts
+                .insert(from, self.workspace_snapshot());
+        }
+        if let Some(snapshot) = self.workspace_layouts.get(&to).cloned() {
+            self.shell
+                .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+        }
+        for event in self
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to })
+        {
+            self.handle_workspace_event(event);
+        }
     }
 
     /// Restore a persisted workspace snapshot through the normal command
@@ -893,6 +953,16 @@ impl K10sApp {
         }
     }
 
+    /// Open the real shared destructive confirmation for the selected resource.
+    pub fn web_open_delete_dialog(&mut self, window: WindowId) {
+        if let Some(identity) = self
+            .web_selected_detail(window)
+            .map(|(identity, _)| identity.clone())
+        {
+            self.shell.dialogs_mut().open_delete(window, identity);
+        }
+    }
+
     /// Current shared operation dialog kind, if one is open.
     #[must_use]
     pub fn web_dialog_kind(
@@ -904,14 +974,21 @@ impl K10sApp {
 
     /// Request the selected Pod's real bounded logs stream.
     pub fn web_connect_logs(&mut self, window: WindowId) -> Result<(), ClientError> {
-        let target = self.workspace_stream_target(window).ok_or_else(|| {
-            ClientError::Protocol("selected resource cannot stream logs".to_owned())
-        })?;
+        let target = self
+            .current_stream_target(window, StreamRoute::Logs)
+            .ok_or_else(|| {
+                ClientError::Protocol("selected resource cannot stream logs".to_owned())
+            })?;
         let stores = self.shell.stream_stores_mut();
         stores.logs.ensure(window, target.clone()).connect();
         stores.logs.queue(
             window,
-            crate::ui::tools::LogsAction::OpenLogs { window, target },
+            crate::ui::tools::LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
         );
         self.process_stream_requests()
     }
@@ -1079,6 +1156,72 @@ impl K10sApp {
                                 SafeUiError::new(server_error.safe_message.clone()),
                             );
                             self.namespace_rejected_context = Some(context);
+                        }
+                        ClientError::Server(ref server_error)
+                            if server_error.scope == k10s_protocol::ErrorScope::Subscription
+                                && stream_subscription_id.as_ref().is_some_and(|id| {
+                                    self.resource_subscriptions
+                                        .values()
+                                        .any(|entry| entry.live.id() == id)
+                                }) =>
+                        {
+                            let id = stream_subscription_id
+                                .as_ref()
+                                .expect("matched subscription");
+                            let key = self
+                                .resource_subscriptions
+                                .iter()
+                                .find_map(|(key, entry)| {
+                                    (entry.live.id() == id).then(|| key.clone())
+                                })
+                                .expect("matched subscription key");
+                            let entry = self
+                                .resource_subscriptions
+                                .remove(&key)
+                                .expect("matched subscription entry");
+                            self.rejected_subscription_keys.insert(key.clone());
+                            let retained_rows = self
+                                .client
+                                .resource_list(entry.live.id())
+                                .map(|state| state.rows().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            self.client.retire_rejected_subscription(&entry.live);
+                            let details = server_error.details.as_ref();
+                            for window in entry.windows {
+                                self.window_retained_rows
+                                    .insert(window, retained_rows.clone());
+                                let state = if server_error.code
+                                    == k10s_protocol::ErrorCode::Unauthorized
+                                {
+                                    WindowFreshness::Forbidden {
+                                        user: details
+                                            .and_then(|v| v.get("user"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("current user")
+                                            .to_owned(),
+                                        verb: details
+                                            .and_then(|v| v.get("verb"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("list")
+                                            .to_owned(),
+                                        resource: details
+                                            .and_then(|v| v.get("resource"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or(key.gvk.kind.as_str())
+                                            .to_owned(),
+                                        scope: details
+                                            .and_then(|v| v.get("scope"))
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("--all-namespaces")
+                                            .to_owned(),
+                                    }
+                                } else {
+                                    WindowFreshness::Failed {
+                                        message: server_error.safe_message.clone(),
+                                    }
+                                };
+                                self.window_freshness_overrides.insert(window, state);
+                            }
                         }
                         // A request-scoped mutation denial is projected into
                         // the originating dialog for a corrected retry; it
@@ -1292,6 +1435,22 @@ impl K10sApp {
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
                 }
+                if applied
+                    && let Some(subscription) = stream_subscription_id.as_ref()
+                    && self.client.resource_list(subscription).is_some()
+                {
+                    let windows: Vec<_> = self
+                        .resource_subscriptions
+                        .values()
+                        .find(|entry| entry.live.id() == subscription)
+                        .map(|entry| entry.windows.iter().copied().collect())
+                        .unwrap_or_default();
+                    for window in windows {
+                        self.window_last_sync_ms.insert(window, now_ms);
+                        self.window_freshness_overrides.remove(&window);
+                        self.window_retained_rows.remove(&window);
+                    }
+                }
                 if applied && (server_rebuild_requested || replacement_snapshot_started) {
                     // A replacement is assembled across chunks, so neither
                     // the identities in an early page nor identities removed
@@ -1408,13 +1567,7 @@ impl K10sApp {
                         // guards still belong to the old one leaves the UI
                         // inconsistent until some later switch succeeds.
                         if self.shell.workspace().context() != context {
-                            for event in self.shell.apply_workspace_command(
-                                WorkspaceCommand::CommitContextSwitch {
-                                    to: context.clone(),
-                                },
-                            ) {
-                                self.handle_workspace_event(event);
-                            }
+                            self.commit_context_layout(context.clone());
                         }
                         // The bootstrap answer already wrote the selection,
                         // so the render-time context-change path would skip
@@ -1505,12 +1658,7 @@ impl K10sApp {
                 self.failed_switch = None;
                 let current = response.current;
                 self.client.local_ui_mut().selected_context = Some(current.clone());
-                for event in self
-                    .shell
-                    .apply_workspace_command(WorkspaceCommand::CommitContextSwitch { to: current })
-                {
-                    self.handle_workspace_event(event);
-                }
+                self.commit_context_layout(current);
                 let current = self.shell.workspace().context().to_owned();
                 self.reconcile_resource_streams(&current)
                     .map_err(|error| AppEventError::Terminal(error.to_string()))?;
@@ -1638,8 +1786,42 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        for (window, key) in &self.window_subscriptions {
+            if let Some(rows) = self
+                .resource_subscriptions
+                .get(key)
+                .and_then(|entry| self.client.resource_list(entry.live.id()))
+                .map(|state| state.rows().cloned().collect())
+            {
+                self.window_retained_rows.insert(*window, rows);
+            }
+        }
         if self.client.phase() != ClientPhase::Disconnected {
             self.client.transport_lost(now_ms, entropy);
+        }
+        let retry = self.client.retry_schedule();
+        for window in self.window_subscriptions.keys().copied() {
+            let last_sync_age = self.window_last_sync_ms.get(&window).map_or_else(
+                || "unknown".to_owned(),
+                |synced| format_age(now_ms.saturating_sub(*synced)),
+            );
+            let (retry_in, attempt) = retry.map_or_else(
+                || ("pending".to_owned(), 1),
+                |schedule| {
+                    (
+                        format_duration(schedule.retry_at_ms.saturating_sub(now_ms)),
+                        schedule.attempt.saturating_add(1),
+                    )
+                },
+            );
+            self.window_freshness_overrides.insert(
+                window,
+                WindowFreshness::Reconnecting {
+                    last_sync_age,
+                    retry_in,
+                    attempt,
+                },
+            );
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
@@ -1685,18 +1867,44 @@ impl K10sApp {
     fn build_resource_feed(&self) -> ResourceFeed {
         let mut window_lists = std::collections::HashMap::new();
         let mut window_services = std::collections::HashMap::new();
+        let mut lists = std::collections::HashMap::new();
+        let mut services = None;
         for (window, key) in &self.window_subscriptions {
-            let Some(subscription) = self.resource_subscriptions.get(key) else {
-                continue;
-            };
-            if let Some(state) = self.client.resource_list(subscription.live.id()) {
-                let rows = state.rows().cloned().collect();
+            let rows = self
+                .resource_subscriptions
+                .get(key)
+                .and_then(|subscription| self.client.resource_list(subscription.live.id()))
+                .map(|state| state.rows().cloned().collect::<Vec<_>>())
+                .or_else(|| self.window_retained_rows.get(window).cloned());
+            if let Some(rows) = rows {
                 if key.gvk.group.is_empty() && key.gvk.version == "v1" && key.gvk.kind == "Service"
                 {
                     window_services.insert(*window, rows);
                 } else {
                     window_lists.insert(*window, rows);
                 }
+            }
+        }
+        for (key, subscription) in &self.resource_subscriptions {
+            if !matches!(
+                key.scope,
+                SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces)
+            ) {
+                continue;
+            }
+            let Some(state) = self.client.resource_list(subscription.live.id()) else {
+                continue;
+            };
+            let rows = state.rows().cloned().collect::<Vec<_>>();
+            match key.gvk.kind.as_str() {
+                "Pod" => {
+                    lists.insert(WorkloadKind::Pods, rows);
+                }
+                "Deployment" => {
+                    lists.insert(WorkloadKind::Deployments, rows);
+                }
+                "Service" => services = Some(rows),
+                _ => {}
             }
         }
         let namespace_catalog = match (&self.namespace_catalog, &self.namespace_subscription) {
@@ -1714,10 +1922,38 @@ impl K10sApp {
             (state, _) => state.clone(),
         };
         ResourceFeed {
+            window_freshness: window_lists
+                .iter()
+                .map(|(window, rows)| {
+                    let state = if rows.is_empty() {
+                        WindowFreshness::ReadyEmpty
+                    } else {
+                        WindowFreshness::Live {
+                            last_sync_age: "just now".into(),
+                        }
+                    };
+                    (*window, state)
+                })
+                .chain(window_services.iter().map(|(window, rows)| {
+                    let state = if rows.is_empty() {
+                        WindowFreshness::ReadyEmpty
+                    } else {
+                        WindowFreshness::Live {
+                            last_sync_age: "just now".into(),
+                        }
+                    };
+                    (*window, state)
+                }))
+                .chain(
+                    self.window_freshness_overrides
+                        .iter()
+                        .map(|(window, state)| (*window, state.clone())),
+                )
+                .collect(),
             namespace_catalog,
-            lists: std::collections::HashMap::new(),
+            lists,
             window_lists,
-            services: None,
+            services,
             window_services,
             types: self.resource_types.clone(),
             details: self.details.clone().into_iter().collect(),
@@ -1759,6 +1995,27 @@ impl K10sApp {
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
         let mut namespace_demanded = false;
+        if self.shell.command_palette_open() {
+            for (group, version, kind) in [
+                ("", "v1", "Pod"),
+                ("apps", "v1", "Deployment"),
+                ("", "v1", "Service"),
+            ] {
+                desired
+                    .entry(SubscriptionKey {
+                        context: context.to_owned(),
+                        gvk: k10s_protocol::GroupVersionKind {
+                            group: group.to_owned(),
+                            version: version.to_owned(),
+                            kind: kind.to_owned(),
+                        },
+                        protocol_namespace: None,
+                        scope: SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces),
+                    })
+                    .or_default();
+            }
+            namespace_demanded = true;
+        }
         for window in self.shell.workspace().windows() {
             let (gvk, scope) = match (&window.kind, &window.content) {
                 (WindowKind::Services, WindowContent::Services(state)) => (
@@ -1791,16 +2048,23 @@ impl K10sApp {
                         };
                         (descriptor.gvk.clone(), scope)
                     } else {
-                        let Some((group, version, kind)) = builtin_kind_gvk(*kind) else {
+                        let resource_kind = *kind;
+                        let Some((group, version, wire_kind)) = builtin_kind_gvk(resource_kind)
+                        else {
                             continue;
+                        };
+                        let scope = if resource_kind.namespaced() {
+                            SubscriptionScope::Namespaced(state.namespace_scope.clone())
+                        } else {
+                            SubscriptionScope::ClusterScoped
                         };
                         (
                             k10s_protocol::GroupVersionKind {
                                 group: group.to_owned(),
                                 version: version.to_owned(),
-                                kind: kind.to_owned(),
+                                kind: wire_kind.to_owned(),
                             },
-                            SubscriptionScope::Namespaced(state.namespace_scope.clone()),
+                            scope,
                         )
                     }
                 }
@@ -1830,7 +2094,10 @@ impl K10sApp {
             .collect();
         let additions = desired
             .keys()
-            .filter(|key| !self.resource_subscriptions.contains_key(*key))
+            .filter(|key| {
+                !self.resource_subscriptions.contains_key(*key)
+                    && !self.rejected_subscription_keys.contains(*key)
+            })
             .count();
         let namespace_removed = usize::from(self.namespace_subscription.as_ref().is_some_and(
             |(subscribed_context, _)| !namespace_demanded || subscribed_context != context,
@@ -1879,6 +2146,9 @@ impl K10sApp {
             self.namespace_rejected_context = None;
         }
         for (key, windows) in desired {
+            if self.rejected_subscription_keys.contains(&key) {
+                continue;
+            }
             if let Some(entry) = self.resource_subscriptions.get_mut(&key) {
                 entry.windows = windows;
                 continue;
@@ -1902,6 +2172,14 @@ impl K10sApp {
             self.resource_subscriptions
                 .insert(key, RetainedSubscription { live, windows });
         }
+        self.window_freshness_overrides
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.window_retained_rows
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.window_last_sync_ms
+            .retain(|window, _| window_subscriptions.contains_key(window));
+        self.rejected_subscription_keys
+            .retain(|key| window_subscriptions.values().any(|wanted| wanted == key));
         self.window_subscriptions = window_subscriptions;
 
         if custom_open {
@@ -1972,7 +2250,48 @@ impl K10sApp {
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
+            if self
+                .window_freshness_overrides
+                .get(&window)
+                .is_some_and(|freshness| !freshness.mutations_allowed())
+            {
+                if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
+                    dialog.operation_failed("window is not live; retry the list before mutating");
+                }
+                continue;
+            }
             let command = match action {
+                DialogAction::RequestDeletePreflight {
+                    target,
+                    propagation,
+                } => {
+                    let superseded = self
+                        .pending_delete_preflights
+                        .iter()
+                        .filter_map(|(id, entry)| (entry.window == window).then_some(id.clone()))
+                        .collect::<Vec<_>>();
+                    for id in superseded {
+                        if let Some(entry) = self.pending_delete_preflights.remove(&id) {
+                            let _ = self.client.cancel(&entry.request);
+                        }
+                    }
+                    let request = self.client.begin(Query::DeletePreflight(
+                        k10s_protocol::DeletePreflightRequest {
+                            identity: target.clone(),
+                            propagation,
+                        },
+                    ))?;
+                    self.pending_delete_preflights.insert(
+                        request.id().clone(),
+                        PendingDeletePreflight {
+                            request,
+                            window,
+                            target,
+                            propagation,
+                        },
+                    );
+                    continue;
+                }
                 DialogAction::SubmitScale {
                     target,
                     replicas,
@@ -1985,10 +2304,12 @@ impl K10sApp {
                 DialogAction::SubmitDelete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 } => Command::Delete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
                 },
             };
@@ -2024,7 +2345,54 @@ impl K10sApp {
             }
         }
         self.finish_type_requests();
+        self.finish_delete_preflights();
         self.refresh_details();
+    }
+
+    fn finish_delete_preflights(&mut self) {
+        while let Some(id) = self
+            .pending_delete_preflights
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let entry = self.pending_delete_preflights.remove(&id).unwrap();
+            let preflight = match self.client.take(entry.request.clone()) {
+                Some(QueryResult::DeletePreflight(response)) => {
+                    crate::ui::dialogs::DestructivePreflight::Ready {
+                        impact: response.impact,
+                        dry_run: response.dry_run,
+                        resource_version: response.resource_version,
+                    }
+                }
+                _ => {
+                    let failure = self.client.take_failure(entry.request);
+                    match failure {
+                        Some(failure) if failure.code == ErrorCode::Unauthorized => {
+                            crate::ui::dialogs::DestructivePreflight::Forbidden(
+                                failure.safe_message,
+                            )
+                        }
+                        Some(failure) if failure.code == ErrorCode::Conflict => {
+                            crate::ui::dialogs::DestructivePreflight::Conflict(failure.safe_message)
+                        }
+                        Some(failure) => crate::ui::dialogs::DestructivePreflight::DryRunFailed(
+                            failure.safe_message,
+                        ),
+                        None => crate::ui::dialogs::DestructivePreflight::DryRunFailed(
+                            "delete dry-run failed".into(),
+                        ),
+                    }
+                }
+            };
+            if let Some(crate::ui::dialogs::DialogHandle::Delete(dialog)) =
+                self.shell.dialogs_mut().active_mut(entry.window)
+                && dialog.target() == &entry.target
+                && dialog.propagation() == entry.propagation
+            {
+                dialog.set_preflight(preflight);
+            }
+        }
     }
 
     /// Issue detail queries for every identity a window pinned so the
@@ -2064,6 +2432,48 @@ impl K10sApp {
             ResourceAction::RetryNamespaceCatalog => {
                 self.namespace_rejected_context = None;
                 self.namespace_catalog = NamespaceCatalogState::Loading;
+                self.reconcile_selected_resource_streams();
+            }
+            ResourceAction::RetryWindow(window) | ResourceAction::FullResyncWindow(window) => {
+                // A stale window may be the projection of a dead control
+                // transport rather than a watch-local failure. Route its
+                // retry through transport recovery and keep the cached rows
+                // until a replacement snapshot arrives.
+                if self.client.phase() != ClientPhase::Ready {
+                    let now_ms =
+                        u64::try_from(self.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    self.jitter_counter = self.jitter_counter.wrapping_add(1);
+                    let entropy =
+                        now_ms.rotate_left(17) ^ self.jitter_counter.wrapping_mul(0x9e37_79b9);
+                    if let Err(error) = self.retry_now(now_ms, entropy) {
+                        self.terminal_failure(error.to_string());
+                    }
+                    return;
+                }
+                let Some(key) = self.window_subscriptions.get(&window).cloned() else {
+                    return;
+                };
+                self.rejected_subscription_keys.remove(&key);
+                let affected: Vec<_> = self
+                    .window_subscriptions
+                    .iter()
+                    .filter_map(|(candidate, candidate_key)| {
+                        (candidate_key == &key).then_some(*candidate)
+                    })
+                    .collect();
+                for affected_window in affected {
+                    self.window_freshness_overrides.insert(
+                        affected_window,
+                        WindowFreshness::StaleRetrying {
+                            last_sync_age: "cached".to_owned(),
+                            retry_in: "now".to_owned(),
+                            attempt: 1,
+                        },
+                    );
+                }
+                if let Some(subscription) = self.resource_subscriptions.remove(&key) {
+                    let _ = self.client.unsubscribe(&subscription.live);
+                }
                 self.reconcile_selected_resource_streams();
             }
         }
@@ -2453,8 +2863,26 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: "app".to_owned(),
+            container: self
+                .details
+                .get(identity)
+                .and_then(|view| crate::ui::pod_container(&view.manifest))
+                .unwrap_or_else(|| "app".to_owned()),
         })
+    }
+
+    /// Resolve the authoritative target for a live route. Logs retain their
+    /// per-window container choice while the workspace remains on the same
+    /// pod; exec continues to use the manifest's default container.
+    fn current_stream_target(&self, window: WindowId, route: StreamRoute) -> Option<StreamTarget> {
+        let workspace_target = self.workspace_stream_target(window)?;
+        if route == StreamRoute::Logs
+            && let Some(selected) = self.shell.stream_stores().logs.target_of(window)
+            && crate::ui::tools::logs::same_workload(&selected, &workspace_target)
+        {
+            return Some(selected);
+        }
+        Some(workspace_target)
     }
 
     /// Whether the window's workspace shell guard is currently engaged.
@@ -2563,7 +2991,7 @@ impl K10sApp {
         for (key, session) in self.stream_sessions.iter() {
             let (window, route) = *key;
             let target_matches =
-                self.workspace_stream_target(window).as_ref() == Some(session.target());
+                self.current_stream_target(window, route).as_ref() == Some(session.target());
             if !target_matches {
                 // The selection moved on while this session existed. If it
                 // had already engaged the guard, release that guard too.
@@ -2616,12 +3044,18 @@ impl K10sApp {
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_log_actions() {
+            let crate::ui::tools::LogsAction::OpenLogs {
+                target,
+                since_seconds,
+                previous,
+                ..
+            } = action;
             let request = self.client.begin(Query::StreamTicket {
-                target: match action {
-                    crate::ui::tools::LogsAction::OpenLogs { target, .. } => target,
-                },
+                target,
                 stream_type: k10s_protocol::StreamType::Logs,
                 tty: false,
+                since_seconds,
+                previous,
             })?;
             // The tool moves to Connecting immediately; the Ready signal
             // completes the attach.
@@ -2642,6 +3076,8 @@ impl K10sApp {
                 target: target.clone(),
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
+                since_seconds: None,
+                previous: false,
             })?;
             // Same explicit Connecting transition for the terminal.
             if let Some(shell) = self.shell.stream_stores_mut().shells.get_mut(window) {
@@ -2691,7 +3127,7 @@ impl K10sApp {
                 window,
             } = entry;
             if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && session_open(
+                && let Err(error) = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
@@ -2699,9 +3135,9 @@ impl K10sApp {
                     &self.connection_url,
                     &self.access_token,
                 )
-                .is_ok()
             {
-                // The session is now live and polling.
+                let reason = format!("could not open stream socket: {error}");
+                fail_stream_tool(&mut self.shell, window, route, &reason);
             }
         }
     }
@@ -2725,7 +3161,7 @@ impl K10sApp {
             // the new pod's guard or attach the old session.
             let bound_target = session.target().clone();
             let target_current =
-                self.workspace_stream_target(window).as_ref() == Some(&bound_target);
+                self.current_stream_target(window, route).as_ref() == Some(&bound_target);
             // Guard transitions are collected while the tool stores are
             // borrowed and applied afterwards.
             let mut guard_connected = false;
@@ -2851,6 +3287,8 @@ fn resource_delta_projection(
 /// picker-driven and have no single GVK.
 fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &'static str)> {
     match kind {
+        WorkloadKind::Events => Some(("", "v1", "Event")),
+        WorkloadKind::Namespaces => Some(("", "v1", "Namespace")),
         WorkloadKind::Deployments => Some(("apps", "v1", "Deployment")),
         WorkloadKind::StatefulSets => Some(("apps", "v1", "StatefulSet")),
         WorkloadKind::DaemonSets => Some(("apps", "v1", "DaemonSet")),
@@ -2858,6 +3296,17 @@ fn builtin_kind_gvk(kind: WorkloadKind) -> Option<(&'static str, &'static str, &
         WorkloadKind::CronJobs => Some(("batch", "v1", "CronJob")),
         WorkloadKind::Pods => Some(("", "v1", "Pod")),
         WorkloadKind::CustomResources => None,
+        WorkloadKind::Ingresses => Some(("networking.k8s.io", "v1", "Ingress")),
+        WorkloadKind::Endpoints => Some(("", "v1", "Endpoints")),
+        WorkloadKind::NetworkPolicies => Some(("networking.k8s.io", "v1", "NetworkPolicy")),
+        WorkloadKind::ConfigMaps => Some(("", "v1", "ConfigMap")),
+        WorkloadKind::Secrets => Some(("", "v1", "Secret")),
+        WorkloadKind::PersistentVolumeClaims => Some(("", "v1", "PersistentVolumeClaim")),
+        WorkloadKind::PersistentVolumes => Some(("", "v1", "PersistentVolume")),
+        WorkloadKind::StorageClasses => Some(("storage.k8s.io", "v1", "StorageClass")),
+        WorkloadKind::ServiceAccounts => Some(("", "v1", "ServiceAccount")),
+        WorkloadKind::Roles => Some(("rbac.authorization.k8s.io", "v1", "Role")),
+        WorkloadKind::RoleBindings => Some(("rbac.authorization.k8s.io", "v1", "RoleBinding")),
     }
 }
 
@@ -2875,13 +3324,45 @@ fn session_open(
     granted: k10s_protocol::StreamTicketResponse,
     connection_url: &str,
     access_token: &str,
-) -> Result<(), ()> {
+) -> Result<(), TransportError> {
     let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
-    session
-        .open_with_ticket(connection_url, access_token, &granted.ticket_id)
-        .map_err(|_| ())?;
+    session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
+}
+
+/// Return one failed dedicated-socket open to the tool that requested it.
+/// The control connection remains healthy and the tool stays reconnectable.
+fn fail_stream_tool(
+    shell: &mut UiShell<ResourceIdentity>,
+    window: WindowId,
+    route: StreamRoute,
+    reason: &str,
+) {
+    match route {
+        StreamRoute::Logs => {
+            if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
+                view.fail(reason);
+            }
+        }
+        StreamRoute::Exec => {
+            if let Some(tool) = shell.stream_stores_mut().shells.get_mut(window) {
+                tool.fail(reason);
+            }
+        }
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        format!("{}s", milliseconds.div_ceil(1_000))
+    }
+}
+
+fn format_age(milliseconds: u64) -> String {
+    format!("{} ago", format_duration(milliseconds))
 }
 
 #[derive(Debug)]
@@ -2918,7 +3399,7 @@ mod tests {
 
     use super::{
         AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
-        PrimaryDetailState, RelationState, ResourceAction, SafeUiError,
+        PrimaryDetailState, RelationState, ResourceAction, SafeUiError, WindowFreshness,
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
     use crate::workspace::{
@@ -2928,6 +3409,27 @@ mod tests {
     #[test]
     fn production_control_inbox_holds_a_large_default_snapshot_burst() {
         assert_eq!(super::CONTROL_INBOX_CAPACITY, 256);
+    }
+
+    #[test]
+    fn context_switches_restore_independent_window_layouts() {
+        let (mut app, _state) = test_app(Vec::new());
+        app.commit_context_layout("dev".into());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let dev_snapshot = app.workspace_snapshot();
+
+        app.commit_context_layout("prod".into());
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Jobs));
+        let prod_snapshot = app.workspace_snapshot();
+        assert_ne!(dev_snapshot, prod_snapshot);
+
+        app.commit_context_layout("dev".into());
+        assert_eq!(app.workspace_snapshot().windows, dev_snapshot.windows);
+        app.commit_context_layout("prod".into());
+        assert_eq!(app.workspace_snapshot().windows, prod_snapshot.windows);
+        assert_eq!(app.workspace_layouts().len(), 2);
     }
 
     #[derive(Debug, Default)]
@@ -4777,6 +5279,174 @@ mod tests {
     }
 
     #[test]
+    fn rejected_watch_retains_its_rows_without_obscuring_a_healthy_sibling() {
+        let (mut app, state) = ready_app();
+        let deployments = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .expect("deployments window opens");
+        let pods = app
+            .web_activate_workload(WorkloadKind::Pods)
+            .expect("pods window opens");
+
+        let subscription_for = |app: &K10sApp, kind: &str| {
+            app.resource_subscriptions
+                .iter()
+                .find_map(|(key, entry)| (key.gvk.kind == kind).then(|| entry.live.id().clone()))
+                .expect("watch exists")
+        };
+        let deployment_subscription = subscription_for(&app, "Deployment");
+        let pod_subscription = subscription_for(&app, "Pod");
+        let row = |kind: &str, name: &str| ResourceListRow {
+            identity: ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: if kind == "Pod" {
+                    GroupVersionKind::core("v1", "Pod")
+                } else {
+                    GroupVersionKind {
+                        group: "apps".into(),
+                        version: "v1".into(),
+                        kind: kind.into(),
+                    }
+                },
+                namespace: Some("default".into()),
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            },
+            revision: BackendRevision::new(7),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let apply_snapshot =
+            |app: &mut K10sApp, subscription: &SubscriptionId, row: ResourceListRow| {
+                for (kind, payload) in [
+                    (
+                        ServerKind::Subscribed,
+                        serde_json::to_value(Subscribed).unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotBegin,
+                        serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotChunk,
+                        serde_json::to_value(SnapshotChunk {
+                            chunk_index: 0,
+                            data: serde_json::to_value(ResourceSnapshotPage {
+                                revision: BackendRevision::new(7),
+                                rows: vec![row.clone()],
+                            })
+                            .unwrap(),
+                        })
+                        .unwrap(),
+                    ),
+                    (
+                        ServerKind::SnapshotEnd,
+                        serde_json::to_value(SnapshotEnd {
+                            checksum: "fixture".into(),
+                        })
+                        .unwrap(),
+                    ),
+                ] {
+                    app.handle_event(
+                        server_message(&ServerFrame {
+                            kind,
+                            request_id: None,
+                            subscription_id: Some(subscription.clone()),
+                            sequence: None,
+                            payload,
+                        }),
+                        0,
+                        0,
+                    )
+                    .unwrap();
+                }
+            };
+        apply_snapshot(
+            &mut app,
+            &deployment_subscription,
+            row("Deployment", "healthy-api"),
+        );
+        apply_snapshot(&mut app, &pod_subscription, row("Pod", "cached-pod"));
+
+        let denied = ErrorFrame::new(
+            ErrorCode::Unauthorized,
+            "pods are forbidden",
+            Retryability::AfterRefresh,
+            ErrorScope::Subscription,
+            "pod-watch",
+        )
+        .with_details(serde_json::json!({
+            "user": "alice@example.com",
+            "verb": "list",
+            "resource": "pods",
+            "scope": "--namespace=default"
+        }));
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: None,
+                subscription_id: Some(pod_subscription),
+                sequence: None,
+                payload: serde_json::to_value(denied).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        let feed = app.build_resource_feed();
+        assert_eq!(
+            feed.window_lists[&deployments][0].identity.name,
+            "healthy-api"
+        );
+        assert!(matches!(
+            feed.window_freshness.get(&deployments),
+            Some(WindowFreshness::Live { .. })
+        ));
+        assert_eq!(feed.window_lists[&pods][0].identity.name, "cached-pod");
+        assert!(matches!(
+            feed.window_freshness.get(&pods),
+            Some(WindowFreshness::Forbidden { verb, resource, .. })
+                if verb == "list" && resource == "pods"
+        ));
+        app.reconcile_selected_resource_streams();
+        assert_eq!(
+            resource_watches(&state).len(),
+            2,
+            "a rejected watch waits for explicit retry"
+        );
+        app.handle_resource_action(ResourceAction::RetryWindow(pods));
+        assert_eq!(
+            resource_watches(&state).len(),
+            3,
+            "retry starts one replacement watch"
+        );
+
+        app.transient_loss(100, 250);
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod"
+        );
+        app.handle_resource_action(ResourceAction::RetryWindow(pods));
+        assert_eq!(
+            state.borrow().connect_count,
+            2,
+            "window retry during transport staleness starts transport recovery"
+        );
+        assert_eq!(
+            app.build_resource_feed().window_lists[&pods][0]
+                .identity
+                .name,
+            "cached-pod",
+            "cached rows remain visible until a replacement snapshot succeeds"
+        );
+    }
+
+    #[test]
     fn custom_resource_picker_requests_types_without_opening_a_watch() {
         let (mut app, state) = ready_app();
         app.web_activate_workload(WorkloadKind::CustomResources);
@@ -6240,12 +6910,15 @@ mod stream_lifecycle_tests {
     use std::sync::mpsc;
 
     use ewebsock::{WsEvent, WsMessage};
-    use k10s_protocol::{GroupVersionKind, ResourceIdentity, StreamTarget, StreamType};
+    use k10s_protocol::{
+        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+        ResourceIdentity, StreamTarget, StreamType,
+    };
 
     use super::K10sApp;
     use super::tests::test_app;
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::ShellPhase;
+    use crate::ui::tools::{LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -6272,12 +6945,40 @@ mod stream_lifecycle_tests {
     }
 
     pub(super) fn target_for(pod_name: &str) -> StreamTarget {
+        target_for_container(pod_name, "app")
+    }
+
+    fn target_for_container(pod_name: &str, container: &str) -> StreamTarget {
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
             pod: pod_name.into(),
             uid: format!("uid-{pod_name}"),
-            container: "app".into(),
+            container: container.into(),
+        }
+    }
+
+    fn detail_with_container(
+        identity: &ResourceIdentity,
+        container: &str,
+    ) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_exec: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: format!(
+                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
+            ),
+            projection: None,
         }
     }
 
@@ -6333,6 +7034,132 @@ mod stream_lifecycle_tests {
         app.stream_sessions
             .insert((window, StreamRoute::Exec), session);
         tx
+    }
+
+    #[test]
+    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("database");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "postgres"));
+        let target = target_for_container(&pod.name, "postgres");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .shells
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Exec, target, true);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Exec), session);
+
+        ready_signal(&tx, "postgres");
+        app.poll_stream_sessions();
+
+        assert!(app.shell_guard_connected(window));
+        assert_eq!(
+            *app.shell
+                .stream_stores_mut()
+                .shells
+                .get_mut(window)
+                .expect("terminal exists")
+                .phase(),
+            ShellPhase::Attached
+        );
+    }
+
+    #[test]
+    fn logs_for_manifest_container_attach_and_project_output() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("web");
+        let window = open_pod_detail(&mut app, &pod);
+        app.details
+            .insert(pod.clone(), detail_with_container(&pod, "nginx"));
+        let target = target_for_container(&pod.name, "nginx");
+
+        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
+
+        let (tx, rx) = mpsc::channel();
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, target.clone())
+            .connect();
+        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        session.inject_for_test(ScriptStream { events: rx });
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+
+        tx.send(WsEvent::Message(WsMessage::Text(
+            serde_json::to_string(&k10s_protocol::StreamServerMessage::Ready {
+                stream_type: StreamType::Logs,
+                tty: false,
+                container: "nginx".to_owned(),
+            })
+            .unwrap(),
+        )))
+        .unwrap();
+        tx.send(WsEvent::Message(WsMessage::Binary(
+            k10s_protocol::encode_stream_payload(k10s_protocol::payload_kind::STDOUT, b"served"),
+        )))
+        .unwrap();
+        app.poll_stream_sessions();
+
+        let view = app
+            .shell
+            .stream_stores()
+            .logs
+            .get(window)
+            .expect("log view exists");
+        assert_eq!(view.phase(), LogsPhase::Streaming);
+        assert_eq!(
+            view.visible_lines().map(String::as_str).collect::<Vec<_>>(),
+            vec!["served"]
+        );
+    }
+
+    #[test]
+    fn selected_log_container_is_authoritative_across_render_reconciliation() {
+        let (mut app, _state) = test_app(Vec::new());
+        let pod = pod("multi-container");
+        let window = open_pod_detail(&mut app, &pod);
+        let mut detail = detail_with_container(&pod, "app");
+        detail.manifest = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: app\n    - name: metrics\n".to_owned();
+        app.details.insert(pod.clone(), detail);
+
+        let default_target = target_for_container(&pod.name, "app");
+        let selected_target = target_for_container(&pod.name, "metrics");
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, default_target.clone())
+            .select_container("metrics");
+        // The next render still supplies the manifest default. It must not
+        // replace the user's selected container.
+        app.shell
+            .stream_stores_mut()
+            .logs
+            .ensure(window, default_target);
+
+        assert_eq!(
+            app.current_stream_target(window, StreamRoute::Logs),
+            Some(selected_target.clone())
+        );
+
+        let session = StreamSession::new(StreamRoute::Logs, selected_target, false);
+        app.stream_sessions
+            .insert((window, StreamRoute::Logs), session);
+        app.reconcile_sessions();
+        assert!(
+            app.stream_sessions
+                .contains_key(&(window, StreamRoute::Logs)),
+            "reconciliation retains the selected-container stream"
+        );
     }
 
     /// Ready attaches the terminal and engages the guard; resolving the

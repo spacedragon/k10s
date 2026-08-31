@@ -125,6 +125,9 @@ fn summarize(gvk: &Gvk, object: &kube::core::DynamicObject) -> String {
         ("", "v1", "Node") => typed(object, |n: &k8s_openapi::api::core::v1::Node| {
             node_summary(n)
         }),
+        ("", "v1", "Event") => typed(object, |event: &k8s_openapi::api::core::v1::Event| {
+            event.type_.clone().unwrap_or_default()
+        }),
         ("", "v1", "PersistentVolumeClaim") => typed(
             object,
             |p: &k8s_openapi::api::core::v1::PersistentVolumeClaim| {
@@ -231,8 +234,8 @@ fn pod_summary(pod: &k8s_openapi::api::core::v1::Pod) -> String {
             .as_ref()
             .and_then(|state| state.waiting.as_ref())
             .and_then(|waiting| waiting.reason.as_deref());
-        if waiting_reason == Some("CrashLoopBackOff") {
-            return "CrashLoopBackOff".into();
+        if let Some(reason) = waiting_reason.filter(|reason| !reason.is_empty()) {
+            return reason.to_owned();
         }
     }
     pod.status

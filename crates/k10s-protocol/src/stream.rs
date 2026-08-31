@@ -88,6 +88,9 @@ pub struct StreamTicketRequest {
     /// Relative history window for logs, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_seconds: Option<i64>,
+    /// Read the previously terminated instance of the selected container.
+    #[serde(default)]
+    pub previous: bool,
     /// Ask Kubernetes to prefix log lines with source timestamps.
     #[serde(default)]
     pub timestamps: bool,
@@ -314,6 +317,7 @@ mod tests {
             command: Vec::new(),
             tail_lines: Some(200),
             since_seconds: Some(60),
+            previous: false,
             timestamps: true,
             follow: true,
         };

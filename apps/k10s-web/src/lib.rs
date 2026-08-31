@@ -188,6 +188,10 @@ impl Runtime {
             && let Some(window) = self.active_window
         {
             app.web_open_scale_dialog(window);
+        } else if action == "open-delete"
+            && let Some(window) = self.active_window
+        {
+            app.web_open_delete_dialog(window);
         }
         self.render_key.clear();
     }
@@ -277,7 +281,7 @@ impl Runtime {
         let navigation = self.create_element("nav");
         navigation.set_attribute("aria-label", "Resources").unwrap();
         self.append_button_to(&navigation, "Services", "services");
-        for kind in WorkloadKind::ALL {
+        for kind in WorkloadKind::TAXONOMY {
             self.append_button_to(&navigation, kind.title(), &format!("workload:{kind:?}"));
         }
         self.root.append_child(&navigation).unwrap();
@@ -386,6 +390,9 @@ impl Runtime {
                 if detail.capabilities.can_scale {
                     self.append_button("Scale workload", "open-scale");
                 }
+                if detail.capabilities.can_delete {
+                    self.append_button("Delete resource", "open-delete");
+                }
                 if detail.capabilities.can_view_logs {
                     self.append_button("Connect logs", "connect-logs");
                 }
@@ -415,6 +422,16 @@ impl Runtime {
                 .unwrap();
             let title = self.create_element("h2");
             title.set_text_content(Some("Scale workload"));
+            dialog.append_child(&title).unwrap();
+            self.root.append_child(&dialog).unwrap();
+        } else if dialog == Some(ActiveDialogKind::Delete) {
+            let dialog = self.create_element("section");
+            dialog.set_attribute("role", "dialog").unwrap();
+            dialog
+                .set_attribute("aria-label", "Delete resource")
+                .unwrap();
+            let title = self.create_element("h2");
+            title.set_text_content(Some("Destructive confirmation"));
             dialog.append_child(&title).unwrap();
             self.root.append_child(&dialog).unwrap();
         }
@@ -489,7 +506,7 @@ impl Runtime {
 }
 
 fn parse_kind(value: &str) -> Option<WorkloadKind> {
-    WorkloadKind::ALL
+    WorkloadKind::TAXONOMY
         .into_iter()
         .find(|kind| format!("{kind:?}") == value)
 }

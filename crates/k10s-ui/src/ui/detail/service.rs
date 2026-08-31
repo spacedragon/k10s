@@ -14,8 +14,6 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use crate::ui::resource_window::RowIdentity;
 
-use super::{show_header, tab_label, tabs_for_kind};
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
@@ -23,61 +21,18 @@ pub(super) fn show<I>(
     detail: &DetailState<I>,
     primary_state: Option<&crate::ui::PrimaryDetailState>,
     view: Option<&ResourceDetailResponse>,
-    gone: bool,
     yaml: &mut tools::YamlEditors,
     feed: &crate::ui::ResourceFeed,
     port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    mutations_allowed: bool,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
 {
-    // A gone resource renders only its pinned identity header plus the
-    // gone message; no cached response may resurrect controls for an
-    // object the authoritative rows dropped.
-    if gone && let Some(identity) = detail.identity.as_row_identity() {
-        show_header(ui, identity, None);
-        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
-        return;
-    }
-
-    ui.horizontal(|ui| {
-        ui.heading(RichText::new("Details").strong());
-        let gvk = detail
-            .identity
-            .as_row_identity()
-            .map(|identity| identity.gvk.clone());
-        let tabs: &[DetailTab] = match &gvk {
-            Some(gvk) => tabs_for_kind(gvk),
-            None => &[DetailTab::Overview],
-        };
-        for tab in tabs {
-            let active = *tab == detail.active_tab;
-            let label = if active {
-                RichText::new(tab_label(*tab)).strong()
-            } else {
-                RichText::new(tab_label(*tab))
-            };
-            let button = ui.button(label);
-            button.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    format!("Tab {}", tab_label(*tab)),
-                )
-            });
-            if button.clicked() && !active {
-                queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
-            }
-        }
-    });
-    ui.separator();
-
-    // The header renders from the pinned identity alone.
     let Some(identity) = detail.identity.as_row_identity() else {
         return;
     };
-    show_header(ui, identity, view);
 
     let view = match primary_state {
         Some(crate::ui::PrimaryDetailState::Loaded(view)) => Some(view),
@@ -107,12 +62,16 @@ pub(super) fn show<I>(
     // Read-only panel: only the guarded YAML entry point.
     if view.capabilities.can_edit_yaml {
         ui.horizontal(|ui| {
-            let edit = ui.button("Edit YAML");
+            let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
             edit.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit YAML".to_owned())
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    mutations_allowed,
+                    "Edit YAML".to_owned(),
+                )
             });
             if edit.clicked() {
-                queued.push(WorkspaceCommand::BeginYamlEdit(window_id));
+                queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
             }
         });
         ui.separator();
@@ -143,6 +102,7 @@ pub(super) fn show<I>(
                     yaml,
                     detail.identity.as_row_identity(),
                     Some(view.manifest.as_str()),
+                    mutations_allowed,
                     queued,
                 );
             }

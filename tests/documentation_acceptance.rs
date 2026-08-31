@@ -282,3 +282,36 @@ fn operational_contracts_have_acceptance_coverage() {
         assert!(normalized(document).contains("plugin failure disables only its context"));
     }
 }
+
+#[test]
+fn real_kind_visual_baseline_is_reproducible_and_safe() {
+    let design = read("docs/design/08-improvements.html");
+    let archive = read("docs/design/README.md");
+    let capture = read("docs/testing/real-kind-visual-validation.md");
+    let test = read("tests/browser/real-kind-visual.spec.ts");
+
+    assert!(design.contains("issue-159/design-08-reference.png"));
+    assert!(archive.contains("authoritative visual artifact"));
+    for required in [
+        "1280 × 800",
+        "egui dark theme",
+        "kind-bunyip",
+        "ImagePullBackOff",
+        "completed Job",
+        "StatefulSet",
+        "dense-list",
+        "Windows native-surface fallback",
+        "never replace the real backend with `--fake`",
+    ] {
+        assert!(
+            capture.contains(required),
+            "missing capture contract: {required}"
+        );
+    }
+    for required in ["K10S_REAL_KIND", "kind-bunyip", "Complete", "StatefulSets"] {
+        assert!(
+            test.contains(required),
+            "missing real-kind assertion: {required}"
+        );
+    }
+}

@@ -930,9 +930,13 @@ impl FakeKubernetes {
         &self,
         target: ResourceRef,
         propagation: crate::operation::Propagation,
+        resource_version: String,
         idempotency_key: String,
     ) -> Result<OperationId, BackendError> {
-        let fingerprint = format!("delete/{}/{propagation:?}", target.exact_identity_key());
+        let fingerprint = format!(
+            "delete/{}/{propagation:?}/{resource_version}",
+            target.exact_identity_key()
+        );
         let mut state = self.lock();
         if let Some(existing) = Self::replay_operation(&state, &idempotency_key, &fingerprint)? {
             return Ok(existing);
@@ -959,6 +963,11 @@ impl FakeKubernetes {
             return Err(BackendError::Conflict(
                 "the target does not match the current object at this name; it was recreated"
                     .into(),
+            ));
+        }
+        if record.revision.to_string() != resource_version {
+            return Err(BackendError::Conflict(
+                "the target changed after the delete dry-run".into(),
             ));
         }
         let operation_id = Self::begin_operation(&mut state, &idempotency_key, &fingerprint);
@@ -1380,6 +1389,63 @@ impl KubernetesAccess for FakeKubernetes {
                         .map(QueryResult::ResourceDetail)
                         .ok_or(BackendError::NotFound)
                 }
+                Query::DeletePreflight {
+                    target,
+                    propagation,
+                } => {
+                    let state = self.lock();
+                    if target.context == "prod-readonly" || target.name.contains("forbidden") {
+                        return Err(BackendError::Forbidden);
+                    }
+                    if target.name.contains("conflict") {
+                        return Err(BackendError::Conflict(
+                            "the target changed before the delete dry-run".into(),
+                        ));
+                    }
+                    if target.name.contains("dry-run-failure") {
+                        return Err(BackendError::Internal(
+                            "the API server rejected the delete dry-run".into(),
+                        ));
+                    }
+                    let Some(record) = state.find_record(&target) else {
+                        return Err(BackendError::NotFound);
+                    };
+                    if record.reference.uid != target.uid {
+                        return Err(BackendError::Conflict(
+                            "the target changed before the delete dry-run".into(),
+                        ));
+                    }
+                    let propagation = match propagation {
+                        crate::operation::Propagation::Background => {
+                            k10s_protocol::DeletePropagation::Background
+                        }
+                        crate::operation::Propagation::Foreground => {
+                            k10s_protocol::DeletePropagation::Foreground
+                        }
+                        crate::operation::Propagation::Orphan => {
+                            k10s_protocol::DeletePropagation::Orphan
+                        }
+                    };
+                    Ok(QueryResult::DeletePreflight(
+                        k10s_protocol::DeletePreflightResponse {
+                            identity: k10s_protocol::ResourceIdentity {
+                                context: target.context,
+                                gvk: k10s_protocol::GroupVersionKind {
+                                    group: target.gvk.group,
+                                    version: target.gvk.version,
+                                    kind: target.gvk.kind,
+                                },
+                                namespace: target.namespace,
+                                name: target.name,
+                                uid: target.uid,
+                            },
+                            propagation,
+                            resource_version: record.revision.to_string(),
+                            impact: "Deletes this object; dependents follow the selected propagation policy.".into(),
+                            dry_run: "Passed — the fake API server accepted the delete dry-run.".into(),
+                        },
+                    ))
+                }
                 Query::ResourceRelations { reference } => {
                     let mut state = self.lock();
                     if state.find_record(&reference).is_none() {
@@ -1573,8 +1639,12 @@ impl KubernetesAccess for FakeKubernetes {
                 Command::Delete {
                     target,
                     propagation,
+                    resource_version,
                     idempotency_key,
-                } => self.delete(target, propagation, idempotency_key).await,
+                } => {
+                    self.delete(target, propagation, resource_version, idempotency_key)
+                        .await
+                }
                 Command::Restart {
                     target,
                     idempotency_key,
@@ -2023,6 +2093,118 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             "traffic-overview",
             &[("app", "dashboards")],
         )),
+        record(seed(
+            2_800,
+            "Warning",
+            Gvk::core("v1", "Event"),
+            Some("default"),
+            "api-server-unhealthy",
+            &[],
+        )),
+        record(seed(
+            2_810,
+            "Active",
+            Gvk::core("v1", "Namespace"),
+            None,
+            "default",
+            &[],
+        )),
+        record(seed(
+            2_820,
+            "Ready",
+            Gvk::new("networking.k8s.io", "v1", "Ingress"),
+            Some("default"),
+            "web",
+            &[],
+        )),
+        record(seed(
+            2_830,
+            "2 addresses",
+            Gvk::core("v1", "Endpoints"),
+            Some("default"),
+            "web-frontend",
+            &[],
+        )),
+        record(seed(
+            2_840,
+            "Active",
+            Gvk::new("networking.k8s.io", "v1", "NetworkPolicy"),
+            Some("default"),
+            "default-deny",
+            &[],
+        )),
+        record(seed(
+            2_850,
+            "3 keys",
+            Gvk::core("v1", "ConfigMap"),
+            Some("default"),
+            "app-config",
+            &[],
+        )),
+        record(seed(
+            2_860,
+            "Opaque",
+            Gvk::core("v1", "Secret"),
+            Some("default"),
+            "api-credentials",
+            &[],
+        )),
+        record(seed(
+            2_870,
+            "Bound",
+            Gvk::core("v1", "PersistentVolumeClaim"),
+            Some("default"),
+            "postgres-data",
+            &[],
+        )),
+        record(seed(
+            2_880,
+            "Bound",
+            Gvk::core("v1", "PersistentVolume"),
+            None,
+            "pv-postgres-data",
+            &[],
+        )),
+        record(seed(
+            2_890,
+            "Default",
+            Gvk::new("storage.k8s.io", "v1", "StorageClass"),
+            None,
+            "fast-ssd",
+            &[],
+        )),
+        record(seed(
+            2_900,
+            "Active",
+            Gvk::core("v1", "ServiceAccount"),
+            Some("default"),
+            "api",
+            &[],
+        )),
+        record(seed(
+            2_910,
+            "3 rules",
+            Gvk::new("rbac.authorization.k8s.io", "v1", "Role"),
+            Some("default"),
+            "api-reader",
+            &[],
+        )),
+        record(seed(
+            2_920,
+            "Active",
+            Gvk::new("rbac.authorization.k8s.io", "v1", "RoleBinding"),
+            Some("default"),
+            "api-reader",
+            &[],
+        )),
+        record(seed(
+            2_930,
+            "Active",
+            Gvk::core("v1", "ServiceAccount"),
+            Some("kube-system"),
+            "node-logs",
+            &[],
+        )),
     ];
 
     // Services carry structured projections so the panel and port-forward
@@ -2094,6 +2276,11 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
 
     // The web-frontend replica wave: twenty pods owned by its replicaset.
     for index in 1..=20_u32 {
+        let summary = if index == 20 {
+            "CrashLoopBackOff"
+        } else {
+            "Running"
+        };
         records.push(record(RecordSeed {
             owner_references: vec![OwnerRef {
                 gvk: replicaset_gvk(),
@@ -2108,7 +2295,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             }],
             ..seed(
                 3_000 + u64::from(index) * 10,
-                "Running",
+                summary,
                 Gvk::core("v1", "Pod"),
                 Some("default"),
                 &format!("web-frontend-7d9f8-{index:05}"),
@@ -2154,6 +2341,16 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             &[("app", "db")],
         )
     }));
+    // Design 08 command-palette fixture: searchable by name, status, and
+    // restart count while remaining an ordinary authoritative fake row.
+    records.push(record(seed(
+        5_250,
+        "1/2 ready · CrashLoopBackOff · 7 restarts",
+        Gvk::core("v1", "Pod"),
+        Some("payments"),
+        "worker-7f498f8b6c-x2psq",
+        &[("app", "worker")],
+    )));
     records
 }
 
@@ -2211,6 +2408,19 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::port::BackendEvent;
+
+    #[test]
+    fn deterministic_fixture_includes_a_crashlooping_pod() {
+        let fake = FakeKubernetes::default();
+        let state = fake.lock();
+        let crashloop = state
+            .records
+            .iter()
+            .find(|record| record.summary == "CrashLoopBackOff")
+            .expect("the fake fixture exposes previous-log behavior");
+        assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
+        assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+    }
 
     #[tokio::test]
     async fn specialized_idempotency_keys_bind_the_exact_source_uid() {

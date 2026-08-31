@@ -121,6 +121,43 @@ fn unavailable_events_are_explicitly_safe() {
         .get_by_label("Events unavailable");
 }
 
+#[test]
+fn crashloop_logs_default_to_previous_with_complete_toolbar() {
+    let mut harness = harness();
+    let pod = identity("Pod", "web-frontend-7d9f8-00001");
+    let mut detail = pod_detail("web-frontend-7d9f8-00001");
+    detail.sections[0]
+        .rows
+        .iter_mut()
+        .find(|row| row.label == "Status")
+        .unwrap()
+        .value = "CrashLoopBackOff".into();
+    harness.state_mut().feed.details.insert(pod, detail);
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Tab Logs")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    for label in ["Previous", "Wrap"] {
+        window.get_by_role_and_label(Role::CheckBox, label);
+    }
+    for label in ["Connect logs", "Export"] {
+        window.get_by_role_and_label(Role::Button, label);
+    }
+    window.get_by_role_and_label(Role::TextInput, "Find in logs");
+    window.get_by_label(
+        "CrashLoopBackOff: showing logs from the previous terminated container by default",
+    );
+}
+
 impl Default for Fixture {
     fn default() -> Self {
         let mut fixture = Self {
@@ -291,6 +328,7 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
         capabilities: ResourceCapabilities {
             can_view_logs: true,
             can_exec: true,
+            can_edit_yaml: true,
             ..ResourceCapabilities::default()
         },
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
@@ -398,7 +436,13 @@ fn tabs_and_actions_are_exact_per_kind() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    for tab in ["Tab Overview", "Tab Events", "Tab Logs", "Tab Shell"] {
+    for tab in [
+        "Tab Overview",
+        "Tab Events",
+        "Tab YAML",
+        "Tab Logs",
+        "Tab Shell",
+    ] {
         window.get_by_role_and_label(Role::Button, tab);
     }
     assert!(
@@ -408,6 +452,47 @@ fn tabs_and_actions_are_exact_per_kind() {
         "pods own nothing, so no related-workloads tab"
     );
     assert!(window.query_by_label("Scale workload").is_none());
+}
+
+#[test]
+fn pod_edit_yaml_action_opens_the_read_only_manifest_before_editing() {
+    let mut harness = harness();
+    harness.state_mut().feed.details.insert(
+        identity("Pod", "db-postgres-0"),
+        pod_detail("db-postgres-0"),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Pods),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Edit YAML")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Read-only");
+    window.get_by_label("apiVersion: v1\nkind: Pod\nmetadata:\n  name: db-postgres-0\n");
+    let pods_id = workload_window_id(
+        harness.state().shell.workspace(),
+        k10s_ui::workspace::WorkloadKind::Pods,
+    );
+    let detail = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(pods_id)
+        .and_then(|resource| resource.detail.as_ref())
+        .expect("pod detail is selected");
+    assert_eq!(detail.active_tab, WorkspaceDetailTab::Yaml);
+    assert!(!detail.yaml.dirty, "opening YAML must remain read-only");
 }
 
 #[test]
@@ -641,6 +726,18 @@ fn popout_is_pinned_and_never_follows_later_selection() {
     // The pinned window renders its own identity, not the integrated one.
     let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
     dedicated.get_by_label("UID uid-dev-local-deployment-default-web-frontend");
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Pop out ↗")
+            .is_none(),
+        "a dedicated detail must not offer another pop-out"
+    );
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none(),
+        "pane-only maximize is hidden in a dedicated window"
+    );
     assert!(
         dedicated
             .query_by_label("UID uid-dev-local-deployment-default-api-server")

@@ -6,8 +6,8 @@
 
 use k10s_protocol::{
     AttentionRow, BackendRevision, CapacityUsage, ClusterTotals, HealthLevel,
-    InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, NodeRow,
-    PersistentVolumeClaimRow, PersistentVolumeRow, StorageClassRow, StorageInventory,
+    InfrastructureResponse, LauncherCounts, MetricsAvailability, MetricsCondition, MetricsStatus,
+    NodeRow, PersistentVolumeClaimRow, PersistentVolumeRow, StorageClassRow, StorageInventory,
     WorkloadHealth,
 };
 
@@ -43,6 +43,7 @@ pub struct CatalogSnapshot {
     attention: Vec<CatalogAttention>,
     nodes: Vec<CatalogNode>,
     storage: CatalogStorage,
+    launcher: LauncherCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,55 +98,56 @@ struct CatalogNode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CatalogStorage {
-    persistent_volume_claims: Vec<CatalogPvc>,
-    persistent_volumes: Vec<CatalogPv>,
-    storage_classes: Vec<CatalogStorageClass>,
+pub(crate) struct CatalogStorage {
+    pub(crate) persistent_volume_claims: Vec<CatalogPvc>,
+    pub(crate) persistent_volumes: Vec<CatalogPv>,
+    pub(crate) storage_classes: Vec<CatalogStorageClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPvc {
-    namespace: String,
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_volume: String,
-    age: String,
+pub(crate) struct CatalogPvc {
+    pub(crate) namespace: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_volume: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogPv {
-    name: String,
-    status: String,
-    capacity: String,
-    access_modes: Vec<String>,
-    storage_class: String,
-    bound_claim: String,
-    reclaim_policy: String,
-    age: String,
+pub(crate) struct CatalogPv {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) capacity: String,
+    pub(crate) access_modes: Vec<String>,
+    pub(crate) storage_class: String,
+    pub(crate) bound_claim: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) age: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogStorageClass {
-    name: String,
-    provisioner: String,
-    reclaim_policy: String,
-    volume_binding_mode: String,
-    age: String,
+pub(crate) struct CatalogStorageClass {
+    pub(crate) name: String,
+    pub(crate) provisioner: String,
+    pub(crate) reclaim_policy: String,
+    pub(crate) volume_binding_mode: String,
+    pub(crate) age: String,
 }
 
 impl CatalogSnapshot {
     /// Build an honest, metrics-free overview from normalized live resource
-    /// rows. The real adapter uses this projection until cluster-wide
-    /// capacity and storage collectors are available; absent values remain
-    /// absent instead of being fabricated.
+    /// rows and storage inventory. Absent metrics remain absent instead of
+    /// being fabricated.
     pub(crate) fn live(
         context: impl Into<String>,
         revision: u64,
         generated_at: impl Into<String>,
         records: Vec<ResourceRecord>,
+        storage: CatalogStorage,
+        node_rows: Vec<NodeRow>,
     ) -> Self {
         let nodes = records
             .iter()
@@ -160,6 +162,12 @@ impl CatalogSnapshot {
             .iter()
             .filter(|record| workload_kinds.contains(&record.reference.gvk.kind.as_str()))
             .count() as u32;
+        let count_kinds = |kinds: &[&str]| {
+            records
+                .iter()
+                .filter(|record| kinds.contains(&record.reference.gvk.kind.as_str()))
+                .count() as u32
+        };
 
         let is_unhealthy = |summary: &str| {
             let value = summary.to_ascii_lowercase();
@@ -185,6 +193,13 @@ impl CatalogSnapshot {
                 reason: "Resource is not healthy".into(),
             })
             .collect::<Vec<_>>();
+        let event_warnings = records
+            .iter()
+            .filter(|record| {
+                record.reference.gvk.kind == "Event"
+                    && record.summary.eq_ignore_ascii_case("Warning")
+            })
+            .count() as u32;
         let unhealthy_workloads = records
             .iter()
             .filter(|record| {
@@ -193,6 +208,11 @@ impl CatalogSnapshot {
             })
             .count() as u32;
         let healthy_workloads = workloads.saturating_sub(unhealthy_workloads);
+        let persistent_storage_bytes = storage
+            .persistent_volume_claims
+            .iter()
+            .filter_map(|claim| crate::kube::metrics::quantity_bytes(Some(claim.capacity.clone())))
+            .fold(0, u64::saturating_add);
         let mut workload_health = Vec::new();
         if healthy_workloads > 0 {
             workload_health.push(CatalogHealth {
@@ -217,7 +237,7 @@ impl CatalogSnapshot {
                 nodes,
                 pods,
                 workloads,
-                persistent_storage_bytes: 0,
+                persistent_storage_bytes,
             },
             cluster_cpu: CatalogUsage {
                 used: None,
@@ -240,8 +260,41 @@ impl CatalogSnapshot {
             },
             workload_health,
             attention,
-            nodes: Vec::new(),
-            storage: CatalogStorage::default(),
+            nodes: node_rows
+                .into_iter()
+                .map(|node| CatalogNode {
+                    name: node.name,
+                    status: node.status,
+                    roles: node.roles,
+                    kubernetes_version: node.kubernetes_version,
+                    cpu: CatalogUsage {
+                        used: node.cpu.used,
+                        capacity: node.cpu.capacity,
+                    },
+                    memory: CatalogUsage {
+                        used: node.memory.used,
+                        capacity: node.memory.capacity,
+                    },
+                    pods: CatalogUsage {
+                        used: node.pods.used,
+                        capacity: node.pods.capacity,
+                    },
+                    age: node.age,
+                })
+                .collect(),
+            storage,
+            launcher: LauncherCounts {
+                events_warning: event_warnings,
+                workloads,
+                network: count_kinds(&["Service", "Ingress", "Endpoints", "NetworkPolicy"]),
+                config: count_kinds(&["ConfigMap", "Secret"]),
+                storage: count_kinds(&[
+                    "PersistentVolumeClaim",
+                    "PersistentVolume",
+                    "StorageClass",
+                ]),
+                access: count_kinds(&["ServiceAccount", "Role", "RoleBinding"]),
+            },
         }
     }
 
@@ -347,6 +400,14 @@ impl CatalogSnapshot {
                     age: "90d".into(),
                 }],
             },
+            launcher: LauncherCounts {
+                events_warning: 4,
+                workloads: 6,
+                network: 4,
+                config: 2,
+                storage: 3,
+                access: 4,
+            },
         }
     }
 
@@ -383,6 +444,10 @@ impl CatalogSnapshot {
                 age: "30d".into(),
             }],
             storage: CatalogStorage::default(),
+            launcher: LauncherCounts {
+                workloads: 1,
+                ..LauncherCounts::default()
+            },
         }
     }
 
@@ -411,6 +476,7 @@ impl CatalogSnapshot {
                 workloads: self.totals.workloads,
                 persistent_storage_bytes: self.totals.persistent_storage_bytes,
             },
+            launcher: self.launcher,
             cluster_cpu: usage(self.cluster_cpu),
             cluster_memory: usage(self.cluster_memory),
             pod_capacity: usage(self.pod_capacity),
@@ -657,7 +723,11 @@ mod tests {
                 record("Pod", "broken-pod", Some("default"), "CrashLoopBackOff"),
                 record("Deployment", "api", Some("default"), "2/2 ready"),
                 record("Job", "migration", Some("default"), "Failed"),
+                record("Event", "image-pull", Some("default"), "Warning"),
+                record("Event", "scheduled", Some("default"), "Normal"),
             ],
+            CatalogStorage::default(),
+            Vec::new(),
         )
         .into_protocol();
 
@@ -667,6 +737,12 @@ mod tests {
         assert_eq!(snapshot.totals.pods, 2);
         assert_eq!(snapshot.totals.workloads, 2);
         assert_eq!(snapshot.attention.len(), 2);
+        assert_eq!(snapshot.launcher.events_warning, 1);
+        assert_eq!(snapshot.launcher.workloads, 2);
+        assert_eq!(snapshot.launcher.network, 0);
+        assert_eq!(snapshot.launcher.config, 0);
+        assert_eq!(snapshot.launcher.storage, 0);
+        assert_eq!(snapshot.launcher.access, 0);
         assert!(
             snapshot
                 .attention

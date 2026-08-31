@@ -24,8 +24,8 @@ use k10s_protocol::{
     ResourceTypeEntry, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell},
-    workspace::{LauncherItem, WindowId, WorkloadKind as W, WorkspaceCommand},
+    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
+    workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
 
 const CONTEXT: &str = "dev-local";
@@ -35,6 +35,7 @@ struct Fixture {
     feed: ResourceFeed,
     response: Option<InfrastructureResponse>,
     selected_context: String,
+    connection: ConnectionState,
 }
 
 impl Default for Fixture {
@@ -44,6 +45,7 @@ impl Default for Fixture {
             feed: ResourceFeed::default(),
             response: None,
             selected_context: CONTEXT.to_owned(),
+            connection: ConnectionState::Connected,
         }
     }
 }
@@ -53,7 +55,7 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     let mut selected = Some(fixture.selected_context.clone());
     fixture.shell.show_with_resources(
         ui,
-        ConnectionState::Connected,
+        fixture.connection,
         &contexts,
         &mut selected,
         fixture.response.as_ref(),
@@ -65,8 +67,12 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 fn harness() -> Harness<'static, Fixture> {
+    harness_with_size(egui::vec2(1_280.0, 800.0))
+}
+
+fn harness_with_size(size: egui::Vec2) -> Harness<'static, Fixture> {
     Harness::builder()
-        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(render, Fixture::default())
 }
@@ -112,6 +118,7 @@ fn snapshot_tree(harness: &Harness<Fixture>, name: &str) {
             path.display()
         )
     });
+    let expected = expected.replace("\r\n", "\n");
     assert!(
         expected == actual,
         "accessibility snapshot {name} drifted.\n\
@@ -223,6 +230,7 @@ fn infrastructure_response(condition: MetricsCondition, detail: &str) -> Infrast
             workloads: 2,
             persistent_storage_bytes: 20 * GIB,
         },
+        launcher: Default::default(),
         cluster_cpu: CapacityUsage::new(Some(500), Some(4_000)),
         cluster_memory: CapacityUsage::new(Some(2 * GIB), Some(16 * GIB)),
         pod_capacity: CapacityUsage::new(Some(3), Some(110)),
@@ -320,7 +328,21 @@ fn deployments_list_window() {
         W::Deployments,
         vec![
             list_row("apps", "v1", "Deployment", "api-server", "2/2 ready"),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                "customer-notification-dispatcher-with-a-long-release-suffix",
+                "0/3 ready · ImagePullBackOff",
+            ),
             list_row("apps", "v1", "Deployment", "web-frontend", "20/20 ready"),
+            list_row(
+                "apps",
+                "v1",
+                "Deployment",
+                "retired-data-migration",
+                "Completed · 1/1 succeeded",
+            ),
         ],
     );
     harness
@@ -491,4 +513,306 @@ fn scale_dialog_with_conflict_reason() {
     }
     run_steps(&mut harness);
     snapshot_tree(&harness, "scale_dialog_conflict");
+}
+
+#[test]
+fn window_freshness_states() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(2_200.0, 1_500.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+    for kind in [
+        W::Deployments,
+        W::Pods,
+        W::StatefulSets,
+        W::DaemonSets,
+        W::Jobs,
+        W::CronJobs,
+        W::ConfigMaps,
+    ] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(kind),
+            ));
+    }
+    let deployments = workload_id(harness.state(), W::Deployments);
+    let pods = workload_id(harness.state(), W::Pods);
+    let stateful_sets = workload_id(harness.state(), W::StatefulSets);
+    let daemon_sets = workload_id(harness.state(), W::DaemonSets);
+    let jobs = workload_id(harness.state(), W::Jobs);
+    let cron_jobs = workload_id(harness.state(), W::CronJobs);
+    let config_maps = workload_id(harness.state(), W::ConfigMaps);
+    for (window, position) in [
+        (deployments, [10.0, 20.0]),
+        (pods, [1_010.0, 20.0]),
+        (stateful_sets, [10.0, 380.0]),
+        (daemon_sets, [1_010.0, 380.0]),
+        (jobs, [10.0, 740.0]),
+        (cron_jobs, [1_010.0, 740.0]),
+        (config_maps, [510.0, 1_100.0]),
+    ] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                window,
+                WindowGeom {
+                    position,
+                    size: [950.0, 330.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let feed = &mut harness.state_mut().feed;
+    feed.window_lists.insert(
+        deployments,
+        vec![list_row(
+            "apps",
+            "v1",
+            "Deployment",
+            "healthy-api",
+            "2/2 ready",
+        )],
+    );
+    feed.window_lists.insert(
+        pods,
+        vec![list_row("", "v1", "Pod", "cached-pod", "Running")],
+    );
+    feed.window_lists.insert(stateful_sets, Vec::new());
+    feed.window_lists.insert(daemon_sets, Vec::new());
+    feed.window_lists.insert(jobs, Vec::new());
+    feed.window_lists.insert(
+        cron_jobs,
+        vec![list_row("batch", "v1", "CronJob", "nightly", "Active 0")],
+    );
+    feed.window_lists.insert(
+        config_maps,
+        vec![list_row("", "v1", "ConfigMap", "app-settings", "3 keys")],
+    );
+    feed.window_freshness.insert(
+        deployments,
+        WindowFreshness::Live {
+            last_sync_age: "4s ago".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        pods,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "37s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 2,
+        },
+    );
+    feed.window_freshness.insert(
+        stateful_sets,
+        WindowFreshness::Forbidden {
+            user: "alice@example.com".into(),
+            verb: "list".into(),
+            resource: "statefulsets.apps".into(),
+            scope: "--namespace=payments".into(),
+        },
+    );
+    feed.window_freshness.insert(
+        daemon_sets,
+        WindowFreshness::Failed {
+            message: "watch ended unexpectedly".into(),
+        },
+    );
+    feed.window_freshness
+        .insert(jobs, WindowFreshness::ReadyEmpty);
+    feed.window_freshness.insert(
+        cron_jobs,
+        WindowFreshness::Reconnecting {
+            last_sync_age: "42s ago".into(),
+            retry_in: "2s".into(),
+            attempt: 3,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(
+            config_maps,
+            "does-not-exist".into(),
+        ));
+    run_steps(&mut harness);
+
+    snapshot_tree(&harness, "window_freshness_states");
+    if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+        harness
+            .render()
+            .expect("render window-state gallery")
+            .save("../../docs/screenshots/issue-171/after-window-states-standard-2200x1500.png")
+            .expect("save window-state screenshot");
+    }
+}
+
+#[test]
+fn compact_window_freshness_states() {
+    let cases = [
+        (
+            "live",
+            Some(WindowFreshness::Live {
+                last_sync_age: "4s ago".into(),
+            }),
+            false,
+        ),
+        (
+            "stale",
+            Some(WindowFreshness::StaleRetrying {
+                last_sync_age: "37s ago".into(),
+                retry_in: "3s".into(),
+                attempt: 2,
+            }),
+            false,
+        ),
+        (
+            "reconnecting",
+            Some(WindowFreshness::Reconnecting {
+                last_sync_age: "42s ago".into(),
+                retry_in: "2s".into(),
+                attempt: 3,
+            }),
+            false,
+        ),
+        (
+            "forbidden",
+            Some(WindowFreshness::Forbidden {
+                user: "alice@example.com".into(),
+                verb: "list".into(),
+                resource: "deployments.apps".into(),
+                scope: "--namespace=payments".into(),
+            }),
+            false,
+        ),
+        (
+            "failed",
+            Some(WindowFreshness::Failed {
+                message: "watch ended unexpectedly".into(),
+            }),
+            false,
+        ),
+        ("empty", Some(WindowFreshness::ReadyEmpty), false),
+        ("filtered-empty", None, true),
+    ];
+
+    for (name, freshness, filtered_empty) in cases {
+        let mut harness = harness_with_size(egui::vec2(640.0, 480.0));
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(W::Deployments),
+            ));
+        run_steps(&mut harness);
+        let window = workload_id(harness.state(), W::Deployments);
+        harness.state_mut().feed.window_lists.insert(
+            window,
+            if matches!(freshness, Some(WindowFreshness::ReadyEmpty)) {
+                Vec::new()
+            } else {
+                vec![list_row(
+                    "apps",
+                    "v1",
+                    "Deployment",
+                    "api-server",
+                    "2/2 ready",
+                )]
+            },
+        );
+        if let Some(freshness) = freshness {
+            harness
+                .state_mut()
+                .feed
+                .window_freshness
+                .insert(window, freshness);
+        }
+        if filtered_empty {
+            harness
+                .state_mut()
+                .shell
+                .apply_workspace_command(WorkspaceCommand::SetSearch(
+                    window,
+                    "does-not-exist".into(),
+                ));
+        }
+        run_steps(&mut harness);
+        snapshot_tree(&harness, &format!("issue_171_compact_{name}"));
+        if std::env::var_os("K10S_CAPTURE_ISSUE_171").is_some() {
+            harness
+                .render()
+                .expect("render compact state")
+                .save(format!(
+                    "../../docs/screenshots/issue-171/after-window-{name}-compact-640x480.png"
+                ))
+                .expect("save compact state screenshot");
+        }
+    }
+}
+
+#[test]
+fn compact_taskbar_exposes_instance_status_and_keyboard_reachable_overflow() {
+    let mut harness = harness_with_size(egui::vec2(640.0, 420.0));
+    let pod = list_row("", "v1", "Pod", "api-0", "Running").identity;
+    {
+        let fixture = harness.state_mut();
+        fixture.connection = ConnectionState::Connecting;
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(W::Pods));
+        let first_pods = workload_id(fixture, W::Pods);
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetNamespaceScope(
+                first_pods,
+                k10s_ui::workspace::NamespaceScope::Namespace("payments".into()),
+            ));
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(W::Pods));
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pod));
+        let detail = fixture
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == k10s_ui::workspace::WindowKind::Detail)
+            .expect("dedicated detail")
+            .id;
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(detail));
+    }
+    run_steps(&mut harness);
+    snapshot_tree(&harness, "taskbar_layouts");
+
+    // The compact overflow control participates in ordinary keyboard focus
+    // traversal, while numbered accelerators still address registry entries.
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (2)")
+    });
+    overflow.focus();
+    run_steps(&mut harness);
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (2)")
+    });
+    assert!(overflow.is_focused());
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num1);
+    run_steps(&mut harness);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .max_by_key(|window| window.z)
+            .unwrap()
+            .id,
+        harness.state().shell.workspace().windows()[0].id
+    );
 }

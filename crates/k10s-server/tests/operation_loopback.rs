@@ -218,6 +218,35 @@ fn delete_payload(name: &str, propagation: DeletePropagation) -> Value {
     serde_json::to_value(k10s_protocol::DeleteRequest {
         identity: deployment_identity(name),
         propagation,
+        resource_version: "1".into(),
+    })
+    .unwrap()
+}
+
+async fn preflighted_delete_payload(
+    ws: &mut Ws,
+    request_id: &str,
+    name: &str,
+    propagation: DeletePropagation,
+) -> Value {
+    send_request(
+        ws,
+        request_id,
+        k10s_protocol::REQUEST_DELETE_PREFLIGHT,
+        serde_json::to_value(k10s_protocol::DeletePreflightRequest {
+            identity: deployment_identity(name),
+            propagation,
+        })
+        .unwrap(),
+    )
+    .await;
+    let frame = next_non_update(ws).await;
+    assert_eq!(frame.kind, ServerKind::Response, "{frame:?}");
+    let response: k10s_protocol::DeletePreflightResponse = frame.decode_response_payload().unwrap();
+    serde_json::to_value(k10s_protocol::DeleteRequest {
+        identity: response.identity,
+        propagation: response.propagation,
+        resource_version: response.resource_version,
     })
     .unwrap()
 }
@@ -333,11 +362,18 @@ async fn deletes_are_typed_with_propagation_modes_and_remove_state() {
         serde_json::to_value(DeletePropagation::Background).unwrap(),
         serde_json::to_value(DeletePropagation::Foreground).unwrap()
     );
+    let payload = preflighted_delete_payload(
+        &mut ws,
+        "delete-background-preflight",
+        "api-server",
+        DeletePropagation::Background,
+    )
+    .await;
     let operation_id = submit_mutation(
         &mut ws,
         "delete-background",
         "workload.delete",
-        delete_payload("api-server", DeletePropagation::Background),
+        payload,
         "idem-delete-bg",
     )
     .await;
@@ -556,11 +592,18 @@ async fn every_nonterminal_operation_is_queryable_after_a_forced_reconnect() {
         "idem-reconnect-a",
     )
     .await;
+    let payload = preflighted_delete_payload(
+        &mut ws,
+        "delete-b-preflight",
+        "api-server",
+        DeletePropagation::Background,
+    )
+    .await;
     let live_one = submit_mutation(
         &mut ws,
         "delete-b",
         "workload.delete",
-        delete_payload("api-server", DeletePropagation::Background),
+        payload,
         "idem-reconnect-b",
     )
     .await;

@@ -101,6 +101,9 @@ impl BackendKernel {
                 QueryResult::ResourceDetail(record) => {
                     KernelQueryResult::ResourceDetail(ResourceDetailResult::new(record))
                 }
+                QueryResult::DeletePreflight(response) => {
+                    KernelQueryResult::DeletePreflight(response)
+                }
                 QueryResult::ResourceMetrics(sample) => {
                     KernelQueryResult::ResourceMetrics(ResourceMetricsResult::new(
                         metrics_reference
@@ -238,6 +241,8 @@ pub enum KernelQueryResult {
     ResourceList(ResourceListResult),
     /// Normalized single-resource detail result.
     ResourceDetail(ResourceDetailResult),
+    /// Successful exact-target delete dry-run.
+    DeletePreflight(k10s_protocol::DeletePreflightResponse),
     /// Independently resolved related-resource groups.
     ResourceRelations(ResourceRelationsResult),
     /// Availability-gated pod metrics result.
@@ -278,6 +283,7 @@ impl KernelQueryResult {
             Self::Bootstrap(b) => b.serialized(),
             Self::ResourceList(r) => r.serialized(),
             Self::ResourceDetail(r) => r.serialized(),
+            Self::DeletePreflight(r) => serde_json::to_string(r).expect("preflight serializes"),
             Self::ResourceRelations(r) => r.serialized(),
             Self::ResourceMetrics(r) => r.serialized(),
             Self::ResourceTypes(r) => r.serialized(),

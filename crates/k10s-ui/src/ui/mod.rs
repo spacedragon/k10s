@@ -1,5 +1,6 @@
 //! The fixed application shell rendered around the command-driven workspace.
 
+mod command_palette;
 mod detail;
 pub mod dialogs;
 mod infrastructure;
@@ -9,14 +10,17 @@ mod resource_table;
 mod resource_window;
 mod service_window;
 mod split;
+mod taskbar;
 mod theme;
 pub mod tools;
 mod top_bar;
 mod window;
 
+pub(crate) use detail::pod_container;
+
 pub use resource_window::{
     NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceFeed, RowIdentity,
-    SafeUiError,
+    SafeUiError, WindowFreshness,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,
@@ -82,6 +86,7 @@ pub struct UiShell<I> {
     yaml: tools::YamlEditors,
     streams: tools::StreamStores,
     dialogs: dialogs::OperationDialogs,
+    command_palette: command_palette::CommandPalette,
     /// A requested context switch awaiting backend validation; drained by
     /// the application layer, which sends the request and commits locally
     /// only after the response succeeds. The origin distinguishes a fresh
@@ -89,6 +94,7 @@ pub struct UiShell<I> {
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_actions: Vec<PortForwardAction<I>>,
     resource_actions: Vec<ResourceAction>,
+    launcher: launcher::LauncherState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +102,8 @@ pub enum ResourceAction {
     RetryPrimary(k10s_protocol::ResourceIdentity),
     RetryRelations(k10s_protocol::ResourceIdentity),
     RetryNamespaceCatalog,
+    RetryWindow(WindowId),
+    FullResyncWindow(WindowId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,15 +138,22 @@ where
             yaml: tools::YamlEditors::default(),
             streams: tools::StreamStores::default(),
             dialogs: dialogs::OperationDialogs::default(),
+            command_palette: command_palette::CommandPalette::default(),
             requested_context: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
+            launcher: launcher::LauncherState::default(),
         }
     }
 
     /// Inspect the persistent workspace rendered by this shell.
     pub fn workspace(&self) -> &WorkspaceState<I> {
         &self.workspace
+    }
+
+    /// Whether palette search currently needs its cross-resource projections.
+    pub(crate) fn command_palette_open(&self) -> bool {
+        self.command_palette.is_open()
     }
 
     /// Apply a command initiated outside the shell's immediate-mode frame,
@@ -378,6 +393,7 @@ where
         load: InfrastructureLoad,
     ) -> bool {
         theme::apply(ui.ctx());
+        self.command_palette.handle_global_shortcut(ui.ctx());
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
         let selected = selected_context
@@ -407,9 +423,14 @@ where
                 .find(|context| context.name == name)
                 .and_then(|context| context.namespace.as_deref())
         });
+        let selected_response =
+            response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
         let mut refresh_requested = false;
+        taskbar::shortcuts(ui.ctx(), &self.workspace, &mut queued);
         egui::Panel::top("k10s.top_bar")
             .resizable(false)
+            .exact_size(theme::TOP_BAR_HEIGHT)
+            .frame(theme::top_bar_frame())
             .show(ui, |ui| {
                 let action = top_bar::show(
                     ui,
@@ -423,36 +444,64 @@ where
                 if action.toggle_free_window_resizing {
                     queued.push(WorkspaceCommand::ToggleFreeWindowResizing);
                 }
+                let canvas = ui.ctx().content_rect();
+                let canvas_size = [
+                    canvas.width() - theme::LAUNCHER_WIDTH,
+                    canvas.height() - theme::TOP_BAR_HEIGHT - theme::TASKBAR_HEIGHT,
+                ];
+                if let Some(layout) = action.layout {
+                    queued.push(match layout {
+                        top_bar::LayoutAction::Tile => WorkspaceCommand::Tile(canvas_size),
+                        top_bar::LayoutAction::Cascade => WorkspaceCommand::Cascade(canvas_size),
+                        top_bar::LayoutAction::Focus => WorkspaceCommand::ToggleFocus(canvas_size),
+                    });
+                }
+            });
+
+        egui::Panel::bottom("k10s.taskbar")
+            .resizable(false)
+            .exact_size(theme::TASKBAR_HEIGHT)
+            .frame(theme::taskbar_frame())
+            .show(ui, |ui| {
+                taskbar::show(ui, &self.workspace, connection, &mut queued);
             });
 
         egui::Panel::left("k10s.launcher")
             .resizable(false)
-            .exact_size(176.0)
+            .exact_size(theme::LAUNCHER_WIDTH)
+            .frame(theme::launcher_frame())
             .show(ui, |ui| {
-                launcher::show(ui, &self.workspace, &mut queued);
+                launcher::show(
+                    ui,
+                    &self.workspace,
+                    selected_response,
+                    load,
+                    &mut self.launcher,
+                    &mut queued,
+                );
             });
 
         let mut resources = std::mem::take(&mut self.resources);
-        egui::CentralPanel::default().show(ui, |ui| {
-            let response =
-                response.filter(|response| Some(response.context.as_str()) == selected.as_deref());
-            refresh_requested |= window::show_canvas(
-                ui,
-                &self.workspace,
-                &mut self.infrastructure,
-                &mut resources,
-                &mut self.yaml,
-                &mut self.streams,
-                &mut self.dialogs,
-                response,
-                load,
-                feed,
-                selected_namespace,
-                connection,
-                &mut self.resource_actions,
-                &mut queued,
-            );
-        });
+        egui::CentralPanel::default()
+            .frame(theme::canvas_frame())
+            .show(ui, |ui| {
+                refresh_requested |= window::show_canvas(
+                    ui,
+                    &self.workspace,
+                    &mut self.infrastructure,
+                    &mut resources,
+                    &mut self.yaml,
+                    &mut self.streams,
+                    &mut self.dialogs,
+                    selected_response,
+                    load,
+                    feed,
+                    selected_namespace,
+                    connection,
+                    &mut self.resource_actions,
+                    &mut queued,
+                );
+            });
         resources.retain(|id| self.workspace.window(id).is_some());
         self.resources = resources;
         self.yaml.retain(|id| self.workspace.window(id).is_some());
@@ -461,7 +510,15 @@ where
         let live_windows: Vec<_> = self.workspace.windows().iter().map(|w| w.id).collect();
         self.dialogs.retain(|id| live_windows.contains(&id));
         self.dialogs
-            .show(ui, connection == ConnectionState::Connected);
+            .show(ui, connection == ConnectionState::Connected, |window| {
+                feed.window_freshness
+                    .get(&window)
+                    .is_none_or(resource_window::WindowFreshness::mutations_allowed)
+            });
+
+        if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {
+            refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
+        }
 
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))
@@ -516,5 +573,157 @@ where
             ui.ctx().request_repaint();
         }
         refresh_requested
+    }
+
+    fn activate_palette_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: command_palette::PaletteAction,
+        new_window: bool,
+    ) -> bool {
+        use crate::workspace::{NamespaceScope, WindowContent, WindowKind};
+        use command_palette::PaletteAction;
+
+        let mut commands = Vec::new();
+        match action {
+            PaletteAction::Refresh => return true,
+            PaletteAction::Context(to) => {
+                self.requested_context = Some((to, ContextRequestOrigin::Explicit));
+                return false;
+            }
+            PaletteAction::Namespace(namespace) => {
+                let active = self
+                    .workspace
+                    .windows()
+                    .iter()
+                    .filter(|window| {
+                        matches!(
+                            window.content,
+                            WindowContent::Resource(_) | WindowContent::Services(_)
+                        )
+                    })
+                    .max_by_key(|window| window.z)
+                    .map(|window| window.id);
+                if let Some(window) = active {
+                    commands.push(WorkspaceCommand::SetNamespaceScope(
+                        window,
+                        NamespaceScope::Namespace(namespace),
+                    ));
+                } else {
+                    let events = self.workspace.apply(WorkspaceCommand::ActivateLauncherItem(
+                        crate::workspace::LauncherItem::Workload(
+                            crate::workspace::WorkloadKind::Pods,
+                        ),
+                    ));
+                    if let Some(id) = events.iter().find_map(|event| match event {
+                        WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(*id),
+                        _ => None,
+                    }) {
+                        self.workspace.apply(WorkspaceCommand::SetNamespaceScope(
+                            id,
+                            NamespaceScope::Namespace(namespace),
+                        ));
+                        ctx.move_to_top(window::layer_id(id));
+                    }
+                    return false;
+                }
+            }
+            PaletteAction::List(item) => {
+                commands.push(if new_window {
+                    WorkspaceCommand::AddListInstance(item)
+                } else {
+                    WorkspaceCommand::ActivateLauncherItem(item)
+                });
+            }
+            PaletteAction::Resource(identity, jump) => {
+                let workspace_identity = I::from_row_identity(&identity);
+                let tab = command_palette::tab_for_jump(jump);
+                if new_window {
+                    let events = self
+                        .workspace
+                        .apply(WorkspaceCommand::OpenDedicatedDetail(workspace_identity));
+                    if let Some(id) = events.iter().find_map(|event| match event {
+                        WorkspaceEvent::Opened(id) => Some(*id),
+                        _ => None,
+                    }) {
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                        ctx.move_to_top(window::layer_id(id));
+                    }
+                    return false;
+                }
+
+                let target_kind = match identity.gvk.kind.as_str() {
+                    "Pod" => Some(WindowKind::Workload(crate::workspace::WorkloadKind::Pods)),
+                    "Deployment" => Some(WindowKind::Workload(
+                        crate::workspace::WorkloadKind::Deployments,
+                    )),
+                    "Service" => Some(WindowKind::Services),
+                    _ => None,
+                };
+                let existing = target_kind.and_then(|kind| {
+                    self.workspace
+                        .windows()
+                        .iter()
+                        .filter(|window| window.kind == kind)
+                        .max_by_key(|window| window.z)
+                        .map(|window| window.id)
+                });
+                let window_id = if let Some(id) = existing {
+                    self.workspace.apply(WorkspaceCommand::FocusWindow(id));
+                    Some(id)
+                } else if let Some(kind) = target_kind {
+                    let item = match kind {
+                        WindowKind::Workload(kind) => {
+                            crate::workspace::LauncherItem::Workload(kind)
+                        }
+                        WindowKind::Services => crate::workspace::LauncherItem::Services,
+                        _ => unreachable!(),
+                    };
+                    self.workspace
+                        .apply(WorkspaceCommand::ActivateLauncherItem(item))
+                        .iter()
+                        .find_map(|event| match event {
+                            WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(*id),
+                            _ => None,
+                        })
+                } else {
+                    self.workspace
+                        .apply(WorkspaceCommand::OpenDedicatedDetail(
+                            workspace_identity.clone(),
+                        ))
+                        .iter()
+                        .find_map(|event| match event {
+                            WorkspaceEvent::Opened(id) => Some(*id),
+                            _ => None,
+                        })
+                };
+                if let Some(id) = window_id {
+                    if matches!(
+                        self.workspace.window(id).map(|window| window.kind),
+                        Some(WindowKind::Detail)
+                    ) {
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                    } else {
+                        self.workspace
+                            .apply(WorkspaceCommand::SelectRow(id, workspace_identity));
+                        self.workspace
+                            .apply(WorkspaceCommand::SetActiveTab(id, tab));
+                    }
+                    ctx.move_to_top(window::layer_id(id));
+                }
+                return false;
+            }
+        }
+
+        for command in commands {
+            for event in self.workspace.apply(command) {
+                if let WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) = event {
+                    ctx.move_to_top(window::layer_id(id));
+                }
+            }
+        }
+        false
     }
 }

@@ -1,0 +1,203 @@
+Window
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  Button label="File"
+                  Button label="View"
+                  Button label="Window"
+                  Button label="Help"
+                GenericContainer
+                  Button label="Tile"
+                  Button label="Stack"
+                  Button label="Focus"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          ComboBox label="Kubernetes context" value="dev-local"
+                  GenericContainer
+                    Button label="Refresh"
+                  Label value="v0.1.4"
+                    TextRun value="v0.1.4"
+                  Label value="Connected"
+                    TextRun value="Connected"
+                  Label value="Connection status: Connected"
+                    TextRun value="●"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                Button label="Overview"
+              GenericContainer
+                Button label="Deployments · all namespaces · ● Active"
+        GenericContainer
+          GenericContainer
+            GenericContainer
+              Label value="◈"
+                TextRun value="◈"
+              GenericContainer
+                Label value="k10s"
+                  TextRun value="k10s"
+                Label value="KUBERNETES CONSOLE"
+                  TextRun value="KUBERNETES CONSOLE"
+            TextInput label="Filter resources…" value=""
+              TextRun value=""
+            GenericContainer
+              GenericContainer
+                Label value="CLUSTER"
+                  TextRun value="CLUSTER"
+                Button label="Overview"
+                GenericContainer
+                  GenericContainer
+                    Button label="Events"
+                  Label value="Loading Events inventory"
+                    TextRun value="…"
+                  Button label="Open another Events window"
+                GenericContainer
+                  GenericContainer
+                    Button label="Namespaces"
+                  Button label="Open another Namespaces window"
+                Button label="Nodes"
+                GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Workloads"
+                  Label value="Loading Workloads inventory"
+                    TextRun value="…"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Deployments"
+                    Label value="1 open Deployments window"
+                      TextRun value="1"
+                    Button label="Open another Deployments window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Pods"
+                    Button label="Open another Pods window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="StatefulSets"
+                    Button label="Open another StatefulSets window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="DaemonSets"
+                    Button label="Open another DaemonSets window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Jobs"
+                    Button label="Open another Jobs window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="CronJobs"
+                    Button label="Open another CronJobs window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Custom Resources…"
+                    Button label="Open another Custom Resources… window"
+                GenericContainer
+                  Label value="▾"
+                    TextRun value="▾"
+                  Button label="Network"
+                  Label value="Loading Network inventory"
+                    TextRun value="…"
+                GenericContainer
+                  Button label="Services"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Ingresses"
+                    Button label="Open another Ingresses window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Endpoints"
+                    Button label="Open another Endpoints window"
+                  GenericContainer
+                    GenericContainer
+                      Button label="NetworkPolicies"
+                    Button label="Open another NetworkPolicies window"
+                GenericContainer
+                  Label value="▸"
+                  Button label="Config"
+                  Label value="Loading Config inventory"
+                GenericContainer
+                  Label value="▸"
+                  Button label="Storage"
+                  Label value="Loading Storage inventory"
+                GenericContainer
+                  Label value="▸"
+                  Button label="Access"
+                  Label value="Loading Access inventory"
+            ScrollBar
+        GenericContainer
+          GenericContainer
+  Window label="Overview"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  ProgressIndicator
+                  Label value="Loading cluster overview"
+                    TextRun value="Loading cluster overview"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+  Window label="Deployments"
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          GenericContainer
+            Button label="Hide"
+            Button label="Close window"
+            Unknown
+          GenericContainer
+            GenericContainer
+              GenericContainer
+                TextInput label="Search deployments" value="does-not-exist"
+                  TextRun value="does-not-exist"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace" value="Namespace catalog not requested"
+                    Label value="Namespace"
+                      TextRun value="Namespace"
+                Button label="Clear"
+                Button label="Hide details"
+              GenericContainer
+                GenericContainer
+                  Label value="[?]"
+                    TextRun value="[?]"
+                  Label value="Filtered empty"
+                    TextRun value="Filtered empty"
+                Label value="Resources exist, but none match the active filters."
+                  TextRun value="Resources exist, but none match the active filters."
+                Label value="Use Clear filters in the toolbar to restore all rows."
+                  TextRun value="Use Clear filters in the toolbar to restore all rows."
+              GenericContainer
+                Label value="No resources match these filters"
+                  TextRun value="No resources match these filters"
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter
+    Splitter

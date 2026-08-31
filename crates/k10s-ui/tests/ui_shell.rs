@@ -86,14 +86,38 @@ fn context(name: &str, is_current: bool) -> Context {
 }
 
 fn shell_harness() -> Harness<'static, ShellFixture> {
+    shell_harness_at(egui::vec2(1_280.0, 800.0))
+}
+
+fn shell_harness_at(size: egui::Vec2) -> Harness<'static, ShellFixture> {
     Harness::builder()
-        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(render_shell, ShellFixture::default())
 }
 
 fn window_layer(id: WindowId) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(("k10s.window", id.0)))
+}
+
+fn rendered_window(harness: &Harness<'_, ShellFixture>, title: &str) -> egui::Rect {
+    harness.get_by_role_and_label(Role::Window, title).rect()
+}
+
+fn assert_rect_matches_geometry(
+    rect: egui::Rect,
+    canvas_origin: egui::Pos2,
+    geometry: k10s_ui::workspace::WindowGeom,
+) {
+    let expected = egui::Rect::from_min_size(
+        canvas_origin + egui::vec2(geometry.position[0], geometry.position[1]),
+        egui::vec2(geometry.size[0], geometry.size[1]),
+    );
+    assert!(
+        (rect.min - expected.min).length() <= 1.0
+            && (rect.size() - expected.size()).length() <= 1.0,
+        "rendered {rect:?} did not apply workspace geometry {expected:?}"
+    );
 }
 
 fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
@@ -140,9 +164,14 @@ fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: 
 fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
     let harness = shell_harness();
 
-    for menu in ["File", "View", "Help"] {
+    for menu in ["File", "View", "Window", "Help"] {
         harness.get_by_role_and_label(Role::Button, menu);
     }
+    for command in ["Tile", "Cascade", "Focus"] {
+        harness.get_by_role_and_label(Role::Button, command);
+    }
+    let version = format!("k10s v{}", env!("CARGO_PKG_VERSION"));
+    harness.get_by_label(&version);
     harness.get_by_label("Connected");
     harness.get_by_role_and_label(Role::Button, "Refresh");
     let context = harness.get_by_role_and_label(Role::ComboBox, "Kubernetes context");
@@ -164,6 +193,253 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
         "Overview is the only initial workspace window"
     );
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    harness.get_by_role_and_label(Role::Button, "Overview · ● Active");
+}
+
+#[test]
+fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
+    for size in [
+        egui::vec2(640.0, 420.0),
+        egui::vec2(1_280.0, 800.0),
+        egui::vec2(1_440.0, 900.0),
+    ] {
+        let harness = shell_harness_at(size);
+        let controls = [
+            harness.get_by_role_and_label(Role::Button, "File").rect(),
+            harness.get_by_role_and_label(Role::Button, "View").rect(),
+            harness.get_by_role_and_label(Role::Button, "Window").rect(),
+            harness.get_by_role_and_label(Role::Button, "Help").rect(),
+            harness.get_by_role_and_label(Role::Button, "Tile").rect(),
+            harness
+                .get_by_role_and_label(
+                    Role::Button,
+                    if size.x < 760.0 { "Stack" } else { "Cascade" },
+                )
+                .rect(),
+            harness.get_by_role_and_label(Role::Button, "Focus").rect(),
+            harness
+                .get_by_role_and_label(Role::Button, "Refresh")
+                .rect(),
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+                .rect(),
+        ];
+        let top = controls
+            .iter()
+            .map(egui::Rect::top)
+            .fold(f32::INFINITY, f32::min);
+        for (index, left) in controls.iter().enumerate() {
+            assert!(
+                left.top() >= top && left.bottom() <= top + 29.0,
+                "{size:?}: {left:?}"
+            );
+            for right in controls.iter().skip(index + 1) {
+                assert!(
+                    !left.intersects(*right),
+                    "top-bar controls overlap at {size:?}: {left:?} and {right:?}"
+                );
+            }
+        }
+
+        let launcher = harness
+            .get_by_role_and_label(Role::Button, "Overview")
+            .rect();
+        let window = harness
+            .get_by_role_and_label(Role::Window, "Overview")
+            .rect();
+        let launcher_panel_left = launcher.left() - 9.0;
+        assert!(
+            window.left() - launcher_panel_left >= 196.0,
+            "the window canvas must begin beyond the 196 px launcher at {size:?}: launcher={launcher:?}, window={window:?}"
+        );
+        let task = harness
+            .get_by_role_and_label(Role::Button, "Overview · ● Active")
+            .rect();
+        assert!(
+            task.top() >= size.y - 37.0 && task.bottom() <= size.y,
+            "the taskbar must occupy the bottom 29 px at {size:?}: {task:?}"
+        );
+    }
+}
+
+#[test]
+fn layout_commands_apply_to_already_rendered_window_rectangles() {
+    let mut harness = shell_harness_at(egui::vec2(1_280.0, 800.0));
+    for kind in [WorkloadKind::Pods, WorkloadKind::Jobs] {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(kind));
+    }
+    harness.run_steps(4);
+
+    let canvas = [1_080.0, 700.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Tile(canvas));
+    harness.run_steps(4);
+
+    let tiled: Vec<_> = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .map(|window| (window.title.clone(), window.geometry))
+        .collect();
+    let first_rect = rendered_window(&harness, &tiled[0].0);
+    let canvas_origin = first_rect.min - egui::vec2(tiled[0].1.position[0], tiled[0].1.position[1]);
+    let tiled_rects: Vec<_> = tiled
+        .iter()
+        .map(|(title, geometry)| {
+            let rect = rendered_window(&harness, title);
+            assert_rect_matches_geometry(rect, canvas_origin, *geometry);
+            rect
+        })
+        .collect();
+    for (index, left) in tiled_rects.iter().enumerate() {
+        for right in tiled_rects.iter().skip(index + 1) {
+            let separated = left.right() <= right.left()
+                || right.right() <= left.left()
+                || left.bottom() <= right.top()
+                || right.bottom() <= left.top();
+            assert!(
+                separated,
+                "tiled rendered windows overlap: {left:?} {right:?}"
+            );
+        }
+    }
+    assert!(
+        tiled_rects.iter().any(|rect| rect.right() > 1_280.0),
+        "compact tiling keeps usable minima on an intentional overflow surface"
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    let focused = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .max_by_key(|window| window.z)
+        .expect("active window");
+    assert_rect_matches_geometry(
+        rendered_window(&harness, &focused.title),
+        canvas_origin,
+        focused.geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFocus(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for window in harness.state().shell.workspace().windows() {
+        assert_rect_matches_geometry(
+            rendered_window(&harness, &window.title),
+            canvas_origin,
+            window.geometry,
+        );
+    }
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::Cascade(canvas));
+    harness.run_steps(4);
+    for (title, geometry) in &tiled {
+        assert_rect_matches_geometry(rendered_window(&harness, title), canvas_origin, *geometry);
+    }
+}
+
+#[test]
+fn live_snapshot_restore_reapplies_geometry_across_context_like_a_b_a_cycle() {
+    let mut harness = shell_harness();
+    harness.run_steps(4);
+
+    let mut layout_a = harness.state().shell.workspace().snapshot();
+    layout_a.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [12.0, 18.0],
+        size: [720.0, 500.0],
+        collapsed: false,
+    };
+    let mut layout_b = layout_a.clone();
+    layout_b.windows[0].geometry = k10s_ui::workspace::WindowGeom {
+        position: [140.0, 96.0],
+        size: [800.0, 560.0],
+        collapsed: false,
+    };
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    let rect_a = rendered_window(&harness, "Overview");
+    let canvas_origin = rect_a.min - egui::vec2(12.0, 18.0);
+    assert_rect_matches_geometry(rect_a, canvas_origin, layout_a.windows[0].geometry);
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_b.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_b.windows[0].geometry,
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(layout_a.clone()));
+    harness.run_steps(4);
+    assert_rect_matches_geometry(
+        rendered_window(&harness, "Overview"),
+        canvas_origin,
+        layout_a.windows[0].geometry,
+    );
+}
+
+#[test]
+fn compact_taskbar_overflow_remains_keyboard_reachable() {
+    let mut harness = shell_harness_at(egui::vec2(640.0, 420.0));
+    for kind in WorkloadKind::ALL {
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(kind),
+            ));
+    }
+    harness.run_steps(4);
+
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (6)")
+    });
+    overflow.focus();
+    harness.run_steps(4);
+
+    let overflow = harness.get_by(|node| {
+        node.role() == Role::ComboBox && node.value().as_deref() == Some("More tasks (6)")
+    });
+    assert!(overflow.is_focused());
+    assert!(overflow.rect().right() <= 640.0);
 }
 
 #[test]
@@ -178,6 +454,14 @@ fn top_bar_menus_expose_window_view_and_help_actions() {
     harness.run_steps(2);
     harness.get_by_role_and_label(Role::Button, "Minimize");
     harness.get_by_role_and_label(Role::Button, "Enter full screen");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Window")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Tile windows");
+    harness.get_by_role_and_label(Role::Button, "Cascade windows");
+    harness.get_by_role_and_label(Role::Button, "Focus active window");
 
     harness.get_by_role_and_label(Role::Button, "Help").click();
     harness.run_steps(2);
@@ -222,6 +506,35 @@ fn view_menu_toggles_free_window_resizing() {
             .accesskit_node()
             .toggled(),
         Some(Toggled::True)
+    );
+}
+
+#[test]
+fn global_layout_controls_are_keyboard_focusable_and_dispatch_workspace_commands() {
+    let mut harness = shell_harness();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+    harness.run_steps(4);
+
+    let tile = harness.get_by_role_and_label(Role::Button, "Tile");
+    tile.focus();
+    harness.run_steps(2);
+    let tile = harness.get_by_role_and_label(Role::Button, "Tile");
+    assert!(tile.is_focused());
+    tile.click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .all(|window| window.layout_revision > 0),
+        "the top-bar command must use the real workspace layout path"
     );
 }
 
@@ -280,6 +593,71 @@ fn workloads_group_expands_and_launcher_never_uses_checkbox_roles() {
     harness.run_steps(4);
     harness.get_by_role_and_label(Role::Button, "Pods");
     assert_eq!(harness.query_all_by_role(Role::CheckBox).count(), 0);
+}
+
+#[test]
+fn launcher_filter_reveals_matches_inside_collapsed_groups() {
+    let mut harness = shell_harness();
+    assert!(harness.query_by_label("Secrets").is_none());
+    harness
+        .get_by_role_and_label(Role::Button, "Config")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
+    let filter = harness.get_by_role_and_label(Role::TextInput, "Filter resources…");
+    filter.click();
+    filter.type_text("secret");
+    harness.run_steps(4);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
+    assert!(harness.query_by_label("Pods").is_none());
+
+    // A filter is a transient reveal: toggling the matching group must not
+    // remove the result, and clearing the focused input restores the saved
+    // collapsed state instead of silently expanding it.
+    harness
+        .get_by_role_and_label(Role::Button, "Config")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Secrets");
+    harness
+        .get_by_role_and_label(Role::TextInput, "Filter resources…")
+        .focus();
+    for _ in 0.."secret".len() {
+        harness.key_press(egui::Key::Backspace);
+    }
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Secrets").is_none());
+}
+
+#[test]
+fn full_taxonomy_entries_open_named_windows_and_track_instances() {
+    // Keep every expanded taxonomy row inside the test viewport so clicks
+    // exercise the controls rather than clipped accessibility nodes.
+    let mut harness = shell_harness_at(egui::vec2(1_280.0, 1_200.0));
+    for group in ["Config", "Storage", "Access"] {
+        harness.get_by_role_and_label(Role::Button, group).click();
+        harness.run_steps(2);
+    }
+    for label in [
+        "Events",
+        "Namespaces",
+        "Ingresses",
+        "Endpoints",
+        "NetworkPolicies",
+        "ConfigMaps",
+        "Secrets",
+        "PersistentVolumeClaims",
+        "PersistentVolumes",
+        "StorageClasses",
+        "ServiceAccounts",
+        "Roles",
+        "RoleBindings",
+    ] {
+        harness.get_by_role_and_label(Role::Button, label).click();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(Role::Window, label);
+        harness.get_by_label(&format!("1 open {label} window"));
+    }
 }
 
 #[test]
@@ -371,21 +749,27 @@ fn singleton_launcher_item_opens_once_then_focuses_existing_window() {
         .z;
 
     harness
-        .get_by_role_and_label(Role::Button, "Storage")
+        .get_by_role_and_label(Role::Button, "Services")
         .click();
     harness.run_steps(4);
-    let storage_id = harness
+    let services_id = harness
         .state()
         .shell
         .workspace()
         .windows()
         .iter()
-        .find(|window| window.kind == WindowKind::Storage)
-        .expect("Storage opens")
+        .find(|window| window.kind == WindowKind::Services)
+        .expect("Services opens")
         .id;
-    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(storage_id)));
+    assert_eq!(harness.ctx.top_layer_id(), Some(window_layer(services_id)));
 
-    harness.get_by_role_and_label(Role::Button, "Nodes").click();
+    harness
+        .get_by(|node| {
+            node.role() == Role::Button
+                && node.label().as_deref() == Some("Nodes")
+                && node.toggled() == Some(Toggled::True)
+        })
+        .click();
     harness.run_steps(4);
     let nodes: Vec<_> = harness
         .state()

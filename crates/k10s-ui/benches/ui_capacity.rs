@@ -432,7 +432,10 @@ fn main() {
     // The full list is ~350k points tall; each visible widget contributes
     // one bounded 100-point step per frame, so crossing the whole list
     // takes a four-digit number of frames.
-    for frame in 0..(SCROLL_STEP_BUDGET * 140) {
+    // The 196 px launcher leaves slightly fewer row anchors per frame than
+    // the legacy shell, so retain enough deterministic steps to traverse
+    // the same 18,750-row model at the supported shell geometry.
+    for frame in 0..(SCROLL_STEP_BUDGET * 150) {
         let anchors = locate_visible_pods(accesskit_tree.as_ref().unwrap());
         render_frame(
             &ctx,

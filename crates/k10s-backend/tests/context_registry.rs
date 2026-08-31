@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use k10s_backend::{
-    AdapterError, BackendError, BackendEvent, ContextAvailability, ContextInfo, ContextRegistry,
-    KubeAdapter, KubernetesAccess, Query, QueryResult, Subscribe,
+    AdapterError, BackendError, ContextAvailability, ContextInfo, ContextRegistry, KubeAdapter,
+    KubernetesAccess, Query, QueryResult,
 };
+#[cfg(unix)]
+use k10s_backend::{BackendEvent, Subscribe};
 
 /// Distinctive markers embedded in fixture kubeconfigs so redaction failures
 /// are exact substring checks instead of guesses.

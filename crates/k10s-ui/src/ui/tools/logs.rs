@@ -40,6 +40,10 @@ pub struct LogsTool {
     phase: LogsPhase,
     paused: bool,
     follow: bool,
+    previous: bool,
+    source_defaults_applied: bool,
+    since_seconds: Option<i64>,
+    wrap: bool,
     find: Option<String>,
     truncated_lines: u64,
     dropped_while_paused: u64,
@@ -64,6 +68,10 @@ impl LogsTool {
             phase: LogsPhase::Disconnected,
             paused: false,
             follow: true,
+            previous: false,
+            source_defaults_applied: false,
+            since_seconds: Some(300),
+            wrap: false,
             find: None,
             truncated_lines: 0,
             dropped_while_paused: 0,
@@ -95,6 +103,63 @@ impl LogsTool {
     #[must_use]
     pub fn follows(&self) -> bool {
         self.follow
+    }
+
+    #[must_use]
+    pub fn previous(&self) -> bool {
+        self.previous
+    }
+
+    pub fn set_previous(&mut self, previous: bool) {
+        if self.previous != previous {
+            self.previous = previous;
+            self.phase = LogsPhase::Disconnected;
+        }
+    }
+
+    pub fn apply_source_defaults(&mut self, previous: bool) {
+        if !self.source_defaults_applied {
+            self.previous = previous;
+            self.source_defaults_applied = true;
+        }
+    }
+
+    #[must_use]
+    pub fn since_seconds(&self) -> Option<i64> {
+        self.since_seconds
+    }
+
+    pub fn set_since_seconds(&mut self, since_seconds: Option<i64>) {
+        if self.since_seconds != since_seconds {
+            self.since_seconds = since_seconds;
+            self.phase = LogsPhase::Disconnected;
+        }
+    }
+
+    #[must_use]
+    pub fn wraps(&self) -> bool {
+        self.wrap
+    }
+
+    pub fn set_wrap(&mut self, wrap: bool) {
+        self.wrap = wrap;
+    }
+
+    pub fn select_container(&mut self, container: &str) {
+        if self.target.container != container {
+            self.target.container = container.to_owned();
+            self.phase = LogsPhase::Disconnected;
+            self.lines.clear();
+            self.last_error = None;
+        }
+    }
+
+    #[must_use]
+    pub fn export_text(&self) -> String {
+        self.visible_lines()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Lines retained after the tail bound, pause drops, and the `since`
@@ -249,6 +314,8 @@ pub enum LogsAction {
         window: WindowId,
         /// Target resolved from the window's pinned identity.
         target: StreamTarget,
+        since_seconds: Option<i64>,
+        previous: bool,
     },
 }
 
@@ -265,10 +332,14 @@ impl LogsViews {
     /// Lazily ensure the view for `window`, bound to `target`.
     ///
     /// The view is rebound whenever its window's pinned identity resolves
-    /// to a different pod/container: history from one pod must never be
-    /// displayed under another pod's identity.
+    /// to a different pod. Container choice belongs to this viewer and must
+    /// survive the manifest-default target supplied by subsequent renders.
     pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut LogsTool {
-        if self.target_of(window).as_ref() != Some(&target) {
+        if self
+            .target_of(window)
+            .as_ref()
+            .is_none_or(|current| !same_workload(current, &target))
+        {
             self.views
                 .insert(window, LogsTool::new(target.clone(), DEFAULT_TAIL_CAPACITY));
         }
@@ -318,6 +389,15 @@ impl LogsViews {
     }
 }
 
+/// Container choice is viewer state; the remaining fields identify the pod
+/// whose history must be discarded when the workspace selection changes.
+pub(crate) fn same_workload(left: &StreamTarget, right: &StreamTarget) -> bool {
+    left.context == right.context
+        && left.namespace == right.namespace
+        && left.pod == right.pod
+        && left.uid == right.uid
+}
+
 /// Tail capacity used by detail-view log panes.
 pub const DEFAULT_TAIL_CAPACITY: usize = 512;
 
@@ -327,6 +407,8 @@ pub(crate) fn show(
     window_id: WindowId,
     views: &mut LogsViews,
     target: Option<StreamTarget>,
+    containers: &[String],
+    default_previous: bool,
 ) {
     let Some(target) = target else {
         ui.label("Select a pod to stream logs");
@@ -335,12 +417,64 @@ pub(crate) fn show(
     let mut connect_requested = false;
     {
         let view = views.ensure(window_id, target.clone());
+        if !containers.is_empty()
+            && !containers
+                .iter()
+                .any(|container| container == &view.target().container)
+        {
+            view.select_container(&containers[0]);
+        }
+        view.apply_source_defaults(default_previous);
         if let Some(error) = view.last_error() {
             ui.label(
                 RichText::new(error.to_owned()).color(egui::Color32::from_rgb(0xc0, 0x39, 0x2b)),
             );
         }
-        ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("LOG SOURCE")
+                .small()
+                .strong()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt(("logs.container", window_id.0))
+                .selected_text(format!("Container: {}", view.target().container))
+                .show_ui(ui, |ui| {
+                    for container in containers {
+                        if ui
+                            .selectable_label(view.target().container == *container, container)
+                            .clicked()
+                        {
+                            view.select_container(container);
+                        }
+                    }
+                });
+            let mut previous = view.previous();
+            if ui.checkbox(&mut previous, "Previous").changed() {
+                view.set_previous(previous);
+            }
+            egui::ComboBox::from_id_salt(("logs.since", window_id.0))
+                .selected_text(match view.since_seconds() {
+                    Some(300) => "Since: 5m",
+                    Some(900) => "Since: 15m",
+                    Some(3600) => "Since: 1h",
+                    _ => "Since: all",
+                })
+                .show_ui(ui, |ui| {
+                    for (label, seconds) in [
+                        ("All retained", None),
+                        ("Last 5 minutes", Some(300)),
+                        ("Last 15 minutes", Some(900)),
+                        ("Last hour", Some(3600)),
+                    ] {
+                        if ui
+                            .selectable_label(view.since_seconds() == seconds, label)
+                            .clicked()
+                        {
+                            view.set_since_seconds(seconds);
+                        }
+                    }
+                });
             match view.phase() {
                 LogsPhase::Disconnected => {
                     let button = ui.button("Connect logs");
@@ -387,6 +521,15 @@ pub(crate) fn show(
                     }
                 }
             }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("VIEW")
+                .small()
+                .strong()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+        ui.horizontal_wrapped(|ui| {
             let mut find = view.find().unwrap_or_default().to_owned();
             let find_edit = ui.add(egui::TextEdit::singleline(&mut find).hint_text("Find"));
             find_edit.widget_info(|| {
@@ -399,7 +542,22 @@ pub(crate) fn show(
             if find_edit.changed() {
                 view.set_find(Some(&find));
             }
+            let mut wrap = view.wraps();
+            if ui.checkbox(&mut wrap, "Wrap").changed() {
+                view.set_wrap(wrap);
+            }
+            if ui.button("Export").clicked() {
+                ui.ctx().copy_text(view.export_text());
+            }
         });
+        if default_previous && view.previous() {
+            ui.label(
+                RichText::new(
+                    "CrashLoopBackOff: showing logs from the previous terminated container by default",
+                )
+                .color(crate::ui::theme::WARNING),
+            );
+        }
         ScrollArea::vertical()
             .id_salt(("logs.stream", window_id.0))
             .show(ui, |ui| {
@@ -407,11 +565,27 @@ pub(crate) fn show(
                 // since/tail-filtered view is shown.
                 if view.find().is_some() {
                     for line in view.find_matches() {
-                        ui.label(RichText::new(line.as_str()).monospace());
+                        ui.add(
+                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                                if view.wraps() {
+                                    egui::TextWrapMode::Wrap
+                                } else {
+                                    egui::TextWrapMode::Extend
+                                },
+                            ),
+                        );
                     }
                 } else {
                     for line in view.visible_lines() {
-                        ui.label(RichText::new(line.as_str()).monospace());
+                        ui.add(
+                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                                if view.wraps() {
+                                    egui::TextWrapMode::Wrap
+                                } else {
+                                    egui::TextWrapMode::Extend
+                                },
+                            ),
+                        );
                     }
                 }
                 if view.truncated_lines() > 0 {
@@ -428,11 +602,16 @@ pub(crate) fn show(
             });
     }
     if connect_requested {
+        let selected_target = views
+            .target_of(window_id)
+            .expect("a rendered logs view has a target");
         views.queue(
             window_id,
             LogsAction::OpenLogs {
                 window: window_id,
-                target,
+                target: selected_target,
+                since_seconds: views.get(window_id).and_then(LogsTool::since_seconds),
+                previous: views.get(window_id).is_some_and(LogsTool::previous),
             },
         );
     }

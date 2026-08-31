@@ -123,6 +123,7 @@ impl KubeAdapter {
             container,
             tail_lines,
             since_seconds,
+            previous,
             timestamps,
             follow,
         } = stream
@@ -166,6 +167,7 @@ impl KubeAdapter {
             container,
             tail_lines,
             since_seconds,
+            previous,
             timestamps,
             follow,
         };
@@ -193,6 +195,7 @@ impl KubeAdapter {
             container,
             tail_lines,
             since_seconds,
+            previous,
             timestamps,
             follow,
         } = &bound
@@ -216,6 +219,7 @@ impl KubeAdapter {
             since_seconds: *since_seconds,
             tail_lines: *tail_lines,
             timestamps: *timestamps,
+            previous: *previous,
             ..LogParams::default()
         };
         let mut reader = api.log_stream(pod, &params).await.map_err(stream_error)?;
@@ -351,6 +355,7 @@ mod tests {
             container: "app".into(),
             tail_lines: Some(200),
             since_seconds: None,
+            previous: false,
             timestamps: true,
             follow: true,
         }

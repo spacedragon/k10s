@@ -15,10 +15,75 @@ use k10s_protocol::{DeletePropagation, OperationId, ResourceIdentity};
 
 use crate::workspace::WindowId;
 
+/// Authoritative preflight outcome shown by every destructive confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestructivePreflight {
+    /// No exact-target server result has been received yet.
+    Pending,
+    /// The API server accepted the dry-run and returned an impact estimate.
+    Ready {
+        impact: String,
+        dry_run: String,
+        resource_version: String,
+    },
+    /// RBAC denied the dry-run.
+    Forbidden(String),
+    /// The target changed after the view was loaded.
+    Conflict(String),
+    /// The API server rejected or could not complete the dry-run.
+    DryRunFailed(String),
+}
+
+impl DestructivePreflight {
+    /// Deterministic fake-mode fixtures covering every safety outcome.
+    #[must_use]
+    pub fn fake_success() -> Self {
+        Self::Ready {
+            impact: "Deletes this object; dependents follow the selected propagation policy."
+                .into(),
+            resource_version: "fake-revision".into(),
+            dry_run: "Passed — the API server accepted the delete dry-run.".into(),
+        }
+    }
+
+    /// Fake RBAC denial fixture.
+    #[must_use]
+    pub fn fake_forbidden() -> Self {
+        Self::Forbidden("Forbidden — delete is not allowed in this context.".into())
+    }
+
+    /// Fake stale-resource conflict fixture.
+    #[must_use]
+    pub fn fake_conflict() -> Self {
+        Self::Conflict("Conflict — the resource changed; refresh before deleting.".into())
+    }
+
+    /// Fake server dry-run failure fixture.
+    #[must_use]
+    pub fn fake_dry_run_failure() -> Self {
+        Self::DryRunFailed("Dry-run failed — the API server rejected this delete.".into())
+    }
+
+    fn blocking_reason(&self) -> Option<&str> {
+        match self {
+            Self::Pending => Some("waiting for authoritative server dry-run"),
+            Self::Ready { .. } => None,
+            Self::Forbidden(reason) | Self::Conflict(reason) | Self::DryRunFailed(reason) => {
+                Some(reason)
+            }
+        }
+    }
+}
+
 /// One queued mutation request from a dialog, drained by the application
 /// layer after rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogAction {
+    /// Request an authoritative delete dry-run for this exact target/policy.
+    RequestDeletePreflight {
+        target: ResourceIdentity,
+        propagation: DeletePropagation,
+    },
     /// Scale the target to the requested replica count.
     SubmitScale {
         /// Exact target identity including its immutable UID.
@@ -34,6 +99,8 @@ pub enum DialogAction {
         target: ResourceIdentity,
         /// How dependents are handled.
         propagation: DeletePropagation,
+        /// Resource version authorized by the successful dry-run.
+        resource_version: String,
         /// Idempotency key for safe retries.
         idempotency_key: String,
     },
@@ -213,6 +280,8 @@ pub struct DeleteDialog {
     confirmation: String,
     idempotency_key: String,
     connected: bool,
+    stale_reason: Option<String>,
+    preflight: DestructivePreflight,
     consumed: bool,
     submitted_operation: Option<OperationId>,
     failure: Option<String>,
@@ -228,6 +297,8 @@ impl DeleteDialog {
             confirmation: String::new(),
             target,
             connected: true,
+            stale_reason: None,
+            preflight: DestructivePreflight::Pending,
             consumed: false,
             submitted_operation: None,
             failure: None,
@@ -253,6 +324,7 @@ impl DeleteDialog {
     /// Select the propagation mode.
     pub fn set_propagation(&mut self, propagation: DeletePropagation) {
         self.propagation = propagation;
+        self.preflight = DestructivePreflight::Pending;
     }
 
     /// Currently selected propagation mode.
@@ -261,11 +333,57 @@ impl DeleteDialog {
         self.propagation
     }
 
+    /// Replace the authoritative impact and server dry-run result.
+    pub fn set_preflight(&mut self, preflight: DestructivePreflight) {
+        self.preflight = preflight;
+    }
+
+    /// Mark the displayed target data stale and revoke submission authority.
+    pub fn mark_stale(&mut self, reason: impl Into<String>) {
+        self.stale_reason = Some(reason.into());
+        self.preflight = DestructivePreflight::Pending;
+    }
+
+    /// Clear a stale-data block, returning whether a fresh preflight is needed.
+    pub fn clear_stale(&mut self) -> bool {
+        self.stale_reason.take().is_some()
+    }
+
+    /// Equivalent command for the exact target and selected propagation.
+    #[must_use]
+    pub fn kubectl_command(&self) -> String {
+        let namespace = self
+            .target
+            .namespace
+            .as_ref()
+            .map(|namespace| format!(" --namespace {}", shell_quote(namespace)))
+            .unwrap_or_default();
+        let propagation = match self.propagation {
+            DeletePropagation::Background => "Background",
+            DeletePropagation::Foreground => "Foreground",
+            DeletePropagation::Orphan => "Orphan",
+        };
+        format!(
+            "kubectl --context {} delete {} {}{} --cascade={} --wait=false",
+            shell_quote(&self.target.context),
+            shell_quote(&self.target.gvk.kind.to_ascii_lowercase()),
+            shell_quote(&self.target.name),
+            namespace,
+            propagation.to_ascii_lowercase()
+        )
+    }
+
     /// Why submission is disabled right now, if it is.
     #[must_use]
-    pub fn disabled_reason(&self) -> Option<&'static str> {
+    pub fn disabled_reason(&self) -> Option<&str> {
         if !self.connected {
             return Some("not connected");
+        }
+        if self.stale_reason.is_some() {
+            return self.stale_reason.as_deref();
+        }
+        if let Some(reason) = self.preflight.blocking_reason() {
+            return Some(reason);
         }
         if self.consumed {
             return Some("already submitted");
@@ -288,9 +406,16 @@ impl DeleteDialog {
             return None;
         }
         self.consumed = true;
+        let DestructivePreflight::Ready {
+            resource_version, ..
+        } = &self.preflight
+        else {
+            unreachable!("submission is gated on a ready preflight")
+        };
         Some(DialogAction::SubmitDelete {
             target: self.target.clone(),
             propagation: self.propagation,
+            resource_version: resource_version.clone(),
             idempotency_key: self.idempotency_key.clone(),
         })
     }
@@ -298,6 +423,7 @@ impl DeleteDialog {
     /// Notify the dialog that the transport was lost.
     pub fn connection_lost(&mut self) {
         self.connected = false;
+        self.preflight = DestructivePreflight::Pending;
     }
 
     /// Notify the dialog that the transport is available again.
@@ -329,6 +455,22 @@ impl DeleteDialog {
     #[must_use]
     pub fn submitted_operation(&self) -> Option<OperationId> {
         self.submitted_operation.clone()
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+                )
+        })
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 }
 
@@ -399,6 +541,13 @@ impl OperationDialogs {
 
     /// Open (or replace) the delete dialog on `window`.
     pub fn open_delete(&mut self, window: WindowId, target: ResourceIdentity) {
+        self.actions.push((
+            window,
+            DialogAction::RequestDeletePreflight {
+                target: target.clone(),
+                propagation: DeletePropagation::Background,
+            },
+        ));
         self.windows.insert(
             window,
             ActiveDialog::Delete(DeleteDialog::for_target(target)),
@@ -444,6 +593,18 @@ impl OperationDialogs {
         }
     }
 
+    fn request_delete_preflight(&mut self, window: WindowId) {
+        if let Some(ActiveDialog::Delete(dialog)) = self.windows.get(&window) {
+            self.actions.push((
+                window,
+                DialogAction::RequestDeletePreflight {
+                    target: dialog.target.clone(),
+                    propagation: dialog.propagation,
+                },
+            ));
+        }
+    }
+
     /// Drop entries for closed windows.
     pub fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
         self.windows.retain(|window, _| live(*window));
@@ -458,7 +619,8 @@ impl OperationDialogs {
     /// a dialog opened before or across a reconnect always reflects the
     /// current transport state.
     pub fn set_connected(&mut self, connected: bool) {
-        for dialog in self.windows.values_mut() {
+        let mut refresh = Vec::new();
+        for (window, dialog) in &mut self.windows {
             match dialog {
                 ActiveDialog::Scale(scale) => {
                     if connected {
@@ -469,6 +631,9 @@ impl OperationDialogs {
                 }
                 ActiveDialog::Delete(delete) => {
                     if connected {
+                        if !delete.connected {
+                            refresh.push((*window, delete.target.clone(), delete.propagation));
+                        }
                         delete.reconnected();
                     } else {
                         delete.connection_lost();
@@ -476,6 +641,16 @@ impl OperationDialogs {
                 }
             }
         }
+        self.actions
+            .extend(refresh.into_iter().map(|(window, target, propagation)| {
+                (
+                    window,
+                    DialogAction::RequestDeletePreflight {
+                        target,
+                        propagation,
+                    },
+                )
+            }));
     }
 
     /// Drain every queued dialog action for submission.
@@ -484,36 +659,90 @@ impl OperationDialogs {
     }
 
     /// Render every open dialog. Queues actions; never blocks.
-    pub fn show(&mut self, ui: &mut egui::Ui, connected: bool) {
-        self.set_connected(connected);
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        connected: bool,
+        mut mutations_allowed: impl FnMut(WindowId) -> bool,
+    ) {
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        let mut refresh = Vec::new();
         for window in windows {
+            let mutations_allowed = mutations_allowed(window);
             let Some(dialog) = self.windows.get_mut(&window) else {
                 continue;
             };
+            match dialog {
+                ActiveDialog::Scale(scale) => {
+                    if connected && mutations_allowed {
+                        scale.reconnected()
+                    } else {
+                        scale.connection_lost()
+                    }
+                }
+                ActiveDialog::Delete(delete) => {
+                    if !connected {
+                        delete.connection_lost()
+                    } else if mutations_allowed {
+                        if !delete.connected || delete.clear_stale() {
+                            refresh.push((window, delete.target.clone(), delete.propagation));
+                        }
+                        delete.reconnected()
+                    } else {
+                        delete.mark_stale("stale data - refresh the resource before deleting")
+                    }
+                }
+            }
             let mut close_requested = false;
             let mut submit_requested = false;
-            egui::Window::new(dialog_title(dialog))
+            let mut preflight_requested = false;
+            let operation_window = egui::Window::new(dialog_title(dialog))
                 .id(egui::Id::new(("k10s.operation-dialog", window.0)))
                 .collapsible(false)
-                .resizable(false)
-                .show(ui, |ui| match dialog {
-                    ActiveDialog::Scale(scale) => {
-                        render_scale(ui, scale, &mut submit_requested, &mut close_requested);
-                    }
-                    ActiveDialog::Delete(delete) => {
-                        render_delete(ui, delete, &mut submit_requested, &mut close_requested);
-                    }
-                });
+                .resizable(false);
+            let operation_window = if matches!(dialog, ActiveDialog::Delete(_)) {
+                operation_window
+                    .default_width(520.0)
+                    .max_width(ui.available_width().min(620.0))
+            } else {
+                operation_window
+            };
+            operation_window.show(ui, |ui| match dialog {
+                ActiveDialog::Scale(scale) => {
+                    render_scale(ui, scale, &mut submit_requested, &mut close_requested);
+                }
+                ActiveDialog::Delete(delete) => {
+                    render_delete(
+                        ui,
+                        delete,
+                        &mut submit_requested,
+                        &mut preflight_requested,
+                        &mut close_requested,
+                    );
+                }
+            });
             if submit_requested {
                 self.submit_active(window);
                 ui.ctx().request_repaint();
+            }
+            if preflight_requested {
+                self.request_delete_preflight(window);
             }
             if close_requested {
                 self.windows.remove(&window);
                 ui.ctx().request_repaint();
             }
         }
+        self.actions
+            .extend(refresh.into_iter().map(|(window, target, propagation)| {
+                (
+                    window,
+                    DialogAction::RequestDeletePreflight {
+                        target,
+                        propagation,
+                    },
+                )
+            }));
     }
 }
 
@@ -565,13 +794,46 @@ fn render_delete(
     ui: &mut egui::Ui,
     dialog: &mut DeleteDialog,
     submit: &mut bool,
+    request_preflight: &mut bool,
     close: &mut bool,
 ) {
-    ui.label(format!(
-        "Permanently delete {}? Type its name to confirm.",
-        dialog.target().name
-    ));
+    ui.heading("WARNING — Destructive action");
+    ui.label("Complete each safety check in order. Nothing runs until all five pass.");
+    ui.strong("1  Scope");
+    egui::Grid::new("delete-scope")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let target = dialog.target();
+            let gvk = if target.gvk.group.is_empty() {
+                format!("{}/{}", target.gvk.version, target.gvk.kind)
+            } else {
+                format!(
+                    "{}/{}/{}",
+                    target.gvk.group, target.gvk.version, target.gvk.kind
+                )
+            };
+            for (label, value) in [
+                ("Context", target.context.as_str()),
+                (
+                    "Namespace",
+                    target.namespace.as_deref().unwrap_or("Cluster-scoped"),
+                ),
+                ("GVK", gvk.as_str()),
+                ("Name", target.name.as_str()),
+                ("UID", target.uid.as_str()),
+            ] {
+                ui.strong(label);
+                ui.label(value);
+                ui.end_row();
+            }
+        });
     ui.add_space(4.0);
+    ui.strong("2  Impact");
+    if let DestructivePreflight::Ready { impact, .. } = &dialog.preflight {
+        ui.label(impact);
+    } else {
+        ui.label("Deletes this exact object using the selected dependent policy.");
+    }
     ui.horizontal(|ui| {
         ui.label("Propagation");
         for (mode, label) in [
@@ -581,16 +843,63 @@ fn render_delete(
         ] {
             if ui.radio(dialog.propagation() == mode, label).clicked() {
                 dialog.set_propagation(mode);
+                *request_preflight = true;
             }
         }
     });
+    ui.label(format!("Propagation policy: {:?}", dialog.propagation()));
+    ui.strong("3  Server dry run");
+    match &dialog.preflight {
+        DestructivePreflight::Pending => {
+            ui.label("[PENDING] Waiting for authoritative server dry-run.");
+        }
+        DestructivePreflight::Ready { dry_run, .. } => {
+            ui.label(
+                RichText::new(format!("[PASS] Server dry-run: {dry_run}"))
+                    .color(egui::Color32::GREEN),
+            );
+        }
+        DestructivePreflight::Forbidden(reason) => {
+            ui.label(
+                RichText::new(format!("[BLOCKED] Forbidden: {reason}"))
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+        DestructivePreflight::Conflict(reason) => {
+            ui.label(
+                RichText::new(format!("[STALE] Conflict: {reason}")).color(egui::Color32::YELLOW),
+            );
+        }
+        DestructivePreflight::DryRunFailed(reason) => {
+            ui.label(
+                RichText::new(format!("[FAILED] Server dry-run failed: {reason}"))
+                    .color(ui.visuals().error_fg_color),
+            );
+        }
+    }
+    ui.strong("4  Typed confirmation");
+    ui.label(format!("Type {} to confirm.", dialog.target().name));
     let field = ui.text_edit_singleline(dialog.confirmation_buffer());
+    // A single-line editor surrenders focus while handling Enter, so
+    // `lost_focus` is part of the same safe, field-owned activation gesture.
+    let confirmation_focused = field.has_focus() || field.lost_focus();
     field.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::TextEdit,
             true,
             "Confirm deletion".to_owned(),
         )
+    });
+    let command = dialog.kubectl_command();
+    ui.strong("5  Exact command");
+    ui.label(
+        "Equivalent kubectl command (shown for review; the client submits the protocol operation)",
+    );
+    ui.vertical(|ui| {
+        ui.monospace(&command);
+        if ui.button("Copy command").clicked() {
+            ui.ctx().copy_text(command);
+        }
     });
     if let Some(reason) = dialog.disabled_reason() {
         ui.label(RichText::new(reason).weak());
@@ -614,4 +923,10 @@ fn render_delete(
             *submit = true;
         }
     });
+    if confirmation_focused
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && dialog.can_submit()
+    {
+        *submit = true;
+    }
 }

@@ -452,7 +452,7 @@ fn quantity_millicores(text: Option<String>) -> Option<u64> {
 }
 
 /// Parse a memory quantity into bytes, rounding to the nearest byte.
-fn quantity_bytes(text: Option<String>) -> Option<u64> {
+pub(crate) fn quantity_bytes(text: Option<String>) -> Option<u64> {
     non_negative_rounded(parse_quantity(&text?)?)
 }
 

@@ -14,7 +14,7 @@ use k10s_protocol::{
     ResourceRelationsResponse, ResourceTypeEntry,
 };
 
-use crate::workspace::{ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
+use crate::workspace::{DetailTab, ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
 use super::{ConnectionState, theme};
 
@@ -30,6 +30,61 @@ impl SafeUiError {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.0
+    }
+}
+
+/// Window-local lifecycle for a resource watch. Values are presentation-ready
+/// so deterministic fixtures never depend on wall-clock time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowFreshness {
+    Live {
+        last_sync_age: String,
+    },
+    StaleRetrying {
+        last_sync_age: String,
+        retry_in: String,
+        attempt: u32,
+    },
+    Reconnecting {
+        last_sync_age: String,
+        retry_in: String,
+        attempt: u32,
+    },
+    Forbidden {
+        user: String,
+        verb: String,
+        resource: String,
+        scope: String,
+    },
+    Failed {
+        message: String,
+    },
+    ReadyEmpty,
+}
+
+impl WindowFreshness {
+    #[must_use]
+    pub fn mutations_allowed(&self) -> bool {
+        matches!(self, Self::Live { .. } | Self::ReadyEmpty)
+    }
+}
+
+fn recovery_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    unavailable_reason: &str,
+) -> bool {
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.to_owned())
+    });
+    if enabled {
+        response.clicked()
+    } else {
+        response
+            .on_disabled_hover_text(unavailable_reason)
+            .clicked()
     }
 }
 
@@ -99,6 +154,9 @@ pub enum RelationState {
 /// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
+    /// Lifecycle of each open list window. Missing entries retain the legacy
+    /// inference from connection and row state for compatibility.
+    pub window_freshness: HashMap<WindowId, WindowFreshness>,
     /// Shared Namespace candidates for every namespaced list window.
     pub namespace_catalog: NamespaceCatalogState,
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so
@@ -141,6 +199,109 @@ pub trait RowIdentity: Clone + Eq + std::hash::Hash + std::fmt::Debug {
     fn as_row_identity(&self) -> Option<&ResourceIdentity> {
         None
     }
+}
+
+pub(super) fn show_window_freshness(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    freshness: &WindowFreshness,
+    resource_actions: &mut Vec<super::ResourceAction>,
+) {
+    match freshness {
+        WindowFreshness::Live { last_sync_age } => {
+            ui.label(
+                RichText::new(format!("● Live · synced {last_sync_age}")).color(theme::HEALTHY),
+            );
+        }
+        WindowFreshness::ReadyEmpty => {
+            ui.label("◇ Ready · no resources");
+            if ui.button("Refresh list").clicked() {
+                resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+            }
+        }
+        WindowFreshness::StaleRetrying {
+            last_sync_age,
+            retry_in,
+            attempt,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "▲ Stale · last sync {last_sync_age} · retry in {retry_in} · attempt {attempt}"
+                ))
+                .color(theme::WARNING),
+            );
+            ui.label("Mutations disabled while this window is stale");
+            ui.horizontal(|ui| {
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+                if ui.button("Full resync").clicked() {
+                    resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+                }
+            });
+        }
+        WindowFreshness::Reconnecting {
+            last_sync_age,
+            retry_in,
+            attempt,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "[~] Reconnecting · last sync {last_sync_age} · retry in {retry_in} · attempt {attempt}"
+                ))
+                .strong()
+                .color(theme::CONNECTING),
+            );
+            ui.label("Mutations are disabled; recovery controls unlock after reconnecting.");
+            ui.horizontal(|ui| {
+                recovery_button(ui, "Retry now", false, "Reconnect is already in progress");
+                recovery_button(
+                    ui,
+                    "Full resync",
+                    false,
+                    "Full resync is unavailable until the transport reconnects",
+                );
+            });
+        }
+        WindowFreshness::Forbidden {
+            user,
+            verb,
+            resource,
+            scope,
+        } => {
+            ui.label(
+                RichText::new(format!(
+                    "■ Forbidden · user {user} cannot {verb} {resource} in {scope}"
+                ))
+                .color(egui::Color32::LIGHT_RED),
+            );
+            ui.label("Ask a cluster administrator to grant this permission, then retry.");
+            let command = format!("kubectl auth can-i {verb} {resource} --as={user} {scope}");
+            ui.horizontal(|ui| {
+                ui.monospace(&command);
+                if ui.button("Copy auth can-i command").clicked() {
+                    ui.ctx().copy_text(command);
+                }
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+            });
+        }
+        WindowFreshness::Failed { message } => {
+            ui.label(
+                RichText::new(format!("✕ Failed · {message}")).color(egui::Color32::LIGHT_RED),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Retry now").clicked() {
+                    resource_actions.push(super::ResourceAction::RetryWindow(window_id));
+                }
+                if ui.button("Full resync").clicked() {
+                    resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+                }
+            });
+        }
+    }
+    ui.separator();
 }
 
 impl RowIdentity for ResourceIdentity {
@@ -287,6 +448,8 @@ fn gvk(group: &str, version: &str, kind: &str) -> GroupVersionKind {
 /// their own type instead.
 fn builtin_gvk(kind: WorkloadKind) -> Option<GroupVersionKind> {
     match kind {
+        WorkloadKind::Events => Some(GroupVersionKind::core("v1", "Event")),
+        WorkloadKind::Namespaces => Some(GroupVersionKind::core("v1", "Namespace")),
         WorkloadKind::Deployments => Some(gvk("apps", "v1", "Deployment")),
         WorkloadKind::Pods => Some(GroupVersionKind::core("v1", "Pod")),
         WorkloadKind::StatefulSets => Some(gvk("apps", "v1", "StatefulSet")),
@@ -294,6 +457,19 @@ fn builtin_gvk(kind: WorkloadKind) -> Option<GroupVersionKind> {
         WorkloadKind::Jobs => Some(gvk("batch", "v1", "Job")),
         WorkloadKind::CronJobs => Some(gvk("batch", "v1", "CronJob")),
         WorkloadKind::CustomResources => None,
+        WorkloadKind::Ingresses => Some(gvk("networking.k8s.io", "v1", "Ingress")),
+        WorkloadKind::Endpoints => Some(GroupVersionKind::core("v1", "Endpoints")),
+        WorkloadKind::NetworkPolicies => Some(gvk("networking.k8s.io", "v1", "NetworkPolicy")),
+        WorkloadKind::ConfigMaps => Some(GroupVersionKind::core("v1", "ConfigMap")),
+        WorkloadKind::Secrets => Some(GroupVersionKind::core("v1", "Secret")),
+        WorkloadKind::PersistentVolumeClaims => {
+            Some(GroupVersionKind::core("v1", "PersistentVolumeClaim"))
+        }
+        WorkloadKind::PersistentVolumes => Some(GroupVersionKind::core("v1", "PersistentVolume")),
+        WorkloadKind::StorageClasses => Some(gvk("storage.k8s.io", "v1", "StorageClass")),
+        WorkloadKind::ServiceAccounts => Some(GroupVersionKind::core("v1", "ServiceAccount")),
+        WorkloadKind::Roles => Some(gvk("rbac.authorization.k8s.io", "v1", "Role")),
+        WorkloadKind::RoleBindings => Some(gvk("rbac.authorization.k8s.io", "v1", "RoleBinding")),
     }
 }
 
@@ -318,9 +494,18 @@ pub(super) fn show<I>(
     I: RowIdentity,
 {
     let title = kind.title();
-    if connection != ConnectionState::Connected {
-        ui.label(RichText::new("Connection stale · showing last known rows").color(theme::WARNING));
-        ui.separator();
+    let fallback_freshness =
+        (connection != ConnectionState::Connected).then(|| WindowFreshness::Reconnecting {
+            last_sync_age: "unknown".into(),
+            retry_in: "pending".into(),
+            attempt: 1,
+        });
+    let effective_freshness = feed
+        .window_freshness
+        .get(&window_id)
+        .or(fallback_freshness.as_ref());
+    if let Some(freshness) = effective_freshness {
+        show_window_freshness(ui, window_id, freshness, resource_actions);
     }
 
     // Resolve which type this window displays. Custom resources must pick
@@ -331,7 +516,7 @@ pub(super) fn show<I>(
             .as_deref()
             .and_then(|key| feed.types.iter().find(|entry| type_key(&entry.gvk) == *key))
             .map(|entry| (entry.gvk.clone(), entry.namespaced)),
-        _ => builtin_gvk(kind).map(|gvk| (gvk, true)),
+        _ => builtin_gvk(kind).map(|gvk| (gvk, kind.namespaced())),
     };
     let Some((_, namespaced)) = selected_type else {
         show_picker(ui, scratch, window_id, feed, queued);
@@ -416,6 +601,15 @@ pub(super) fn show<I>(
         return;
     };
 
+    if rows.is_empty() && effective_freshness.is_none() {
+        show_window_freshness(
+            ui,
+            window_id,
+            &WindowFreshness::ReadyEmpty,
+            resource_actions,
+        );
+    }
+
     // The namespace restriction filters authoritative rows locally; the
     // search text filter lives in the table module.
     let needle = state.search.to_lowercase();
@@ -433,6 +627,23 @@ pub(super) fn show<I>(
     let mut sorted = filtered;
     if let Some(sort) = state.sort.as_ref() {
         super::resource_table::sort_rows(&mut sorted, sort);
+    }
+
+    if sorted.is_empty() && !rows.is_empty() {
+        egui::Frame::NONE
+            .fill(theme::STATUS_BACKGROUND)
+            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+            .corner_radius(egui::CornerRadius::same(3))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("[?]").strong().color(theme::ACCENT));
+                    ui.strong("Filtered empty");
+                });
+                ui.label("Resources exist, but none match the active filters.");
+                ui.label("Use Clear filters in the toolbar to restore all rows.");
+            });
+        ui.separator();
     }
 
     let selected: Option<&I> = state.selection.as_ref();
@@ -457,10 +668,12 @@ pub(super) fn show<I>(
     let primary_state = detail_identity.and_then(|identity| feed.primary_details.get(identity));
     let detail_view = detail_identity.and_then(|identity| feed.details.get(identity));
 
+    let available_height = ui.available_height();
     let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
         detail_shown,
+        state.prior_split_ratio.is_some(),
         |ui| {
             super::resource_table::show(
                 ui,
@@ -489,17 +702,51 @@ pub(super) fn show<I>(
                     primary_state,
                     detail_view,
                     gone,
+                    true,
+                    state.prior_split_ratio.is_some(),
                     yaml,
                     streams,
                     dialogs,
                     feed,
                     None,
+                    effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
                     resource_actions,
                     queued,
                 );
             }
         },
     );
+
+    if detail_shown {
+        let auto_focus =
+            state.detail.as_ref().is_some_and(|detail| {
+                matches!(detail.active_tab, DetailTab::Logs | DetailTab::Shell)
+            }) && super::split::pane_heights(available_height, ratio, true).1
+                < super::split::DETAIL_PANE_MIN + 80.0;
+        if auto_focus && state.prior_split_ratio.is_none() {
+            queued.push(WorkspaceCommand::MaximizeDetailPane(window_id));
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            let find_active = state
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.active_tab == DetailTab::Logs)
+                && streams
+                    .logs
+                    .get(window_id)
+                    .and_then(|logs| logs.find())
+                    .is_some();
+            if find_active {
+                if let Some(logs) = streams.logs.get_mut(window_id) {
+                    logs.set_find(None);
+                }
+            } else if state.prior_split_ratio.is_some() {
+                queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
+            } else {
+                queued.push(WorkspaceCommand::ClearSelection(window_id));
+            }
+        }
+    }
 
     if let Some(actions) = list_actions {
         if actions.cleared {
@@ -522,6 +769,17 @@ pub(super) fn show<I>(
         // window's later selection.
         if let Some(identity) = actions.popped_out {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        }
+    }
+
+    if let Some(identity) = state.selection.clone()
+        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        if ui.input(|input| input.modifiers.any()) && !gone {
+            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
+        } else if !state.detail_visible {
+            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 
@@ -592,4 +850,71 @@ fn show_picker<I>(
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::*;
+
+    #[test]
+    fn every_named_taxonomy_entry_maps_directly_to_its_gvk_and_scope() {
+        let expected = [
+            (WorkloadKind::Events, "", "Event", true),
+            (WorkloadKind::Namespaces, "", "Namespace", false),
+            (
+                WorkloadKind::Ingresses,
+                "networking.k8s.io",
+                "Ingress",
+                true,
+            ),
+            (WorkloadKind::Endpoints, "", "Endpoints", true),
+            (
+                WorkloadKind::NetworkPolicies,
+                "networking.k8s.io",
+                "NetworkPolicy",
+                true,
+            ),
+            (WorkloadKind::ConfigMaps, "", "ConfigMap", true),
+            (WorkloadKind::Secrets, "", "Secret", true),
+            (
+                WorkloadKind::PersistentVolumeClaims,
+                "",
+                "PersistentVolumeClaim",
+                true,
+            ),
+            (
+                WorkloadKind::PersistentVolumes,
+                "",
+                "PersistentVolume",
+                false,
+            ),
+            (
+                WorkloadKind::StorageClasses,
+                "storage.k8s.io",
+                "StorageClass",
+                false,
+            ),
+            (WorkloadKind::ServiceAccounts, "", "ServiceAccount", true),
+            (
+                WorkloadKind::Roles,
+                "rbac.authorization.k8s.io",
+                "Role",
+                true,
+            ),
+            (
+                WorkloadKind::RoleBindings,
+                "rbac.authorization.k8s.io",
+                "RoleBinding",
+                true,
+            ),
+        ];
+        for (kind, group, wire_kind, namespaced) in expected {
+            let gvk = builtin_gvk(kind).expect("named entries bypass the custom picker");
+            assert_eq!(
+                (gvk.group.as_str(), gvk.version.as_str(), gvk.kind.as_str()),
+                (group, "v1", wire_kind)
+            );
+            assert_eq!(kind.namespaced(), namespaced);
+        }
+    }
 }

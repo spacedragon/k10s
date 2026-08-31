@@ -13,8 +13,9 @@ mod create;
 mod discovery;
 mod events;
 mod exec;
+mod infrastructure;
 mod logs;
-mod metrics;
+pub(crate) mod metrics;
 mod mutate;
 mod normalize;
 mod owners;
@@ -35,14 +36,42 @@ use futures_util::future::{BoxFuture, Shared};
 pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 
 use crate::port::{
-    AdapterError, BackendError, BootstrapInfo, Command, ContextInfo, ContextPermissionsData,
-    ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query, QueryResult, ResourceListData,
-    ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    AdapterError, ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo,
+    ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query,
+    QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
 use crate::runtime::supervisor::WatchSource;
 use crate::watch::WatchSelector;
+
+const INFRASTRUCTURE_KINDS: [&str; 20] = [
+    "Node",
+    "Pod",
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "Job",
+    "CronJob",
+    "Event",
+    "Service",
+    "Ingress",
+    "Endpoints",
+    "NetworkPolicy",
+    "ConfigMap",
+    "Secret",
+    "PersistentVolumeClaim",
+    "PersistentVolume",
+    "StorageClass",
+    "ServiceAccount",
+    "Role",
+    "RoleBinding",
+];
+
+fn is_infrastructure_descriptor(entry: &ApiResourceDescriptor) -> bool {
+    INFRASTRUCTURE_KINDS.contains(&entry.gvk.kind.as_str())
+        && (entry.gvk.kind != "Event" || entry.gvk.group.is_empty())
+}
 
 /// A test-only override choosing scripted watch sources per selection.
 ///
@@ -357,6 +386,10 @@ impl KubernetesAccess for KubeAdapter {
                     namespace,
                 } => self.resource_list(context, gvk, namespace).await,
                 Query::ResourceDetail { reference } => self.resource_detail(reference).await,
+                Query::DeletePreflight {
+                    target,
+                    propagation,
+                } => self.delete_preflight(target, propagation).await,
                 Query::ResourceMetrics { reference } => self.resource_metrics(reference).await,
                 Query::ResourceRelations { reference } => self.resource_relations(reference).await,
                 Query::Infrastructure { context } => self.infrastructure(&context).await,
@@ -392,16 +425,8 @@ impl KubernetesAccess for KubeAdapter {
                     gvk,
                     namespace,
                 } => self.resource_watch(context, gvk, namespace).await,
-                // Live infrastructure updates are refreshed explicitly by
-                // the client for now. Accepting the subscription keeps the
-                // capability available instead of replacing a successful
-                // snapshot with an unsupported-capability placeholder.
                 Subscribe::Infrastructure { context } => {
-                    if !self.knows_context(&context) {
-                        Err(BackendError::NotFound)
-                    } else {
-                        Ok(SubscriptionHandle::new(format!("infrastructure:{context}")))
-                    }
+                    self.infrastructure_subscription(context).await
                 }
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     self.redeem_stream_ticket(ticket_id, route).await
@@ -432,42 +457,104 @@ impl KubeAdapter {
             return Err(BackendError::NotFound);
         }
         let catalog = self.catalog_for(context).await?;
-        let overview_kinds = [
-            "Node",
-            "Pod",
-            "Deployment",
-            "StatefulSet",
-            "DaemonSet",
-            "Job",
-            "CronJob",
-        ];
         let descriptors = catalog
             .types
             .iter()
-            .filter(|entry| overview_kinds.contains(&entry.gvk.kind.as_str()))
+            .filter(|entry| is_infrastructure_descriptor(entry))
             .cloned()
             .collect::<Vec<_>>();
-        let mut records = Vec::new();
+        let client = self.cluster_client(context).await?;
+        Self::infrastructure_snapshot(client, context, descriptors, self.watches.clone())
+            .await
+            .map(QueryResult::Infrastructure)
+    }
+
+    async fn infrastructure_snapshot(
+        client: kube::Client,
+        context: &str,
+        descriptors: Vec<ApiResourceDescriptor>,
+        watches: ClusterWatches,
+    ) -> Result<crate::catalog::CatalogSnapshot, BackendError> {
+        let mut rows = Vec::new();
+        let mut nodes = Vec::new();
         for descriptor in descriptors {
-            match self
-                .resource_list(context.to_owned(), descriptor.gvk, None)
-                .await
+            if descriptor.gvk.kind == "Node" {
+                let inventory = infrastructure::nodes(client.clone(), context).await?;
+                rows.extend(inventory.rows);
+                nodes = inventory.nodes;
+                continue;
+            }
+            match read::list_resource(
+                &client,
+                context,
+                &descriptor.gvk,
+                &descriptor.plural,
+                descriptor.namespaced,
+                None,
+            )
+            .await
             {
-                Ok(QueryResult::ResourceList(list)) => records.extend(list.rows),
-                Ok(_) => unreachable!("resource_list always returns a resource list"),
+                Ok(read) => rows.extend(read.rows),
                 Err(BackendError::NotFound) => continue,
                 Err(error) => return Err(error),
             }
         }
-        let revision = self.watches.next_revision();
-        Ok(QueryResult::Infrastructure(
-            crate::catalog::CatalogSnapshot::live(
-                context,
-                revision,
-                crate::runtime::now_rfc3339(),
-                records,
-            ),
+        let storage = infrastructure::storage_inventory(client).await?;
+        let revision = watches.next_revision();
+        let records = rows
+            .iter()
+            .map(|row| crate::runtime::record_from_row(row, revision))
+            .collect();
+        Ok(crate::catalog::CatalogSnapshot::live(
+            context,
+            revision,
+            crate::runtime::now_rfc3339(),
+            records,
+            storage,
+            nodes,
         ))
+    }
+
+    async fn infrastructure_subscription(
+        &self,
+        context: String,
+    ) -> Result<SubscriptionHandle, BackendError> {
+        if !self.knows_context(&context) {
+            return Err(BackendError::NotFound);
+        }
+        let catalog = self.catalog_for(&context).await?;
+        let descriptors = catalog
+            .types
+            .iter()
+            .filter(|entry| is_infrastructure_descriptor(entry))
+            .cloned()
+            .collect::<Vec<_>>();
+        let client = self.cluster_client(&context).await?;
+        let watches = self.watches.clone();
+        let (sender, receiver) = tokio::sync::broadcast::channel(crate::watch::WATCH_CAPACITY);
+        let subscription_id = format!("infrastructure:{context}");
+        tokio::spawn(async move {
+            loop {
+                if sender.receiver_count() == 0 {
+                    break;
+                }
+                if let Ok(snapshot) = Self::infrastructure_snapshot(
+                    client.clone(),
+                    &context,
+                    descriptors.clone(),
+                    watches.clone(),
+                )
+                .await
+                    && sender
+                        .send(crate::port::BackendEvent::Infrastructure(snapshot))
+                        .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        Ok(SubscriptionHandle::with_events(subscription_id, receiver))
     }
 
     /// Open a supervised demand-driven resource watch for one selection.
@@ -1436,8 +1523,56 @@ mod client_build_lock_tests {
 
     use futures_util::FutureExt;
 
-    use super::{CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks};
-    use crate::port::{BackendError, ResourceTypesData};
+    use super::{
+        CatalogFlight, CatalogFlights, CatalogWaiter, ClientBuildLocks,
+        is_infrastructure_descriptor,
+    };
+    use crate::port::{ApiResourceDescriptor, BackendError, Gvk, ResourceTypesData};
+
+    fn descriptor(group: &str, kind: &str) -> ApiResourceDescriptor {
+        ApiResourceDescriptor {
+            gvk: Gvk::new(group, "v1", kind),
+            plural: format!("{}s", kind.to_ascii_lowercase()),
+            namespaced: kind != "Node",
+            supports_scale: false,
+            supports_watch: true,
+            supports_patch: false,
+            supports_create: false,
+            supports_delete: false,
+        }
+    }
+
+    #[test]
+    fn infrastructure_catalog_includes_every_launcher_count_kind_once() {
+        for (group, kind) in [
+            ("", "Event"),
+            ("", "Service"),
+            ("networking.k8s.io", "Ingress"),
+            ("", "Endpoints"),
+            ("networking.k8s.io", "NetworkPolicy"),
+            ("", "ConfigMap"),
+            ("", "Secret"),
+            ("", "PersistentVolumeClaim"),
+            ("", "PersistentVolume"),
+            ("storage.k8s.io", "StorageClass"),
+            ("", "ServiceAccount"),
+            ("rbac.authorization.k8s.io", "Role"),
+            ("rbac.authorization.k8s.io", "RoleBinding"),
+        ] {
+            assert!(
+                is_infrastructure_descriptor(&descriptor(group, kind)),
+                "{kind} must feed launcher counts"
+            );
+        }
+        assert!(!is_infrastructure_descriptor(&descriptor(
+            "events.k8s.io",
+            "Event"
+        )));
+        assert!(!is_infrastructure_descriptor(&descriptor(
+            "apps",
+            "ReplicaSet"
+        )));
+    }
 
     #[tokio::test]
     async fn one_context_build_never_blocks_another_context() {
