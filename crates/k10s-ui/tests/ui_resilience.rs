@@ -13,9 +13,10 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, CapacityUsage, ClusterTotals, DetailRow, DetailSection, GroupVersionKind,
-    InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, NodeRow,
-    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow, StreamTarget,
+    BackendRevision, CapacityUsage, ClusterTotals, ContainerStateProjection, DetailRow,
+    DetailSection, GroupVersionKind, InfrastructureResponse, MetricsAvailability, MetricsCondition,
+    MetricsStatus, NodeRow, PodContainerProjection, PodProjection, ResourceCapabilities,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection, StreamTarget,
 };
 use k10s_ui::{
     ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
@@ -184,8 +185,33 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             can_exec: true,
             ..ResourceCapabilities::default()
         },
-        manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
-        projection: None,
+        manifest: "SENTINEL MANIFEST: runtime tools must not parse this".into(),
+        projection: Some(ResourceProjection::Pod(PodProjection {
+            phase: Some("Running".into()),
+            ready_containers: Some(1),
+            total_containers: Some(1),
+            restart_count: Some(0),
+            containers: vec![PodContainerProjection {
+                name: "app".into(),
+                image: None,
+                state: Some(ContainerStateProjection::Running),
+                ready: Some(true),
+                restart_count: Some(0),
+                last_termination: None,
+            }],
+            conditions: Vec::new(),
+            node_name: None,
+            pod_ip: None,
+            host_ip: None,
+            qos_class: None,
+            priority: None,
+            service_account: None,
+            restart_policy: None,
+            ports: Vec::new(),
+            labels: Default::default(),
+            annotations: Default::default(),
+            created_at: None,
+        })),
     }
 }
 

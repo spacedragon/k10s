@@ -16,8 +16,9 @@ pub(super) mod presentation;
 mod related;
 mod service;
 
+pub(crate) use pod::PodRuntimeProjection;
+
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
-use serde::Deserialize;
 
 use crate::ui::dialogs;
 use crate::ui::tools;
@@ -361,7 +362,10 @@ pub(super) fn show<I>(
         match action {
             DetailRuntimeAction::PreviousLogs { window, container } => {
                 if let presentation::DetailPrimary::Loaded(view) = presentation.primary
-                    && let Some(target) = stream_target(detail, view)
+                    && let Some(runtime) =
+                        pod::PodRuntimeProjection::from_view(presentation.identity, view)
+                    && runtime.contains(&container)
+                    && let Some(target) = stream_target(detail, &container)
                 {
                     let logs = streams.logs.ensure(window, target);
                     logs.select_container(&container);
@@ -413,22 +417,33 @@ fn show_generic_body<I: RowIdentity>(
             }
         }
         DetailTab::Logs => {
-            let containers = pod_containers(&view.manifest);
+            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
+            else {
+                ui.label("Pod runtime details unavailable");
+                return;
+            };
             tools::logs::show(
                 ui,
                 window_id,
                 &mut streams.logs,
-                stream_target(detail, view),
-                &containers,
-                status_summary(view).is_some_and(|status| status.contains("CrashLoopBackOff")),
+                stream_target(detail, runtime.default_container()),
+                runtime.containers(),
+                runtime.default_previous(),
             );
         }
-        DetailTab::Shell => tools::shell::show(
-            ui,
-            window_id,
-            &mut streams.shells,
-            stream_target(detail, view),
-        ),
+        DetailTab::Shell => {
+            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
+            else {
+                ui.label("Pod runtime details unavailable");
+                return;
+            };
+            tools::shell::show(
+                ui,
+                window_id,
+                &mut streams.shells,
+                stream_target(detail, runtime.default_container()),
+            );
+        }
     }
 }
 
@@ -475,9 +490,6 @@ fn show_generic_actions(
     }
 }
 
-/// The default pod container streamed by the connected tools.
-const DEFAULT_CONTAINER: &str = "app";
-
 /// Best-effort current desired replica count from a status summary such as
 /// `20/20 ready`, used as the pre-filled value of the scale dialog.
 fn summary_replicas(summary: &str) -> Option<u32> {
@@ -501,14 +513,18 @@ fn status_summary(view: &ResourceDetailResponse) -> Option<&str> {
 
 /// Resolve a pod/container stream target from the pinned identity. Only pod
 /// identities can stream; anything else yields no target.
-fn stream_target<I>(
-    detail: &DetailState<I>,
-    view: &ResourceDetailResponse,
-) -> Option<k10s_protocol::StreamTarget>
+fn stream_target<I>(detail: &DetailState<I>, container: &str) -> Option<k10s_protocol::StreamTarget>
 where
     I: RowIdentity,
 {
     let identity = detail.identity.as_row_identity()?;
+    if !identity.gvk.group.is_empty()
+        || identity.gvk.version != "v1"
+        || identity.gvk.kind != "Pod"
+        || container.is_empty()
+    {
+        return None;
+    }
     Some(k10s_protocol::StreamTarget {
         context: identity.context.clone(),
         namespace: identity
@@ -517,44 +533,8 @@ where
             .unwrap_or_else(|| "default".to_owned()),
         pod: identity.name.clone(),
         uid: identity.uid.clone(),
-        container: pod_container(&view.manifest).unwrap_or_else(|| DEFAULT_CONTAINER.to_owned()),
+        container: container.to_owned(),
     })
-}
-
-/// Resolve the default exec/logs container from the authoritative Pod
-/// manifest. Kubernetes does not prescribe an `app` container name, so the
-/// first regular container is the only generally valid implicit selection.
-pub(crate) fn pod_container(manifest: &str) -> Option<String> {
-    pod_containers(manifest).into_iter().next()
-}
-
-pub(crate) fn pod_containers(manifest: &str) -> Vec<String> {
-    #[derive(Deserialize)]
-    struct Manifest {
-        spec: Spec,
-    }
-
-    #[derive(Deserialize)]
-    struct Spec {
-        containers: Vec<Container>,
-    }
-
-    #[derive(Deserialize)]
-    struct Container {
-        name: String,
-    }
-
-    serde_yaml::from_str::<Manifest>(manifest)
-        .map(|manifest| {
-            manifest
-                .spec
-                .containers
-                .into_iter()
-                .map(|container| container.name)
-                .filter(|name| !name.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn detail_identity_gvk<I>(detail: &DetailState<I>) -> GroupVersionKind
@@ -573,7 +553,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DetailShortcut, pod_container, shortcut_for_key, shortcut_tab};
+    use super::{DetailShortcut, shortcut_for_key, shortcut_tab};
     use crate::workspace::DetailTab;
 
     #[test]
@@ -601,29 +581,6 @@ mod tests {
         assert_eq!(
             shortcut_for_key(egui::Key::O, &pod_tabs, true),
             Some(DetailShortcut::OpenOwner)
-        );
-    }
-
-    #[test]
-    fn pod_container_reads_first_regular_container_from_yaml_manifest() {
-        let manifest = r#"
-spec:
-  initContainers:
-    - name: setup
-  containers:
-    - name: postgres
-    - name: metrics
-"#;
-
-        assert_eq!(pod_container(manifest).as_deref(), Some("postgres"));
-    }
-
-    #[test]
-    fn pod_container_rejects_missing_or_empty_container_names() {
-        assert_eq!(pod_container("spec:\n  containers: []\n"), None);
-        assert_eq!(
-            pod_container("spec:\n  containers:\n    - name: ''\n"),
-            None
         );
     }
 }

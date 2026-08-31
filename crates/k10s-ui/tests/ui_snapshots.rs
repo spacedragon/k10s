@@ -18,10 +18,11 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, CapacityUsage, ClusterTotals, DetailRow, DetailSection, EventRow,
-    GroupVersionKind, InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus,
-    NodeRow, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
-    ResourceTypeEntry, StreamTarget,
+    BackendRevision, CapacityUsage, ClusterTotals, ContainerStateProjection, DetailRow,
+    DetailSection, EventRow, GroupVersionKind, InfrastructureResponse, MetricsAvailability,
+    MetricsCondition, MetricsStatus, NodeRow, PodContainerProjection, PodProjection,
+    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    ResourceProjection, ResourceTypeEntry, StreamTarget,
 };
 use k10s_ui::{
     ui::{
@@ -219,6 +220,37 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
         manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
         projection: None,
     }
+}
+
+fn pod_runtime_detail(name: &str) -> ResourceDetailResponse {
+    let mut detail = pod_detail(name);
+    detail.projection = Some(ResourceProjection::Pod(PodProjection {
+        phase: None,
+        ready_containers: None,
+        total_containers: None,
+        restart_count: None,
+        containers: vec![PodContainerProjection {
+            name: "app".into(),
+            image: None,
+            state: Some(ContainerStateProjection::Running),
+            ready: None,
+            restart_count: None,
+            last_termination: None,
+        }],
+        conditions: Vec::new(),
+        node_name: None,
+        pod_ip: None,
+        host_ip: None,
+        qos_class: None,
+        priority: None,
+        service_account: None,
+        restart_policy: None,
+        ports: Vec::new(),
+        labels: Default::default(),
+        annotations: Default::default(),
+        created_at: None,
+    }));
+    detail
 }
 
 fn infrastructure_response(condition: MetricsCondition, detail: &str) -> InfrastructureResponse {
@@ -456,7 +488,7 @@ fn pod_detail_disconnected_logs() {
         .state_mut()
         .feed
         .details
-        .insert(identity, pod_detail("db-postgres-0"));
+        .insert(identity, pod_runtime_detail("db-postgres-0"));
     run_steps(&mut harness);
     harness
         .get_by_role_and_label(Role::Window, "Pods")

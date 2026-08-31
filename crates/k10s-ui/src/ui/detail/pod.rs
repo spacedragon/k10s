@@ -3,7 +3,8 @@
 use egui::{Grid, RichText, ScrollArea, Stroke, accesskit::Role};
 use k10s_protocol::{
     ContainerStateProjection, ContainerTerminationProjection, EventsCondition, MetricsAvailability,
-    OwnerReference, PodContainerPort, PodProjection, ResourceProjection, TransportProtocol,
+    OwnerReference, PodContainerPort, PodProjection, ResourceDetailResponse, ResourceIdentity,
+    ResourceProjection, TransportProtocol,
 };
 
 use crate::ui::resource_window::RowIdentity;
@@ -101,6 +102,62 @@ struct PodDetailProjection {
     created_at: String,
     uid: String,
     context: String,
+}
+
+/// Runtime source data for Pod Logs and Shell tabs. This projection is
+/// deliberately typed-only: manifests and display sections are never
+/// interpreted as runtime authority.
+pub(crate) struct PodRuntimeProjection {
+    containers: Vec<String>,
+    default_previous: bool,
+}
+
+impl PodRuntimeProjection {
+    pub(crate) fn from_view(
+        identity: &ResourceIdentity,
+        view: &ResourceDetailResponse,
+    ) -> Option<Self> {
+        if view.identity != *identity {
+            return None;
+        }
+        let Some(ResourceProjection::Pod(pod)) = view.projection.as_ref() else {
+            return None;
+        };
+        let default = pod
+            .containers
+            .iter()
+            .find(|container| !container.name.is_empty())?;
+        let default_previous =
+            failure_projection(default).is_some() && default.last_termination.is_some();
+        let containers = pod
+            .containers
+            .iter()
+            .filter(|container| !container.name.is_empty())
+            .map(|container| container.name.clone())
+            .collect();
+        Some(Self {
+            containers,
+            default_previous,
+        })
+    }
+
+    pub(crate) fn containers(&self) -> &[String] {
+        &self.containers
+    }
+
+    pub(crate) fn default_container(&self) -> &str {
+        &self.containers[0]
+    }
+
+    pub(crate) fn default_previous(&self) -> bool {
+        self.default_previous
+    }
+
+    pub(crate) fn contains(&self, container: &str) -> bool {
+        self.containers
+            .iter()
+            .any(|candidate| candidate == container)
+    }
 }
 
 impl PodDetailProjection {
@@ -207,6 +264,7 @@ struct FailureProjection {
     reason: String,
     last_exit: Option<ContainerTerminationProjection>,
     terminated: bool,
+    supports_previous_logs: bool,
 }
 
 #[derive(Clone)]
@@ -285,6 +343,7 @@ fn failure_projection(
             reason: reason.clone(),
             last_exit: container.last_termination.clone(),
             terminated: false,
+            supports_previous_logs: container.last_termination.is_some(),
         }),
         ContainerStateProjection::Terminated(termination) if termination.exit_code != 0 => {
             termination
@@ -296,6 +355,7 @@ fn failure_projection(
                     reason: present(reason),
                     last_exit: Some(termination.clone()),
                     terminated: true,
+                    supports_previous_logs: container.last_termination.is_some(),
                 })
         }
         ContainerStateProjection::Running
@@ -376,7 +436,7 @@ fn show_operational<I: RowIdentity>(
             "{} · {} · {}",
             failure.container, failure.reason, exit
         ));
-        if ui.button("Previous logs").clicked() {
+        if failure.supports_previous_logs && ui.button("Previous logs").clicked() {
             runtime_actions.push(super::DetailRuntimeAction::PreviousLogs {
                 window: window_id,
                 container: failure.container.clone(),

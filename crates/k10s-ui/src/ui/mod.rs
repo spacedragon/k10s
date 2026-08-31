@@ -16,7 +16,7 @@ pub mod tools;
 mod top_bar;
 mod window;
 
-pub(crate) use detail::pod_container;
+pub(crate) use detail::PodRuntimeProjection;
 
 pub use resource_window::{
     DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,

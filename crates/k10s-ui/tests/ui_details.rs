@@ -9,10 +9,11 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, DeploymentProjection, DetailRow, DetailSection, EventRow, GroupVersionKind,
-    OwnerReference, PodProjection, RelatedGroup, ResourceCapabilities, ResourceConditionProjection,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection,
-    ResourceRelationsResponse,
+    BackendRevision, ContainerStateProjection, ContainerTerminationProjection,
+    DeploymentProjection, DetailRow, DetailSection, EventRow, GroupVersionKind, OwnerReference,
+    PodContainerProjection, PodProjection, RelatedGroup, ResourceCapabilities,
+    ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    ResourceProjection, ResourceRelationsResponse,
 };
 use k10s_ui::{
     ui::{
@@ -741,7 +742,7 @@ fn global_detail_shortcuts_belong_only_to_the_top_workspace_detail() {
             .state_mut()
             .feed
             .details
-            .insert(identity("Pod", name), typed_pod_detail(name));
+            .insert(identity("Pod", name), typed_pod_runtime_detail(name));
     }
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
@@ -1289,13 +1290,17 @@ fn detail_overflow_opens_only_the_controller_owner() {
 fn crashloop_logs_default_to_previous_with_complete_toolbar() {
     let mut harness = harness();
     let pod = identity("Pod", "web-frontend-7d9f8-00001");
-    let mut detail = pod_detail("web-frontend-7d9f8-00001");
-    detail.sections[0]
-        .rows
-        .iter_mut()
-        .find(|row| row.label == "Status")
-        .unwrap()
-        .value = "CrashLoopBackOff".into();
+    let mut detail = typed_pod_runtime_detail("web-frontend-7d9f8-00001");
+    let Some(ResourceProjection::Pod(projection)) = detail.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    projection.containers[0].state = Some(ContainerStateProjection::Waiting {
+        reason: Some("CrashLoopBackOff".into()),
+    });
+    projection.containers[0].last_termination = Some(ContainerTerminationProjection {
+        exit_code: 1,
+        reason: Some("Error".into()),
+    });
     harness.state_mut().feed.details.insert(pod, detail);
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
@@ -1525,6 +1530,22 @@ fn typed_pod_detail(name: &str) -> ResourceDetailResponse {
         annotations: Default::default(),
         created_at: Some(rfc3339_ago(2 * 60 * 60)),
     }));
+    detail
+}
+
+fn typed_pod_runtime_detail(name: &str) -> ResourceDetailResponse {
+    let mut detail = typed_pod_detail(name);
+    let Some(ResourceProjection::Pod(projection)) = detail.projection.as_mut() else {
+        unreachable!("typed Pod fixture owns a Pod projection");
+    };
+    projection.containers = vec![PodContainerProjection {
+        name: "app".into(),
+        image: Some("example/app:latest".into()),
+        state: Some(ContainerStateProjection::Running),
+        ready: Some(true),
+        restart_count: Some(0),
+        last_termination: None,
+    }];
     detail
 }
 

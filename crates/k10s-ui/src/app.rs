@@ -3429,6 +3429,10 @@ impl K10sApp {
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
             })?;
         let identity = k10s_ui_row_identity(&detail.identity)?;
+        let runtime = self
+            .details
+            .get(identity)
+            .and_then(|view| crate::ui::PodRuntimeProjection::from_view(identity, view))?;
         Some(StreamTarget {
             context: identity.context.clone(),
             namespace: identity
@@ -3437,17 +3441,13 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: self
-                .details
-                .get(identity)
-                .and_then(|view| crate::ui::pod_container(&view.manifest))
-                .unwrap_or_else(|| "app".to_owned()),
+            container: runtime.default_container().to_owned(),
         })
     }
 
     /// Resolve the authoritative target for a live route. Logs retain their
     /// per-window container choice while the workspace remains on the same
-    /// pod; exec continues to use the manifest's default container.
+    /// pod; exec continues to use the typed projection's default container.
     fn current_stream_target(&self, window: WindowId, route: StreamRoute) -> Option<StreamTarget> {
         let workspace_target = self.workspace_stream_target(window)?;
         if route == StreamRoute::Logs
@@ -8742,8 +8742,9 @@ mod stream_lifecycle_tests {
 
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
-        ResourceIdentity, StreamTarget, StreamType,
+        BackendRevision, ContainerStateProjection, GroupVersionKind, PodContainerProjection,
+        PodProjection, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
+        ResourceProjection, StreamTarget, StreamType,
     };
 
     use super::tests::{ready_app, test_app};
@@ -8832,10 +8833,33 @@ mod stream_lifecycle_tests {
                 can_exec: true,
                 ..ResourceCapabilities::default()
             },
-            manifest: format!(
-                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
-            ),
-            projection: None,
+            manifest: "SENTINEL MANIFEST: runtime tests must not parse this".into(),
+            projection: Some(ResourceProjection::Pod(PodProjection {
+                phase: Some("Running".into()),
+                ready_containers: Some(1),
+                total_containers: Some(1),
+                restart_count: Some(0),
+                containers: vec![PodContainerProjection {
+                    name: container.into(),
+                    image: None,
+                    state: Some(ContainerStateProjection::Running),
+                    ready: Some(true),
+                    restart_count: Some(0),
+                    last_termination: None,
+                }],
+                conditions: Vec::new(),
+                node_name: None,
+                pod_ip: None,
+                host_ip: None,
+                qos_class: None,
+                priority: None,
+                service_account: None,
+                restart_policy: None,
+                ports: Vec::new(),
+                labels: Default::default(),
+                annotations: Default::default(),
+                created_at: None,
+            })),
         }
     }
 
@@ -8855,6 +8879,9 @@ mod stream_lifecycle_tests {
         app: &mut K10sApp,
         pod: &ResourceIdentity,
     ) -> crate::workspace::WindowId {
+        app.details
+            .entry(pod.clone())
+            .or_insert_with(|| detail_with_container(pod, "app"));
         let events = app
             .shell
             .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
@@ -8894,7 +8921,7 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
+    fn exec_ready_for_typed_container_attaches_instead_of_becoming_stale() {
         let (mut app, _state) = test_app(Vec::new());
         let pod = pod("database");
         let window = open_pod_detail(&mut app, &pod);
@@ -8931,7 +8958,7 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn logs_for_manifest_container_attach_and_project_output() {
+    fn logs_for_typed_container_attach_and_project_output() {
         let (mut app, _state) = test_app(Vec::new());
         let pod = pod("web");
         let window = open_pod_detail(&mut app, &pod);
@@ -8986,7 +9013,18 @@ mod stream_lifecycle_tests {
         let pod = pod("multi-container");
         let window = open_pod_detail(&mut app, &pod);
         let mut detail = detail_with_container(&pod, "app");
-        detail.manifest = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: app\n    - name: metrics\n".to_owned();
+        let Some(ResourceProjection::Pod(projection)) = detail.projection.as_mut() else {
+            panic!("fixture has a typed Pod projection");
+        };
+        projection.total_containers = Some(2);
+        projection.containers.push(PodContainerProjection {
+            name: "metrics".into(),
+            image: None,
+            state: Some(ContainerStateProjection::Running),
+            ready: Some(true),
+            restart_count: Some(0),
+            last_termination: None,
+        });
         app.details.insert(pod.clone(), detail);
 
         let default_target = target_for_container(&pod.name, "app");
@@ -8996,7 +9034,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, default_target.clone())
             .select_container("metrics");
-        // The next render still supplies the manifest default. It must not
+        // The next render still supplies the typed default. It must not
         // replace the user's selected container.
         app.shell
             .stream_stores_mut()
@@ -9166,6 +9204,8 @@ mod stream_lifecycle_tests {
         let pod_a = pod("pod-a");
         let pod_b = pod("pod-b");
         let window = open_pod_detail(&mut app, &pod_a);
+        app.details
+            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
         assert_eq!(
             app.workspace_stream_target(window).as_ref(),
             Some(&target_for("pod-a"))
@@ -9275,6 +9315,8 @@ mod stream_lifecycle_tests {
         let pod_a = pod("pod-a");
         let pod_b = pod("pod-b");
         let window = open_pod_detail(&mut app, &pod_a);
+        app.details
+            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
 
         // A connecting session for pod A...
         let tx = attach_session(&mut app, window, &pod_a);

@@ -1,7 +1,10 @@
 //! Typed Pod Detail projection, responsive layout, and interaction coverage.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, Node, kittest::Queryable as _};
+use egui_kittest::{
+    Harness, Node,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, ContainerMetrics, ContainerStateProjection, ContainerTerminationProjection,
     EventRow, GroupVersionKind, MetricsAvailability, OwnerReference, PodContainerPort,
@@ -808,6 +811,140 @@ fn pod_interaction_non_overview_tools_stay_on_existing_router_flows() {
     pod_window(&harness).get_by_role_and_label(Role::Button, "Connect shell");
 }
 
+#[test]
+fn pod_runtime_tabs_use_only_typed_container_and_failure_data() {
+    let mut response = healthy_detail();
+    response.manifest = "spec:\n  containers:\n    - name: legacy-manifest\n".into();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.containers[0].state = Some(ContainerStateProjection::Waiting {
+        reason: Some("CrashLoopBackOff".into()),
+    });
+
+    let mut harness = harness(1_100.0, response);
+    let window_id = detail_window_id(&harness);
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Tab Logs")
+        .click();
+    harness.run_steps(3);
+
+    let logs = harness
+        .state()
+        .shell
+        .stream_stores()
+        .logs
+        .get(window_id)
+        .expect("typed Pod runtime creates the log target");
+    assert_eq!(logs.target().container, "web");
+    assert!(
+        logs.previous(),
+        "the typed failing container has a real previous instance"
+    );
+    let detail = pod_window(&harness);
+    let container_picker = detail
+        .query_all_by_role(Role::ComboBox)
+        .find(|node| node.accesskit_node().value().as_deref() == Some("Container: web"))
+        .expect("typed default container is exposed by the picker");
+    container_picker.click();
+    harness.run_steps(1);
+    harness.get_by_label("sidecar");
+    assert!(harness.query_by_label("legacy-manifest").is_none());
+
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Tab Shell")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .shells
+            .get(window_id)
+            .expect("typed Pod runtime creates the shell target")
+            .target()
+            .container,
+        "web"
+    );
+}
+
+#[test]
+fn pod_runtime_tabs_fail_closed_without_typed_projection() {
+    let mut response = healthy_detail();
+    response.projection = None;
+    response.manifest = "spec:\n  containers:\n    - name: legacy-manifest\n".into();
+    response.sections[0].rows[0].value = "CrashLoopBackOff".into();
+
+    let mut harness = harness(1_100.0, response);
+    let window_id = detail_window_id(&harness);
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Tab Logs")
+        .click();
+    harness.run_steps(3);
+    let detail = pod_window(&harness);
+    detail.get_by_label("Pod runtime details unavailable");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Connect logs")
+            .is_none()
+    );
+    assert!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .logs
+            .get(window_id)
+            .is_none(),
+        "legacy manifest data must not create a log target"
+    );
+
+    detail
+        .get_by_role_and_label(Role::Button, "Tab Shell")
+        .click();
+    harness.run_steps(3);
+    let detail = pod_window(&harness);
+    detail.get_by_label("Pod runtime details unavailable");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Connect shell")
+            .is_none()
+    );
+    assert!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .shells
+            .get(window_id)
+            .is_none(),
+        "legacy manifest data must not create a shell target"
+    );
+}
+
+#[test]
+fn waiting_failure_without_a_previous_instance_hides_previous_logs() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.containers[0].state = Some(ContainerStateProjection::Waiting {
+        reason: Some("CrashLoopBackOff".into()),
+    });
+    pod.containers[0].last_termination = None;
+
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    detail.get_by_label("WHY IT'S FAILING");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Previous logs")
+            .is_none(),
+        "waiting alone does not prove a previous container instance exists"
+    );
+}
+
 fn harness(width: f32, detail: ResourceDetailResponse) -> Harness<'static, Fixture> {
     let identity = detail.identity.clone();
     let mut fixture = Fixture::default();
@@ -855,6 +992,18 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 
 fn pod_window<'a>(harness: &'a Harness<'static, Fixture>) -> Node<'a> {
     harness.get_by_role_and_label(Role::Window, "Pod · default / web-0")
+}
+
+fn detail_window_id(harness: &Harness<'static, Fixture>) -> k10s_ui::workspace::WindowId {
+    harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Detail)
+        .expect("dedicated Pod detail remains open")
+        .id
 }
 
 impl Default for Fixture {
