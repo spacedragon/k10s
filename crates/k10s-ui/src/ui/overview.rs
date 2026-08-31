@@ -9,6 +9,12 @@ use super::{
     theme,
 };
 
+#[derive(Clone)]
+struct FixedContentMeasurement {
+    signature: String,
+    height: f32,
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     response: Option<&InfrastructureResponse>,
@@ -42,23 +48,15 @@ pub(super) fn show(
         ui.separator();
     }
 
-    let content_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
+    let content_height = ui
+        .available_height()
+        .min(ui.clip_rect().bottom() - ui.cursor().top())
+        .max(0.0);
     let content_width = ui.available_width();
     let footer_height = metrics_footer_height(ui, response);
     let panel_chrome_height = attention_panel_chrome_height(ui);
-    let measurement_id = ui.make_persistent_id("k10s.overview.fixed-content-height");
-    let measured_fixed_height = ui
-        .ctx()
-        .data(|data| data.get_temp::<f32>(measurement_id))
-        .unwrap_or({
-            // The 480x320 minimum has less than 300 points of content height.
-            // Larger windows may render once normally to seed the exact measurement.
-            if content_height >= 300.0 {
-                0.0
-            } else {
-                f32::INFINITY
-            }
-        });
+    let measured_fixed_height =
+        current_fixed_content_height(ui, response, connection, content_width);
     // Account for the explicit gap plus egui's gap between the panel and footer.
     let available_panel_height = content_height - measured_fixed_height - 16.0 - footer_height;
 
@@ -66,13 +64,6 @@ pub(super) fn show(
         let fixed_top = ui.cursor().top();
         let refresh_requested = fixed_content(ui, response, connection);
         let fixed_height = ui.cursor().top() - fixed_top;
-        let fixed_height = if measured_fixed_height.is_finite() {
-            fixed_height.max(measured_fixed_height)
-        } else {
-            fixed_height
-        };
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(measurement_id, fixed_height));
         let available_panel_height = content_height - fixed_height - 16.0 - footer_height;
         let inner_height = if available_panel_height >= panel_chrome_height + 96.0 {
             available_panel_height - panel_chrome_height
@@ -91,22 +82,67 @@ pub(super) fn show(
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(content_width - ui.style().spacing.scroll.allocated_width());
-                let fixed_top = ui.cursor().top();
                 refresh_requested = fixed_content(ui, response, connection);
-                let fixed_height = ui.cursor().top() - fixed_top;
-                let fixed_height = if measured_fixed_height.is_finite() {
-                    fixed_height.max(measured_fixed_height)
-                } else {
-                    fixed_height
-                };
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(measurement_id, fixed_height));
                 attention_panel(ui, response, 48.0);
                 ui.add_space(8.0);
                 metrics_footer(ui, response);
             });
         refresh_requested
     }
+}
+
+fn current_fixed_content_height(
+    ui: &egui::Ui,
+    response: &InfrastructureResponse,
+    connection: ConnectionState,
+    width: f32,
+) -> f32 {
+    let signature = format!(
+        "{width:?}|{connection:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        ui.style(),
+        response.generated_at,
+        response.totals,
+        response.cluster_cpu,
+        response.cluster_memory,
+        response.pod_capacity,
+        response.workload_health,
+    );
+    let measurement_id = ui.make_persistent_id("k10s.overview.current-fixed-height");
+    if let Some(measurement) = ui
+        .ctx()
+        .data(|data| data.get_temp::<FixedContentMeasurement>(measurement_id))
+        && measurement.signature == signature
+    {
+        return measurement.height;
+    }
+
+    let context = egui::Context::default();
+    context.set_style_of(egui::Theme::Dark, ui.style().as_ref().clone());
+    context.set_style_of(egui::Theme::Light, ui.style().as_ref().clone());
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 10_000.0),
+        )),
+        ..Default::default()
+    };
+    let mut height = 0.0;
+    for _ in 0..2 {
+        let mut output = context.run_ui(input.clone(), |measure_ui| {
+            measure_ui.set_width(width);
+            let top = measure_ui.cursor().top();
+            fixed_content(measure_ui, response, connection);
+            height = measure_ui.cursor().top() - top;
+        });
+        output.textures_delta.clear();
+    }
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            measurement_id,
+            FixedContentMeasurement { signature, height },
+        );
+    });
+    height
 }
 
 fn fixed_content(

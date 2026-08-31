@@ -537,6 +537,87 @@ fn compact_overview_keeps_large_attention_content_reachable() {
 }
 
 #[test]
+fn overview_resize_reselects_layout_from_current_geometry() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_280.0, 720.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+    harness.state_mut().response = large_attention_response();
+
+    let mut compact = harness.state().shell.workspace().snapshot();
+    let overview = compact
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [0.0, 0.0];
+    overview.geometry.size = [480.0, 350.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(compact));
+    harness.run_steps(1);
+    let first_render = harness
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(
+        first_render.height() <= 355.0 && first_render.bottom() <= 720.0,
+        "first render near the compact threshold grew beyond its geometry: {first_render:?}"
+    );
+    harness.run_steps(3);
+
+    let mut wide = harness.state().shell.workspace().snapshot();
+    let overview = wide
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [24.0, 20.0];
+    overview.geometry.size = [920.0, 620.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(wide));
+    harness.run_steps(4);
+
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    let window_before = overview.rect();
+    let summary_before = overview.get_by_label("2 nodes").rect();
+    let footer = overview.get_by_label("Metrics: Available").rect();
+    assert!(
+        window_before.contains_rect(footer),
+        "the current wide geometry should select a fixed-top layout with visible footer: window={window_before:?}, footer={footer:?}"
+    );
+    assert!(window_before.contains_rect(summary_before));
+
+    let mut late_visible = false;
+    for _ in 0..32 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            let first = overview.get_by_label("attention-row-000");
+            first.hover();
+            first.scroll_down();
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        if overview
+            .rect()
+            .intersects(overview.get_by_label("attention-row-079").rect())
+        {
+            late_visible = true;
+            break;
+        }
+    }
+    assert!(
+        late_visible,
+        "wide geometry should expose the inner attention scroll"
+    );
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    assert_eq!(window_before, overview.rect());
+    assert_eq!(summary_before, overview.get_by_label("2 nodes").rect());
+}
+
+#[test]
 fn nodes_table_is_searchable_sortable_and_progress_always_has_numeric_text() {
     let mut harness = harness();
     harness
