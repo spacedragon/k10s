@@ -19,11 +19,11 @@ use tokio::sync::broadcast;
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerMetricsSample,
-    ContainerStateProjection, ContextInfo, Gvk, KubernetesAccess, MetricsSample, OperationId,
-    OwnerRef, PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
-    RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord, ResourceRef,
-    ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe, SubscriptionHandle,
-    TargetPort, TransportProtocol,
+    ContainerStateProjection, ContainerTerminationProjection, ContextInfo, Gvk, KubernetesAccess,
+    MetricsSample, OperationId, OwnerRef, PodContainerProjection, PodProjection, Query,
+    QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,
+    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
+    ServiceProjection, StreamInput, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -2004,11 +2004,24 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
     ) -> RecordSeed<'a> {
         let projection = (gvk.kind == "Pod").then(|| {
             let running = summary == "Running";
+            let crashloop = summary.contains("CrashLoopBackOff");
+            let restart_count = if crashloop { 7 } else { 0 };
+            let last_termination = crashloop.then(|| ContainerTerminationProjection {
+                exit_code: 1,
+                reason: Some("Error".into()),
+            });
             ResourceProjection::Pod(PodProjection {
-                phase: Some(if running { "Running" } else { "Pending" }.into()),
+                phase: Some(
+                    if running || crashloop {
+                        "Running"
+                    } else {
+                        "Pending"
+                    }
+                    .into(),
+                ),
                 ready_containers: Some(u32::from(running)),
                 total_containers: Some(1),
-                restart_count: Some(0),
+                restart_count: Some(restart_count),
                 containers: vec![PodContainerProjection {
                     name: "app".into(),
                     image: Some("example/fake-app:v1".into()),
@@ -2020,8 +2033,8 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                         ContainerStateProjection::Running
                     }),
                     ready: Some(running),
-                    restart_count: Some(0),
-                    last_termination: None,
+                    restart_count: Some(restart_count),
+                    last_termination,
                 }],
                 conditions: Vec::new(),
                 node_name: Some("fake-node".into()),
@@ -2469,6 +2482,25 @@ mod tests {
             .expect("the fake fixture exposes previous-log behavior");
         assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
         assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+        let Some(ResourceProjection::Pod(crashloop_projection)) = crashloop.projection.as_ref()
+        else {
+            panic!("CrashLoop fixture carries typed runtime state");
+        };
+        assert_eq!(crashloop_projection.phase.as_deref(), Some("Running"));
+        assert_eq!(crashloop_projection.restart_count, Some(7));
+        assert!(matches!(
+            crashloop_projection.containers[0].state,
+            Some(ContainerStateProjection::Waiting {
+                reason: Some(ref reason)
+            }) if reason == "CrashLoopBackOff"
+        ));
+        assert_eq!(
+            crashloop_projection.containers[0]
+                .last_termination
+                .as_ref()
+                .map(|termination| termination.exit_code),
+            Some(1)
+        );
         let pods = state
             .records
             .iter()
