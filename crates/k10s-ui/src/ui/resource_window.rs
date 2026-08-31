@@ -557,11 +557,6 @@ pub(super) fn show<I>(
             queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
         }
 
-        let toggle_label = if state.detail_visible {
-            "Hide details"
-        } else {
-            "Show details"
-        };
         let filters_active = !state.search.is_empty()
             || (namespaced
                 && state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces);
@@ -578,10 +573,6 @@ pub(super) fn show<I>(
                     crate::workspace::NamespaceScope::AllNamespaces,
                 ));
             }
-        }
-
-        if ui.button(toggle_label).clicked() {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     });
     if namespaced {
@@ -657,7 +648,10 @@ pub(super) fn show<I>(
     // was deleted (or is gone behind the watch); it must never be shown as
     // merely "loading".
     let gone = state.detail.is_some() && detail_row.is_none();
-    let detail_shown = state.detail_visible && state.detail.is_some();
+    // Workload details are a contextual bottom panel: selecting a resource
+    // opens it and clearing the selection removes it. `detail_visible` is
+    // retained only for backwards-compatible workspace snapshots.
+    let detail_shown = state.detail.is_some();
 
     let available_height = ui.available_height();
     let (list_actions, _) = super::split::show_vertical(
@@ -767,8 +761,6 @@ pub(super) fn show<I>(
     {
         if ui.input(|input| input.modifiers.any()) && !gone {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
-        } else if !state.detail_visible {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 
