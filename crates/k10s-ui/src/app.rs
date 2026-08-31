@@ -122,6 +122,8 @@ pub struct K10sApp {
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
     log_sources: BTreeMap<WindowId, LogSource>,
     log_session_sources: BTreeMap<WindowId, LogSource>,
+    log_generations: BTreeMap<WindowId, u64>,
+    log_session_generations: BTreeMap<WindowId, u64>,
     /// Canonical resource watches retained by visible workspace demand;
     /// rebuilt automatically on reconnect by shared client recovery.
     resource_subscriptions: BTreeMap<SubscriptionKey, RetainedSubscription>,
@@ -187,6 +189,7 @@ struct PendingStreamTicket {
     route: StreamRoute,
     window: WindowId,
     log_source: Option<LogSource>,
+    log_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +327,8 @@ impl K10sApp {
             pending_stream_tickets: BTreeMap::new(),
             log_sources: BTreeMap::new(),
             log_session_sources: BTreeMap::new(),
+            log_generations: BTreeMap::new(),
+            log_session_generations: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
             window_freshness_overrides: BTreeMap::new(),
@@ -1376,9 +1381,13 @@ impl K10sApp {
                                 .and_then(|id| self.pending_stream_tickets.remove(id))
                             {
                                 let reason = server_error.safe_message.clone();
-                                if entry.log_source.as_ref().is_some_and(|source| {
-                                    self.log_sources.get(&entry.window) != Some(source)
-                                }) {
+                                let stale_log_attempt =
+                                    entry.log_source.as_ref().is_some_and(|source| {
+                                        self.log_sources.get(&entry.window) != Some(source)
+                                            || entry.log_generation
+                                                != self.log_generations.get(&entry.window).copied()
+                                    });
+                                if stale_log_attempt {
                                     return Ok(());
                                 }
                                 match entry.route {
@@ -2982,6 +2991,8 @@ impl K10sApp {
         self.pending_stream_tickets.clear();
         self.log_sources.clear();
         self.log_session_sources.clear();
+        self.log_generations.clear();
+        self.log_session_generations.clear();
         self.shell.stream_stores_mut().connection_lost();
     }
 
@@ -3074,6 +3085,16 @@ impl K10sApp {
                 since_seconds,
                 previous,
             };
+            let generation = self
+                .log_generations
+                .entry(window)
+                .and_modify(|generation| {
+                    *generation = generation
+                        .checked_add(1)
+                        .expect("log attempt generation exhausted")
+                })
+                .or_insert(1)
+                .to_owned();
             for entry in self.pending_stream_tickets.values() {
                 if entry.window == window && entry.route == StreamRoute::Logs {
                     let _ = self.client.cancel(&entry.request)?;
@@ -3083,6 +3104,7 @@ impl K10sApp {
                 session.disconnect();
             }
             self.log_session_sources.remove(&window);
+            self.log_session_generations.remove(&window);
             self.log_sources.insert(window, source.clone());
             let request = self.client.begin(Query::StreamTicket {
                 target,
@@ -3103,6 +3125,7 @@ impl K10sApp {
                     route: StreamRoute::Logs,
                     window,
                     log_source: Some(source),
+                    log_generation: Some(generation),
                 },
             );
         }
@@ -3125,6 +3148,7 @@ impl K10sApp {
                     route: StreamRoute::Exec,
                     window,
                     log_source: None,
+                    log_generation: None,
                 },
             );
         }
@@ -3162,10 +3186,12 @@ impl K10sApp {
                 route,
                 window,
                 log_source,
+                log_generation,
             } = entry;
-            let source_current = log_source
-                .as_ref()
-                .is_none_or(|source| self.log_sources.get(&window) == Some(source));
+            let source_current = log_source.as_ref().is_none_or(|source| {
+                self.log_sources.get(&window) == Some(source)
+                    && log_generation == self.log_generations.get(&window).copied()
+            });
             if !source_current {
                 let _ = self.client.take(request);
                 continue;
@@ -3183,6 +3209,10 @@ impl K10sApp {
                     Ok(()) => {
                         if let Some(source) = log_source {
                             self.log_session_sources.insert(window, source);
+                            self.log_session_generations.insert(
+                                window,
+                                log_generation.expect("log tickets carry an attempt generation"),
+                            );
                         }
                     }
                     Err(error) => {
@@ -3215,7 +3245,9 @@ impl K10sApp {
             let target_current =
                 self.current_stream_target(window, route).as_ref() == Some(&bound_target);
             let source_current = route != StreamRoute::Logs
-                || self.log_session_sources.get(&window) == self.log_sources.get(&window);
+                || (self.log_session_sources.get(&window) == self.log_sources.get(&window)
+                    && self.log_session_generations.get(&window)
+                        == self.log_generations.get(&window));
             let target_current = target_current && source_current;
             // Guard transitions are collected while the tool stores are
             // borrowed and applied afterwards.
@@ -7158,6 +7190,48 @@ mod stream_lifecycle_tests {
             Some(900)
         );
         assert!(app.log_session_sources.get(&window).unwrap().previous);
+    }
+
+    #[test]
+    fn newer_identical_log_attempt_supersedes_reversed_old_completion() {
+        let (mut app, _state) = super::tests::ready_app();
+        let pod = pod("same-source");
+        let window = open_pod_detail(&mut app, &pod);
+        let target = target_for(&pod.name);
+
+        queue_logs(&mut app, window, target.clone(), Some(300), false);
+        let old_id = app.pending_stream_tickets.keys().next().unwrap().clone();
+        let old_generation = app.pending_stream_tickets[&old_id].log_generation.unwrap();
+        queue_logs(&mut app, window, target.clone(), Some(300), false);
+        let new_id = app
+            .pending_stream_tickets
+            .keys()
+            .find(|id| **id != old_id)
+            .unwrap()
+            .clone();
+        let new_generation = app.pending_stream_tickets[&new_id].log_generation.unwrap();
+        assert!(new_generation > old_generation);
+        assert_eq!(app.log_generations[&window], new_generation);
+
+        let grant = |id, ticket: &str| {
+            k10s_protocol::ServerFrame::response(
+                id,
+                k10s_protocol::StreamTicketResponse {
+                    ticket_id: ticket.into(),
+                    target: target.clone(),
+                    stream_type: StreamType::Logs,
+                    tty: false,
+                },
+            )
+        };
+        app.handle_event(super::tests::server_message(&grant(new_id, "new")), 1, 0)
+            .unwrap();
+        app.finish_stream_tickets();
+        assert_eq!(app.log_session_generations[&window], new_generation);
+
+        let _ = app.handle_event(super::tests::server_message(&grant(old_id, "old")), 2, 0);
+        app.finish_stream_tickets();
+        assert_eq!(app.log_session_generations[&window], new_generation);
     }
 
     #[test]
