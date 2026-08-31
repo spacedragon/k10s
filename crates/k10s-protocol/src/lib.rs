@@ -40,9 +40,9 @@ pub use envelope::{
 pub use error::{ErrorCode, ErrorFrame, ErrorScope, Retryability};
 pub use ids::{CorrelationId, OperationId, RequestId, SessionId, SubscriptionId};
 pub use metrics::{
-    CapacityUsage, ClusterTotals, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest,
-    InfrastructureResponse, InfrastructureWatchSpec, LauncherCounts, MetricsAvailability,
-    MetricsCondition, MetricsStatus, PodMetrics, ResourceMetricsResponse,
+    CapacityUsage, ClusterTotals, ContainerMetrics, INFRASTRUCTURE_EVENT_UPDATED,
+    InfrastructureRequest, InfrastructureResponse, InfrastructureWatchSpec, LauncherCounts,
+    MetricsAvailability, MetricsCondition, MetricsStatus, PodMetrics, ResourceMetricsResponse,
 };
 pub use operation::{
     CreateJobRequest, CronJobSuspendRequest, DeletePreflightRequest, DeletePreflightResponse,
@@ -62,13 +62,15 @@ pub use port_forward::{
     REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
 };
 pub use resource::{
-    AttentionRow, BackendRevision, DetailRow, DetailSection, EventRow, EventsCondition,
-    GroupVersionKind, HealthLevel, NodeRow, OwnerReference, PersistentVolumeClaimRow,
-    PersistentVolumeRow, REQUEST_RESOURCE_RELATIONS, RelatedGroup, ResourceCapabilities,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResourceProjection, ResourceRefRequest, ResourceRelationsResponse,
-    ResourceScope, ServicePort, ServiceProjection, StorageClassRow, StorageInventory, TargetPort,
-    TransportProtocol, WorkloadHealth, WorkloadKind,
+    AttentionRow, BackendRevision, ContainerImageProjection, ContainerStateProjection,
+    ContainerTerminationProjection, DeploymentProjection, DetailRow, DetailSection, EventRow,
+    EventsCondition, GroupVersionKind, HealthLevel, NodeRow, OwnerReference,
+    PersistentVolumeClaimRow, PersistentVolumeRow, PodContainerProjection, PodProjection,
+    REQUEST_RESOURCE_RELATIONS, RelatedGroup, ReplicaSetProjection, ResourceCapabilities,
+    ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity, ResourceListRequest,
+    ResourceListResponse, ResourceListRow, ResourceProjection, ResourceRefRequest,
+    ResourceRelationsResponse, ResourceScope, ServicePort, ServiceProjection, StorageClassRow,
+    StorageInventory, TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use stream::{

@@ -7,19 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use k10s_protocol::metrics::ContainerMetrics;
-use k10s_protocol::resource::{
-    ContainerImageProjection, ContainerStateProjection, ContainerTerminationProjection,
-    DeploymentProjection, PodContainerProjection, PodProjection, ReplicaSetProjection,
-    ResourceConditionProjection,
-};
 use k10s_protocol::{
-    BackendRevision, EventsCondition, GroupVersionKind, InfrastructureWatchSpec,
-    MetricsAvailability, PodMetrics, REQUEST_RESOURCE_RELATIONS, RequestId, ResourceCapabilities,
-    ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListResponse, ResourceListRow,
-    ResourceMetricsResponse, ResourceProjection, ResourceRelationsResponse, ResourceScope,
-    ResourceSnapshotPage, ServerFrame, ServerKind, SubscriptionSelector, WorkloadKind,
-    decode_server_frame,
+    BackendRevision, ContainerImageProjection, ContainerMetrics, ContainerStateProjection,
+    ContainerTerminationProjection, DeploymentProjection, EventsCondition, GroupVersionKind,
+    InfrastructureWatchSpec, MetricsAvailability, PodContainerProjection, PodMetrics,
+    PodProjection, REQUEST_RESOURCE_RELATIONS, ReplicaSetProjection, RequestId,
+    ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceGone,
+    ResourceIdentity, ResourceListResponse, ResourceListRow, ResourceMetricsResponse,
+    ResourceProjection, ResourceRelationsResponse, ResourceScope, ResourceSnapshotPage,
+    ServerFrame, ServerKind, SubscriptionSelector, WorkloadKind, decode_server_frame,
 };
 use serde_json::{Value, json};
 
