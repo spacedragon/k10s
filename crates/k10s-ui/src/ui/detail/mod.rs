@@ -99,8 +99,6 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     detail: &DetailState<I>,
-    primary_state: Option<&crate::ui::PrimaryDetailState>,
-    view: Option<&ResourceDetailResponse>,
     gone: bool,
     integrated: bool,
     detail_maximized: bool,
@@ -118,6 +116,11 @@ pub(super) fn show<I>(
     let Some(identity) = detail.identity.as_row_identity() else {
         return;
     };
+    // Resolve the detail projection here, at the shared rendering boundary.
+    // Integrated panes and dedicated windows must not maintain parallel
+    // lookup/fallback logic for the same pinned identity.
+    let primary_state = feed.primary_details.get(identity);
+    let view = feed.details.get(identity);
     ui.horizontal(|ui| {
         show_header(ui, identity, if gone { None } else { view });
         if integrated && !gone {

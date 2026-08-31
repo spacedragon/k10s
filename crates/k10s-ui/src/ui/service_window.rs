@@ -327,13 +327,6 @@ where
     // merely "loading".
     let gone = state.detail.is_some() && detail_row.is_none();
     let detail_shown = state.detail_visible && state.detail.is_some();
-    let detail_identity = state
-        .detail
-        .as_ref()
-        .and_then(|detail| detail.identity.as_row_identity());
-    let primary_state = detail_identity.and_then(|identity| feed.primary_details.get(identity));
-    let detail_view = detail_identity.and_then(|identity| feed.details.get(identity));
-
     let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
@@ -363,8 +356,6 @@ where
                     ui,
                     window_id,
                     detail,
-                    primary_state,
-                    detail_view,
                     gone,
                     true,
                     state.prior_split_ratio.is_some(),
