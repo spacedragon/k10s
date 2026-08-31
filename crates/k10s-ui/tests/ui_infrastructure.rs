@@ -58,6 +58,20 @@ fn harness() -> Harness<'static, Fixture> {
         .build_ui_state(render, Fixture::default())
 }
 
+fn large_attention_response() -> InfrastructureResponse {
+    let mut response = full_response();
+    response.attention = (0..80)
+        .map(|index| AttentionRow {
+            namespace: Some("default".into()),
+            kind: "Deployment".into(),
+            name: format!("attention-row-{index:03}"),
+            status: "Degraded".into(),
+            reason: format!("attention reason {index:03}"),
+        })
+        .collect();
+    response
+}
+
 #[test]
 fn launcher_inventory_badges_share_loading_zero_warning_and_unavailable_contract() {
     let mut harness = harness();
@@ -248,6 +262,87 @@ fn overview_renders_totals_capacity_health_attention_and_refresh_timestamp() {
     ] {
         overview.get_by_role_and_label(Role::ProgressIndicator, progress_text);
     }
+}
+
+#[test]
+fn overview_attention_rows_scroll_inside_the_window() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, Fixture::default());
+
+    let mut snapshot = harness.state().shell.workspace().snapshot();
+    let overview = snapshot
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [32.0, 24.0];
+    overview.geometry.size = [920.0, 620.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+    harness.state_mut().response = large_attention_response();
+    harness.run_steps(4);
+
+    let (overview_before, summary_before, health_before) = {
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let overview_before = overview.rect();
+        assert!(overview_before.left() >= 0.0 && overview_before.top() >= 0.0);
+        assert!(overview_before.right() <= 1_280.0 && overview_before.bottom() <= 800.0);
+        assert!(
+            overview_before.width() <= 923.0 && overview_before.height() <= 621.0,
+            "restored 920x620 Overview grew to {overview_before:?}"
+        );
+
+        let late = overview.get_by_label("attention-row-079");
+        assert!(
+            !overview_before.intersects(late.rect()),
+            "the late attention row should initially be clipped"
+        );
+        (
+            overview_before,
+            overview.get_by_label("2 nodes").rect(),
+            overview.get_by_label("Workload health").rect(),
+        )
+    };
+
+    let mut late_visible = false;
+    for _ in 0..24 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            overview.get_by_label("attention-row-000").scroll_down();
+        }
+        harness.run_steps(2);
+        let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+        let late = overview.get_by_label("attention-row-079");
+        if overview.rect().intersects(late.rect()) {
+            late_visible = true;
+            break;
+        }
+    }
+    assert!(
+        late_visible,
+        "vertical scrolling should reveal the late attention row"
+    );
+
+    let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+    let overview_after = overview.rect();
+    let summary_after = overview.get_by_label("2 nodes").rect();
+    let health_after = overview.get_by_label("Workload health").rect();
+    for (before, after, label) in [
+        (overview_before, overview_after, "Overview"),
+        (summary_before, summary_after, "summary"),
+        (health_before, health_after, "Workload health"),
+    ] {
+        assert!(
+            (before.min - after.min).length() <= 1.0 && (before.max - after.max).length() <= 1.0,
+            "{label} rectangle moved while the attention list scrolled"
+        );
+    }
+    overview.get_by_role_and_label(Role::Button, "Refresh overview");
+    overview.get_by_label("Metrics: Available");
 }
 
 #[test]

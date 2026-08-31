@@ -42,6 +42,8 @@ pub(super) fn show(
         ui.separator();
     }
 
+    let content_top = ui.cursor().top();
+    let content_height = ui.available_height();
     let mut refresh_requested = false;
     ui.horizontal(|ui| {
         let (visible, accessible) = if connection == ConnectionState::Connected {
@@ -71,7 +73,11 @@ pub(super) fn show(
         health_panel(ui, response);
     }
     ui.add_space(8.0);
-    attention_panel(ui, response);
+    // Keep the wrapping two-row footer in the finite window content region.
+    let footer_height = 2.0 * ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let fixed_height = ui.cursor().top() - content_top;
+    let panel_height = (content_height - fixed_height - 8.0 - footer_height).max(96.0 + 48.0);
+    attention_panel(ui, response, panel_height);
     ui.add_space(8.0);
     metrics_footer(ui, response);
     refresh_requested
@@ -153,16 +159,24 @@ fn health_panel(ui: &mut egui::Ui, response: &InfrastructureResponse) {
     });
 }
 
-fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse) {
+fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse, panel_height: f32) {
     panel().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
+        // The frame consumes 18 points and the heading/spacing another 22.
+        // Reserve the horizontal scrollbar inside the framed allocation too.
+        let scrollbar_height = ui.style().spacing.scroll.bar_width
+            + ui.style().spacing.scroll.bar_inner_margin
+            + ui.style().spacing.scroll.bar_outer_margin;
+        let inner_scroll_height = (panel_height - 18.0 - 22.0 - scrollbar_height).max(96.0);
+        ui.set_height(panel_height - 18.0);
         ui.strong("Needs attention");
         ui.add_space(4.0);
         if response.attention.is_empty() {
             ui.label("No unhealthy or pending resources");
         } else {
-            egui::ScrollArea::horizontal()
+            egui::ScrollArea::both()
                 .id_salt("k10s.overview.attention.scroll")
+                .max_height(inner_scroll_height)
                 .show(ui, |ui| {
                     egui::Grid::new("k10s.overview.attention")
                         .striped(true)
