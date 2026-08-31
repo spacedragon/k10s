@@ -21,8 +21,9 @@ use crate::port::AdapterError;
 pub use self::cache::{INITIAL_WATCH_REVISION, RevisionCounter, SummaryCache};
 pub(crate) use self::cache::{now_rfc3339, record_from_row};
 pub use self::cluster::{
-    ClusterMetrics, ClusterWatches, METRICS_LINGER, METRICS_POLL_INTERVAL, MetricsApiState,
-    MetricsCoverage, MetricsPollSource, MetricsSnapshot, ResourceUsageSample, WATCH_LINGER,
+    ClusterMetrics, ClusterWatches, ContainerUsageSample, METRICS_LINGER, METRICS_POLL_INTERVAL,
+    MetricsApiState, MetricsCoverage, MetricsPollSource, MetricsSnapshot, ResourceUsageSample,
+    WATCH_LINGER,
 };
 pub use self::context::{ContextRegistry, PreparedSwitch};
 pub use self::supervisor::{

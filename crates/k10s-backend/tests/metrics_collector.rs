@@ -353,6 +353,59 @@ async fn full_coverage_collects_usage_and_allocatable_pod_capacity() {
 }
 
 #[tokio::test]
+async fn pod_container_metrics_preserve_exact_names_and_fail_closed_per_container() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    // Deliberately reverse the input order. Names are authoritative keys, so
+    // the result must retain them exactly and publish deterministically.
+    record_pod_metrics(
+        &server,
+        vec![pod_metric_item(
+            "web",
+            &timestamp,
+            json!([
+                {"name": "sidecar", "usage": {"cpu": "150m"}},
+                {"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}
+            ]),
+        )],
+    );
+    record_pod(&server, "web");
+    let world = world(&server);
+
+    let payload = metrics_wire(&world.kernel, pod_ref("web", "uid-web")).await;
+
+    // The pod aggregate still fails closed when one container omitted memory.
+    assert_eq!(payload["metrics"]["availability"], "partial");
+    assert_eq!(payload["metrics"]["cpuMillicores"], 250);
+    assert!(payload["metrics"].get("memoryBytes").is_none());
+    assert_eq!(
+        payload["containers"],
+        json!([
+            {
+                "name": "app",
+                "metrics": {
+                    "availability": "available",
+                    "cpuMillicores": 100,
+                    "memoryBytes": 1_048_576,
+                    "collectedAt": timestamp,
+                },
+            },
+            {
+                "name": "sidecar",
+                "metrics": {
+                    "availability": "partial",
+                    "cpuMillicores": 150,
+                    "collectedAt": timestamp,
+                },
+            },
+        ]),
+        "each reported container keeps its exact name and only its reported values"
+    );
+}
+
+#[tokio::test]
 async fn partial_node_coverage_is_reported_honestly() {
     let server = RecordedApiServer::standard();
     let timestamp = recent_rfc3339(10);
@@ -447,6 +500,11 @@ async fn stale_source_timestamps_are_never_served_as_values() {
     );
     assert_eq!(payload["metrics"]["availability"], "unavailable");
     assert_eq!(payload["metrics"]["collectedAt"], ANCIENT);
+    assert_eq!(
+        payload["containers"],
+        json!([]),
+        "stale container values are withheld rather than presented as current samples"
+    );
 
     let snapshot = world
         .metrics

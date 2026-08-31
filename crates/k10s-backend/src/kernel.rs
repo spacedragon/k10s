@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k10s_protocol::{
-    BackendRevision, BootstrapResponse, Context, DetailRow, DetailSection, GroupVersionKind,
-    InfrastructureResponse, MetricsAvailability, PodMetrics, ProtocolVersion, ResourceCapabilities,
-    ResourceDetailResponse, ResourceIdentity, ResourceListResponse, ResourceListRow,
-    ResourceMetricsResponse, ResourceProjection as WireProjection, ResourceRelationsResponse,
-    ServerInfo, TargetPort, TransportProtocol, WorkloadKind,
+    BackendRevision, BootstrapResponse, ContainerMetrics, Context, DetailRow, DetailSection,
+    GroupVersionKind, InfrastructureResponse, MetricsAvailability, PodMetrics, ProtocolVersion,
+    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListResponse,
+    ResourceListRow, ResourceMetricsResponse, ResourceProjection as WireProjection,
+    ResourceRelationsResponse, ServerInfo, TargetPort, TransportProtocol, WorkloadKind,
 };
 use uuid::Uuid;
 
@@ -234,6 +234,7 @@ impl BackendKernel {
 
 /// Result of a kernel query.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // Resource records intentionally remain inline at this port boundary.
 pub enum KernelQueryResult {
     /// Bootstrap result with contexts and server metadata.
     Bootstrap(BootstrapResult),
@@ -744,21 +745,27 @@ impl ResourceMetricsResult {
     /// wire contract stays consistent.
     #[must_use]
     pub fn new(reference: &ResourceRef, sample: MetricsSample) -> Self {
-        let availability = match (&sample.cpu_millicores, &sample.memory_bytes) {
-            (Some(_), Some(_)) => MetricsAvailability::Available,
-            (None, None) => MetricsAvailability::Unavailable,
-            _ => MetricsAvailability::Partial,
-        };
+        let MetricsSample {
+            cpu_millicores,
+            memory_bytes,
+            collected_at,
+            containers,
+        } = sample;
         Self {
             payload: ResourceMetricsResponse {
                 identity: map_identity(reference),
-                metrics: PodMetrics {
-                    availability,
-                    cpu_millicores: sample.cpu_millicores,
-                    memory_bytes: sample.memory_bytes,
-                    collected_at: sample.collected_at,
-                },
-                containers: Vec::new(),
+                metrics: pod_metrics(cpu_millicores, memory_bytes, collected_at.clone()),
+                containers: containers
+                    .into_iter()
+                    .map(|container| ContainerMetrics {
+                        name: container.name,
+                        metrics: pod_metrics(
+                            container.cpu_millicores,
+                            container.memory_bytes,
+                            collected_at.clone(),
+                        ),
+                    })
+                    .collect(),
             },
         }
     }
@@ -773,6 +780,26 @@ impl ResourceMetricsResult {
     #[must_use]
     pub fn serialized(&self) -> String {
         serde_json::to_string(&self.payload).expect("ResourceMetricsResponse must serialize")
+    }
+}
+
+/// Derive the availability of one aggregate or container sample.
+#[must_use]
+fn pod_metrics(
+    cpu_millicores: Option<u64>,
+    memory_bytes: Option<u64>,
+    collected_at: Option<String>,
+) -> PodMetrics {
+    let availability = match (&cpu_millicores, &memory_bytes) {
+        (Some(_), Some(_)) => MetricsAvailability::Available,
+        (None, None) => MetricsAvailability::Unavailable,
+        _ => MetricsAvailability::Partial,
+    };
+    PodMetrics {
+        availability,
+        cpu_millicores,
+        memory_bytes,
+        collected_at,
     }
 }
 

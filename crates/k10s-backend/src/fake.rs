@@ -18,11 +18,11 @@ use tokio::sync::broadcast;
 
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
-    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
-    KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
-    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
-    SubscriptionHandle, TargetPort, TransportProtocol,
+    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerMetricsSample,
+    ContextInfo, Gvk, KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult,
+    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection,
+    ResourceRecord, ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput,
+    Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -301,6 +301,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(220),
                     memory_bytes: Some(134_217_728),
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(220),
+                        memory_bytes: Some(134_217_728),
+                    }],
                 },
             ),
             (
@@ -309,6 +314,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(90),
                     memory_bytes: None,
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(90),
+                        memory_bytes: None,
+                    }],
                 },
             ),
         ]);

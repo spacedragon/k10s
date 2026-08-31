@@ -96,6 +96,20 @@ pub struct ResourceUsageSample {
     pub timestamp: Option<String>,
     /// Source-reported scrape window in seconds, when reported.
     pub window_seconds: Option<u64>,
+    /// Per-container usage from a PodMetrics item, sorted by exact name.
+    /// NodeMetrics samples carry an empty list.
+    pub containers: Vec<ContainerUsageSample>,
+}
+
+/// One exact-name container usage sample from the Metrics API.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerUsageSample {
+    /// Exact container name reported by the Metrics API.
+    pub name: String,
+    /// CPU usage in millicores, absent when this container did not report it.
+    pub cpu_millicores: Option<u64>,
+    /// Working-set memory in bytes, absent when this container did not report it.
+    pub memory_bytes: Option<u64>,
 }
 
 /// Honest node coverage of one cut relative to core Node membership.

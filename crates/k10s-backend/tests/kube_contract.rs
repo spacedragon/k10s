@@ -355,7 +355,8 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
         assert!(!text.contains("resource_version"), "{label}: rv leaked");
     }
 
-    // Row-level shape parity (row counts differ by dataset design).
+    // Base row fields are common across adapters. The recorded adapter has a
+    // typed Pod projection; legacy fake fixture rows intentionally omit it.
     let fake_rows = fake_payload["rows"].as_array().unwrap();
     let kube_rows = kube_payload["rows"].as_array().unwrap();
     assert!(!fake_rows.is_empty() && !kube_rows.is_empty());
@@ -367,10 +368,9 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
             .collect::<std::collections::BTreeSet<_>>()
     };
     for kube_row in kube_rows {
-        assert_eq!(
-            row_keys(&fake_rows[0]),
-            row_keys(kube_row),
-            "row keys drifted between adapters"
+        assert!(
+            row_keys(&fake_rows[0]).is_subset(&row_keys(kube_row)),
+            "normalized rows retain every legacy base field"
         );
         let identity_keys = |row: &Value| {
             row["identity"]
@@ -386,6 +386,7 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
     // Both adapters produce honest summaries on the same projection: the
     // kube pod carries the phase from its recorded status.
     assert_eq!(kube_rows[0]["summary"], "Running");
+    assert_eq!(kube_rows[0]["projection"]["kind"], "pod");
 }
 
 /// Shared resource-detail wire contract: the fake adapter's stored records
@@ -736,8 +737,8 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
             );
             assert_eq!(
                 payload["containers"].as_array().map(Vec::len),
-                Some(0),
-                "{label}: adapters without normalized container samples default empty"
+                if label == "absent" { Some(0) } else { Some(1) },
+                "{label}: available container samples retain exact names"
             );
         }
         // Per-case availability agrees, and the present-key sets match.

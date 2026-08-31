@@ -21,7 +21,8 @@ use kube::core::DynamicObject;
 
 use crate::port::{BackendError, Gvk, MetricsSample, ResourceRef};
 use crate::runtime::{
-    MetricsApiState, MetricsPollSource, MetricsSnapshot, ResourceUsageSample, now_rfc3339,
+    ContainerUsageSample, MetricsApiState, MetricsPollSource, MetricsSnapshot, ResourceUsageSample,
+    now_rfc3339,
 };
 
 use super::read::sanitize_get_error;
@@ -259,6 +260,7 @@ fn normalize_node_metrics(item: &DynamicObject) -> Option<(String, ResourceUsage
             memory_bytes: quantity_bytes(usage.get("memory").and_then(as_text)),
             timestamp,
             window_seconds,
+            containers: Vec::new(),
         },
     ))
 }
@@ -273,6 +275,19 @@ fn normalize_pod_metrics(item: &DynamicObject) -> Option<((String, String), Reso
     let value = serde_json::to_value(item).ok()?;
     let containers = value.get("containers")?.as_array()?;
     let (timestamp, window_seconds) = item_time_meta(&value);
+    let mut container_samples: Vec<_> = containers
+        .iter()
+        .map(normalize_container_metrics)
+        .collect::<Option<_>>()?;
+    container_samples.sort_by(|left, right| left.name.cmp(&right.name));
+    if container_samples
+        .windows(2)
+        .any(|pair| pair[0].name == pair[1].name)
+    {
+        // Duplicate names cannot be joined faithfully. Withhold this whole
+        // PodMetrics item instead of choosing an arbitrary sample.
+        return None;
+    }
     Some((
         (namespace, name),
         ResourceUsageSample {
@@ -294,8 +309,29 @@ fn normalize_pod_metrics(item: &DynamicObject) -> Option<((String, String), Reso
             })),
             timestamp,
             window_seconds,
+            containers: container_samples,
         },
     ))
+}
+
+/// Normalize one named PodMetrics container without defaulting omitted usage.
+fn normalize_container_metrics(value: &serde_json::Value) -> Option<ContainerUsageSample> {
+    let name = value.get("name").and_then(as_text)?;
+    (!name.is_empty()).then(|| ContainerUsageSample {
+        name,
+        cpu_millicores: quantity_millicores(
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("cpu"))
+                .and_then(as_text),
+        ),
+        memory_bytes: quantity_bytes(
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("memory"))
+                .and_then(as_text),
+        ),
+    })
 }
 
 /// Sum one usage field across every container, failing closed to `None`
@@ -332,6 +368,7 @@ pub(crate) fn sample_for_reference(
         cpu_millicores: None,
         memory_bytes: None,
         collected_at: None,
+        containers: Vec::new(),
     };
     let Some(snapshot) = snapshot else {
         return default();
@@ -355,12 +392,22 @@ pub(crate) fn sample_for_reference(
             cpu_millicores: None,
             memory_bytes: None,
             collected_at: usage.timestamp.clone(),
+            containers: Vec::new(),
         };
     }
     MetricsSample {
         cpu_millicores: usage.cpu_millicores,
         memory_bytes: usage.memory_bytes,
         collected_at: usage.timestamp.clone(),
+        containers: usage
+            .containers
+            .iter()
+            .map(|container| crate::port::ContainerMetricsSample {
+                name: container.name.clone(),
+                cpu_millicores: container.cpu_millicores,
+                memory_bytes: container.memory_bytes,
+            })
+            .collect(),
     }
 }
 

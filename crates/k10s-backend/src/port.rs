@@ -358,6 +358,7 @@ pub enum Subscribe {
 
 /// Result of a query to the Kubernetes adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Resource records intentionally remain inline at this adapter boundary.
 pub enum QueryResult {
     /// Bootstrap result with contexts and server metadata.
     Bootstrap(BootstrapInfo),
@@ -858,10 +859,24 @@ pub struct MetricsSample {
     pub memory_bytes: Option<u64>,
     /// Deterministic collection timestamp formatted as RFC 3339.
     pub collected_at: Option<String>,
+    /// Per-container samples keyed by exact Metrics API names, sorted by name.
+    pub containers: Vec<ContainerMetricsSample>,
+}
+
+/// One availability-gated usage sample for an exact container name.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContainerMetricsSample {
+    /// Exact container name reported by the Metrics API.
+    pub name: String,
+    /// CPU usage in millicores, absent when not reported.
+    pub cpu_millicores: Option<u64>,
+    /// Working-set memory in bytes, absent when not reported.
+    pub memory_bytes: Option<u64>,
 }
 
 /// One event delivered on a backend subscription stream.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // Resource records intentionally remain inline on subscription events.
 pub enum BackendEvent {
     /// One context became unavailable after a background credential refresh.
     /// Bootstrap-status subscribers use this to reconcile without waiting for

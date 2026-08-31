@@ -430,6 +430,189 @@ async fn pods_normalize_phase_and_container_waiting_reasons() {
 }
 
 #[tokio::test]
+async fn pods_project_authoritative_detail_data_and_leave_absent_fields_absent() {
+    let case = Case {
+        label: "pod projections",
+        gvk: gvk("", "v1", "Pod"),
+        plural: "pods",
+        namespace: Some("default"),
+        list_body: r#"{"kind":"PodList","apiVersion":"v1","items":[
+          {"metadata":{"name":"healthy","uid":"uid-healthy","namespace":"default","creationTimestamp":"2026-08-21T00:00:00Z","labels":{"app":"web"},"annotations":{"trace.example/enabled":"true"}},
+           "spec":{"nodeName":"worker-a","serviceAccountName":"web","restartPolicy":"Always","priority":1000,"containers":[
+             {"name":"app","image":"example/web:v1","ports":[{"name":"http","containerPort":8080,"hostPort":18080,"protocol":"TCP"}]},
+             {"name":"metrics","image":"example/metrics:v1","ports":[{"containerPort":9090,"protocol":"UDP"}]}
+           ]},
+           "status":{"phase":"Running","hostIP":"192.168.1.7","podIP":"10.42.0.7","qosClass":"Burstable","conditions":[
+             {"type":"Ready","status":"True","reason":"ContainersReady","message":"all ready","lastTransitionTime":"2026-08-21T00:02:00Z"},
+             {"type":"PodScheduled","status":"True","lastTransitionTime":"2026-08-21T00:01:00Z"}
+           ],"containerStatuses":[
+             {"name":"app","image":"example/web:v1","ready":true,"restartCount":1,"state":{"running":{}}},
+             {"name":"metrics","image":"example/metrics:v1","ready":true,"restartCount":0,"state":{"running":{}}},
+             {"name":"obsolete-status","image":"example/obsolete:v1","ready":true,"restartCount":99,"state":{"running":{}}}
+           ],"hostIP":"192.168.1.7"}},
+          {"metadata":{"name":"crashloop","uid":"uid-crashloop","namespace":"default","creationTimestamp":"2026-08-21T01:00:00Z","labels":{"app":"worker"}},
+           "spec":{"serviceAccountName":"worker","restartPolicy":"OnFailure","containers":[
+             {"name":"worker","image":"example/worker:v2"},
+             {"name":"sidecar","image":"example/sidecar:v1"},
+             {"name":"done","image":"example/done:v1"}
+           ]},
+           "status":{"phase":"Running","hostIP":"192.168.1.8","podIP":"10.42.0.8","qosClass":"Guaranteed","conditions":[{"type":"Ready","status":"False","reason":"ContainersNotReady","message":"worker is restarting","lastTransitionTime":"2026-08-21T01:02:00Z"}],"containerStatuses":[
+             {"name":"worker","image":"example/worker:v2","ready":false,"restartCount":4,"state":{"waiting":{"reason":"CrashLoopBackOff"}},"lastState":{"terminated":{"exitCode":137,"reason":"OOMKilled"}}},
+             {"name":"sidecar","image":"example/sidecar:v1","ready":true,"restartCount":1,"state":{"running":{}}},
+             {"name":"done","image":"example/done:v1","ready":false,"restartCount":0,"state":{"terminated":{"exitCode":0,"reason":"Completed"}}}
+           ]}},
+          {"metadata":{"name":"ambiguous","uid":"uid-ambiguous","namespace":"default","creationTimestamp":"2026-08-21T01:30:00Z"},
+           "spec":{"containers":[{"name":"app","image":"example/app:v1"}]},
+           "status":{"phase":"Running","containerStatuses":[
+             {"name":"app","ready":true,"restartCount":0,"state":{"running":{}}},
+             {"name":"app","ready":false,"restartCount":5,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+           ]}},
+          {"metadata":{"name":"incomplete","uid":"uid-incomplete","namespace":"default","creationTimestamp":"2026-08-21T02:00:00Z"}}
+        ]}"#,
+        expect: vec![
+            ExpectedRow {
+                name: "ambiguous",
+                uid: "uid-ambiguous",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "CrashLoopBackOff",
+                created_at_prefix: "2026-08-21T01:30:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "crashloop",
+                uid: "uid-crashloop",
+                namespace: Some("default"),
+                labels: &[("app", "worker")],
+                summary: "CrashLoopBackOff",
+                created_at_prefix: "2026-08-21T01:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "healthy",
+                uid: "uid-healthy",
+                namespace: Some("default"),
+                labels: &[("app", "web")],
+                summary: "Running",
+                created_at_prefix: "2026-08-21T00:00:00",
+                owner: None,
+            },
+            ExpectedRow {
+                name: "incomplete",
+                uid: "uid-incomplete",
+                namespace: Some("default"),
+                labels: &[],
+                summary: "Unknown",
+                created_at_prefix: "2026-08-21T02:00:00",
+                owner: None,
+            },
+        ],
+    };
+    let data = run_case(&case).await;
+    assert_rows(&case, &data);
+    let payload = run_case_wire(&case).await;
+    let projection = |name: &str| {
+        let row = payload
+            .rows
+            .iter()
+            .find(|row| row.identity.name == name)
+            .unwrap_or_else(|| panic!("{name} row exists"));
+        let Some(k10s_protocol::ResourceProjection::Pod(projection)) = &row.projection else {
+            panic!("{name} carries a Pod projection")
+        };
+        projection
+    };
+
+    let healthy = projection("healthy");
+    assert_eq!(healthy.phase.as_deref(), Some("Running"));
+    assert_eq!(healthy.ready_containers, Some(2));
+    assert_eq!(healthy.total_containers, Some(2));
+    assert_eq!(healthy.restart_count, Some(1));
+    assert_eq!(healthy.node_name.as_deref(), Some("worker-a"));
+    assert_eq!(healthy.pod_ip.as_deref(), Some("10.42.0.7"));
+    assert_eq!(healthy.host_ip.as_deref(), Some("192.168.1.7"));
+    assert_eq!(healthy.qos_class.as_deref(), Some("Burstable"));
+    assert_eq!(healthy.priority, Some(1000));
+    assert_eq!(healthy.service_account.as_deref(), Some("web"));
+    assert_eq!(healthy.restart_policy.as_deref(), Some("Always"));
+    assert_eq!(healthy.labels.get("app").map(String::as_str), Some("web"));
+    assert_eq!(
+        healthy
+            .annotations
+            .get("trace.example/enabled")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(healthy.created_at.as_deref(), Some("2026-08-21T00:00:00Z"));
+    assert_eq!(healthy.conditions.len(), 2);
+    assert_eq!(healthy.conditions[0].condition_type, "PodScheduled");
+    assert_eq!(healthy.conditions[1].condition_type, "Ready");
+    assert_eq!(
+        healthy.conditions[1].reason.as_deref(),
+        Some("ContainersReady")
+    );
+    assert_eq!(healthy.containers[0].name, "app");
+    assert!(matches!(
+        healthy.containers[0].state,
+        Some(k10s_protocol::ContainerStateProjection::Running)
+    ));
+    assert_eq!(healthy.ports.len(), 2);
+    assert_eq!(healthy.ports[0].container_name, "app");
+    assert_eq!(healthy.ports[0].container_port, 8080);
+    assert_eq!(healthy.ports[0].host_port, Some(18080));
+    assert_eq!(
+        healthy.ports[1].protocol,
+        k10s_protocol::TransportProtocol::Udp
+    );
+
+    let crashloop = projection("crashloop");
+    assert_eq!(crashloop.ready_containers, Some(1));
+    assert_eq!(crashloop.total_containers, Some(3));
+    assert_eq!(crashloop.restart_count, Some(5));
+    assert!(
+        matches!(crashloop.containers[0].state, Some(k10s_protocol::ContainerStateProjection::Waiting { ref reason }) if reason.as_deref() == Some("CrashLoopBackOff"))
+    );
+    assert_eq!(
+        crashloop.containers[0]
+            .last_termination
+            .as_ref()
+            .map(|termination| (termination.exit_code, termination.reason.as_deref())),
+        Some((137, Some("OOMKilled")))
+    );
+    assert!(matches!(
+        crashloop.containers[1].state,
+        Some(k10s_protocol::ContainerStateProjection::Running)
+    ));
+    assert!(
+        matches!(crashloop.containers[2].state, Some(k10s_protocol::ContainerStateProjection::Terminated(ref termination)) if termination.exit_code == 0 && termination.reason.as_deref() == Some("Completed"))
+    );
+
+    let ambiguous = projection("ambiguous");
+    assert_eq!(ambiguous.total_containers, Some(1));
+    assert_eq!(ambiguous.ready_containers, None);
+    assert_eq!(ambiguous.restart_count, None);
+    assert_eq!(ambiguous.containers[0].ready, None);
+    assert_eq!(ambiguous.containers[0].restart_count, None);
+    assert_eq!(ambiguous.containers[0].state, None);
+
+    let incomplete = projection("incomplete");
+    assert_eq!(incomplete.phase, None);
+    assert_eq!(incomplete.ready_containers, None);
+    assert_eq!(incomplete.total_containers, None);
+    assert_eq!(incomplete.restart_count, None);
+    assert!(incomplete.containers.is_empty());
+    assert!(incomplete.conditions.is_empty());
+    assert_eq!(incomplete.node_name, None);
+    assert_eq!(incomplete.pod_ip, None);
+    assert_eq!(incomplete.host_ip, None);
+    assert_eq!(incomplete.qos_class, None);
+    assert_eq!(incomplete.priority, None);
+    assert_eq!(incomplete.service_account, None);
+    assert_eq!(incomplete.restart_policy, None);
+    assert!(incomplete.ports.is_empty());
+}
+
+#[tokio::test]
 async fn jobs_normalize_conditions() {
     let case = Case {
         label: "jobs",
