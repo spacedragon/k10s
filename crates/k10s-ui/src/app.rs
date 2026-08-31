@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
     ClientFrame, Context, ContextAvailability, ErrorCode, InfrastructureRequest, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
-    ResourceTypesRequest, ServerFrame, StreamTarget,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceMetricsResponse,
+    ResourceTypeEntry, ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
@@ -173,6 +173,12 @@ pub struct K10sApp {
     detail_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
     relations: BTreeMap<ResourceIdentity, RelationState>,
     relation_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
+    /// Last fresh metrics response for each currently pinned exact Pod.
+    metrics: BTreeMap<ResourceIdentity, ResourceMetricsResponse>,
+    /// Last completed or failed metrics check, used for TTL refresh/backoff.
+    metric_checked_at: BTreeMap<ResourceIdentity, u64>,
+    /// One in-flight metrics request per exact Pod identity across all windows.
+    metric_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
     resource_generation: u64,
     recovering: bool,
     view: AppView,
@@ -358,6 +364,9 @@ impl K10sApp {
             detail_requests: BTreeMap::new(),
             relations: BTreeMap::new(),
             relation_requests: BTreeMap::new(),
+            metrics: BTreeMap::new(),
+            metric_checked_at: BTreeMap::new(),
+            metric_requests: BTreeMap::new(),
             resource_generation: 0,
             recovering: false,
             view: AppView::Connecting,
@@ -1357,6 +1366,31 @@ impl K10sApp {
                             }
                         }
                         ClientError::Server(ref server_error)
+                            if server_error.retryability
+                                != k10s_protocol::Retryability::AfterReconnect
+                                && stream_request_id.as_ref().is_some_and(|id| {
+                                    self.metric_requests
+                                        .values()
+                                        .any(|pending| pending.request.id() == id)
+                                }) =>
+                        {
+                            if let Some(id) = stream_request_id.as_ref()
+                                && let Some(identity) = self
+                                    .metric_requests
+                                    .iter()
+                                    .find(|(_, pending)| pending.request.id() == id)
+                                    .map(|(identity, _)| identity.clone())
+                            {
+                                if let Some(pending) = self.metric_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
+                                self.metrics.remove(&identity);
+                                if self.is_resource_pinned(&identity) {
+                                    self.metric_checked_at.insert(identity, now_ms);
+                                }
+                            }
+                        }
+                        ClientError::Server(ref server_error)
                             if server_error.code
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
                                 && server_error.scope == k10s_protocol::ErrorScope::Request
@@ -1907,6 +1941,9 @@ impl K10sApp {
         self.detail_requests.clear();
         self.relations.clear();
         self.relation_requests.clear();
+        self.metrics.clear();
+        self.metric_checked_at.clear();
+        self.metric_requests.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
         if !matches!(self.namespace_catalog, NamespaceCatalogState::NotDemanded) {
             self.namespace_catalog = NamespaceCatalogState::Loading;
@@ -2124,7 +2161,7 @@ impl K10sApp {
             details: self.details.clone().into_iter().collect(),
             primary_details: self.primary_details.clone().into_iter().collect(),
             relations: self.relations.clone().into_iter().collect(),
-            metrics: Default::default(),
+            metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
             port_forward_sessions: self
                 .client
@@ -2912,6 +2949,24 @@ impl K10sApp {
         true
     }
 
+    /// Metrics equivalent of [`Self::cancel_detail_request`].
+    fn cancel_metric_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .metric_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.metric_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
+    }
+
     fn refresh_details_at(&mut self, now_ms: u64) {
         // Until bootstrap identifies the server's authoritative context, the
         // workspace may still contain selections from the lost generation.
@@ -3037,10 +3092,129 @@ impl K10sApp {
             }
         }
 
+        self.refresh_metrics(now_ms, &pinned_set);
         self.refresh_relations(now_ms);
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
             .ok();
+    }
+
+    fn refresh_metrics(
+        &mut self,
+        now_ms: u64,
+        pinned: &std::collections::BTreeSet<ResourceIdentity>,
+    ) {
+        const METRICS_TTL_MS: u64 = 30_000;
+
+        let desired: std::collections::BTreeSet<_> = pinned
+            .iter()
+            .filter(|identity| {
+                identity.gvk.group.is_empty()
+                    && identity.gvk.version == "v1"
+                    && identity.gvk.kind == "Pod"
+                    && self.client.local_ui().selected_context.as_deref()
+                        == Some(identity.context.as_str())
+                    && !self.resource_lifecycle_is_gone(identity)
+            })
+            .cloned()
+            .collect();
+
+        for identity in self
+            .metric_requests
+            .keys()
+            .filter(|identity| !desired.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.cancel_metric_request(&identity);
+        }
+        self.metrics
+            .retain(|identity, _| desired.contains(identity));
+        self.metric_checked_at
+            .retain(|identity, _| desired.contains(identity));
+
+        for identity in &desired {
+            if self.metric_requests.contains_key(identity) {
+                continue;
+            }
+            let due = self
+                .metric_checked_at
+                .get(identity)
+                .is_none_or(|checked_at| now_ms.saturating_sub(*checked_at) >= METRICS_TTL_MS);
+            if !due {
+                continue;
+            }
+            // Metrics are useful only while fresh. A TTL expiry or failed
+            // replacement therefore exposes absence instead of stale values.
+            self.metrics.remove(identity);
+            match self.client.begin(Query::ResourceMetrics(identity.clone())) {
+                Ok(request) => {
+                    self.metric_requests.insert(
+                        identity.clone(),
+                        PendingResourceRequest {
+                            request,
+                            context: identity.context.clone(),
+                            generation: self.resource_generation,
+                        },
+                    );
+                }
+                Err(_) => {
+                    self.metric_checked_at.insert(identity.clone(), now_ms);
+                }
+            }
+        }
+
+        let completed: Vec<_> = self
+            .metric_requests
+            .iter()
+            .filter(|(_, pending)| !self.client.is_pending(&pending.request))
+            .map(|(identity, _)| identity.clone())
+            .collect();
+        for identity in completed {
+            let Some(pending) = self.metric_requests.remove(&identity) else {
+                continue;
+            };
+            if pending.generation != self.resource_generation
+                || self.client.local_ui().selected_context.as_deref()
+                    != Some(pending.context.as_str())
+                || !desired.contains(&identity)
+            {
+                let _ = self.client.take(pending.request.clone());
+                let _ = self.client.take_failure(pending.request);
+                self.metrics.remove(&identity);
+                self.metric_checked_at.remove(&identity);
+                continue;
+            }
+            if let Some(QueryResult::ResourceMetrics(response)) =
+                self.client.take(pending.request.clone())
+            {
+                let response = *response;
+                if response.identity == identity {
+                    self.metrics.insert(identity.clone(), response);
+                    self.metric_checked_at.insert(identity, now_ms);
+                }
+            } else {
+                let _ = self.client.take_failure(pending.request);
+                self.metrics.remove(&identity);
+                self.metric_checked_at.insert(identity, now_ms);
+            }
+        }
+    }
+
+    fn resource_lifecycle_is_gone(&self, identity: &ResourceIdentity) -> bool {
+        let newest = self
+            .detail_lifecycles
+            .values()
+            .filter_map(|source| source.entries.get(identity))
+            .map(|event| event.revision)
+            .max();
+        newest.is_some_and(|newest| {
+            self.detail_lifecycles.values().any(|source| {
+                source.entries.get(identity).is_some_and(|event| {
+                    event.revision == newest && event.lifecycle == DetailLifecycle::Gone
+                })
+            })
+        })
     }
 
     fn refresh_relations(&mut self, now_ms: u64) {
@@ -3314,10 +3488,15 @@ impl K10sApp {
         for identity in self.relation_requests.keys().cloned().collect::<Vec<_>>() {
             self.cancel_relation_request(&identity);
         }
+        for identity in self.metric_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_metric_request(&identity);
+        }
         self.details.clear();
         self.detail_lifecycles.clear();
         self.primary_details.clear();
         self.relations.clear();
+        self.metrics.clear();
+        self.metric_checked_at.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
     }
 
@@ -3782,16 +3961,17 @@ mod tests {
     };
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
-        ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
-        ResourceCapabilities, ResourceChanged, ResourceDetailResponse, ResourceGone,
-        ResourceIdentity, ResourceListRow, ResourceSnapshotPage, ResumeStatus, Retryability,
-        ServerFrame, ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+        BackendRevision, BootstrapResponse, ClientFrame, ClientKind, ContainerMetrics, Context,
+        ErrorCode, ErrorFrame, ErrorScope, Event, GroupVersionKind, MetricsAvailability,
+        PodMetrics, ProtocolVersion, RequestId, ResourceCapabilities, ResourceChanged,
+        ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListRow,
+        ResourceMetricsResponse, ResourceSnapshotPage, ResumeStatus, Retryability, ServerFrame,
+        ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
         SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
     use super::{
-        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        AppConnection, AppEventError, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
         PrimaryDetailState, RelationState, ResourceAction, SafeUiError, WindowFreshness,
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
@@ -5454,6 +5634,314 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
         window
+    }
+
+    fn pod_identity(name: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        }
+    }
+
+    fn pin_pod_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
+        let events = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let window = events
+            .iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(*id),
+                _ => None,
+            })
+            .expect("pod window opens");
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
+        window
+    }
+
+    fn metrics_response(identity: &ResourceIdentity) -> ResourceMetricsResponse {
+        ResourceMetricsResponse {
+            identity: identity.clone(),
+            metrics: PodMetrics {
+                availability: MetricsAvailability::Available,
+                cpu_millicores: Some(135),
+                memory_bytes: Some(96 * 1024 * 1024),
+                collected_at: Some("2026-08-31T12:00:00Z".into()),
+            },
+            containers: vec![
+                ContainerMetrics {
+                    name: "api".into(),
+                    metrics: PodMetrics {
+                        availability: MetricsAvailability::Available,
+                        cpu_millicores: Some(100),
+                        memory_bytes: Some(64 * 1024 * 1024),
+                        collected_at: Some("2026-08-31T12:00:00Z".into()),
+                    },
+                },
+                ContainerMetrics {
+                    name: "telemetry-sidecar".into(),
+                    metrics: PodMetrics {
+                        availability: MetricsAvailability::Partial,
+                        cpu_millicores: Some(35),
+                        memory_bytes: None,
+                        collected_at: Some("2026-08-31T12:00:00Z".into()),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn production_pod_metrics_request_reaches_feed_with_named_containers() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("api-7f9d");
+        pin_pod_without_request(&mut app, &pod);
+
+        app.refresh_details_at(1);
+
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1
+        );
+        let request = app
+            .metric_requests
+            .get(&pod)
+            .expect("metrics request is tracked")
+            .request
+            .clone();
+        let response = metrics_response(&pod);
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                response.clone(),
+            )),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+
+        assert_eq!(app.build_resource_feed().metrics.get(&pod), Some(&response));
+        assert_eq!(
+            app.build_resource_feed().metrics[&pod].containers[1].name,
+            "telemetry-sidecar"
+        );
+    }
+
+    #[test]
+    fn duplicate_pod_detail_windows_share_one_metrics_query() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("shared");
+        pin_pod_without_request(&mut app, &pod);
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pod.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        pin_deployment_without_request(&mut app, &deployment_identity("not-a-pod"));
+        let wrong_gvk = ResourceIdentity {
+            gvk: GroupVersionKind {
+                group: "metrics.k8s.io".into(),
+                version: "v1beta1".into(),
+                kind: "Pod".into(),
+            },
+            ..pod_identity("wrong-gvk")
+        };
+        pin_pod_without_request(&mut app, &wrong_gvk);
+
+        app.refresh_details_at(1);
+        app.refresh_details_at(2);
+
+        assert_eq!(app.metric_requests.len(), 1);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mismatched_or_failed_metrics_never_enter_the_feed_or_storm_retries() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("guarded");
+        pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let request = app.metric_requests[&pod].request.clone();
+        let mut mismatch = metrics_response(&pod);
+        mismatch.identity.uid = "uid-replacement".into();
+
+        app.handle_event(
+            server_message(&ServerFrame::response(request.id().clone(), mismatch)),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+        app.refresh_details_at(3);
+
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1,
+            "a failed exact-identity query waits for the normal refresh cadence"
+        );
+
+        app.refresh_details_at(30_002);
+        let retry = app.metric_requests[&pod].request.clone();
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(retry.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Unauthorized,
+                    "metrics unavailable",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    retry.id().as_str(),
+                ))
+                .unwrap(),
+            }),
+            30_003,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(30_003);
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        app.refresh_details_at(30_004);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            2,
+            "a server error also waits for the normal refresh cadence"
+        );
+    }
+
+    #[test]
+    fn stale_pod_metrics_fail_closed_while_one_refresh_is_in_flight() {
+        let (mut app, _) = ready_app();
+        let pod = pod_identity("refreshing");
+        pin_pod_without_request(&mut app, &pod);
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 10);
+
+        app.refresh_details_at(30_009);
+        assert!(app.build_resource_feed().metrics.contains_key(&pod));
+        app.refresh_details_at(30_010);
+
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        assert!(app.metric_requests.contains_key(&pod));
+    }
+
+    #[test]
+    fn reconnectable_metrics_error_enters_the_normal_transport_recovery_path() {
+        let (mut app, _) = ready_app();
+        let pod = pod_identity("reconnect");
+        pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let request = app.metric_requests[&pod].request.clone();
+
+        let result = app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(request.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Internal,
+                    "metrics collector moved",
+                    Retryability::AfterReconnect,
+                    ErrorScope::Request,
+                    request.id().as_str(),
+                ))
+                .unwrap(),
+            }),
+            100,
+            7,
+        );
+
+        assert!(matches!(result, Err(AppEventError::Transient)));
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+    }
+
+    #[test]
+    fn pod_metrics_are_pruned_on_close_gone_and_context_reset() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("ephemeral");
+        let window = pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let closing = app.metric_requests[&pod].request.clone();
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+        app.refresh_details_at(2);
+        assert!(!app.metrics.contains_key(&pod));
+        assert!(!app.metric_checked_at.contains_key(&pod));
+        assert!(!app.metric_requests.contains_key(&pod));
+        assert!(state.borrow().sent.iter().any(|frame| {
+            frame.kind == ClientKind::CancelRequest
+                && frame.request_id.as_ref() == Some(closing.id())
+        }));
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                closing.id().clone(),
+                metrics_response(&pod),
+            )),
+            3,
+            0,
+        )
+        .expect("a response already queued before cancellation is consumed");
+        app.refresh_details_at(3);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+
+        pin_pod_without_request(&mut app, &pod);
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 4);
+        app.record_detail_lifecycle(
+            SubscriptionId::new("pod-source"),
+            pod.clone(),
+            BackendRevision::new(9),
+            super::DetailLifecycle::Gone,
+        );
+        app.refresh_details_at(5);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+
+        app.detail_lifecycles.clear();
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 6);
+        app.retire_resource_context();
+        assert!(app.metrics.is_empty());
+        assert!(app.metric_checked_at.is_empty());
+        assert!(app.metric_requests.is_empty());
     }
 
     #[test]
