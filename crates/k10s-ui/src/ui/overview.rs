@@ -1,5 +1,7 @@
 //! Cluster overview rendered exclusively from one protocol response.
 
+use std::hash::{Hash, Hasher};
+
 use egui::{Color32, Frame, Margin, RichText, Spinner, Stroke, WidgetInfo, WidgetType};
 use k10s_protocol::{HealthLevel, InfrastructureResponse, MetricsCondition};
 
@@ -9,9 +11,21 @@ use super::{
     theme,
 };
 
+#[derive(Clone, PartialEq)]
+struct LayoutMeasurementKey {
+    width_quarters: i32,
+    body_font: egui::FontId,
+    monospace_font: egui::FontId,
+    interact_height_bits: u32,
+    item_spacing_x_bits: u32,
+    item_spacing_y_bits: u32,
+    scroll_width_bits: u32,
+    content_hash: u64,
+}
+
 #[derive(Clone)]
-struct FixedContentMeasurement {
-    signature: String,
+struct LayoutMeasurement {
+    key: LayoutMeasurementKey,
     height: f32,
 }
 
@@ -53,7 +67,7 @@ pub(super) fn show(
         .min(ui.clip_rect().bottom() - ui.cursor().top())
         .max(0.0);
     let content_width = ui.available_width();
-    let footer_height = metrics_footer_height(ui, response);
+    let footer_height = current_metrics_footer_height(ui, response, content_width);
     let panel_chrome_height = attention_panel_chrome_height(ui);
     let measured_fixed_height =
         current_fixed_content_height(ui, response, connection, content_width);
@@ -97,25 +111,101 @@ fn current_fixed_content_height(
     connection: ConnectionState,
     width: f32,
 ) -> f32 {
-    let signature = format!(
-        "{width:?}|{connection:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
-        ui.style(),
-        response.generated_at,
-        response.totals,
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&connection).hash(&mut hasher);
+    response.generated_at.hash(&mut hasher);
+    response.totals.nodes.hash(&mut hasher);
+    response.totals.pods.hash(&mut hasher);
+    response.totals.workloads.hash(&mut hasher);
+    response.totals.persistent_storage_bytes.hash(&mut hasher);
+    for usage in [
         response.cluster_cpu,
         response.cluster_memory,
         response.pod_capacity,
-        response.workload_health,
-    );
+    ] {
+        usage.used.hash(&mut hasher);
+        usage.capacity.hash(&mut hasher);
+    }
+    for bucket in &response.workload_health {
+        bucket.label.hash(&mut hasher);
+        bucket.count.hash(&mut hasher);
+    }
+    let key = layout_measurement_key(ui, width, hasher.finish());
     let measurement_id = ui.make_persistent_id("k10s.overview.current-fixed-height");
     if let Some(measurement) = ui
         .ctx()
-        .data(|data| data.get_temp::<FixedContentMeasurement>(measurement_id))
-        && measurement.signature == signature
+        .data(|data| data.get_temp::<LayoutMeasurement>(measurement_id))
+        && measurement.key == key
     {
         return measurement.height;
     }
 
+    let measured_width = key.width_quarters as f32 / 4.0;
+    let height = measure_isolated(ui, measured_width, |measure_ui| {
+        fixed_content(measure_ui, response, connection);
+    });
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(measurement_id, LayoutMeasurement { key, height });
+    });
+    height
+}
+
+fn current_metrics_footer_height(
+    ui: &egui::Ui,
+    response: &InfrastructureResponse,
+    width: f32,
+) -> f32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metrics_label(response).hash(&mut hasher);
+    response.metrics.detail.hash(&mut hasher);
+    response.metrics.source.hash(&mut hasher);
+    response.metrics.source_updated_at.hash(&mut hasher);
+    let key = layout_measurement_key(ui, width, hasher.finish());
+    let measurement_id = ui.make_persistent_id("k10s.overview.current-footer-height");
+    if let Some(measurement) = ui
+        .ctx()
+        .data(|data| data.get_temp::<LayoutMeasurement>(measurement_id))
+        && measurement.key == key
+    {
+        return measurement.height;
+    }
+
+    let measured_width = key.width_quarters as f32 / 4.0;
+    let height = measure_isolated(ui, measured_width, |measure_ui| {
+        metrics_footer(measure_ui, response);
+    });
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(measurement_id, LayoutMeasurement { key, height });
+    });
+    height
+}
+
+fn layout_measurement_key(ui: &egui::Ui, width: f32, content_hash: u64) -> LayoutMeasurementKey {
+    let body_font = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(14.0));
+    let monospace_font = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0));
+    LayoutMeasurementKey {
+        width_quarters: (width * 4.0).floor() as i32,
+        body_font,
+        monospace_font,
+        interact_height_bits: ui.spacing().interact_size.y.to_bits(),
+        item_spacing_x_bits: ui.spacing().item_spacing.x.to_bits(),
+        item_spacing_y_bits: ui.spacing().item_spacing.y.to_bits(),
+        scroll_width_bits: ui.style().spacing.scroll.allocated_width().to_bits(),
+        content_hash,
+    }
+}
+
+fn measure_isolated(ui: &egui::Ui, width: f32, contents: impl Fn(&mut egui::Ui)) -> f32 {
     let context = egui::Context::default();
     context.set_style_of(egui::Theme::Dark, ui.style().as_ref().clone());
     context.set_style_of(egui::Theme::Light, ui.style().as_ref().clone());
@@ -129,19 +219,14 @@ fn current_fixed_content_height(
     let mut height = 0.0;
     for _ in 0..2 {
         let mut output = context.run_ui(input.clone(), |measure_ui| {
+            measure_ui.set_max_width(width);
             measure_ui.set_width(width);
             let top = measure_ui.cursor().top();
-            fixed_content(measure_ui, response, connection);
+            contents(measure_ui);
             height = measure_ui.cursor().top() - top;
         });
         output.textures_delta.clear();
     }
-    ui.ctx().data_mut(|data| {
-        data.insert_temp(
-            measurement_id,
-            FixedContentMeasurement { signature, height },
-        );
-    });
     height
 }
 
@@ -320,32 +405,6 @@ fn metrics_label(response: &InfrastructureResponse) -> String {
             format!("Metrics: {}", response.metrics.availability)
         }
     }
-}
-
-fn metrics_footer_height(ui: &egui::Ui, response: &InfrastructureResponse) -> f32 {
-    let available_width = ui.available_width();
-    let first_row = egui::WidgetText::from(metrics_label(response)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Wrap),
-        available_width,
-        egui::TextStyle::Body,
-    );
-    let detail_row = egui::WidgetText::from(
-        RichText::new(format!(
-            "{}    |    Source: {}    |    Source updated: {}",
-            response.metrics.detail,
-            response.metrics.source,
-            response.metrics.source_updated_at.as_deref().unwrap_or("—")
-        ))
-        .weak(),
-    )
-    .into_galley(
-        ui,
-        Some(egui::TextWrapMode::Wrap),
-        available_width,
-        egui::TextStyle::Body,
-    );
-    first_row.size().y + 4.0 * ui.spacing().item_spacing.y + detail_row.size().y
 }
 
 fn metrics_footer(ui: &mut egui::Ui, response: &InfrastructureResponse) {

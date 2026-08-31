@@ -618,6 +618,97 @@ fn overview_resize_reselects_layout_from_current_geometry() {
 }
 
 #[test]
+fn narrow_overview_budgets_the_real_wrapped_metrics_footer() {
+    let mut fixture = Fixture {
+        response: large_attention_response(),
+        ..Fixture::default()
+    };
+    fixture.response.metrics.detail =
+        "Every node and workload metric remains independently available for inspection. ".repeat(5);
+    fixture.response.metrics.source =
+        "aggregated metrics production example internal very long source name".into();
+    fixture.response.metrics.source_updated_at =
+        Some("2026 08 31 23 59 59 with additional clock synchronization context".into());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(720.0, 800.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    let mut snapshot = harness.state().shell.workspace().snapshot();
+    let overview = snapshot
+        .windows
+        .iter_mut()
+        .find(|window| window.title == "Overview")
+        .expect("the default workspace contains Overview");
+    overview.geometry.position = [0.0, 0.0];
+    overview.geometry.size = [480.0, 600.0];
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::RestoreSnapshot(snapshot));
+    harness.run_steps(4);
+
+    let window_before = harness
+        .get_by_role_and_label(Role::Window, "Overview")
+        .rect();
+    assert!(
+        window_before.bottom() <= 800.0
+            && window_before.height() <= 605.0
+            && window_before.width() <= 483.0
+    );
+    let detail = harness.state().response.metrics.detail.clone();
+    assert!(
+        !window_before.contains_rect(harness.get_by_label(&detail).rect()),
+        "the real wrapped footer should initially be clipped by the bounded fallback"
+    );
+    let mut detail_visible = false;
+    for _ in 0..64 {
+        {
+            let overview = harness.get_by_role_and_label(Role::Window, "Overview");
+            if overview
+                .rect()
+                .contains_rect(overview.get_by_label(&detail).rect())
+            {
+                detail_visible = true;
+                break;
+            }
+            let target = [
+                "2 nodes",
+                "Cluster capacity",
+                "Workload health",
+                "Needs attention",
+            ]
+            .into_iter()
+            .map(|label| overview.get_by_label(label))
+            .find(|node| overview.rect().intersects(node.rect()))
+            .expect("a visible outer-scroll descendant remains available");
+            let center = target.rect().center();
+            harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(center));
+            harness.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -100.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run_steps(2);
+    }
+    assert!(
+        detail_visible,
+        "the actual wrapped metrics footer should be reachable"
+    );
+    assert_eq!(
+        window_before,
+        harness
+            .get_by_role_and_label(Role::Window, "Overview")
+            .rect()
+    );
+}
+
+#[test]
 fn nodes_table_is_searchable_sortable_and_progress_always_has_numeric_text() {
     let mut harness = harness();
     harness
