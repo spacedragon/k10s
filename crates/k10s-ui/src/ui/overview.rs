@@ -42,8 +42,78 @@ pub(super) fn show(
         ui.separator();
     }
 
-    let content_top = ui.cursor().top();
-    let content_height = ui.available_height();
+    let content_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
+    let content_width = ui.available_width();
+    let footer_height = metrics_footer_height(ui, response);
+    let panel_chrome_height = attention_panel_chrome_height(ui);
+    let measurement_id = ui.make_persistent_id("k10s.overview.fixed-content-height");
+    let measured_fixed_height = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(measurement_id))
+        .unwrap_or({
+            // The 480x320 minimum has less than 300 points of content height.
+            // Larger windows may render once normally to seed the exact measurement.
+            if content_height >= 300.0 {
+                0.0
+            } else {
+                f32::INFINITY
+            }
+        });
+    // Account for the explicit gap plus egui's gap between the panel and footer.
+    let available_panel_height = content_height - measured_fixed_height - 16.0 - footer_height;
+
+    if available_panel_height >= panel_chrome_height + 48.0 {
+        let fixed_top = ui.cursor().top();
+        let refresh_requested = fixed_content(ui, response, connection);
+        let fixed_height = ui.cursor().top() - fixed_top;
+        let fixed_height = if measured_fixed_height.is_finite() {
+            fixed_height.max(measured_fixed_height)
+        } else {
+            fixed_height
+        };
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(measurement_id, fixed_height));
+        let available_panel_height = content_height - fixed_height - 16.0 - footer_height;
+        let inner_height = if available_panel_height >= panel_chrome_height + 96.0 {
+            available_panel_height - panel_chrome_height
+        } else {
+            (available_panel_height - panel_chrome_height).max(48.0)
+        };
+        attention_panel(ui, response, inner_height);
+        ui.add_space(8.0);
+        metrics_footer(ui, response);
+        refresh_requested
+    } else {
+        let mut refresh_requested = false;
+        egui::ScrollArea::vertical()
+            .id_salt("k10s.overview.compact.scroll")
+            .max_height(content_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(content_width - ui.style().spacing.scroll.allocated_width());
+                let fixed_top = ui.cursor().top();
+                refresh_requested = fixed_content(ui, response, connection);
+                let fixed_height = ui.cursor().top() - fixed_top;
+                let fixed_height = if measured_fixed_height.is_finite() {
+                    fixed_height.max(measured_fixed_height)
+                } else {
+                    fixed_height
+                };
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(measurement_id, fixed_height));
+                attention_panel(ui, response, 48.0);
+                ui.add_space(8.0);
+                metrics_footer(ui, response);
+            });
+        refresh_requested
+    }
+}
+
+fn fixed_content(
+    ui: &mut egui::Ui,
+    response: &InfrastructureResponse,
+    connection: ConnectionState,
+) -> bool {
     let mut refresh_requested = false;
     ui.horizontal(|ui| {
         let (visible, accessible) = if connection == ConnectionState::Connected {
@@ -73,12 +143,6 @@ pub(super) fn show(
         health_panel(ui, response);
     }
     ui.add_space(8.0);
-    let footer_height = metrics_footer_height(ui, response);
-    let fixed_height = ui.cursor().top() - content_top;
-    let panel_height = (content_height - fixed_height - 8.0 - footer_height).max(96.0);
-    attention_panel(ui, response, panel_height);
-    ui.add_space(8.0);
-    metrics_footer(ui, response);
     refresh_requested
 }
 
@@ -158,21 +222,29 @@ fn health_panel(ui: &mut egui::Ui, response: &InfrastructureResponse) {
     });
 }
 
-fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse, panel_height: f32) {
+fn attention_panel_chrome_height(ui: &egui::Ui) -> f32 {
+    let frame = panel();
+    let heading = egui::WidgetText::from(RichText::new("Needs attention").strong()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    frame.total_margin().sum().y
+        + heading.size().y.max(ui.spacing().interact_size.y)
+        + 4.0
+        + ui.style().spacing.scroll.allocated_width()
+}
+
+fn attention_panel(ui: &mut egui::Ui, response: &InfrastructureResponse, inner_scroll_height: f32) {
     let frame = panel();
     let frame_height = frame.total_margin().sum().y;
+    let panel_height = attention_panel_chrome_height(ui) + inner_scroll_height;
     frame.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.set_height(panel_height - frame_height);
-        let chrome_top = ui.cursor().top();
         ui.strong("Needs attention");
         ui.add_space(4.0);
-        let heading_height = ui.cursor().top() - chrome_top;
-        let inner_scroll_height = (panel_height
-            - frame_height
-            - heading_height
-            - ui.style().spacing.scroll.allocated_width())
-        .max(96.0);
         if response.attention.is_empty() {
             ui.label("No unhealthy or pending resources");
         } else {
