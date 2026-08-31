@@ -194,6 +194,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     scratch: &mut super::resource_window::ResourceUiState,
     window_id: WindowId,
+    focused: bool,
     state: &mut ServiceWindowState<I>,
     feed: &ResourceFeed,
     context_namespace: Option<&str>,
@@ -352,27 +353,36 @@ where
                 if ui.button("Clear selection").clicked() {
                     queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
-                super::detail::show(
-                    ui,
-                    window_id,
-                    detail,
-                    gone,
-                    true,
-                    state.prior_split_ratio.is_some(),
-                    yaml,
-                    streams,
-                    dialogs,
-                    feed,
-                    Some(&state.port_drafts),
-                    effective_freshness.is_none_or(super::WindowFreshness::mutations_allowed),
-                    resource_actions,
-                    queued,
-                );
+                if let Some(presentation) =
+                    super::detail::presentation::DetailPresentationInput::from_feed(
+                        detail,
+                        feed,
+                        gone,
+                        effective_freshness,
+                        effective_freshness.is_some_and(super::WindowFreshness::mutations_allowed),
+                    )
+                {
+                    super::detail::show(
+                        ui,
+                        window_id,
+                        detail,
+                        &presentation,
+                        focused,
+                        true,
+                        state.prior_split_ratio.is_some(),
+                        yaml,
+                        streams,
+                        dialogs,
+                        Some(&state.port_drafts),
+                        resource_actions,
+                        queued,
+                    );
+                }
             }
         },
     );
 
-    if detail_shown && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+    if detail_shown && focused && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         if state.prior_split_ratio.is_some() {
             queued.push(WorkspaceCommand::RestoreDetailPane(window_id));
         } else {

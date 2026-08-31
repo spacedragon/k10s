@@ -39,7 +39,7 @@ fn service_identity() -> ResourceIdentity {
 #[test]
 fn protocol_minor_bumps_without_changing_major() {
     assert_eq!(k10s_protocol::PROTOCOL_MAJOR, 1);
-    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 2);
+    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 3);
 }
 
 #[test]
@@ -288,6 +288,7 @@ fn legacy_detail_responses_without_projections_still_decode() {
     });
     let decoded: ResourceDetailResponse = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded.projection, None);
+    assert!(!decoded.capabilities.can_restart);
 }
 
 #[test]

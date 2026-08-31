@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
     ClientFrame, Context, ContextAvailability, ErrorCode, InfrastructureRequest, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
-    ResourceTypesRequest, ServerFrame, StreamTarget,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceMetricsResponse,
+    ResourceTypeEntry, ResourceTypesRequest, ServerFrame, StreamTarget,
 };
 
 use crate::client::{
@@ -21,8 +21,8 @@ use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
-    NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
-    SafeUiError, WindowFreshness,
+    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
+    ResourceAction, ResourceFeed, SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
     NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
@@ -119,6 +119,7 @@ pub struct K10sApp {
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
+    log_session_sources: BTreeMap<WindowId, LogStreamSource>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
     /// Canonical resource watches retained by visible workspace demand;
     /// rebuilt automatically on reconnect by shared client recovery.
@@ -163,11 +164,22 @@ pub struct K10sApp {
     /// Backend-resolved details for every identity a window pinned, keyed by
     /// stable identity; rebuilt from `operation.status`-style queries.
     details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
+    /// Revisioned exact-identity lifecycle retained independently for every
+    /// authoritative resource source. Cross-source aggregation happens only
+    /// when building the UI feed, never by last-writer arrival order.
+    detail_lifecycles:
+        std::collections::HashMap<k10s_protocol::SubscriptionId, DetailLifecycleSource>,
     primary_details: BTreeMap<ResourceIdentity, PrimaryDetailState>,
     /// In-flight detail requests per identity.
     detail_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
     relations: BTreeMap<ResourceIdentity, RelationState>,
     relation_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
+    /// Last fresh metrics response for each currently pinned exact Pod.
+    metrics: BTreeMap<ResourceIdentity, ResourceMetricsResponse>,
+    /// Last completed or failed metrics check, used for TTL refresh/backoff.
+    metric_checked_at: BTreeMap<ResourceIdentity, u64>,
+    /// One in-flight metrics request per exact Pod identity across all windows.
+    metric_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
     resource_generation: u64,
     recovering: bool,
     view: AppView,
@@ -184,6 +196,15 @@ struct PendingStreamTicket {
     request: PendingRequest,
     route: StreamRoute,
     window: WindowId,
+    logs_source: Option<LogStreamSource>,
+}
+
+/// Complete source mode owned by one logs socket or in-flight ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogStreamSource {
+    target: StreamTarget,
+    since_seconds: Option<i64>,
+    previous: bool,
 }
 
 /// A window's in-flight workload mutation (scale or delete).
@@ -238,6 +259,20 @@ struct SubscriptionKey {
 struct RetainedSubscription {
     live: LiveSubscription,
     windows: std::collections::BTreeSet<WindowId>,
+}
+
+const DETAIL_LIFECYCLE_TOMBSTONE_CAP: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetailLifecycleEvent {
+    revision: k10s_protocol::BackendRevision,
+    lifecycle: DetailLifecycle,
+}
+
+#[derive(Debug, Default)]
+struct DetailLifecycleSource {
+    snapshot_revision: Option<k10s_protocol::BackendRevision>,
+    entries: BTreeMap<ResourceIdentity, DetailLifecycleEvent>,
 }
 
 /// Semantic Service detail projection for the web host.
@@ -311,6 +346,7 @@ impl K10sApp {
             infrastructure_subscription: None,
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
+            log_session_sources: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
@@ -334,10 +370,14 @@ impl K10sApp {
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
+            detail_lifecycles: std::collections::HashMap::new(),
             primary_details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
             relations: BTreeMap::new(),
             relation_requests: BTreeMap::new(),
+            metrics: BTreeMap::new(),
+            metric_checked_at: BTreeMap::new(),
+            metric_requests: BTreeMap::new(),
             resource_generation: 0,
             recovering: false,
             view: AppView::Connecting,
@@ -1050,6 +1090,18 @@ impl K10sApp {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
                 let resource_delta = resource_delta_projection(&frame);
+                let completed_resource_snapshot = (frame.kind
+                    == k10s_protocol::ServerKind::SnapshotEnd)
+                    .then(|| frame.subscription_id.clone())
+                    .flatten()
+                    .map(|subscription| {
+                        let previous = self
+                            .client
+                            .resource_list(&subscription)
+                            .map(|state| state.rows().map(|row| row.identity.clone()).collect())
+                            .unwrap_or_default();
+                        (subscription, previous)
+                    });
                 let replacement_snapshot_started = frame.kind
                     == k10s_protocol::ServerKind::SnapshotBegin
                     && frame.subscription_id.as_ref().is_some_and(|subscription| {
@@ -1151,6 +1203,7 @@ impl K10sApp {
                                 .namespace_subscription
                                 .take()
                                 .expect("matched namespace subscription exists");
+                            self.retire_detail_lifecycle_source(subscription.id());
                             self.client.retire_rejected_subscription(&subscription);
                             self.namespace_catalog = NamespaceCatalogState::Unavailable(
                                 SafeUiError::new(server_error.safe_message.clone()),
@@ -1179,6 +1232,7 @@ impl K10sApp {
                                 .resource_subscriptions
                                 .remove(&key)
                                 .expect("matched subscription entry");
+                            self.retire_detail_lifecycle_source(entry.live.id());
                             self.rejected_subscription_keys.insert(key.clone());
                             let retained_rows = self
                                 .client
@@ -1323,6 +1377,31 @@ impl K10sApp {
                             }
                         }
                         ClientError::Server(ref server_error)
+                            if server_error.retryability
+                                != k10s_protocol::Retryability::AfterReconnect
+                                && stream_request_id.as_ref().is_some_and(|id| {
+                                    self.metric_requests
+                                        .values()
+                                        .any(|pending| pending.request.id() == id)
+                                }) =>
+                        {
+                            if let Some(id) = stream_request_id.as_ref()
+                                && let Some(identity) = self
+                                    .metric_requests
+                                    .iter()
+                                    .find(|(_, pending)| pending.request.id() == id)
+                                    .map(|(identity, _)| identity.clone())
+                            {
+                                if let Some(pending) = self.metric_requests.remove(&identity) {
+                                    let _ = self.client.take_failure(pending.request);
+                                }
+                                self.metrics.remove(&identity);
+                                if self.is_resource_pinned(&identity) {
+                                    self.metric_checked_at.insert(identity, now_ms);
+                                }
+                            }
+                        }
+                        ClientError::Server(ref server_error)
                             if server_error.code
                                 == k10s_protocol::ErrorCode::UnsupportedMessage
                                 && server_error.scope == k10s_protocol::ErrorScope::Request
@@ -1424,7 +1503,24 @@ impl K10sApp {
                     }
                 }
                 if applied
-                    && let Some((subscription, identity, revision)) = resource_delta
+                    && let Some((subscription, previous)) = completed_resource_snapshot
+                    && let Some((revision, current)) =
+                        self.client.resource_list(&subscription).and_then(|state| {
+                            Some((
+                                state.revision()?,
+                                state.rows().map(|row| row.identity.clone()).collect(),
+                            ))
+                        })
+                {
+                    self.accept_detail_lifecycle_snapshot(
+                        subscription,
+                        revision,
+                        previous,
+                        current,
+                    );
+                }
+                if applied
+                    && let Some((subscription, identity, revision, lifecycle)) = resource_delta
                     && self
                         .client
                         .resource_list(&subscription)
@@ -1434,6 +1530,7 @@ impl K10sApp {
                     self.shell
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
+                    self.record_detail_lifecycle(subscription, identity, revision, lifecycle);
                 }
                 if applied
                     && let Some(subscription) = stream_subscription_id.as_ref()
@@ -1850,10 +1947,14 @@ impl K10sApp {
 
     fn enter_resource_recovery(&mut self) {
         self.details.clear();
+        self.detail_lifecycles.clear();
         self.primary_details.clear();
         self.detail_requests.clear();
         self.relations.clear();
         self.relation_requests.clear();
+        self.metrics.clear();
+        self.metric_checked_at.clear();
+        self.metric_requests.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
         if !matches!(self.namespace_catalog, NamespaceCatalogState::NotDemanded) {
             self.namespace_catalog = NamespaceCatalogState::Loading;
@@ -1921,35 +2022,147 @@ impl K10sApp {
                 .unwrap_or(NamespaceCatalogState::Loading),
             (state, _) => state.clone(),
         };
-        ResourceFeed {
-            window_freshness: window_lists
-                .iter()
-                .map(|(window, rows)| {
-                    let state = if rows.is_empty() {
-                        WindowFreshness::ReadyEmpty
-                    } else {
-                        WindowFreshness::Live {
-                            last_sync_age: "just now".into(),
-                        }
-                    };
-                    (*window, state)
+        let window_freshness: std::collections::HashMap<_, _> = window_lists
+            .iter()
+            .map(|(window, rows)| {
+                let state = if rows.is_empty() {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    WindowFreshness::Live {
+                        last_sync_age: "just now".into(),
+                    }
+                };
+                (*window, state)
+            })
+            .chain(window_services.iter().map(|(window, rows)| {
+                let state = if rows.is_empty() {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    WindowFreshness::Live {
+                        last_sync_age: "just now".into(),
+                    }
+                };
+                (*window, state)
+            }))
+            .chain(
+                self.window_freshness_overrides
+                    .iter()
+                    .map(|(window, state)| (*window, state.clone())),
+            )
+            .collect();
+        let aggregate_freshness = |sources: Vec<WindowFreshness>| {
+            if sources.len() == 1 {
+                sources.into_iter().next().unwrap()
+            } else if !sources.is_empty() && sources.iter().all(WindowFreshness::mutations_allowed)
+            {
+                WindowFreshness::Live {
+                    last_sync_age: "all sources live".into(),
+                }
+            } else {
+                WindowFreshness::Failed {
+                    message: "one or more authoritative sources are not live".into(),
+                }
+            }
+        };
+        let mut lifecycle_candidates: BTreeMap<
+            ResourceIdentity,
+            Vec<(
+                k10s_protocol::BackendRevision,
+                DetailLifecycle,
+                WindowFreshness,
+            )>,
+        > = BTreeMap::new();
+        for subscription in self.resource_subscriptions.values() {
+            let source_freshness = aggregate_freshness(
+                subscription
+                    .windows
+                    .iter()
+                    .filter_map(|window| window_freshness.get(window).cloned())
+                    .collect(),
+            );
+            let source_state = self.detail_lifecycles.get(subscription.live.id());
+            if let Some(state) = self.client.resource_list(subscription.live.id()) {
+                for row in state.rows() {
+                    let revision = source_state
+                        .and_then(|source| source.snapshot_revision)
+                        .map_or(row.revision, |snapshot| snapshot.max(row.revision));
+                    lifecycle_candidates
+                        .entry(row.identity.clone())
+                        .or_default()
+                        .push((revision, DetailLifecycle::Present, source_freshness.clone()));
+                }
+            }
+            if let Some(source) = source_state {
+                for (identity, event) in &source.entries {
+                    lifecycle_candidates
+                        .entry(identity.clone())
+                        .or_default()
+                        .push((event.revision, event.lifecycle, source_freshness.clone()));
+                }
+            }
+        }
+        for (window, key) in &self.window_subscriptions {
+            if self
+                .resource_subscriptions
+                .get(key)
+                .is_some_and(|subscription| {
+                    self.client.resource_list(subscription.live.id()).is_some()
                 })
-                .chain(window_services.iter().map(|(window, rows)| {
-                    let state = if rows.is_empty() {
-                        WindowFreshness::ReadyEmpty
-                    } else {
-                        WindowFreshness::Live {
-                            last_sync_age: "just now".into(),
-                        }
-                    };
-                    (*window, state)
-                }))
-                .chain(
-                    self.window_freshness_overrides
-                        .iter()
-                        .map(|(window, state)| (*window, state.clone())),
+            {
+                continue;
+            }
+            let Some(freshness) = window_freshness.get(window) else {
+                continue;
+            };
+            let Some(rows) = self.window_retained_rows.get(window) else {
+                continue;
+            };
+            for row in rows {
+                lifecycle_candidates
+                    .entry(row.identity.clone())
+                    .or_default()
+                    .push((row.revision, DetailLifecycle::Present, freshness.clone()));
+            }
+        }
+        let detail_authority = lifecycle_candidates
+            .into_iter()
+            .map(|(identity, candidates)| {
+                let newest = candidates
+                    .iter()
+                    .map(|(revision, _, _)| *revision)
+                    .max()
+                    .expect("candidate groups are never empty");
+                let lifecycle = if candidates.iter().any(|(revision, lifecycle, _)| {
+                    *revision == newest && *lifecycle == DetailLifecycle::Gone
+                }) {
+                    DetailLifecycle::Gone
+                } else {
+                    DetailLifecycle::Present
+                };
+                let freshness = if lifecycle == DetailLifecycle::Gone {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    aggregate_freshness(
+                        candidates
+                            .into_iter()
+                            .filter_map(|(_, lifecycle, freshness)| {
+                                (lifecycle == DetailLifecycle::Present).then_some(freshness)
+                            })
+                            .collect(),
+                    )
+                };
+                (
+                    identity,
+                    DetailAuthority {
+                        freshness,
+                        lifecycle,
+                    },
                 )
-                .collect(),
+            })
+            .collect();
+        ResourceFeed {
+            window_freshness,
+            detail_authority,
             namespace_catalog,
             lists,
             window_lists,
@@ -1959,6 +2172,7 @@ impl K10sApp {
             details: self.details.clone().into_iter().collect(),
             primary_details: self.primary_details.clone().into_iter().collect(),
             relations: self.relations.clone().into_iter().collect(),
+            metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
             port_forward_sessions: self
                 .client
@@ -2120,13 +2334,20 @@ impl K10sApp {
             && let Some((_, subscription)) = self.namespace_subscription.take()
         {
             self.client.unsubscribe(&subscription)?;
+            self.retire_detail_lifecycle_source(subscription.id());
             self.namespace_rejected_context = None;
         }
         for key in removed {
-            if let Some(entry) = self.resource_subscriptions.get(&key) {
+            let source = if let Some(entry) = self.resource_subscriptions.get(&key) {
                 self.client.unsubscribe(&entry.live)?;
-            }
+                Some(entry.live.id().clone())
+            } else {
+                None
+            };
             self.resource_subscriptions.remove(&key);
+            if let Some(source) = source {
+                self.retire_detail_lifecycle_source(&source);
+            }
         }
         if self.client.phase() != ClientPhase::Ready {
             self.window_subscriptions = window_subscriptions;
@@ -2247,14 +2468,33 @@ impl K10sApp {
         }
     }
 
+    /// Require current exact-identity authority at the final application
+    /// dispatch boundary. Rendering may have happened several frames before
+    /// an action is drained, so the dialog's earlier enabled state is never
+    /// sufficient authority on its own.
+    fn mutation_authority_allows(&self, target: &ResourceIdentity) -> bool {
+        let primary_loaded = match self.primary_details.get(target) {
+            Some(PrimaryDetailState::Loaded(_)) => true,
+            Some(PrimaryDetailState::Loading | PrimaryDetailState::Failed(_)) => false,
+            None => self.details.contains_key(target),
+        };
+        primary_loaded
+            && self
+                .build_resource_feed()
+                .detail_authority
+                .get(target)
+                .is_some_and(DetailAuthority::mutations_allowed)
+    }
+
     /// Drain rendering-time dialog actions into workload mutation commands.
     fn process_dialog_actions(&mut self) -> Result<(), ClientError> {
         for (window, action) in self.shell.drain_dialog_actions() {
-            if self
-                .window_freshness_overrides
-                .get(&window)
-                .is_some_and(|freshness| !freshness.mutations_allowed())
-            {
+            let target = match &action {
+                DialogAction::RequestDeletePreflight { target, .. }
+                | DialogAction::SubmitScale { target, .. }
+                | DialogAction::SubmitDelete { target, .. } => target,
+            };
+            if !self.mutation_authority_allows(target) {
                 if let Some(mut dialog) = self.shell.dialogs_mut().active_mut(window) {
                     dialog.operation_failed("window is not live; retry the list before mutating");
                 }
@@ -2317,6 +2557,7 @@ impl K10sApp {
             self.pending_mutations
                 .insert(request.id().clone(), PendingMutation { request, window });
         }
+        self.prune_detail_lifecycles();
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
     }
@@ -2405,6 +2646,30 @@ impl K10sApp {
 
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
+            ResourceAction::Restart { window, target } => {
+                if !self.mutation_authority_allows(&target) {
+                    return;
+                }
+                let idempotency_key = format!(
+                    "restart:{}:{}:{}",
+                    target.uid,
+                    window.0,
+                    self.clock_started.elapsed().as_nanos()
+                );
+                match self.client.begin_command(Command::Restart {
+                    target,
+                    idempotency_key,
+                }) {
+                    Ok(request) => {
+                        self.pending_mutations
+                            .insert(request.id().clone(), PendingMutation { request, window });
+                        if let Err(error) = self.flush_outbound() {
+                            self.terminal_failure(format!("{error:?}"));
+                        }
+                    }
+                    Err(error) => self.terminal_failure(error.to_string()),
+                }
+            }
             ResourceAction::RetryPrimary(identity) => {
                 if !self.cancel_detail_request(&identity) {
                     return;
@@ -2473,6 +2738,7 @@ impl K10sApp {
                 }
                 if let Some(subscription) = self.resource_subscriptions.remove(&key) {
                     let _ = self.client.unsubscribe(&subscription.live);
+                    self.retire_detail_lifecycle_source(subscription.live.id());
                 }
                 self.reconcile_selected_resource_streams();
             }
@@ -2496,6 +2762,172 @@ impl K10sApp {
             };
             identity == Some(wanted)
         })
+    }
+
+    fn tracked_detail_identities(&self) -> std::collections::BTreeSet<ResourceIdentity> {
+        let mut tracked = std::collections::BTreeSet::new();
+        for window in self.shell.workspace().windows() {
+            let identity = match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::Services(service) => service
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+            };
+            if let Some(identity) = identity {
+                tracked.insert(identity.clone());
+            }
+        }
+        tracked.extend(self.shell.dialogs().targets().cloned());
+        tracked
+    }
+
+    fn merge_detail_lifecycle_event(
+        entries: &mut BTreeMap<ResourceIdentity, DetailLifecycleEvent>,
+        identity: ResourceIdentity,
+        incoming: DetailLifecycleEvent,
+    ) {
+        let replace = entries.get(&identity).is_none_or(|current| {
+            incoming.revision > current.revision
+                || (incoming.revision == current.revision
+                    && incoming.lifecycle == DetailLifecycle::Gone
+                    && current.lifecycle == DetailLifecycle::Present)
+        });
+        if replace {
+            entries.insert(identity, incoming);
+        }
+    }
+
+    fn record_detail_lifecycle(
+        &mut self,
+        source: k10s_protocol::SubscriptionId,
+        identity: ResourceIdentity,
+        revision: k10s_protocol::BackendRevision,
+        lifecycle: DetailLifecycle,
+    ) {
+        let tracked = self.tracked_detail_identities().contains(&identity);
+        let source_state = self.detail_lifecycles.entry(source).or_default();
+        let had_entry = source_state.entries.contains_key(&identity);
+        if lifecycle == DetailLifecycle::Gone || tracked || had_entry {
+            Self::merge_detail_lifecycle_event(
+                &mut source_state.entries,
+                identity.clone(),
+                DetailLifecycleEvent {
+                    revision,
+                    lifecycle,
+                },
+            );
+        }
+        if lifecycle == DetailLifecycle::Present
+            && !tracked
+            && source_state.entries.get(&identity).is_some_and(|entry| {
+                entry.lifecycle == DetailLifecycle::Present && entry.revision <= revision
+            })
+        {
+            source_state.entries.remove(&identity);
+        }
+        self.prune_detail_lifecycles();
+    }
+
+    fn accept_detail_lifecycle_snapshot(
+        &mut self,
+        source: k10s_protocol::SubscriptionId,
+        revision: k10s_protocol::BackendRevision,
+        previous: Vec<ResourceIdentity>,
+        current: Vec<ResourceIdentity>,
+    ) {
+        let tracked = self.tracked_detail_identities();
+        let current: std::collections::BTreeSet<_> = current.into_iter().collect();
+        let source_state = self.detail_lifecycles.entry(source).or_default();
+        source_state.snapshot_revision = Some(revision);
+
+        let known: Vec<_> = source_state.entries.keys().cloned().collect();
+        for identity in known {
+            let lifecycle = if current.contains(&identity) {
+                DetailLifecycle::Present
+            } else {
+                DetailLifecycle::Gone
+            };
+            Self::merge_detail_lifecycle_event(
+                &mut source_state.entries,
+                identity.clone(),
+                DetailLifecycleEvent {
+                    revision,
+                    lifecycle,
+                },
+            );
+            if lifecycle == DetailLifecycle::Present && !tracked.contains(&identity) {
+                source_state.entries.remove(&identity);
+            }
+        }
+        for identity in previous {
+            if !current.contains(&identity) {
+                Self::merge_detail_lifecycle_event(
+                    &mut source_state.entries,
+                    identity,
+                    DetailLifecycleEvent {
+                        revision,
+                        lifecycle: DetailLifecycle::Gone,
+                    },
+                );
+            }
+        }
+        for identity in current {
+            if tracked.contains(&identity) {
+                Self::merge_detail_lifecycle_event(
+                    &mut source_state.entries,
+                    identity,
+                    DetailLifecycleEvent {
+                        revision,
+                        lifecycle: DetailLifecycle::Present,
+                    },
+                );
+            }
+        }
+        self.prune_detail_lifecycles();
+    }
+
+    fn retire_detail_lifecycle_source(&mut self, source: &k10s_protocol::SubscriptionId) {
+        self.detail_lifecycles.remove(source);
+    }
+
+    fn prune_detail_lifecycles(&mut self) {
+        let tracked = self.tracked_detail_identities();
+        let mut untracked: Vec<_> = self
+            .detail_lifecycles
+            .iter()
+            .flat_map(|(source, state)| {
+                state
+                    .entries
+                    .iter()
+                    .filter(|(identity, _)| !tracked.contains(*identity))
+                    .map(|(identity, event)| {
+                        (
+                            event.revision,
+                            source.as_str().to_owned(),
+                            source.clone(),
+                            identity.clone(),
+                        )
+                    })
+            })
+            .collect();
+        untracked.sort_by(|left, right| {
+            (&left.0, &left.1, &left.3).cmp(&(&right.0, &right.1, &right.3))
+        });
+        let remove = untracked
+            .len()
+            .saturating_sub(DETAIL_LIFECYCLE_TOMBSTONE_CAP);
+        for (_, _, source, identity) in untracked.into_iter().take(remove) {
+            if let Some(source) = self.detail_lifecycles.get_mut(&source) {
+                source.entries.remove(&identity);
+            }
+        }
     }
 
     /// Cancel one correlated primary request without orphaning it when the
@@ -2530,6 +2962,24 @@ impl K10sApp {
             return false;
         }
         self.relation_requests.remove(identity);
+        let _ = self.client.take(request.clone());
+        let _ = self.client.take_failure(request);
+        true
+    }
+
+    /// Metrics equivalent of [`Self::cancel_detail_request`].
+    fn cancel_metric_request(&mut self, identity: &ResourceIdentity) -> bool {
+        let Some(request) = self
+            .metric_requests
+            .get(identity)
+            .map(|pending| pending.request.clone())
+        else {
+            return true;
+        };
+        if self.client.cancel(&request).is_err() {
+            return false;
+        }
+        self.metric_requests.remove(identity);
         let _ = self.client.take(request.clone());
         let _ = self.client.take_failure(request);
         true
@@ -2660,30 +3110,154 @@ impl K10sApp {
             }
         }
 
+        self.refresh_metrics(now_ms, &pinned_set);
         self.refresh_relations(now_ms);
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
             .ok();
     }
 
+    fn refresh_metrics(
+        &mut self,
+        now_ms: u64,
+        pinned: &std::collections::BTreeSet<ResourceIdentity>,
+    ) {
+        const METRICS_TTL_MS: u64 = 30_000;
+
+        let desired: std::collections::BTreeSet<_> = pinned
+            .iter()
+            .filter(|identity| {
+                identity.gvk.group.is_empty()
+                    && identity.gvk.version == "v1"
+                    && identity.gvk.kind == "Pod"
+                    && self.client.local_ui().selected_context.as_deref()
+                        == Some(identity.context.as_str())
+                    && !self.resource_lifecycle_is_gone(identity)
+            })
+            .cloned()
+            .collect();
+
+        for identity in self
+            .metric_requests
+            .keys()
+            .filter(|identity| !desired.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.cancel_metric_request(&identity);
+        }
+        self.metrics
+            .retain(|identity, _| desired.contains(identity));
+        self.metric_checked_at
+            .retain(|identity, _| desired.contains(identity));
+
+        for identity in &desired {
+            if self.metric_requests.contains_key(identity) {
+                continue;
+            }
+            let due = self
+                .metric_checked_at
+                .get(identity)
+                .is_none_or(|checked_at| now_ms.saturating_sub(*checked_at) >= METRICS_TTL_MS);
+            if !due {
+                continue;
+            }
+            // Metrics are useful only while fresh. A TTL expiry or failed
+            // replacement therefore exposes absence instead of stale values.
+            self.metrics.remove(identity);
+            match self.client.begin(Query::ResourceMetrics(identity.clone())) {
+                Ok(request) => {
+                    self.metric_requests.insert(
+                        identity.clone(),
+                        PendingResourceRequest {
+                            request,
+                            context: identity.context.clone(),
+                            generation: self.resource_generation,
+                        },
+                    );
+                }
+                Err(_) => {
+                    self.metric_checked_at.insert(identity.clone(), now_ms);
+                }
+            }
+        }
+
+        let completed: Vec<_> = self
+            .metric_requests
+            .iter()
+            .filter(|(_, pending)| !self.client.is_pending(&pending.request))
+            .map(|(identity, _)| identity.clone())
+            .collect();
+        for identity in completed {
+            let Some(pending) = self.metric_requests.remove(&identity) else {
+                continue;
+            };
+            if pending.generation != self.resource_generation
+                || self.client.local_ui().selected_context.as_deref()
+                    != Some(pending.context.as_str())
+                || !desired.contains(&identity)
+            {
+                let _ = self.client.take(pending.request.clone());
+                let _ = self.client.take_failure(pending.request);
+                self.metrics.remove(&identity);
+                self.metric_checked_at.remove(&identity);
+                continue;
+            }
+            if let Some(QueryResult::ResourceMetrics(response)) =
+                self.client.take(pending.request.clone())
+            {
+                let response = *response;
+                if response.identity == identity {
+                    self.metrics.insert(identity.clone(), response);
+                    self.metric_checked_at.insert(identity, now_ms);
+                }
+            } else {
+                let _ = self.client.take_failure(pending.request);
+                self.metrics.remove(&identity);
+                self.metric_checked_at.insert(identity, now_ms);
+            }
+        }
+    }
+
+    fn resource_lifecycle_is_gone(&self, identity: &ResourceIdentity) -> bool {
+        let newest = self
+            .detail_lifecycles
+            .values()
+            .filter_map(|source| source.entries.get(identity))
+            .map(|event| event.revision)
+            .max();
+        newest.is_some_and(|newest| {
+            self.detail_lifecycles.values().any(|source| {
+                source.entries.get(identity).is_some_and(|event| {
+                    event.revision == newest && event.lifecycle == DetailLifecycle::Gone
+                })
+            })
+        })
+    }
+
     fn refresh_relations(&mut self, now_ms: u64) {
         const RELATIONS_TTL_MS: u64 = 30_000;
         let current_context = self.client.local_ui().selected_context.as_deref();
-        let desired: Vec<ResourceIdentity> = self
+        let wants_relations = |detail: &crate::workspace::DetailState<ResourceIdentity>| {
+            detail.active_tab == crate::workspace::DetailTab::Pods
+                || (detail.active_tab == crate::workspace::DetailTab::Overview
+                    && detail.identity.gvk.group == "apps"
+                    && detail.identity.gvk.version == "v1"
+                    && detail.identity.gvk.kind == "Deployment")
+        };
+        let desired: std::collections::BTreeSet<ResourceIdentity> = self
             .shell
             .workspace()
             .windows()
             .iter()
             .filter_map(|window| match &window.content {
-                crate::workspace::WindowContent::Detail(detail)
-                    if detail.active_tab == crate::workspace::DetailTab::Pods =>
-                {
+                crate::workspace::WindowContent::Detail(detail) if wants_relations(detail) => {
                     detail.identity.as_row_identity().cloned()
                 }
                 crate::workspace::WindowContent::Resource(resource) => resource
                     .detail
                     .as_ref()
-                    .filter(|detail| detail.active_tab == crate::workspace::DetailTab::Pods)
+                    .filter(|detail| wants_relations(detail))
                     .and_then(|detail| detail.identity.as_row_identity())
                     .cloned(),
                 _ => None,
@@ -2855,6 +3429,10 @@ impl K10sApp {
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
             })?;
         let identity = k10s_ui_row_identity(&detail.identity)?;
+        let runtime = self
+            .details
+            .get(identity)
+            .and_then(|view| crate::ui::PodRuntimeProjection::from_view(identity, view))?;
         Some(StreamTarget {
             context: identity.context.clone(),
             namespace: identity
@@ -2863,17 +3441,13 @@ impl K10sApp {
                 .unwrap_or_else(|| "default".to_owned()),
             pod: identity.name.clone(),
             uid: identity.uid.clone(),
-            container: self
-                .details
-                .get(identity)
-                .and_then(|view| crate::ui::pod_container(&view.manifest))
-                .unwrap_or_else(|| "app".to_owned()),
+            container: runtime.default_container().to_owned(),
         })
     }
 
     /// Resolve the authoritative target for a live route. Logs retain their
     /// per-window container choice while the workspace remains on the same
-    /// pod; exec continues to use the manifest's default container.
+    /// pod; exec continues to use the typed projection's default container.
     fn current_stream_target(&self, window: WindowId, route: StreamRoute) -> Option<StreamTarget> {
         let workspace_target = self.workspace_stream_target(window)?;
         if route == StreamRoute::Logs
@@ -2927,6 +3501,7 @@ impl K10sApp {
             WorkspaceEvent::ContextSwitched { .. } => self.retire_resource_context(),
             _ => {}
         }
+        self.prune_detail_lifecycles();
     }
 
     fn retire_resource_context(&mut self) {
@@ -2936,9 +3511,15 @@ impl K10sApp {
         for identity in self.relation_requests.keys().cloned().collect::<Vec<_>>() {
             self.cancel_relation_request(&identity);
         }
+        for identity in self.metric_requests.keys().cloned().collect::<Vec<_>>() {
+            self.cancel_metric_request(&identity);
+        }
         self.details.clear();
+        self.detail_lifecycles.clear();
         self.primary_details.clear();
         self.relations.clear();
+        self.metrics.clear();
+        self.metric_checked_at.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
     }
 
@@ -2954,6 +3535,7 @@ impl K10sApp {
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
             session.disconnect();
         }
+        self.log_session_sources.clear();
         for window in exec_windows {
             for event in self
                 .shell
@@ -2964,6 +3546,113 @@ impl K10sApp {
         }
         self.pending_stream_tickets.clear();
         self.shell.stream_stores_mut().connection_lost();
+    }
+
+    fn desired_log_source(&self, window: WindowId) -> Option<LogStreamSource> {
+        let target = self.current_stream_target(window, StreamRoute::Logs)?;
+        let view = self.shell.stream_stores().logs.get(window)?;
+        Some(LogStreamSource {
+            target,
+            since_seconds: view.since_seconds(),
+            previous: view.previous(),
+        })
+    }
+
+    /// Retire source modes that no longer match their owning log view and
+    /// replace them with one ticket for the full current mode.
+    fn reconcile_log_sources(
+        &mut self,
+        mut requested: BTreeMap<WindowId, LogStreamSource>,
+    ) -> Result<(), ClientError> {
+        let stale_pending = self
+            .pending_stream_tickets
+            .iter()
+            .filter(|(_, pending)| pending.route == StreamRoute::Logs)
+            .filter(|(_, pending)| {
+                pending.logs_source.as_ref() != self.desired_log_source(pending.window).as_ref()
+            })
+            .map(|(id, pending)| (id.clone(), pending.window))
+            .collect::<Vec<_>>();
+        let mut restart = std::collections::BTreeSet::new();
+        for (id, window) in stale_pending {
+            let Some(request) = self
+                .pending_stream_tickets
+                .get(&id)
+                .map(|pending| pending.request.clone())
+            else {
+                continue;
+            };
+            self.client.cancel(&request)?;
+            self.pending_stream_tickets.remove(&id);
+            let _ = self.client.take(request.clone());
+            let _ = self.client.take_failure(request);
+            restart.insert(window);
+        }
+
+        let stale_sessions = self
+            .stream_sessions
+            .iter()
+            .filter(|((_, route), _)| *route == StreamRoute::Logs)
+            .filter_map(|((window, _), session)| {
+                let desired = self.desired_log_source(*window);
+                let stale = self.log_session_sources.get(window).map_or_else(
+                    || desired.as_ref().map(|source| &source.target) != Some(session.target()),
+                    |current| desired.as_ref() != Some(current),
+                );
+                stale.then_some(*window)
+            })
+            .collect::<Vec<_>>();
+        for window in stale_sessions {
+            if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Logs)) {
+                session.disconnect();
+            }
+            self.log_session_sources.remove(&window);
+            restart.insert(window);
+        }
+
+        for window in restart {
+            if let Some(source) = self.desired_log_source(window) {
+                requested.entry(window).or_insert(source);
+            }
+        }
+        for (window, source) in requested {
+            if self.desired_log_source(window).as_ref() != Some(&source) {
+                continue;
+            }
+            let already_pending = self.pending_stream_tickets.values().any(|pending| {
+                pending.window == window && pending.logs_source.as_ref() == Some(&source)
+            });
+            let already_live = self
+                .log_session_sources
+                .get(&window)
+                .is_some_and(|current| current == &source)
+                && self
+                    .stream_sessions
+                    .contains_key(&(window, StreamRoute::Logs));
+            if already_pending || already_live {
+                continue;
+            }
+            let request = self.client.begin(Query::StreamTicket {
+                target: source.target.clone(),
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+                since_seconds: source.since_seconds,
+                previous: source.previous,
+            })?;
+            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
+                view.connect();
+            }
+            self.pending_stream_tickets.insert(
+                request.id().clone(),
+                PendingStreamTicket {
+                    request,
+                    route: StreamRoute::Logs,
+                    window,
+                    logs_source: Some(source),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Reconcile live sessions against the authoritative workspace state:
@@ -3014,6 +3703,9 @@ impl K10sApp {
             if let Some(mut session) = self.stream_sessions.remove(&(window, route)) {
                 session.disconnect();
             }
+            if route == StreamRoute::Logs {
+                self.log_session_sources.remove(&window);
+            }
             let stores = self.shell.stream_stores_mut();
             match route {
                 StreamRoute::Logs => {
@@ -3043,6 +3735,7 @@ impl K10sApp {
     /// views and explicit shell connects, plus stdin/resize forwarding into
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
+        let mut requested_logs = BTreeMap::new();
         for (window, action) in self.shell.drain_log_actions() {
             let crate::ui::tools::LogsAction::OpenLogs {
                 target,
@@ -3050,30 +3743,19 @@ impl K10sApp {
                 previous,
                 ..
             } = action;
-            let request = self.client.begin(Query::StreamTicket {
-                target,
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
-                since_seconds,
-                previous,
-            })?;
-            // The tool moves to Connecting immediately; the Ready signal
-            // completes the attach.
-            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
-                view.connect();
-            }
-            self.pending_stream_tickets.insert(
-                request.id().clone(),
-                PendingStreamTicket {
-                    request,
-                    route: StreamRoute::Logs,
-                    window,
+            requested_logs.insert(
+                window,
+                LogStreamSource {
+                    target,
+                    since_seconds,
+                    previous,
                 },
             );
         }
+        self.reconcile_log_sources(requested_logs)?;
         for (window, target) in self.shell.drain_shell_connects() {
             let request = self.client.begin(Query::StreamTicket {
-                target: target.clone(),
+                target,
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
                 since_seconds: None,
@@ -3089,6 +3771,7 @@ impl K10sApp {
                     request,
                     route: StreamRoute::Exec,
                     window,
+                    logs_source: None,
                 },
             );
         }
@@ -3125,25 +3808,42 @@ impl K10sApp {
                 request,
                 route,
                 window,
+                logs_source,
             } = entry;
-            if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && let Err(error) = session_open(
+            let result = self.client.take(request);
+            if route == StreamRoute::Logs
+                && logs_source.as_ref() != self.desired_log_source(window).as_ref()
+            {
+                continue;
+            }
+            if let Some(QueryResult::StreamTicket(granted)) = result {
+                if let Err(error) = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
                     *granted,
                     &self.connection_url,
                     &self.access_token,
-                )
-            {
-                let reason = format!("could not open stream socket: {error}");
-                fail_stream_tool(&mut self.shell, window, route, &reason);
+                ) {
+                    let reason = format!("could not open stream socket: {error}");
+                    fail_stream_tool(&mut self.shell, window, route, &reason);
+                } else if let Some(source) = logs_source {
+                    self.log_session_sources.insert(window, source);
+                }
             }
         }
     }
 
     /// Project dedicated-socket events into the connected tools.
     fn poll_stream_sessions(&mut self) {
+        if let Err(error) = self.reconcile_log_sources(BTreeMap::new()) {
+            self.terminal_failure(error.to_string());
+            return;
+        }
+        if self.flush_outbound().is_err() {
+            self.terminal_failure("could not send stream request".to_owned());
+            return;
+        }
         self.finish_stream_tickets();
         self.reconcile_sessions();
         let keys: Vec<(WindowId, StreamRoute)> = self.stream_sessions.keys().copied().collect();
@@ -3224,6 +3924,7 @@ impl K10sApp {
                                     view.fail(&reason);
                                 }
                                 self.stream_sessions.remove(&key);
+                                self.log_session_sources.remove(&window);
                             }
                             StreamRoute::Exec => {
                                 if let Some(shell) = stores.shells.get_mut(window) {
@@ -3264,6 +3965,7 @@ fn resource_delta_projection(
     k10s_protocol::SubscriptionId,
     ResourceIdentity,
     k10s_protocol::BackendRevision,
+    DetailLifecycle,
 )> {
     let subscription = frame.subscription_id.clone()?;
     let k10s_protocol::ServerPayload::Event(event) = frame.decode_payload().ok()? else {
@@ -3273,11 +3975,21 @@ fn resource_delta_projection(
         k10s_protocol::RESOURCE_EVENT_CHANGED => {
             let delta: k10s_protocol::ResourceChanged =
                 serde_json::from_value(event.payload).ok()?;
-            Some((subscription, delta.identity, delta.row.revision))
+            Some((
+                subscription,
+                delta.identity,
+                delta.row.revision,
+                DetailLifecycle::Present,
+            ))
         }
         k10s_protocol::RESOURCE_EVENT_GONE => {
             let delta: k10s_protocol::ResourceGone = serde_json::from_value(event.payload).ok()?;
-            Some((subscription, delta.identity, delta.revision))
+            Some((
+                subscription,
+                delta.identity,
+                delta.revision,
+                DetailLifecycle::Gone,
+            ))
         }
         _ => None,
     }
@@ -3386,19 +4098,23 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
 
-    use egui_kittest::{Harness, kittest::Queryable as _};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT as _, Queryable as _},
+    };
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BackendRevision, BootstrapResponse, ClientFrame, ClientKind, Context, ErrorCode,
-        ErrorFrame, ErrorScope, Event, GroupVersionKind, ProtocolVersion, RequestId,
-        ResourceChanged, ResourceGone, ResourceIdentity, ResourceListRow, ResourceSnapshotPage,
-        ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin,
-        SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
-        ValidationTicket, Welcome, YamlOutcome, buffer_hash,
+        BackendRevision, BootstrapResponse, ClientFrame, ClientKind, ContainerMetrics, Context,
+        ErrorCode, ErrorFrame, ErrorScope, Event, GroupVersionKind, MetricsAvailability,
+        PodMetrics, ProtocolVersion, RequestId, ResourceCapabilities, ResourceChanged,
+        ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListRow,
+        ResourceMetricsResponse, ResourceSnapshotPage, ResumeStatus, Retryability, ServerFrame,
+        ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
+        SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
     use super::{
-        AppConnection, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
+        AppConnection, AppEventError, AppView, ConnectionFactory, K10sApp, NamespaceCatalogState,
         PrimaryDetailState, RelationState, ResourceAction, SafeUiError, WindowFreshness,
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
@@ -3789,6 +4505,146 @@ mod tests {
         assert!(
             absent_editor.is_dirty(),
             "removed-target local edits survive resync invalidation"
+        );
+    }
+
+    #[test]
+    fn only_accepted_exact_watch_revision_updates_detail_lifecycle() {
+        let (mut app, _) = test_app(Vec::new());
+        app.client.apply(welcome()).unwrap();
+        let subscription = app
+            .client
+            .subscribe_resource("dev", "apps", "v1", "Deployment", None)
+            .unwrap();
+        let subscription_id = subscription.id().clone();
+        let identity = ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "Deployment".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web-old".into(),
+        };
+        let row = |identity: ResourceIdentity, revision| ResourceListRow {
+            identity,
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        };
+        let frame = |kind, sequence, payload| ServerFrame {
+            kind,
+            request_id: None,
+            subscription_id: Some(subscription_id.clone()),
+            sequence: Some(sequence),
+            payload,
+        };
+        for (kind, sequence, payload) in [
+            (
+                ServerKind::Subscribed,
+                1,
+                serde_json::to_value(Subscribed).unwrap(),
+            ),
+            (
+                ServerKind::SnapshotBegin,
+                2,
+                serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            ),
+            (
+                ServerKind::SnapshotChunk,
+                3,
+                serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(10),
+                        rows: vec![row(identity.clone(), 10)],
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            ),
+            (
+                ServerKind::SnapshotEnd,
+                4,
+                serde_json::to_value(SnapshotEnd {
+                    checksum: "initial".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            app.handle_event(server_message(&frame(kind, sequence, payload)), 0, 0)
+                .unwrap();
+        }
+
+        let gone = |revision: u64| {
+            serde_json::to_value(Event {
+                event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                revision: Some(revision.to_string()),
+                payload: serde_json::to_value(ResourceGone {
+                    identity: identity.clone(),
+                    revision: BackendRevision::new(revision),
+                })
+                .unwrap(),
+            })
+            .unwrap()
+        };
+        app.handle_event(server_message(&frame(ServerKind::Event, 5, gone(9))), 0, 0)
+            .unwrap();
+        assert!(
+            app.detail_lifecycles
+                .get(&subscription_id)
+                .is_none_or(|source| !source.entries.contains_key(&identity))
+        );
+
+        app.handle_event(server_message(&frame(ServerKind::Event, 6, gone(11))), 0, 0)
+            .unwrap();
+        assert_eq!(
+            app.detail_lifecycles
+                .get(&subscription_id)
+                .and_then(|source| source.entries.get(&identity))
+                .map(|entry| entry.lifecycle),
+            Some(super::DetailLifecycle::Gone)
+        );
+
+        let mut recreated = identity.clone();
+        recreated.uid = "uid-web-new".into();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(recreated.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        app.handle_event(
+            server_message(&frame(
+                ServerKind::Event,
+                7,
+                serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("12".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: recreated.clone(),
+                        row: row(recreated.clone(), 12),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        let source = app.detail_lifecycles.get(&subscription_id).unwrap();
+        assert_eq!(
+            source.entries.get(&identity).map(|entry| entry.lifecycle),
+            Some(super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            source.entries.get(&recreated).map(|entry| entry.lifecycle),
+            Some(super::DetailLifecycle::Present)
         );
     }
 
@@ -4584,7 +5440,7 @@ mod tests {
         assert!(harness.state().infrastructure_request.is_none());
     }
 
-    fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+    pub(super) fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
         let bootstrap =
             ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
         let (mut app, state) = test_app(vec![ConnectionScript {
@@ -4673,6 +5529,239 @@ mod tests {
         }
     }
 
+    fn complete_resource_snapshot(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        revision: u64,
+        rows: Vec<ResourceListRow>,
+        initial: bool,
+    ) {
+        let mut frames = Vec::new();
+        if initial {
+            frames.push(ServerFrame {
+                kind: ServerKind::Subscribed,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Subscribed).unwrap(),
+            });
+        }
+        frames.extend([
+            ServerFrame {
+                kind: ServerKind::SnapshotBegin,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            },
+            ServerFrame {
+                kind: ServerKind::SnapshotChunk,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(revision),
+                        rows,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            },
+            ServerFrame {
+                kind: ServerKind::SnapshotEnd,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotEnd {
+                    checksum: format!("snapshot-{revision}"),
+                })
+                .unwrap(),
+            },
+        ]);
+        for frame in frames {
+            app.handle_event(server_message(&frame), 0, 0).unwrap();
+        }
+    }
+
+    fn apply_resource_changed(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        row: ResourceListRow,
+    ) {
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some(row.revision.to_string()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: row.identity.clone(),
+                        row,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+    }
+
+    fn apply_resource_gone(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        identity: ResourceIdentity,
+        revision: u64,
+    ) {
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                    revision: Some(revision.to_string()),
+                    payload: serde_json::to_value(ResourceGone {
+                        identity,
+                        revision: BackendRevision::new(revision),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+    }
+
+    fn deployment_row(identity: ResourceIdentity, revision: u64) -> ResourceListRow {
+        ResourceListRow {
+            identity,
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        }
+    }
+
+    fn overlapping_deployment_sources(
+        app: &mut K10sApp,
+    ) -> (WindowId, SubscriptionId, WindowId, SubscriptionId) {
+        let broad_window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+                WorkloadKind::Deployments,
+            ))
+        {
+            app.handle_workspace_event(event);
+        }
+        let narrow_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| {
+                window.kind == crate::workspace::WindowKind::Workload(WorkloadKind::Deployments)
+                    && window.id != broad_window
+            })
+            .map(|window| window.id)
+            .next()
+            .unwrap();
+        app.web_set_namespace_scope(narrow_window, NamespaceScope::Namespace("default".into()));
+        let subscription_for = |app: &K10sApp, window| {
+            let key = app.window_subscriptions.get(&window).unwrap();
+            app.resource_subscriptions
+                .get(key)
+                .unwrap()
+                .live
+                .id()
+                .clone()
+        };
+        (
+            broad_window,
+            subscription_for(app, broad_window),
+            narrow_window,
+            subscription_for(app, narrow_window),
+        )
+    }
+
+    fn projected_detail_lifecycle(
+        app: &K10sApp,
+        identity: &ResourceIdentity,
+    ) -> Option<super::DetailLifecycle> {
+        app.build_resource_feed()
+            .detail_authority
+            .get(identity)
+            .map(|authority| authority.lifecycle)
+    }
+
+    fn freshness_arbitration_app(
+        older_source_freshness: WindowFreshness,
+    ) -> (K10sApp, WindowId, ResourceIdentity, ResourceIdentity) {
+        let (mut app, _) = ready_app();
+        let (older_window, older_source, _, newer_source) =
+            overlapping_deployment_sources(&mut app);
+        let target = deployment_identity("web-frontend");
+        let unrelated = deployment_identity("unrelated-api");
+        complete_resource_snapshot(
+            &mut app,
+            &older_source,
+            10,
+            vec![deployment_row(target.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &newer_source,
+            20,
+            vec![
+                deployment_row(target.clone(), 20),
+                deployment_row(unrelated.clone(), 20),
+            ],
+            true,
+        );
+        app.window_freshness_overrides
+            .insert(older_window, older_source_freshness);
+        for identity in [&target, &unrelated] {
+            let detail = deployment_detail_fixture(identity);
+            app.details.insert(identity.clone(), detail.clone());
+            app.primary_details
+                .insert(identity.clone(), PrimaryDetailState::Loaded(detail));
+        }
+        (app, older_window, target, unrelated)
+    }
+
+    fn deployment_detail_fixture(identity: &ResourceIdentity) -> ResourceDetailResponse {
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(20),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            related: Vec::new(),
+            capabilities: ResourceCapabilities {
+                can_scale: true,
+                ..ResourceCapabilities::default()
+            },
+            manifest: "apiVersion: apps/v1\nkind: Deployment\n".into(),
+            projection: None,
+        }
+    }
+
     fn deployment_identity(name: &str) -> ResourceIdentity {
         ResourceIdentity {
             context: "dev-local".into(),
@@ -4694,6 +5783,698 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
         window
+    }
+
+    fn pod_identity(name: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        }
+    }
+
+    fn pin_pod_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
+        let events = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
+        let window = events
+            .iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(id) => Some(*id),
+                _ => None,
+            })
+            .expect("pod window opens");
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, identity.clone()));
+        window
+    }
+
+    fn metrics_response(identity: &ResourceIdentity) -> ResourceMetricsResponse {
+        ResourceMetricsResponse {
+            identity: identity.clone(),
+            metrics: PodMetrics {
+                availability: MetricsAvailability::Available,
+                cpu_millicores: Some(135),
+                memory_bytes: Some(96 * 1024 * 1024),
+                collected_at: Some("2026-08-31T12:00:00Z".into()),
+            },
+            containers: vec![
+                ContainerMetrics {
+                    name: "api".into(),
+                    metrics: PodMetrics {
+                        availability: MetricsAvailability::Available,
+                        cpu_millicores: Some(100),
+                        memory_bytes: Some(64 * 1024 * 1024),
+                        collected_at: Some("2026-08-31T12:00:00Z".into()),
+                    },
+                },
+                ContainerMetrics {
+                    name: "telemetry-sidecar".into(),
+                    metrics: PodMetrics {
+                        availability: MetricsAvailability::Partial,
+                        cpu_millicores: Some(35),
+                        memory_bytes: None,
+                        collected_at: Some("2026-08-31T12:00:00Z".into()),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn production_pod_metrics_request_reaches_feed_with_named_containers() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("api-7f9d");
+        pin_pod_without_request(&mut app, &pod);
+
+        app.refresh_details_at(1);
+
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1
+        );
+        let request = app
+            .metric_requests
+            .get(&pod)
+            .expect("metrics request is tracked")
+            .request
+            .clone();
+        let response = metrics_response(&pod);
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                response.clone(),
+            )),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+
+        assert_eq!(app.build_resource_feed().metrics.get(&pod), Some(&response));
+        assert_eq!(
+            app.build_resource_feed().metrics[&pod].containers[1].name,
+            "telemetry-sidecar"
+        );
+    }
+
+    #[test]
+    fn duplicate_pod_detail_windows_share_one_metrics_query() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("shared");
+        pin_pod_without_request(&mut app, &pod);
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pod.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        pin_deployment_without_request(&mut app, &deployment_identity("not-a-pod"));
+        let wrong_gvk = ResourceIdentity {
+            gvk: GroupVersionKind {
+                group: "metrics.k8s.io".into(),
+                version: "v1beta1".into(),
+                kind: "Pod".into(),
+            },
+            ..pod_identity("wrong-gvk")
+        };
+        pin_pod_without_request(&mut app, &wrong_gvk);
+
+        app.refresh_details_at(1);
+        app.refresh_details_at(2);
+
+        assert_eq!(app.metric_requests.len(), 1);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mismatched_or_failed_metrics_never_enter_the_feed_or_storm_retries() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("guarded");
+        pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let request = app.metric_requests[&pod].request.clone();
+        let mut mismatch = metrics_response(&pod);
+        mismatch.identity.uid = "uid-replacement".into();
+
+        app.handle_event(
+            server_message(&ServerFrame::response(request.id().clone(), mismatch)),
+            2,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(2);
+        app.refresh_details_at(3);
+
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            1,
+            "a failed exact-identity query waits for the normal refresh cadence"
+        );
+
+        app.refresh_details_at(30_002);
+        let retry = app.metric_requests[&pod].request.clone();
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(retry.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Unauthorized,
+                    "metrics unavailable",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    retry.id().as_str(),
+                ))
+                .unwrap(),
+            }),
+            30_003,
+            0,
+        )
+        .unwrap();
+        app.refresh_details_at(30_003);
+        assert_eq!(app.client.phase(), ClientPhase::Ready);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        app.refresh_details_at(30_004);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.metrics")
+                .count(),
+            2,
+            "a server error also waits for the normal refresh cadence"
+        );
+    }
+
+    #[test]
+    fn stale_pod_metrics_fail_closed_while_one_refresh_is_in_flight() {
+        let (mut app, _) = ready_app();
+        let pod = pod_identity("refreshing");
+        pin_pod_without_request(&mut app, &pod);
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 10);
+
+        app.refresh_details_at(30_009);
+        assert!(app.build_resource_feed().metrics.contains_key(&pod));
+        app.refresh_details_at(30_010);
+
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+        assert!(app.metric_requests.contains_key(&pod));
+    }
+
+    #[test]
+    fn reconnectable_metrics_error_enters_the_normal_transport_recovery_path() {
+        let (mut app, _) = ready_app();
+        let pod = pod_identity("reconnect");
+        pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let request = app.metric_requests[&pod].request.clone();
+
+        let result = app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(request.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Internal,
+                    "metrics collector moved",
+                    Retryability::AfterReconnect,
+                    ErrorScope::Request,
+                    request.id().as_str(),
+                ))
+                .unwrap(),
+            }),
+            100,
+            7,
+        );
+
+        assert!(matches!(result, Err(AppEventError::Transient)));
+        assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+    }
+
+    #[test]
+    fn pod_metrics_are_pruned_on_close_gone_and_context_reset() {
+        let (mut app, state) = ready_app();
+        let pod = pod_identity("ephemeral");
+        let window = pin_pod_without_request(&mut app, &pod);
+        app.refresh_details_at(1);
+        let closing = app.metric_requests[&pod].request.clone();
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+        app.refresh_details_at(2);
+        assert!(!app.metrics.contains_key(&pod));
+        assert!(!app.metric_checked_at.contains_key(&pod));
+        assert!(!app.metric_requests.contains_key(&pod));
+        assert!(state.borrow().sent.iter().any(|frame| {
+            frame.kind == ClientKind::CancelRequest
+                && frame.request_id.as_ref() == Some(closing.id())
+        }));
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                closing.id().clone(),
+                metrics_response(&pod),
+            )),
+            3,
+            0,
+        )
+        .expect("a response already queued before cancellation is consumed");
+        app.refresh_details_at(3);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+
+        pin_pod_without_request(&mut app, &pod);
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 4);
+        app.record_detail_lifecycle(
+            SubscriptionId::new("pod-source"),
+            pod.clone(),
+            BackendRevision::new(9),
+            super::DetailLifecycle::Gone,
+        );
+        app.refresh_details_at(5);
+        assert!(!app.build_resource_feed().metrics.contains_key(&pod));
+
+        app.detail_lifecycles.clear();
+        app.metrics.insert(pod.clone(), metrics_response(&pod));
+        app.metric_checked_at.insert(pod.clone(), 6);
+        app.retire_resource_context();
+        assert!(app.metrics.is_empty());
+        assert!(app.metric_checked_at.is_empty());
+        assert!(app.metric_requests.is_empty());
+    }
+
+    #[test]
+    fn primary_loading_revokes_dialog_authority_before_mutation_dispatch() {
+        let (mut app, _) = ready_app();
+        let target = deployment_identity("web-frontend");
+        let window = pin_deployment_without_request(&mut app, &target);
+        let detail = deployment_detail_fixture(&target);
+        app.details.insert(target.clone(), detail.clone());
+        app.primary_details
+            .insert(target.clone(), PrimaryDetailState::Loaded(detail));
+        app.window_retained_rows.insert(
+            window,
+            vec![ResourceListRow {
+                identity: target.clone(),
+                revision: BackendRevision::new(1),
+                labels: Default::default(),
+                summary: "20/20 ready".into(),
+                created_at: String::new(),
+                projection: None,
+            }],
+        );
+        app.window_freshness_overrides.insert(
+            window,
+            WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+        );
+        assert!(app.mutation_authority_allows(&target));
+        app.shell
+            .dialogs_mut()
+            .open_scale(window, target.clone(), Some(20));
+
+        // The dialog was valid when opened, then its exact primary detail
+        // began reloading before submission reached the application layer.
+        app.primary_details
+            .insert(target, PrimaryDetailState::Loading);
+        app.shell.dialogs_mut().submit_active(window);
+        app.process_dialog_actions().unwrap();
+
+        assert!(
+            app.pending_mutations.is_empty(),
+            "revoked authority must block the command before client dispatch"
+        );
+    }
+
+    #[test]
+    fn detail_lifecycle_uses_newest_source_revision_and_gone_wins_equal_revision() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let identity = deployment_identity("web-frontend");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(identity.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            20,
+            vec![deployment_row(identity.clone(), 20)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, identity.clone(), 30);
+
+        apply_resource_changed(&mut app, &narrow, deployment_row(identity.clone(), 25));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone),
+            "an older Present from an overlapping source cannot revive newer Gone"
+        );
+
+        apply_resource_changed(&mut app, &narrow, deployment_row(identity.clone(), 30));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone),
+            "equal-revision Gone must dominate Present across sources"
+        );
+        assert!(
+            !app.mutation_authority_allows(&identity),
+            "final application dispatch must consume the ordered aggregate"
+        );
+    }
+
+    #[test]
+    fn older_stale_source_disables_detail_frame_and_dialog_for_newer_live_identity() {
+        fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
+            app.render_ui(ui);
+        }
+
+        let (mut app, _, target, _) = freshness_arbitration_app(WindowFreshness::StaleRetrying {
+            last_sync_age: "30s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 1,
+        });
+        let detail = deployment_detail_fixture(&target);
+        app.details.insert(target.clone(), detail.clone());
+        app.primary_details
+            .insert(target.clone(), PrimaryDetailState::Loaded(detail));
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        let detail_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| {
+                matches!(
+                    &window.content,
+                    WindowContent::Detail(detail) if detail.identity == target
+                )
+            })
+            .map(|window| window.id)
+            .unwrap();
+        app.shell
+            .dialogs_mut()
+            .open_scale(detail_window, target, Some(20));
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_280.0, 800.0))
+            .build_ui_state(render, app);
+        for _ in 0..3 {
+            harness.step();
+        }
+
+        assert!(
+            harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::Window,
+                    "Deployment · default / web-frontend",
+                )
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Scale…")
+                .accesskit_node()
+                .is_disabled(),
+            "every contributing source must gate frame mutations"
+        );
+        assert!(
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::Window, "Scale workload")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Apply scale")
+                .accesskit_node()
+                .is_disabled(),
+            "every contributing source must gate the active dialog"
+        );
+    }
+
+    #[test]
+    fn older_forbidden_source_blocks_final_dispatch_for_newer_live_identity() {
+        let (mut app, window, target, _) = freshness_arbitration_app(WindowFreshness::Forbidden {
+            user: "alice@example.com".into(),
+            verb: "list".into(),
+            resource: "deployments".into(),
+            scope: "--all-namespaces".into(),
+        });
+        app.shell.dialogs_mut().open_scale(window, target, Some(20));
+        app.shell.dialogs_mut().submit_active(window);
+
+        app.process_dialog_actions().unwrap();
+
+        assert!(
+            app.pending_mutations.is_empty(),
+            "final dispatch must fail closed when any contributing source is forbidden"
+        );
+    }
+
+    #[test]
+    fn retiring_stale_source_restores_live_authority_without_affecting_unrelated_identity() {
+        let (mut app, stale_window, target, unrelated) =
+            freshness_arbitration_app(WindowFreshness::StaleRetrying {
+                last_sync_age: "30s ago".into(),
+                retry_in: "3s".into(),
+                attempt: 1,
+            });
+        assert!(!app.mutation_authority_allows(&target));
+        assert!(
+            app.mutation_authority_allows(&unrelated),
+            "a stale source that does not contain the exact identity is irrelevant"
+        );
+
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(stale_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        app.reconcile_selected_resource_streams();
+
+        assert!(
+            app.mutation_authority_allows(&target),
+            "retiring the stale contribution leaves the live source authoritative"
+        );
+        assert!(app.mutation_authority_allows(&unrelated));
+    }
+
+    #[test]
+    fn replacement_snapshot_omission_marks_only_that_source_identity_gone() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let omitted = deployment_identity("web-frontend");
+        let narrow_only = deployment_identity("api-server");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(omitted.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            12,
+            vec![deployment_row(narrow_only.clone(), 12)],
+            true,
+        );
+
+        complete_resource_snapshot(&mut app, &broad, 20, Vec::new(), false);
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &omitted),
+            Some(super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            projected_detail_lifecycle(&app, &narrow_only),
+            Some(super::DetailLifecycle::Present),
+            "a broad-source omission cannot tombstone an unrelated exact identity from another source"
+        );
+    }
+
+    #[test]
+    fn retiring_gone_source_reveals_remaining_present_source() {
+        let (mut app, _) = ready_app();
+        let (broad_window, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let identity = deployment_identity("web-frontend");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(identity.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            12,
+            vec![deployment_row(identity.clone(), 12)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, identity.clone(), 20);
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone)
+        );
+
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(broad_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        app.reconcile_selected_resource_streams();
+
+        assert!(!app.detail_lifecycles.contains_key(&broad));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Present),
+            "closing a source must retire only that source's tombstones"
+        );
+    }
+
+    #[test]
+    fn recreated_uid_is_independent_from_old_uid_tombstone_across_sources() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let old = deployment_identity("web-frontend");
+        let mut recreated = old.clone();
+        recreated.uid = "uid-web-frontend-recreated".into();
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(old.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            15,
+            vec![deployment_row(recreated.clone(), 15)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, old.clone(), 20);
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &old),
+            Some(super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            projected_detail_lifecycle(&app, &recreated),
+            Some(super::DetailLifecycle::Present)
+        );
+    }
+
+    #[test]
+    fn lifecycle_tombstones_are_bounded_and_preserve_tracked_identity() {
+        const EXPECTED_TOMBSTONE_CAP: usize = 128;
+
+        let (mut app, _) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let key = app.window_subscriptions.get(&window).unwrap();
+        let subscription = app
+            .resource_subscriptions
+            .get(key)
+            .unwrap()
+            .live
+            .id()
+            .clone();
+        complete_resource_snapshot(&mut app, &subscription, 1, Vec::new(), true);
+        let pinned = deployment_identity("pinned-target");
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pinned.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        apply_resource_gone(&mut app, &subscription, pinned.clone(), 2);
+        for index in 0..(EXPECTED_TOMBSTONE_CAP + 64) {
+            let churn = deployment_identity(&format!("churn-{index}"));
+            apply_resource_gone(
+                &mut app,
+                &subscription,
+                churn,
+                u64::try_from(index).unwrap() + 3,
+            );
+        }
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &pinned),
+            Some(super::DetailLifecycle::Gone),
+            "tracked pinned identities survive cap eviction"
+        );
+        assert!(
+            app.detail_lifecycles
+                .values()
+                .map(|source| source.entries.len())
+                .sum::<usize>()
+                <= EXPECTED_TOMBSTONE_CAP + 1,
+            "untracked high-churn tombstones must remain bounded"
+        );
+
+        let pinned_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| {
+                matches!(
+                    &window.content,
+                    WindowContent::Detail(detail) if detail.identity == pinned
+                )
+            })
+            .map(|window| window.id)
+            .unwrap();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(pinned_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        assert!(
+            app.detail_lifecycles
+                .values()
+                .map(|source| source.entries.len())
+                .sum::<usize>()
+                <= EXPECTED_TOMBSTONE_CAP,
+            "an identity that is no longer pinned must join bounded tombstone eviction"
+        );
     }
 
     fn exhaust_request_capacity(app: &mut K10sApp) {
@@ -5012,13 +6793,14 @@ mod tests {
     }
 
     #[test]
-    fn controller_pods_demand_is_lazy_and_deduplicated() {
+    fn deployment_relations_are_demanded_on_overview_and_deduplicated_across_views() {
         let (mut app, state) = ready_app();
         let window = app
             .web_activate_workload(WorkloadKind::Deployments)
             .unwrap();
         let identity = deployment_identity("api");
         app.web_select_resource(window, identity.clone());
+        app.refresh_details_at(1);
         assert_eq!(
             state
                 .borrow()
@@ -5027,11 +6809,10 @@ mod tests {
                 .filter_map(request_kind)
                 .filter(|kind| kind == "resource.relations")
                 .count(),
-            0,
-            "primary selection must not eagerly request relations"
+            1,
+            "an open Deployment Overview demands rollout relations"
         );
         app.web_set_detail_tab(window, crate::workspace::DetailTab::Pods);
-        app.refresh_details_at(1);
         app.refresh_details_at(2);
         assert_eq!(
             state
@@ -5042,12 +6823,44 @@ mod tests {
                 .filter(|kind| kind == "resource.relations")
                 .count(),
             1,
-            "repeated frames share one pending relations request"
+            "switching Overview to Pods shares the pending relations request"
+        );
+
+        let dedicated = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(window) => Some(window),
+                _ => None,
+            })
+            .expect("dedicated Deployment detail opens on Overview");
+        app.refresh_details_at(3);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1,
+            "integrated and dedicated views deduplicate by exact identity"
         );
         assert!(matches!(
             app.relations.get(&identity),
             Some(crate::ui::RelationState::Loading)
         ));
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+        app.refresh_details_at(4);
+        assert!(app.relation_requests.contains_key(&identity));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(dedicated));
+        app.refresh_details_at(5);
+        assert!(app.relation_requests.is_empty());
+        assert!(app.relations.is_empty());
     }
 
     #[test]
@@ -5063,6 +6876,7 @@ mod tests {
                 window,
                 crate::workspace::DetailTab::Pods,
             ));
+        assert!(app.cancel_relation_request(&identity));
         app.relations.insert(
             identity.clone(),
             crate::ui::RelationState::Loaded {
@@ -5076,9 +6890,24 @@ mod tests {
                 refresh_error: None,
             },
         );
-        let before = state.borrow().sent.len();
+        let before_relations = state
+            .borrow()
+            .sent
+            .iter()
+            .filter_map(request_kind)
+            .filter(|kind| kind == "resource.relations")
+            .count();
         app.refresh_details_at(30_009);
-        assert_eq!(state.borrow().sent.len(), before);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            before_relations
+        );
         app.refresh_details_at(30_010);
         assert!(matches!(
             app.relations.get(&identity),
@@ -5088,12 +6917,14 @@ mod tests {
             })
         ));
         assert_eq!(
-            state.borrow().sent[before..]
+            state
+                .borrow()
+                .sent
                 .iter()
                 .filter_map(request_kind)
                 .filter(|kind| kind == "resource.relations")
                 .count(),
-            1
+            before_relations + 1
         );
     }
 
@@ -6911,14 +8742,15 @@ mod stream_lifecycle_tests {
 
     use ewebsock::{WsEvent, WsMessage};
     use k10s_protocol::{
-        BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
-        ResourceIdentity, StreamTarget, StreamType,
+        BackendRevision, ContainerStateProjection, GroupVersionKind, PodContainerProjection,
+        PodProjection, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity,
+        ResourceProjection, StreamTarget, StreamType,
     };
 
-    use super::K10sApp;
-    use super::tests::test_app;
+    use super::tests::{ready_app, test_app};
+    use super::{K10sApp, LogStreamSource};
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::{LogsPhase, ShellPhase};
+    use crate::ui::tools::{LogsAction, LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -6958,6 +8790,32 @@ mod stream_lifecycle_tests {
         }
     }
 
+    fn log_source(
+        target: StreamTarget,
+        since_seconds: Option<i64>,
+        previous: bool,
+    ) -> LogStreamSource {
+        LogStreamSource {
+            target,
+            since_seconds,
+            previous,
+        }
+    }
+
+    fn queue_logs(app: &mut K10sApp, window: crate::workspace::WindowId, target: StreamTarget) {
+        let logs = &mut app.shell.stream_stores_mut().logs;
+        logs.ensure(window, target.clone());
+        logs.queue(
+            window,
+            LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
+        );
+    }
+
     fn detail_with_container(
         identity: &ResourceIdentity,
         container: &str,
@@ -6975,10 +8833,33 @@ mod stream_lifecycle_tests {
                 can_exec: true,
                 ..ResourceCapabilities::default()
             },
-            manifest: format!(
-                "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: {container}\n"
-            ),
-            projection: None,
+            manifest: "SENTINEL MANIFEST: runtime tests must not parse this".into(),
+            projection: Some(ResourceProjection::Pod(PodProjection {
+                phase: Some("Running".into()),
+                ready_containers: Some(1),
+                total_containers: Some(1),
+                restart_count: Some(0),
+                containers: vec![PodContainerProjection {
+                    name: container.into(),
+                    image: None,
+                    state: Some(ContainerStateProjection::Running),
+                    ready: Some(true),
+                    restart_count: Some(0),
+                    last_termination: None,
+                }],
+                conditions: Vec::new(),
+                node_name: None,
+                pod_ip: None,
+                host_ip: None,
+                qos_class: None,
+                priority: None,
+                service_account: None,
+                restart_policy: None,
+                ports: Vec::new(),
+                labels: Default::default(),
+                annotations: Default::default(),
+                created_at: None,
+            })),
         }
     }
 
@@ -6998,6 +8879,9 @@ mod stream_lifecycle_tests {
         app: &mut K10sApp,
         pod: &ResourceIdentity,
     ) -> crate::workspace::WindowId {
+        app.details
+            .entry(pod.clone())
+            .or_insert_with(|| detail_with_container(pod, "app"));
         let events = app
             .shell
             .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(WorkloadKind::Pods));
@@ -7037,7 +8921,7 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn exec_ready_for_manifest_container_attaches_instead_of_becoming_stale() {
+    fn exec_ready_for_typed_container_attaches_instead_of_becoming_stale() {
         let (mut app, _state) = test_app(Vec::new());
         let pod = pod("database");
         let window = open_pod_detail(&mut app, &pod);
@@ -7074,7 +8958,7 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn logs_for_manifest_container_attach_and_project_output() {
+    fn logs_for_typed_container_attach_and_project_output() {
         let (mut app, _state) = test_app(Vec::new());
         let pod = pod("web");
         let window = open_pod_detail(&mut app, &pod);
@@ -7129,7 +9013,18 @@ mod stream_lifecycle_tests {
         let pod = pod("multi-container");
         let window = open_pod_detail(&mut app, &pod);
         let mut detail = detail_with_container(&pod, "app");
-        detail.manifest = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: app\n    - name: metrics\n".to_owned();
+        let Some(ResourceProjection::Pod(projection)) = detail.projection.as_mut() else {
+            panic!("fixture has a typed Pod projection");
+        };
+        projection.total_containers = Some(2);
+        projection.containers.push(PodContainerProjection {
+            name: "metrics".into(),
+            image: None,
+            state: Some(ContainerStateProjection::Running),
+            ready: Some(true),
+            restart_count: Some(0),
+            last_termination: None,
+        });
         app.details.insert(pod.clone(), detail);
 
         let default_target = target_for_container(&pod.name, "app");
@@ -7139,7 +9034,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, default_target.clone())
             .select_container("metrics");
-        // The next render still supplies the manifest default. It must not
+        // The next render still supplies the typed default. It must not
         // replace the user's selected container.
         app.shell
             .stream_stores_mut()
@@ -7162,6 +9057,144 @@ mod stream_lifecycle_tests {
         );
     }
 
+    #[test]
+    fn changing_live_log_source_retires_only_that_window_and_requests_full_new_mode() {
+        let (mut app, _state) = ready_app();
+        let first = pod("first");
+        let second = pod("second");
+        let first_window = open_pod_detail(&mut app, &first);
+        let second_window = open_pod_detail(&mut app, &second);
+        let first_target = target_for(&first.name);
+        let second_target = target_for(&second.name);
+
+        for (window, target) in [
+            (first_window, first_target.clone()),
+            (second_window, second_target.clone()),
+        ] {
+            app.shell
+                .stream_stores_mut()
+                .logs
+                .ensure(window, target.clone())
+                .connect();
+            app.stream_sessions.insert(
+                (window, StreamRoute::Logs),
+                StreamSession::new(StreamRoute::Logs, target.clone(), false),
+            );
+            app.log_session_sources
+                .insert(window, log_source(target, Some(300), false));
+        }
+
+        let first_logs = app
+            .shell
+            .stream_stores_mut()
+            .logs
+            .get_mut(first_window)
+            .expect("first log view exists");
+        first_logs.select_container("metrics");
+        first_logs.set_previous(true);
+        first_logs.set_since_seconds(Some(900));
+        app.process_stream_requests().unwrap();
+
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(first_window, StreamRoute::Logs)),
+            "the stale live source is retired"
+        );
+        assert!(
+            app.stream_sessions
+                .contains_key(&(second_window, StreamRoute::Logs)),
+            "another window's live logs are untouched"
+        );
+        let replacement = app
+            .pending_stream_tickets
+            .values()
+            .find(|pending| pending.window == first_window)
+            .expect("replacement ticket is pending");
+        assert_eq!(
+            replacement.logs_source.as_ref(),
+            Some(&log_source(
+                target_for_container(&first.name, "metrics"),
+                Some(900),
+                true,
+            ))
+        );
+    }
+
+    #[test]
+    fn changing_pending_log_source_cancels_old_ticket_and_late_reply_cannot_attach() {
+        let (mut app, _state) = ready_app();
+        let first = pod("first-pending");
+        let second = pod("second-pending");
+        let first_window = open_pod_detail(&mut app, &first);
+        let second_window = open_pod_detail(&mut app, &second);
+        let first_target = target_for(&first.name);
+        let second_target = target_for(&second.name);
+        queue_logs(&mut app, first_window, first_target.clone());
+        queue_logs(&mut app, second_window, second_target);
+        app.process_stream_requests().unwrap();
+
+        let old_first = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == first_window)
+            .map(|(id, _)| id.clone())
+            .expect("first ticket is pending");
+        let other = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == second_window)
+            .map(|(id, _)| id.clone())
+            .expect("other ticket is pending");
+
+        let first_logs = app
+            .shell
+            .stream_stores_mut()
+            .logs
+            .get_mut(first_window)
+            .expect("first log view exists");
+        first_logs.select_container("metrics");
+        first_logs.set_previous(true);
+        first_logs.set_since_seconds(None);
+        app.process_stream_requests().unwrap();
+
+        assert!(!app.pending_stream_tickets.contains_key(&old_first));
+        assert!(app.pending_stream_tickets.contains_key(&other));
+        let replacement = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == first_window)
+            .expect("replacement ticket is pending");
+        assert_ne!(replacement.0, &old_first);
+        assert_eq!(
+            replacement.1.logs_source.as_ref(),
+            Some(&log_source(
+                target_for_container(&first.name, "metrics"),
+                None,
+                true,
+            ))
+        );
+
+        let _ = app.client.apply(k10s_protocol::ServerFrame {
+            kind: k10s_protocol::ServerKind::Response,
+            request_id: Some(old_first),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(k10s_protocol::StreamTicketResponse {
+                ticket_id: "late-ticket".into(),
+                target: first_target,
+                stream_type: StreamType::Logs,
+                tty: false,
+            })
+            .unwrap(),
+        });
+        app.finish_stream_tickets();
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(first_window, StreamRoute::Logs)),
+            "the retired ticket cannot attach a late socket"
+        );
+    }
+
     /// Ready attaches the terminal and engages the guard; resolving the
     /// guard closes the transport and fails the tool atomically; selection
     /// can then move on without a ghost session or a stuck guard.
@@ -7171,6 +9204,8 @@ mod stream_lifecycle_tests {
         let pod_a = pod("pod-a");
         let pod_b = pod("pod-b");
         let window = open_pod_detail(&mut app, &pod_a);
+        app.details
+            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
         assert_eq!(
             app.workspace_stream_target(window).as_ref(),
             Some(&target_for("pod-a"))
@@ -7280,6 +9315,8 @@ mod stream_lifecycle_tests {
         let pod_a = pod("pod-a");
         let pod_b = pod("pod-b");
         let window = open_pod_detail(&mut app, &pod_a);
+        app.details
+            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
 
         // A connecting session for pod A...
         let tx = attach_session(&mut app, window, &pod_a);

@@ -144,6 +144,28 @@ pub enum RelationState {
     Failed(SafeUiError),
 }
 
+/// UI-owned freshness and mutation authority for one exact pinned identity.
+/// Dedicated Detail windows consume only this projection and never infer
+/// authority by searching arbitrary list windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailLifecycle {
+    Present,
+    Gone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailAuthority {
+    pub freshness: WindowFreshness,
+    pub lifecycle: DetailLifecycle,
+}
+
+impl DetailAuthority {
+    #[must_use]
+    pub fn mutations_allowed(&self) -> bool {
+        self.lifecycle == DetailLifecycle::Present && self.freshness.mutations_allowed()
+    }
+}
+
 /// Protocol rows and selectable types for one rendered frame.
 ///
 /// The application builds this from its client state; windows render it
@@ -157,6 +179,9 @@ pub struct ResourceFeed {
     /// Lifecycle of each open list window. Missing entries retain the legacy
     /// inference from connection and row state for compatibility.
     pub window_freshness: HashMap<WindowId, WindowFreshness>,
+    /// Exact-identity authority for dedicated Detail windows. Missing means
+    /// unavailable and mutations fail closed.
+    pub detail_authority: HashMap<ResourceIdentity, DetailAuthority>,
     /// Shared Namespace candidates for every namespaced list window.
     pub namespace_catalog: NamespaceCatalogState,
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so
@@ -179,6 +204,8 @@ pub struct ResourceFeed {
     pub primary_details: HashMap<ResourceIdentity, PrimaryDetailState>,
     /// Independently loaded controller relations, keyed by exact identity.
     pub relations: HashMap<ResourceIdentity, RelationState>,
+    /// Exact identity-matched resource and container metrics for detail panes.
+    pub metrics: HashMap<ResourceIdentity, k10s_protocol::ResourceMetricsResponse>,
     pub port_forward_available: bool,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
     pub port_forward_error: Option<String>,
@@ -480,6 +507,7 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     scratch: &mut ResourceUiState,
     window_id: WindowId,
+    focused: bool,
     kind: WorkloadKind,
     state: &mut ResourceWindowState<I>,
     yaml: &mut super::tools::YamlEditors,
@@ -680,27 +708,36 @@ pub(super) fn show<I>(
                 if ui.button("Clear selection").clicked() {
                     queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
-                super::detail::show(
-                    ui,
-                    window_id,
-                    detail,
-                    gone,
-                    true,
-                    state.prior_split_ratio.is_some(),
-                    yaml,
-                    streams,
-                    dialogs,
-                    feed,
-                    None,
-                    effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
-                    resource_actions,
-                    queued,
-                );
+                if let Some(presentation) =
+                    super::detail::presentation::DetailPresentationInput::from_feed(
+                        detail,
+                        feed,
+                        gone,
+                        effective_freshness,
+                        effective_freshness.is_some_and(WindowFreshness::mutations_allowed),
+                    )
+                {
+                    super::detail::show(
+                        ui,
+                        window_id,
+                        detail,
+                        &presentation,
+                        focused,
+                        true,
+                        state.prior_split_ratio.is_some(),
+                        yaml,
+                        streams,
+                        dialogs,
+                        None,
+                        resource_actions,
+                        queued,
+                    );
+                }
             }
         },
     );
 
-    if detail_shown {
+    if detail_shown && focused {
         let auto_focus =
             state.detail.as_ref().is_some_and(|detail| {
                 matches!(detail.active_tab, DetailTab::Logs | DetailTab::Shell)

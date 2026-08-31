@@ -8,11 +8,15 @@
 use std::collections::BTreeMap;
 
 use k10s_protocol::{
-    BackendRevision, EventsCondition, GroupVersionKind, InfrastructureWatchSpec,
-    MetricsAvailability, PodMetrics, REQUEST_RESOURCE_RELATIONS, RequestId, ResourceCapabilities,
-    ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListResponse, ResourceListRow,
-    ResourceRelationsResponse, ResourceScope, ResourceSnapshotPage, ServerFrame, ServerKind,
-    SubscriptionSelector, WorkloadKind, decode_server_frame,
+    BackendRevision, ContainerImageProjection, ContainerMetrics, ContainerStateProjection,
+    ContainerTerminationProjection, DeploymentProjection, EventsCondition, GroupVersionKind,
+    InfrastructureWatchSpec, MetricsAvailability, PodContainerPort, PodContainerProjection,
+    PodMetrics, PodProjection, REQUEST_RESOURCE_RELATIONS, ReplicaSetProjection, RequestId,
+    ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceGone,
+    ResourceIdentity, ResourceListResponse, ResourceListRow, ResourceMetricsResponse,
+    ResourceProjection, ResourceRelationsResponse, ResourceScope, ResourceSnapshotPage,
+    ServerFrame, ServerKind, SubscriptionSelector, TransportProtocol, WorkloadKind,
+    decode_server_frame,
 };
 use serde_json::{Value, json};
 
@@ -250,6 +254,276 @@ fn metrics_availability_is_exactly_tri_state() {
     assert!(encoded.get("memoryBytes").is_none());
 }
 
+#[test]
+fn resource_metrics_preserve_named_container_samples() {
+    let response = ResourceMetricsResponse {
+        identity: ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web-1".into(),
+            uid: "uid-web-1".into(),
+        },
+        metrics: PodMetrics {
+            availability: MetricsAvailability::Available,
+            cpu_millicores: Some(138),
+            memory_bytes: Some(465_567_744),
+            collected_at: Some("2026-08-21T00:00:00Z".into()),
+        },
+        containers: vec![
+            ContainerMetrics {
+                name: "admin-server".into(),
+                metrics: PodMetrics {
+                    availability: MetricsAvailability::Available,
+                    cpu_millicores: Some(120),
+                    memory_bytes: Some(398_458_880),
+                    collected_at: Some("2026-08-21T00:00:00Z".into()),
+                },
+            },
+            ContainerMetrics {
+                name: "envoy".into(),
+                metrics: PodMetrics {
+                    availability: MetricsAvailability::Partial,
+                    cpu_millicores: Some(18),
+                    memory_bytes: None,
+                    collected_at: Some("2026-08-21T00:00:00Z".into()),
+                },
+            },
+        ],
+    };
+
+    let encoded = round_trip(&response);
+
+    assert_eq!(encoded["containers"][0]["name"], json!("admin-server"));
+    assert_eq!(
+        encoded["containers"][0]["metrics"]["cpuMillicores"],
+        json!(120)
+    );
+    assert_eq!(encoded["containers"][1]["name"], json!("envoy"));
+    assert!(
+        encoded["containers"][1]["metrics"]
+            .get("memoryBytes")
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_resource_metrics_without_container_samples_default_to_empty() {
+    let decoded: ResourceMetricsResponse = serde_json::from_value(json!({
+        "identity": {
+            "context": "dev-local",
+            "gvk": {"group": "", "version": "v1", "kind": "Pod"},
+            "namespace": "default",
+            "name": "web-1",
+            "uid": "uid-web-1"
+        },
+        "metrics": {"availability": "unavailable"}
+    }))
+    .unwrap();
+
+    assert!(decoded.containers.is_empty());
+}
+
+#[test]
+fn resource_capabilities_round_trip_restart_authority() {
+    let capabilities = ResourceCapabilities {
+        can_restart: true,
+        ..ResourceCapabilities::default()
+    };
+
+    let encoded = round_trip(&capabilities);
+
+    assert_eq!(encoded["canRestart"], json!(true));
+}
+
+#[test]
+fn legacy_resource_capabilities_default_restart_authority_to_false() {
+    let decoded: ResourceCapabilities = serde_json::from_value(json!({
+        "canEditYaml": true,
+        "canDelete": true,
+        "canScale": true,
+        "canViewLogs": false,
+        "canExec": false
+    }))
+    .unwrap();
+
+    assert!(!decoded.can_restart);
+}
+
+#[test]
+fn detail_resource_projections_round_trip_typed_payloads() {
+    let condition = ResourceConditionProjection {
+        condition_type: "Ready".into(),
+        status: "True".into(),
+        reason: None,
+        message: None,
+        last_transition_time: Some("2026-08-21T00:00:00Z".into()),
+    };
+    let pod = ResourceProjection::Pod(PodProjection {
+        phase: Some("Running".into()),
+        ready_containers: Some(1),
+        total_containers: Some(1),
+        restart_count: Some(2),
+        containers: vec![PodContainerProjection {
+            name: "web".into(),
+            image: Some("ghcr.io/example/web:1.2.3".into()),
+            state: Some(ContainerStateProjection::Running),
+            ready: Some(true),
+            restart_count: Some(2),
+            last_termination: Some(ContainerTerminationProjection {
+                exit_code: 137,
+                reason: Some("OOMKilled".into()),
+            }),
+        }],
+        conditions: vec![condition.clone()],
+        node_name: Some("worker-1".into()),
+        pod_ip: Some("10.12.9.22".into()),
+        host_ip: Some("192.168.1.10".into()),
+        qos_class: Some("Burstable".into()),
+        priority: Some(1_000),
+        service_account: Some("web".into()),
+        restart_policy: Some("Always".into()),
+        ports: vec![PodContainerPort {
+            container_name: "web".into(),
+            name: Some("http".into()),
+            container_port: 8080,
+            host_port: Some(18_080),
+            protocol: TransportProtocol::Tcp,
+        }],
+        labels: BTreeMap::from([("app".into(), "web".into())]),
+        annotations: BTreeMap::from([("example.com/owner".into(), "platform".into())]),
+        created_at: Some("2026-08-20T00:00:00Z".into()),
+    });
+    let deployment = ResourceProjection::Deployment(DeploymentProjection {
+        desired_replicas: Some(3),
+        ready_replicas: Some(2),
+        updated_replicas: Some(3),
+        available_replicas: Some(2),
+        strategy: Some("RollingUpdate".into()),
+        selector: BTreeMap::from([("app".into(), "web".into())]),
+        max_surge: Some("25%".into()),
+        max_unavailable: Some("25%".into()),
+        conditions: vec![condition],
+        template_containers: vec![ContainerImageProjection {
+            name: "web".into(),
+            image: Some("ghcr.io/example/web:1.2.3".into()),
+        }],
+        template_labels: BTreeMap::from([("app".into(), "web".into())]),
+        template_annotations: BTreeMap::new(),
+        labels: BTreeMap::from([("app.kubernetes.io/managed-by".into(), "Helm".into())]),
+        annotations: BTreeMap::from([("meta.helm.sh/release-name".into(), "web".into())]),
+        created_at: Some("2026-08-19T00:00:00Z".into()),
+    });
+    let replica_set = ResourceProjection::ReplicaSet(ReplicaSetProjection {
+        revision: 4,
+        replicas: Some(3),
+        ready_replicas: Some(3),
+        created_at: Some("2026-08-20T00:00:00Z".into()),
+        images: vec![ContainerImageProjection {
+            name: "web".into(),
+            image: Some("ghcr.io/example/web:1.2.2".into()),
+        }],
+    });
+
+    for (projection, kind) in [
+        (pod, "pod"),
+        (deployment, "deployment"),
+        (replica_set, "replicaSet"),
+    ] {
+        let encoded = round_trip(&projection);
+        assert_eq!(encoded["kind"], json!(kind));
+        match kind {
+            "pod" => {
+                assert_eq!(encoded["readyContainers"], json!(1));
+                assert_eq!(
+                    encoded["containers"][0]["state"],
+                    json!({"kind": "running"})
+                );
+                assert_eq!(
+                    encoded["containers"][0]["lastTermination"]["exitCode"],
+                    json!(137)
+                );
+                assert_eq!(encoded["conditions"][0]["conditionType"], json!("Ready"));
+                assert_eq!(encoded["nodeName"], json!("worker-1"));
+                assert_eq!(encoded["podIp"], json!("10.12.9.22"));
+                assert_eq!(encoded["hostIp"], json!("192.168.1.10"));
+                assert_eq!(encoded["qosClass"], json!("Burstable"));
+                assert_eq!(encoded["priority"], json!(1_000));
+                assert_eq!(encoded["serviceAccount"], json!("web"));
+                assert_eq!(encoded["restartPolicy"], json!("Always"));
+                assert_eq!(
+                    encoded["ports"],
+                    json!([{
+                        "containerName": "web",
+                        "name": "http",
+                        "containerPort": 8080,
+                        "hostPort": 18_080,
+                        "protocol": "tcp",
+                    }])
+                );
+            }
+            "deployment" => {
+                assert_eq!(encoded["desiredReplicas"], json!(3));
+                assert_eq!(encoded["updatedReplicas"], json!(3));
+                assert_eq!(encoded["selector"], json!({"app": "web"}));
+                assert_eq!(encoded["maxSurge"], json!("25%"));
+                assert_eq!(encoded["maxUnavailable"], json!("25%"));
+                assert_eq!(encoded["templateContainers"][0]["name"], json!("web"));
+                assert_eq!(encoded["templateLabels"], json!({"app": "web"}));
+            }
+            "replicaSet" => {
+                assert_eq!(encoded["revision"], json!(4));
+                assert_eq!(encoded["readyReplicas"], json!(3));
+                assert_eq!(encoded["images"][0]["name"], json!("web"));
+                assert_eq!(
+                    encoded["images"][0]["image"],
+                    json!("ghcr.io/example/web:1.2.2")
+                );
+            }
+            _ => unreachable!(),
+        }
+        let decoded: ResourceProjection = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, projection);
+    }
+}
+
+#[test]
+fn legacy_replica_set_projection_defaults_images_to_empty() {
+    let decoded: ResourceProjection = serde_json::from_value(json!({
+        "kind": "replicaSet",
+        "revision": 3,
+        "replicas": 2,
+        "readyReplicas": 2,
+        "createdAt": "2026-08-19T00:00:00Z"
+    }))
+    .unwrap();
+
+    let ResourceProjection::ReplicaSet(replica_set) = decoded else {
+        panic!("expected ReplicaSet projection");
+    };
+    assert!(replica_set.images.is_empty());
+}
+
+#[test]
+fn container_states_round_trip_typed_reasons_and_camel_case_exit_codes() {
+    let waiting = ContainerStateProjection::Waiting {
+        reason: Some("CrashLoopBackOff".into()),
+    };
+    assert_eq!(
+        round_trip(&waiting),
+        json!({"kind": "waiting", "reason": "CrashLoopBackOff"})
+    );
+
+    let terminated = ContainerStateProjection::Terminated(ContainerTerminationProjection {
+        exit_code: 137,
+        reason: Some("OOMKilled".into()),
+    });
+    assert_eq!(
+        round_trip(&terminated),
+        json!({"kind": "terminated", "exitCode": 137, "reason": "OOMKilled"})
+    );
+}
+
 fn full_json() -> Value {
     json!({
         "availability": "available",
@@ -372,6 +646,7 @@ fn detail_response_contains_sections_owner_references_and_capabilities() {
             can_edit_yaml: true,
             can_delete: true,
             can_scale: false,
+            can_restart: false,
             can_view_logs: false,
             can_exec: false,
         },

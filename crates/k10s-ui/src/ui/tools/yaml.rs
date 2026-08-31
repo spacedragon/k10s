@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use egui::{Color32, RichText, ScrollArea, TextEdit};
+use egui::{Color32, RichText, TextEdit};
 use k10s_protocol::{
     BackendRevision, ResourceIdentity, ValidationTicket, YamlApplyRequest, YamlDiagnostic,
     YamlOutcome, buffer_hash,
@@ -407,11 +407,9 @@ pub(crate) fn show<I>(
         match editor.phase() {
             YamlPhase::ReadOnly => {
                 ui.label(RichText::new("Read-only").weak());
-                ScrollArea::vertical()
-                    .id_salt(("yaml.readonly", window_id.0))
-                    .show(ui, |ui| {
-                        ui.add(egui::Label::new(RichText::new(manifest).monospace()).wrap());
-                    });
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(RichText::new(manifest).monospace()).wrap());
+                });
                 let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
                 edit.widget_info(|| {
                     egui::WidgetInfo::labeled(
@@ -427,14 +425,12 @@ pub(crate) fn show<I>(
             }
             YamlPhase::Editing => {
                 let mut buffer = editor.buffer().to_owned();
-                ScrollArea::vertical()
-                    .id_salt(("yaml.edit", window_id.0))
-                    .show(ui, |ui| {
-                        ui.add_sized(
-                            [ui.available_width(), ui.available_height() - 40.0],
-                            TextEdit::multiline(&mut buffer).code_editor(),
-                        );
-                    });
+                ui.vertical(|ui| {
+                    ui.add_sized(
+                        [ui.available_width(), ui.available_height() - 40.0],
+                        TextEdit::multiline(&mut buffer).code_editor(),
+                    );
+                });
                 editor.set_buffer(buffer);
                 ui.horizontal(|ui| {
                     if ui
@@ -452,22 +448,20 @@ pub(crate) fn show<I>(
             YamlPhase::Reviewing => {
                 show_validation_panel(ui, editor);
                 ui.separator();
-                ScrollArea::vertical()
-                    .id_salt(("yaml.diff", window_id.0))
-                    .show(ui, |ui| {
-                        for line in editor.diff() {
-                            let (color, prefix) = match line.kind {
-                                DiffKind::Added => (Color32::from_rgb(0x2e, 0xa0, 0x43), "+"),
-                                DiffKind::Removed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "-"),
-                                DiffKind::Unchanged => (Color32::GRAY, " "),
-                            };
-                            ui.label(
-                                RichText::new(format!("{prefix} {}", line.text))
-                                    .monospace()
-                                    .color(color),
-                            );
-                        }
-                    });
+                ui.vertical(|ui| {
+                    for line in editor.diff() {
+                        let (color, prefix) = match line.kind {
+                            DiffKind::Added => (Color32::from_rgb(0x2e, 0xa0, 0x43), "+"),
+                            DiffKind::Removed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "-"),
+                            DiffKind::Unchanged => (Color32::GRAY, " "),
+                        };
+                        ui.label(
+                            RichText::new(format!("{prefix} {}", line.text))
+                                .monospace()
+                                .color(color),
+                        );
+                    }
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     if editor.has_disruption_warning() {

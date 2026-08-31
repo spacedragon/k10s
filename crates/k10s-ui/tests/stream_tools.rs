@@ -61,6 +61,25 @@ fn log_source_toolbar_state_controls_container_history_wrap_and_export() {
 }
 
 #[test]
+fn changing_log_source_mode_clears_history_before_the_replacement_stream() {
+    let mut tool = logs_tool();
+    tool.connect();
+    tool.attach();
+    tool.append("current-container output");
+
+    tool.set_previous(true);
+    assert_eq!(tool.phase(), LogsPhase::Disconnected);
+    assert_eq!(tool.export_text(), "");
+
+    tool.connect();
+    tool.attach();
+    tool.append("previous-container output");
+    tool.set_since_seconds(Some(900));
+    assert_eq!(tool.phase(), LogsPhase::Disconnected);
+    assert_eq!(tool.export_text(), "");
+}
+
+#[test]
 fn selected_container_survives_default_target_reconciliation() {
     let window = WindowId(42);
     let mut views = LogsViews::default();

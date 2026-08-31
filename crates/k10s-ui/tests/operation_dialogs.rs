@@ -268,7 +268,7 @@ fn destructive_dialog_enter_is_gated_and_submits_only_once() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .build_ui_state(
-            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
+            |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_, _| true),
             dialogs,
         );
     assert!(matches!(
@@ -325,7 +325,7 @@ fn destructive_review_snapshots_cover_compact_and_standard_viewports() {
             .with_size(size)
             .with_pixels_per_point(1.0)
             .build_ui_state(
-                |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_| true),
+                |ui, dialogs: &mut OperationDialogs| dialogs.show(ui, true, |_, _| true),
                 dialogs,
             );
         harness.run_steps(4);
@@ -370,7 +370,7 @@ fn connected_stale_window_reports_stale_and_refreshes_before_delete() {
     let mut harness = Harness::builder().build_ui_state(
         move |ui, state: &mut (OperationDialogs, bool)| {
             let mutations_allowed = state.1;
-            state.0.show(ui, true, |_| mutations_allowed);
+            state.0.show(ui, true, |_, _| mutations_allowed);
         },
         (dialogs, false),
     );

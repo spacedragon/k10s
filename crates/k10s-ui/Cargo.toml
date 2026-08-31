@@ -11,6 +11,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_yaml = "0.9"
 ewebsock = { version = "=0.8.0", default-features = false, features = ["tls"] }
 web-time = "=1.1.0"
+jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 egui_kittest = { version = "=0.36.1", features = ["snapshot"] }

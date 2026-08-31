@@ -30,6 +30,7 @@ const NS: &str = "default";
 
 // Recorded request paths.
 const CORE_NODES: &str = "/api/v1/nodes";
+const CORE_PODS: &str = "/api/v1/namespaces/default/pods";
 const NODE_METRICS: &str = "/apis/metrics.k8s.io/v1beta1/nodes";
 const POD_METRICS: &str = "/apis/metrics.k8s.io/v1beta1/pods";
 
@@ -182,11 +183,24 @@ fn record_node_metrics(server: &RecordedApiServer, names: &[&str], timestamp: &s
 /// One PodMetrics item with the given container usage list.
 fn pod_metric_item(name: &str, timestamp: &str, containers: Value) -> Value {
     json!({
-        "metadata": {"name": name, "namespace": NS, "creationTimestamp": timestamp},
+        "metadata": {
+            "name": name,
+            "namespace": NS,
+            "uid": format!("uid-{name}"),
+            "creationTimestamp": timestamp,
+        },
         "timestamp": timestamp,
         "window": "30s",
         "containers": containers
     })
+}
+
+fn without_uid(mut item: Value) -> Value {
+    item["metadata"]
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("uid");
+    item
 }
 
 /// Record PodMetrics for the given items under one list cut.
@@ -204,8 +218,45 @@ fn record_pod_metrics(server: &RecordedApiServer, items: Vec<Value>) {
     );
 }
 
+/// Record the exact core Pod inventory used to bind UID-less metrics items in
+/// the same collection cycle.
+fn record_core_pods(server: &RecordedApiServer, pods: &[(&str, &str, &str, &str)]) {
+    let items: Vec<_> = pods
+        .iter()
+        .map(|(namespace, name, uid, created_at)| {
+            json!({
+                "kind": "Pod",
+                "apiVersion": "v1",
+                "metadata": {
+                    "namespace": namespace,
+                    "name": name,
+                    "uid": uid,
+                    "creationTimestamp": created_at,
+                }
+            })
+        })
+        .collect();
+    server.set_response(
+        CORE_PODS,
+        200,
+        &json!({
+            "kind": "PodList",
+            "apiVersion": "v1",
+            "metadata": {"resourceVersion": "200"},
+            "items": items,
+        })
+        .to_string(),
+    );
+}
+
 /// Record an existing pod object so exact-identity verification resolves.
 fn record_pod(server: &RecordedApiServer, name: &str) {
+    record_pod_identity(server, name, &format!("uid-{name}"));
+}
+
+/// Record an existing pod object with an explicit UID so recreation tests can
+/// move the live name to a new identity without changing its request path.
+fn record_pod_identity(server: &RecordedApiServer, name: &str, uid: &str) {
     server.set_response(
         &format!("/api/v1/namespaces/{NS}/pods/{name}"),
         200,
@@ -215,7 +266,7 @@ fn record_pod(server: &RecordedApiServer, name: &str) {
             "metadata": {
                 "name": name,
                 "namespace": NS,
-                "uid": format!("uid-{name}"),
+                "uid": uid,
                 "resourceVersion": "41",
                 "creationTimestamp": "2026-08-21T00:00:00Z",
             },
@@ -223,6 +274,166 @@ fn record_pod(server: &RecordedApiServer, name: &str) {
         })
         .to_string(),
     );
+}
+
+#[tokio::test]
+async fn warm_metrics_cut_cannot_be_relabelled_to_a_recreated_pod_uid() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    let mut old_sample = pod_metric_item(
+        "web",
+        &timestamp,
+        json!([{"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}]),
+    );
+    old_sample["metadata"]["uid"] = json!("uid-web-old");
+    record_pod_metrics(&server, vec![old_sample]);
+    record_pod_identity(&server, "web", "uid-web-old");
+    let world = world(&server);
+
+    let old = metrics_wire(&world.kernel, pod_ref("web", "uid-web-old")).await;
+    assert_eq!(old["metrics"]["availability"], "available");
+
+    // The cached cut still belongs to the deleted identity. A live GET sees
+    // the replacement, but must never bless the warm name-keyed sample for it.
+    record_pod_identity(&server, "web", "uid-web-new");
+    let replacement = metrics_wire(&world.kernel, pod_ref("web", "uid-web-new")).await;
+    assert_eq!(
+        replacement["metrics"]["availability"], "unavailable",
+        "a replacement stays unmetered until a cut explicitly bound to its UID arrives"
+    );
+    assert_eq!(replacement["containers"], json!([]));
+}
+
+#[tokio::test]
+async fn uidless_metrics_bind_to_the_same_cycle_core_pod_inventory() {
+    let server = RecordedApiServer::standard();
+    let created_at = recent_rfc3339(60);
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    let sample = without_uid(pod_metric_item(
+        "web",
+        &timestamp,
+        json!([{"name": "exact-name", "usage": {"cpu": "75m", "memory": "2Mi"}}]),
+    ));
+    record_pod_metrics(&server, vec![sample]);
+    record_core_pods(&server, &[(NS, "web", "uid-web", &created_at)]);
+    record_pod(&server, "web");
+    let world = world(&server);
+
+    let payload = metrics_wire(&world.kernel, pod_ref("web", "uid-web")).await;
+
+    assert_eq!(payload["metrics"]["availability"], "available");
+    assert_eq!(payload["metrics"]["cpuMillicores"], 75);
+    assert_eq!(payload["containers"][0]["name"], "exact-name");
+    assert_eq!(server.hit_count(CORE_PODS), 1);
+}
+
+#[tokio::test]
+async fn recreated_pod_waits_for_a_post_creation_uidless_sample() {
+    let server = RecordedApiServer::standard();
+    let old_timestamp = recent_rfc3339(10);
+    let new_pod_created_at = recent_rfc3339(5);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &old_timestamp);
+    record_pod_metrics(
+        &server,
+        vec![without_uid(pod_metric_item(
+            "web",
+            &old_timestamp,
+            json!([{"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}]),
+        ))],
+    );
+    record_core_pods(&server, &[(NS, "web", "uid-web-new", &new_pod_created_at)]);
+    record_pod_identity(&server, "web", "uid-web-new");
+    let world = timed_world(&server, Duration::from_millis(80), Duration::from_secs(60));
+
+    let pre_creation = metrics_wire(&world.kernel, pod_ref("web", "uid-web-new")).await;
+    assert_eq!(pre_creation["metrics"]["availability"], "unavailable");
+
+    // The next collector generation observes a genuinely post-creation
+    // sample and can bind it to the replacement UID from that cycle's list.
+    let new_timestamp = recent_rfc3339(0);
+    record_node_metrics(&server, &["node-a", "node-b"], &new_timestamp);
+    record_pod_metrics(
+        &server,
+        vec![without_uid(pod_metric_item(
+            "web",
+            &new_timestamp,
+            json!([{"name": "app", "usage": {"cpu": "200m", "memory": "2Mi"}}]),
+        ))],
+    );
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    assert_eq!(world.metrics.live_collectors(), 0);
+
+    let post_creation = metrics_wire(&world.kernel, pod_ref("web", "uid-web-new")).await;
+    assert_eq!(post_creation["metrics"]["availability"], "available");
+    assert_eq!(post_creation["metrics"]["cpuMillicores"], 200);
+}
+
+#[tokio::test]
+async fn missing_or_mismatched_uid_proof_fails_closed() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    record_pod_metrics(
+        &server,
+        vec![
+            without_uid(pod_metric_item(
+                "missing",
+                &timestamp,
+                json!([{"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}]),
+            )),
+            {
+                let mut item = pod_metric_item(
+                    "mismatch",
+                    &timestamp,
+                    json!([{"name": "app", "usage": {"cpu": "200m", "memory": "2Mi"}}]),
+                );
+                item["metadata"]["uid"] = json!("uid-from-a-past-life");
+                item
+            },
+        ],
+    );
+    // The UID-less item has no matching inventory record at all.
+    record_core_pods(&server, &[]);
+    record_pod(&server, "missing");
+    record_pod(&server, "mismatch");
+    let world = world(&server);
+
+    let missing = metrics_wire(&world.kernel, pod_ref("missing", "uid-missing")).await;
+    let mismatch = metrics_wire(&world.kernel, pod_ref("mismatch", "uid-mismatch")).await;
+
+    assert_eq!(missing["metrics"]["availability"], "unavailable");
+    assert_eq!(mismatch["metrics"]["availability"], "unavailable");
+    assert_eq!(missing["containers"], json!([]));
+    assert_eq!(mismatch["containers"], json!([]));
+}
+
+#[tokio::test]
+async fn pod_metric_identity_is_isolated_by_namespace_and_name() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    let mut foreign = pod_metric_item(
+        "web",
+        &timestamp,
+        json!([{"name": "app", "usage": {"cpu": "999m", "memory": "9Mi"}}]),
+    );
+    foreign["metadata"]["namespace"] = json!("other");
+    foreign["metadata"]["uid"] = json!("uid-other-web");
+    record_pod_metrics(&server, vec![foreign]);
+    record_pod(&server, "web");
+    let world = world(&server);
+
+    let payload = metrics_wire(&world.kernel, pod_ref("web", "uid-web")).await;
+
+    assert_eq!(payload["metrics"]["availability"], "unavailable");
+    assert_eq!(payload["containers"], json!([]));
 }
 
 async fn metrics_wire(kernel: &BackendKernel, reference: ResourceRef) -> Value {
@@ -353,6 +564,59 @@ async fn full_coverage_collects_usage_and_allocatable_pod_capacity() {
 }
 
 #[tokio::test]
+async fn pod_container_metrics_preserve_exact_names_and_fail_closed_per_container() {
+    let server = RecordedApiServer::standard();
+    let timestamp = recent_rfc3339(10);
+    record_core_nodes(&server);
+    record_node_metrics(&server, &["node-a", "node-b"], &timestamp);
+    // Deliberately reverse the input order. Names are authoritative keys, so
+    // the result must retain them exactly and publish deterministically.
+    record_pod_metrics(
+        &server,
+        vec![pod_metric_item(
+            "web",
+            &timestamp,
+            json!([
+                {"name": "sidecar", "usage": {"cpu": "150m"}},
+                {"name": "app", "usage": {"cpu": "100m", "memory": "1Mi"}}
+            ]),
+        )],
+    );
+    record_pod(&server, "web");
+    let world = world(&server);
+
+    let payload = metrics_wire(&world.kernel, pod_ref("web", "uid-web")).await;
+
+    // The pod aggregate still fails closed when one container omitted memory.
+    assert_eq!(payload["metrics"]["availability"], "partial");
+    assert_eq!(payload["metrics"]["cpuMillicores"], 250);
+    assert!(payload["metrics"].get("memoryBytes").is_none());
+    assert_eq!(
+        payload["containers"],
+        json!([
+            {
+                "name": "app",
+                "metrics": {
+                    "availability": "available",
+                    "cpuMillicores": 100,
+                    "memoryBytes": 1_048_576,
+                    "collectedAt": timestamp,
+                },
+            },
+            {
+                "name": "sidecar",
+                "metrics": {
+                    "availability": "partial",
+                    "cpuMillicores": 150,
+                    "collectedAt": timestamp,
+                },
+            },
+        ]),
+        "each reported container keeps its exact name and only its reported values"
+    );
+}
+
+#[tokio::test]
 async fn partial_node_coverage_is_reported_honestly() {
     let server = RecordedApiServer::standard();
     let timestamp = recent_rfc3339(10);
@@ -447,6 +711,11 @@ async fn stale_source_timestamps_are_never_served_as_values() {
     );
     assert_eq!(payload["metrics"]["availability"], "unavailable");
     assert_eq!(payload["metrics"]["collectedAt"], ANCIENT);
+    assert_eq!(
+        payload["containers"],
+        json!([]),
+        "stale container values are withheld rather than presented as current samples"
+    );
 
     let snapshot = world
         .metrics

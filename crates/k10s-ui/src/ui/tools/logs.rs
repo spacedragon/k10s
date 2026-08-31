@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use egui::{RichText, ScrollArea};
+use egui::RichText;
 use k10s_protocol::StreamTarget;
 
 use crate::workspace::WindowId;
@@ -113,7 +113,7 @@ impl LogsTool {
     pub fn set_previous(&mut self, previous: bool) {
         if self.previous != previous {
             self.previous = previous;
-            self.phase = LogsPhase::Disconnected;
+            self.reset_source_history();
         }
     }
 
@@ -132,7 +132,7 @@ impl LogsTool {
     pub fn set_since_seconds(&mut self, since_seconds: Option<i64>) {
         if self.since_seconds != since_seconds {
             self.since_seconds = since_seconds;
-            self.phase = LogsPhase::Disconnected;
+            self.reset_source_history();
         }
     }
 
@@ -148,10 +148,19 @@ impl LogsTool {
     pub fn select_container(&mut self, container: &str) {
         if self.target.container != container {
             self.target.container = container.to_owned();
-            self.phase = LogsPhase::Disconnected;
-            self.lines.clear();
-            self.last_error = None;
+            self.reset_source_history();
         }
+    }
+
+    fn reset_source_history(&mut self) {
+        self.phase = LogsPhase::Disconnected;
+        self.lines.clear();
+        self.paused = false;
+        self.truncated_lines = 0;
+        self.dropped_while_paused = 0;
+        self.total_received = 0;
+        self.since_received = None;
+        self.last_error = None;
     }
 
     #[must_use]
@@ -558,48 +567,46 @@ pub(crate) fn show(
                 .color(crate::ui::theme::WARNING),
             );
         }
-        ScrollArea::vertical()
-            .id_salt(("logs.stream", window_id.0))
-            .show(ui, |ui| {
-                // An active Find filters the retained buffer; otherwise the
-                // since/tail-filtered view is shown.
-                if view.find().is_some() {
-                    for line in view.find_matches() {
-                        ui.add(
-                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
-                                if view.wraps() {
-                                    egui::TextWrapMode::Wrap
-                                } else {
-                                    egui::TextWrapMode::Extend
-                                },
-                            ),
-                        );
-                    }
-                } else {
-                    for line in view.visible_lines() {
-                        ui.add(
-                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
-                                if view.wraps() {
-                                    egui::TextWrapMode::Wrap
-                                } else {
-                                    egui::TextWrapMode::Extend
-                                },
-                            ),
-                        );
-                    }
-                }
-                if view.truncated_lines() > 0 {
-                    ui.label(
-                        RichText::new(format!("{} older lines truncated", view.truncated_lines()))
-                            .weak(),
+        ui.vertical(|ui| {
+            // An active Find filters the retained buffer; otherwise the
+            // since/tail-filtered view is shown.
+            if view.find().is_some() {
+                for line in view.find_matches() {
+                    ui.add(
+                        egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                            if view.wraps() {
+                                egui::TextWrapMode::Wrap
+                            } else {
+                                egui::TextWrapMode::Extend
+                            },
+                        ),
                     );
                 }
-                // Follow autoscrolls to the newest line; a disengaged
-                // follow leaves the scroll position to the user.
-                if view.follows() && !view.is_paused() {
-                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+            } else {
+                for line in view.visible_lines() {
+                    ui.add(
+                        egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                            if view.wraps() {
+                                egui::TextWrapMode::Wrap
+                            } else {
+                                egui::TextWrapMode::Extend
+                            },
+                        ),
+                    );
                 }
-            });
+            }
+            if view.truncated_lines() > 0 {
+                ui.label(
+                    RichText::new(format!("{} older lines truncated", view.truncated_lines()))
+                        .weak(),
+                );
+            }
+            // Follow autoscrolls to the newest line; a disengaged
+            // follow leaves the scroll position to the user.
+            if view.follows() && !view.is_paused() {
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+            }
+        });
     }
     if connect_requested {
         let selected_target = views

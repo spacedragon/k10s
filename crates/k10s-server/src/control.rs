@@ -321,6 +321,7 @@ pub(crate) async fn serve_socket(
         "control session authenticated"
     );
     let negotiated_protocol = negotiated.protocol;
+    outbound.set_negotiated_protocol(negotiated_protocol);
     let negotiated_capabilities = negotiated.capabilities;
     let welcome = Welcome {
         protocol: negotiated_protocol,
@@ -2011,14 +2012,14 @@ async fn stream_snapshot(
         if snapshot_cancelled(cancel, generation_cancel) {
             return Ok(SnapshotOutcome::Cancelled);
         }
-        let page = kernel.snapshot_page(data.revision, chunk);
+        let page = outbound.compatible_value(kernel.snapshot_page(data.revision, chunk));
         let page_bytes = serde_json::to_vec(&page).expect("snapshot page serializes");
         for byte in &page_bytes {
             checksum = (checksum ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
         }
         let payload = SnapshotChunk {
             chunk_index: index as u32,
-            data: serde_json::to_value(page).expect("snapshot page serializes"),
+            data: page,
         };
         send_sequenced(
             outbound,

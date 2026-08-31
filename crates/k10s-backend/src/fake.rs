@@ -18,11 +18,12 @@ use tokio::sync::broadcast;
 
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
-    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
-    KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
-    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
-    SubscriptionHandle, TargetPort, TransportProtocol,
+    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerMetricsSample,
+    ContainerStateProjection, ContainerTerminationProjection, ContextInfo, Gvk, KubernetesAccess,
+    MetricsSample, OperationId, OwnerRef, PodContainerProjection, PodProjection, Query,
+    QueryResult, RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData,
+    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
+    ServiceProjection, StreamInput, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -301,6 +302,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(220),
                     memory_bytes: Some(134_217_728),
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(220),
+                        memory_bytes: Some(134_217_728),
+                    }],
                 },
             ),
             (
@@ -309,6 +315,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(90),
                     memory_bytes: None,
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(90),
+                        memory_bytes: None,
+                    }],
                 },
             ),
         ]);
@@ -1991,6 +2002,57 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         name: &'a str,
         labels: &'a [(&'a str, &'a str)],
     ) -> RecordSeed<'a> {
+        let projection = (gvk.kind == "Pod").then(|| {
+            let running = summary == "Running";
+            let crashloop = summary.contains("CrashLoopBackOff");
+            let restart_count = if crashloop { 7 } else { 0 };
+            let last_termination = crashloop.then(|| ContainerTerminationProjection {
+                exit_code: 1,
+                reason: Some("Error".into()),
+            });
+            ResourceProjection::Pod(PodProjection {
+                phase: Some(
+                    if running || crashloop {
+                        "Running"
+                    } else {
+                        "Pending"
+                    }
+                    .into(),
+                ),
+                ready_containers: Some(u32::from(running)),
+                total_containers: Some(1),
+                restart_count: Some(restart_count),
+                containers: vec![PodContainerProjection {
+                    name: "app".into(),
+                    image: Some("example/fake-app:v1".into()),
+                    state: Some(if summary.contains("CrashLoopBackOff") {
+                        ContainerStateProjection::Waiting {
+                            reason: Some("CrashLoopBackOff".into()),
+                        }
+                    } else {
+                        ContainerStateProjection::Running
+                    }),
+                    ready: Some(running),
+                    restart_count: Some(restart_count),
+                    last_termination,
+                }],
+                conditions: Vec::new(),
+                node_name: Some("fake-node".into()),
+                pod_ip: None,
+                host_ip: None,
+                qos_class: Some("Burstable".into()),
+                priority: None,
+                service_account: Some("default".into()),
+                restart_policy: Some("Always".into()),
+                ports: Vec::new(),
+                labels: labels
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                annotations: BTreeMap::new(),
+                created_at: Some(rfc3339(FAKE_EPOCH_SECS + offset_secs)),
+            })
+        });
         RecordSeed {
             offset_secs,
             summary,
@@ -2000,7 +2062,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             name,
             labels,
             owner_references: Vec::new(),
-            projection: None,
+            projection,
         }
     }
 
@@ -2420,6 +2482,39 @@ mod tests {
             .expect("the fake fixture exposes previous-log behavior");
         assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
         assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+        let Some(ResourceProjection::Pod(crashloop_projection)) = crashloop.projection.as_ref()
+        else {
+            panic!("CrashLoop fixture carries typed runtime state");
+        };
+        assert_eq!(crashloop_projection.phase.as_deref(), Some("Running"));
+        assert_eq!(crashloop_projection.restart_count, Some(7));
+        assert!(matches!(
+            crashloop_projection.containers[0].state,
+            Some(ContainerStateProjection::Waiting {
+                reason: Some(ref reason)
+            }) if reason == "CrashLoopBackOff"
+        ));
+        assert_eq!(
+            crashloop_projection.containers[0]
+                .last_termination
+                .as_ref()
+                .map(|termination| termination.exit_code),
+            Some(1)
+        );
+        let pods = state
+            .records
+            .iter()
+            .filter(|record| record.reference.gvk == Gvk::core("v1", "Pod"));
+        for pod in pods {
+            let Some(ResourceProjection::Pod(projection)) = pod.projection.as_ref() else {
+                panic!(
+                    "fake Pod {} must carry a typed projection",
+                    pod.reference.name
+                );
+            };
+            assert_eq!(projection.containers.len(), 1);
+            assert_eq!(projection.containers[0].name, "app");
+        }
     }
 
     #[tokio::test]

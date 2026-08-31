@@ -3,16 +3,15 @@
 //! Clicking a related row opens a dedicated window pinned to that row's
 //! identity; the UI never re-resolves relations itself.
 
-use egui::{ScrollArea, WidgetInfo, WidgetType};
+use egui::{WidgetInfo, WidgetType};
 use k10s_protocol::ResourceIdentity;
 
-use crate::workspace::{WindowId, WorkspaceCommand};
+use crate::workspace::WorkspaceCommand;
 
 use crate::ui::resource_window::RowIdentity;
 
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
-    window_id: WindowId,
     identity: &ResourceIdentity,
     state: Option<&crate::ui::RelationState>,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
@@ -65,27 +64,21 @@ pub(super) fn show<I>(
         ui.label("No related resources");
         return;
     }
-    ScrollArea::vertical()
-        .id_salt(("k10s.detail.related.scroll", window_id.0))
-        .show(ui, |ui| {
-            for group in groups {
-                if group.rows.is_empty() {
-                    continue;
-                }
-                ui.heading(egui::RichText::new(group.title.as_str()).strong());
-                for row in &group.rows {
-                    let label = format!("{} · {}", row.identity.name, row.summary);
-                    let button = ui.button(label.clone());
-                    button.widget_info(|| {
-                        WidgetInfo::labeled(WidgetType::Button, true, label.clone())
-                    });
-                    if button.clicked() {
-                        queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                            &row.identity,
-                        )));
-                    }
-                }
-                ui.separator();
+    for group in groups {
+        if group.rows.is_empty() {
+            continue;
+        }
+        ui.heading(egui::RichText::new(group.title.as_str()).strong());
+        for row in &group.rows {
+            let label = format!("{} · {}", row.identity.name, row.summary);
+            let button = ui.button(label.clone());
+            button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+            if button.clicked() {
+                queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                    &row.identity,
+                )));
             }
-        });
+        }
+        ui.separator();
+    }
 }

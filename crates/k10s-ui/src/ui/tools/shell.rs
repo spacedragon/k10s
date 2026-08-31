@@ -226,7 +226,7 @@ fn truncate_line_start(line: &mut String) {
 
 use std::collections::HashMap;
 
-use egui::{RichText, ScrollArea};
+use egui::RichText;
 
 use crate::workspace::WindowId;
 
@@ -390,16 +390,14 @@ pub(crate) fn show(
                 }
             }
         }
-        ScrollArea::vertical()
-            .id_salt(("shell.terminal", window_id.0))
-            .show(ui, |ui| {
-                for line in session.buffer() {
-                    ui.label(RichText::new(line.as_str()).monospace());
-                }
-                if session.buffer_is_empty() {
-                    ui.label(RichText::new("No output yet").weak());
-                }
-            });
+        ui.vertical(|ui| {
+            for line in session.buffer() {
+                ui.label(RichText::new(line.as_str()).monospace());
+            }
+            if session.buffer_is_empty() {
+                ui.label(RichText::new("No output yet").weak());
+            }
+        });
     }
     sessions.set_input_buffer(window_id, pending_input);
     if connect_requested {

@@ -913,3 +913,117 @@ async fn service_details_carry_structured_projection() {
         .expect("deployment detail resolves");
     assert!(deployment_detail.projection.is_none());
 }
+
+#[tokio::test]
+async fn pod_details_carry_the_same_authoritative_projection_as_list_rows() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/namespaces/default/pods/web",
+        200,
+        &json!({
+            "kind": "Pod",
+            "apiVersion": "v1",
+            "metadata": {
+                "name": "web",
+                "namespace": NS,
+                "uid": "uid-pod-web",
+                "resourceVersion": "44",
+                "creationTimestamp": "2026-08-21T00:00:00Z",
+                "labels": {"app": "web"},
+                "annotations": {"example.io/trace": "enabled"},
+            },
+            "spec": {
+                "serviceAccountName": "web",
+                "restartPolicy": "Always",
+                "priority": 1000,
+                "containers": [{
+                    "name": "app",
+                    "image": "example/web:v1",
+                    "ports": [{"name": "http", "containerPort": 8080}]
+                }]
+            },
+            "status": {
+                "phase": "Running",
+                "hostIP": "192.168.1.7",
+                "podIP": "10.42.0.7",
+                "qosClass": "Burstable",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{
+                    "name": "app",
+                    "image": "example/web:v1",
+                    "ready": true,
+                    "restartCount": 2,
+                    "state": {"running": {}}
+                }]
+            }
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(&kernel, reference(pods_gvk(), "web", "uid-pod-web"))
+        .await
+        .expect("pod resolves");
+
+    let Some(k10s_protocol::ResourceProjection::Pod(projection)) = detail.projection else {
+        panic!("pod detail carries a Pod projection")
+    };
+    assert_eq!(projection.phase.as_deref(), Some("Running"));
+    assert_eq!(projection.ready_containers, Some(1));
+    assert_eq!(projection.restart_count, Some(2));
+    assert_eq!(projection.host_ip.as_deref(), Some("192.168.1.7"));
+    assert_eq!(projection.qos_class.as_deref(), Some("Burstable"));
+    assert_eq!(projection.service_account.as_deref(), Some("web"));
+    assert_eq!(projection.ports[0].container_name, "app");
+    assert_eq!(projection.ports[0].container_port, 8080);
+}
+
+/// Restart capability must mirror the existing mutation allow-list exactly:
+/// only the three pod-template workloads accepted by `Command::Restart`
+/// advertise the action.
+#[test]
+fn restart_capability_matches_supported_workload_kinds() {
+    use std::collections::BTreeMap;
+
+    use k10s_backend::kernel::ResourceDetailResult;
+    use k10s_backend::{RecordEventsCondition, ResourceRecord};
+
+    let cases = [
+        (Gvk::new("apps", "v1", "Deployment"), true),
+        (Gvk::new("apps", "v1", "StatefulSet"), true),
+        (Gvk::new("apps", "v1", "DaemonSet"), true),
+        (Gvk::new("apps", "v1", "ReplicaSet"), false),
+        (Gvk::new("batch", "v1", "Job"), false),
+        (Gvk::new("batch", "v1", "CronJob"), false),
+        (Gvk::core("v1", "Pod"), false),
+        (Gvk::core("v1", "Service"), false),
+    ];
+
+    for (gvk, expected) in cases {
+        let kind = gvk.kind.clone();
+        let detail = ResourceDetailResult::new(ResourceRecord {
+            reference: ResourceRef {
+                context: CONTEXT.into(),
+                gvk,
+                namespace: Some(NS.into()),
+                name: "target".into(),
+                uid: format!("uid-{kind}"),
+            },
+            revision: 1,
+            labels: BTreeMap::new(),
+            summary: "ready".into(),
+            created_at: "2026-08-21T00:00:00Z".into(),
+            owner_references: Vec::new(),
+            events: Vec::new(),
+            events_condition: RecordEventsCondition::Available,
+            manifest: String::new(),
+            projection: None,
+        })
+        .wire_payload();
+
+        assert_eq!(
+            detail.capabilities.can_restart, expected,
+            "restart capability drifted for {kind}"
+        );
+    }
+}

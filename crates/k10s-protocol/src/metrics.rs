@@ -204,6 +204,16 @@ impl PodMetrics {
     }
 }
 
+/// One availability-gated metrics sample keyed by exact container name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerMetrics {
+    /// Exact container name reported by the metrics API.
+    pub name: String,
+    /// Availability-gated CPU and memory sample for this container.
+    pub metrics: PodMetrics,
+}
+
 /// Response payload for a single-pod metrics query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -212,4 +222,7 @@ pub struct ResourceMetricsResponse {
     pub identity: ResourceIdentity,
     /// Availability-gated metrics sample.
     pub metrics: PodMetrics,
+    /// Per-container samples preserved under their exact reported names.
+    #[serde(default)]
+    pub containers: Vec<ContainerMetrics>,
 }
