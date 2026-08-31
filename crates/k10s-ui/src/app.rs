@@ -163,10 +163,11 @@ pub struct K10sApp {
     /// Backend-resolved details for every identity a window pinned, keyed by
     /// stable identity; rebuilt from `operation.status`-style queries.
     details: BTreeMap<ResourceIdentity, ResourceDetailResponse>,
-    /// Last accepted exact-identity lifecycle from resource watch deltas.
-    /// Gone entries outlive cached detail responses so dedicated windows do
-    /// not infer existence from stale read-only data.
-    detail_lifecycles: BTreeMap<ResourceIdentity, DetailLifecycle>,
+    /// Revisioned exact-identity lifecycle retained independently for every
+    /// authoritative resource source. Cross-source aggregation happens only
+    /// when building the UI feed, never by last-writer arrival order.
+    detail_lifecycles:
+        std::collections::HashMap<k10s_protocol::SubscriptionId, DetailLifecycleSource>,
     primary_details: BTreeMap<ResourceIdentity, PrimaryDetailState>,
     /// In-flight detail requests per identity.
     detail_requests: BTreeMap<ResourceIdentity, PendingResourceRequest>,
@@ -242,6 +243,20 @@ struct SubscriptionKey {
 struct RetainedSubscription {
     live: LiveSubscription,
     windows: std::collections::BTreeSet<WindowId>,
+}
+
+const DETAIL_LIFECYCLE_TOMBSTONE_CAP: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetailLifecycleEvent {
+    revision: k10s_protocol::BackendRevision,
+    lifecycle: DetailLifecycle,
+}
+
+#[derive(Debug, Default)]
+struct DetailLifecycleSource {
+    snapshot_revision: Option<k10s_protocol::BackendRevision>,
+    entries: BTreeMap<ResourceIdentity, DetailLifecycleEvent>,
 }
 
 /// Semantic Service detail projection for the web host.
@@ -338,7 +353,7 @@ impl K10sApp {
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
-            detail_lifecycles: BTreeMap::new(),
+            detail_lifecycles: std::collections::HashMap::new(),
             primary_details: BTreeMap::new(),
             detail_requests: BTreeMap::new(),
             relations: BTreeMap::new(),
@@ -1055,6 +1070,18 @@ impl K10sApp {
                     AppEventError::Terminal(format!("could not decode server frame: {error}"))
                 })?;
                 let resource_delta = resource_delta_projection(&frame);
+                let completed_resource_snapshot = (frame.kind
+                    == k10s_protocol::ServerKind::SnapshotEnd)
+                    .then(|| frame.subscription_id.clone())
+                    .flatten()
+                    .map(|subscription| {
+                        let previous = self
+                            .client
+                            .resource_list(&subscription)
+                            .map(|state| state.rows().map(|row| row.identity.clone()).collect())
+                            .unwrap_or_default();
+                        (subscription, previous)
+                    });
                 let replacement_snapshot_started = frame.kind
                     == k10s_protocol::ServerKind::SnapshotBegin
                     && frame.subscription_id.as_ref().is_some_and(|subscription| {
@@ -1156,6 +1183,7 @@ impl K10sApp {
                                 .namespace_subscription
                                 .take()
                                 .expect("matched namespace subscription exists");
+                            self.retire_detail_lifecycle_source(subscription.id());
                             self.client.retire_rejected_subscription(&subscription);
                             self.namespace_catalog = NamespaceCatalogState::Unavailable(
                                 SafeUiError::new(server_error.safe_message.clone()),
@@ -1184,6 +1212,7 @@ impl K10sApp {
                                 .resource_subscriptions
                                 .remove(&key)
                                 .expect("matched subscription entry");
+                            self.retire_detail_lifecycle_source(entry.live.id());
                             self.rejected_subscription_keys.insert(key.clone());
                             let retained_rows = self
                                 .client
@@ -1429,6 +1458,23 @@ impl K10sApp {
                     }
                 }
                 if applied
+                    && let Some((subscription, previous)) = completed_resource_snapshot
+                    && let Some((revision, current)) =
+                        self.client.resource_list(&subscription).and_then(|state| {
+                            Some((
+                                state.revision()?,
+                                state.rows().map(|row| row.identity.clone()).collect(),
+                            ))
+                        })
+                {
+                    self.accept_detail_lifecycle_snapshot(
+                        subscription,
+                        revision,
+                        previous,
+                        current,
+                    );
+                }
+                if applied
                     && let Some((subscription, identity, revision, lifecycle)) = resource_delta
                     && self
                         .client
@@ -1439,7 +1485,7 @@ impl K10sApp {
                     self.shell
                         .yaml_editors_mut()
                         .target_changed(&identity, revision);
-                    self.detail_lifecycles.insert(identity, lifecycle);
+                    self.record_detail_lifecycle(subscription, identity, revision, lifecycle);
                 }
                 if applied
                     && let Some(subscription) = stream_subscription_id.as_ref()
@@ -1956,39 +2002,11 @@ impl K10sApp {
                     .map(|(window, state)| (*window, state.clone())),
             )
             .collect();
-        let mut authority_sources: BTreeMap<
-            k10s_protocol::ResourceIdentity,
-            Vec<&WindowFreshness>,
-        > = BTreeMap::new();
-        for (window, rows) in window_lists.iter().chain(window_services.iter()) {
-            let Some(freshness) = window_freshness.get(window) else {
-                continue;
-            };
-            for row in rows {
-                authority_sources
-                    .entry(row.identity.clone())
-                    .or_default()
-                    .push(freshness);
-            }
-        }
-        let mut detail_authority: std::collections::HashMap<_, _> = self
-            .detail_lifecycles
-            .iter()
-            .filter(|(_, lifecycle)| **lifecycle == DetailLifecycle::Gone)
-            .map(|(identity, lifecycle)| {
-                (
-                    identity.clone(),
-                    DetailAuthority {
-                        freshness: WindowFreshness::ReadyEmpty,
-                        lifecycle: *lifecycle,
-                    },
-                )
-            })
-            .collect();
-        detail_authority.extend(authority_sources.into_iter().map(|(identity, sources)| {
-            let freshness = if sources.len() == 1 {
-                sources[0].clone()
-            } else if sources.iter().all(|source| source.mutations_allowed()) {
+        let aggregate_freshness = |sources: Vec<WindowFreshness>| {
+            if sources.len() == 1 {
+                sources.into_iter().next().unwrap()
+            } else if !sources.is_empty() && sources.iter().all(WindowFreshness::mutations_allowed)
+            {
                 WindowFreshness::Live {
                     last_sync_age: "all sources live".into(),
                 }
@@ -1996,15 +2014,105 @@ impl K10sApp {
                 WindowFreshness::Failed {
                     message: "one or more authoritative sources are not live".into(),
                 }
+            }
+        };
+        let mut lifecycle_candidates: BTreeMap<
+            ResourceIdentity,
+            Vec<(
+                k10s_protocol::BackendRevision,
+                DetailLifecycle,
+                WindowFreshness,
+            )>,
+        > = BTreeMap::new();
+        for subscription in self.resource_subscriptions.values() {
+            let source_freshness = aggregate_freshness(
+                subscription
+                    .windows
+                    .iter()
+                    .filter_map(|window| window_freshness.get(window).cloned())
+                    .collect(),
+            );
+            let source_state = self.detail_lifecycles.get(subscription.live.id());
+            if let Some(state) = self.client.resource_list(subscription.live.id()) {
+                for row in state.rows() {
+                    let revision = source_state
+                        .and_then(|source| source.snapshot_revision)
+                        .map_or(row.revision, |snapshot| snapshot.max(row.revision));
+                    lifecycle_candidates
+                        .entry(row.identity.clone())
+                        .or_default()
+                        .push((revision, DetailLifecycle::Present, source_freshness.clone()));
+                }
+            }
+            if let Some(source) = source_state {
+                for (identity, event) in &source.entries {
+                    lifecycle_candidates
+                        .entry(identity.clone())
+                        .or_default()
+                        .push((event.revision, event.lifecycle, source_freshness.clone()));
+                }
+            }
+        }
+        for (window, key) in &self.window_subscriptions {
+            if self
+                .resource_subscriptions
+                .get(key)
+                .is_some_and(|subscription| {
+                    self.client.resource_list(subscription.live.id()).is_some()
+                })
+            {
+                continue;
+            }
+            let Some(freshness) = window_freshness.get(window) else {
+                continue;
             };
-            (
-                identity,
-                DetailAuthority {
-                    freshness,
-                    lifecycle: DetailLifecycle::Present,
-                },
-            )
-        }));
+            let Some(rows) = self.window_retained_rows.get(window) else {
+                continue;
+            };
+            for row in rows {
+                lifecycle_candidates
+                    .entry(row.identity.clone())
+                    .or_default()
+                    .push((row.revision, DetailLifecycle::Present, freshness.clone()));
+            }
+        }
+        let detail_authority = lifecycle_candidates
+            .into_iter()
+            .map(|(identity, candidates)| {
+                let newest = candidates
+                    .iter()
+                    .map(|(revision, _, _)| *revision)
+                    .max()
+                    .expect("candidate groups are never empty");
+                let lifecycle = if candidates.iter().any(|(revision, lifecycle, _)| {
+                    *revision == newest && *lifecycle == DetailLifecycle::Gone
+                }) {
+                    DetailLifecycle::Gone
+                } else {
+                    DetailLifecycle::Present
+                };
+                let freshness = if lifecycle == DetailLifecycle::Gone {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    aggregate_freshness(
+                        candidates
+                            .into_iter()
+                            .filter_map(|(revision, lifecycle, freshness)| {
+                                (revision == newest && lifecycle == DetailLifecycle::Present)
+                                    .then_some(freshness)
+                            })
+                            .collect(),
+                    )
+                };
+                (
+                    identity,
+                    DetailAuthority {
+                        freshness,
+                        lifecycle,
+                    },
+                )
+            })
+            .collect();
         ResourceFeed {
             window_freshness,
             detail_authority,
@@ -2179,13 +2287,20 @@ impl K10sApp {
             && let Some((_, subscription)) = self.namespace_subscription.take()
         {
             self.client.unsubscribe(&subscription)?;
+            self.retire_detail_lifecycle_source(subscription.id());
             self.namespace_rejected_context = None;
         }
         for key in removed {
-            if let Some(entry) = self.resource_subscriptions.get(&key) {
+            let source = if let Some(entry) = self.resource_subscriptions.get(&key) {
                 self.client.unsubscribe(&entry.live)?;
-            }
+                Some(entry.live.id().clone())
+            } else {
+                None
+            };
             self.resource_subscriptions.remove(&key);
+            if let Some(source) = source {
+                self.retire_detail_lifecycle_source(&source);
+            }
         }
         if self.client.phase() != ClientPhase::Ready {
             self.window_subscriptions = window_subscriptions;
@@ -2388,6 +2503,7 @@ impl K10sApp {
             self.pending_mutations
                 .insert(request.id().clone(), PendingMutation { request, window });
         }
+        self.prune_detail_lifecycles();
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
     }
@@ -2568,6 +2684,7 @@ impl K10sApp {
                 }
                 if let Some(subscription) = self.resource_subscriptions.remove(&key) {
                     let _ = self.client.unsubscribe(&subscription.live);
+                    self.retire_detail_lifecycle_source(subscription.live.id());
                 }
                 self.reconcile_selected_resource_streams();
             }
@@ -2591,6 +2708,172 @@ impl K10sApp {
             };
             identity == Some(wanted)
         })
+    }
+
+    fn tracked_detail_identities(&self) -> std::collections::BTreeSet<ResourceIdentity> {
+        let mut tracked = std::collections::BTreeSet::new();
+        for window in self.shell.workspace().windows() {
+            let identity = match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity()
+                }
+                crate::workspace::WindowContent::Resource(resource) => resource
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::Services(service) => service
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.identity.as_row_identity()),
+            };
+            if let Some(identity) = identity {
+                tracked.insert(identity.clone());
+            }
+        }
+        tracked.extend(self.shell.dialogs().targets().cloned());
+        tracked
+    }
+
+    fn merge_detail_lifecycle_event(
+        entries: &mut BTreeMap<ResourceIdentity, DetailLifecycleEvent>,
+        identity: ResourceIdentity,
+        incoming: DetailLifecycleEvent,
+    ) {
+        let replace = entries.get(&identity).is_none_or(|current| {
+            incoming.revision > current.revision
+                || (incoming.revision == current.revision
+                    && incoming.lifecycle == DetailLifecycle::Gone
+                    && current.lifecycle == DetailLifecycle::Present)
+        });
+        if replace {
+            entries.insert(identity, incoming);
+        }
+    }
+
+    fn record_detail_lifecycle(
+        &mut self,
+        source: k10s_protocol::SubscriptionId,
+        identity: ResourceIdentity,
+        revision: k10s_protocol::BackendRevision,
+        lifecycle: DetailLifecycle,
+    ) {
+        let tracked = self.tracked_detail_identities().contains(&identity);
+        let source_state = self.detail_lifecycles.entry(source).or_default();
+        let had_entry = source_state.entries.contains_key(&identity);
+        if lifecycle == DetailLifecycle::Gone || tracked || had_entry {
+            Self::merge_detail_lifecycle_event(
+                &mut source_state.entries,
+                identity.clone(),
+                DetailLifecycleEvent {
+                    revision,
+                    lifecycle,
+                },
+            );
+        }
+        if lifecycle == DetailLifecycle::Present
+            && !tracked
+            && source_state.entries.get(&identity).is_some_and(|entry| {
+                entry.lifecycle == DetailLifecycle::Present && entry.revision <= revision
+            })
+        {
+            source_state.entries.remove(&identity);
+        }
+        self.prune_detail_lifecycles();
+    }
+
+    fn accept_detail_lifecycle_snapshot(
+        &mut self,
+        source: k10s_protocol::SubscriptionId,
+        revision: k10s_protocol::BackendRevision,
+        previous: Vec<ResourceIdentity>,
+        current: Vec<ResourceIdentity>,
+    ) {
+        let tracked = self.tracked_detail_identities();
+        let current: std::collections::BTreeSet<_> = current.into_iter().collect();
+        let source_state = self.detail_lifecycles.entry(source).or_default();
+        source_state.snapshot_revision = Some(revision);
+
+        let known: Vec<_> = source_state.entries.keys().cloned().collect();
+        for identity in known {
+            let lifecycle = if current.contains(&identity) {
+                DetailLifecycle::Present
+            } else {
+                DetailLifecycle::Gone
+            };
+            Self::merge_detail_lifecycle_event(
+                &mut source_state.entries,
+                identity.clone(),
+                DetailLifecycleEvent {
+                    revision,
+                    lifecycle,
+                },
+            );
+            if lifecycle == DetailLifecycle::Present && !tracked.contains(&identity) {
+                source_state.entries.remove(&identity);
+            }
+        }
+        for identity in previous {
+            if !current.contains(&identity) {
+                Self::merge_detail_lifecycle_event(
+                    &mut source_state.entries,
+                    identity,
+                    DetailLifecycleEvent {
+                        revision,
+                        lifecycle: DetailLifecycle::Gone,
+                    },
+                );
+            }
+        }
+        for identity in current {
+            if tracked.contains(&identity) {
+                Self::merge_detail_lifecycle_event(
+                    &mut source_state.entries,
+                    identity,
+                    DetailLifecycleEvent {
+                        revision,
+                        lifecycle: DetailLifecycle::Present,
+                    },
+                );
+            }
+        }
+        self.prune_detail_lifecycles();
+    }
+
+    fn retire_detail_lifecycle_source(&mut self, source: &k10s_protocol::SubscriptionId) {
+        self.detail_lifecycles.remove(source);
+    }
+
+    fn prune_detail_lifecycles(&mut self) {
+        let tracked = self.tracked_detail_identities();
+        let mut untracked: Vec<_> = self
+            .detail_lifecycles
+            .iter()
+            .flat_map(|(source, state)| {
+                state
+                    .entries
+                    .iter()
+                    .filter(|(identity, _)| !tracked.contains(*identity))
+                    .map(|(identity, event)| {
+                        (
+                            event.revision,
+                            source.as_str().to_owned(),
+                            source.clone(),
+                            identity.clone(),
+                        )
+                    })
+            })
+            .collect();
+        untracked.sort_by(|left, right| {
+            (&left.0, &left.1, &left.3).cmp(&(&right.0, &right.1, &right.3))
+        });
+        let remove = untracked
+            .len()
+            .saturating_sub(DETAIL_LIFECYCLE_TOMBSTONE_CAP);
+        for (_, _, source, identity) in untracked.into_iter().take(remove) {
+            if let Some(source) = self.detail_lifecycles.get_mut(&source) {
+                source.entries.remove(&identity);
+            }
+        }
     }
 
     /// Cancel one correlated primary request without orphaning it when the
@@ -3022,6 +3305,7 @@ impl K10sApp {
             WorkspaceEvent::ContextSwitched { .. } => self.retire_resource_context(),
             _ => {}
         }
+        self.prune_detail_lifecycles();
     }
 
     fn retire_resource_context(&mut self) {
@@ -3985,24 +4269,30 @@ mod tests {
         };
         app.handle_event(server_message(&frame(ServerKind::Event, 5, gone(9))), 0, 0)
             .unwrap();
-        assert!(!app.detail_lifecycles.contains_key(&identity));
+        assert!(
+            app.detail_lifecycles
+                .get(&subscription_id)
+                .is_none_or(|source| !source.entries.contains_key(&identity))
+        );
 
         app.handle_event(server_message(&frame(ServerKind::Event, 6, gone(11))), 0, 0)
             .unwrap();
         assert_eq!(
-            app.detail_lifecycles.get(&identity),
-            Some(&super::DetailLifecycle::Gone)
-        );
-        assert_eq!(
-            app.build_resource_feed()
-                .detail_authority
-                .get(&identity)
-                .map(|authority| authority.lifecycle),
+            app.detail_lifecycles
+                .get(&subscription_id)
+                .and_then(|source| source.entries.get(&identity))
+                .map(|entry| entry.lifecycle),
             Some(super::DetailLifecycle::Gone)
         );
 
         let mut recreated = identity.clone();
         recreated.uid = "uid-web-new".into();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(recreated.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
         app.handle_event(
             server_message(&frame(
                 ServerKind::Event,
@@ -4022,13 +4312,14 @@ mod tests {
             0,
         )
         .unwrap();
+        let source = app.detail_lifecycles.get(&subscription_id).unwrap();
         assert_eq!(
-            app.detail_lifecycles.get(&identity),
-            Some(&super::DetailLifecycle::Gone)
+            source.entries.get(&identity).map(|entry| entry.lifecycle),
+            Some(super::DetailLifecycle::Gone)
         );
         assert_eq!(
-            app.detail_lifecycles.get(&recreated),
-            Some(&super::DetailLifecycle::Present)
+            source.entries.get(&recreated).map(|entry| entry.lifecycle),
+            Some(super::DetailLifecycle::Present)
         );
     }
 
@@ -4913,6 +5204,184 @@ mod tests {
         }
     }
 
+    fn complete_resource_snapshot(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        revision: u64,
+        rows: Vec<ResourceListRow>,
+        initial: bool,
+    ) {
+        let mut frames = Vec::new();
+        if initial {
+            frames.push(ServerFrame {
+                kind: ServerKind::Subscribed,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Subscribed).unwrap(),
+            });
+        }
+        frames.extend([
+            ServerFrame {
+                kind: ServerKind::SnapshotBegin,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            },
+            ServerFrame {
+                kind: ServerKind::SnapshotChunk,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotChunk {
+                    chunk_index: 0,
+                    data: serde_json::to_value(ResourceSnapshotPage {
+                        revision: BackendRevision::new(revision),
+                        rows,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            },
+            ServerFrame {
+                kind: ServerKind::SnapshotEnd,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotEnd {
+                    checksum: format!("snapshot-{revision}"),
+                })
+                .unwrap(),
+            },
+        ]);
+        for frame in frames {
+            app.handle_event(server_message(&frame), 0, 0).unwrap();
+        }
+    }
+
+    fn apply_resource_changed(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        row: ResourceListRow,
+    ) {
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some(row.revision.to_string()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: row.identity.clone(),
+                        row,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+    }
+
+    fn apply_resource_gone(
+        app: &mut K10sApp,
+        subscription: &SubscriptionId,
+        identity: ResourceIdentity,
+        revision: u64,
+    ) {
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription.clone()),
+                sequence: None,
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_GONE.into(),
+                    revision: Some(revision.to_string()),
+                    payload: serde_json::to_value(ResourceGone {
+                        identity,
+                        revision: BackendRevision::new(revision),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+    }
+
+    fn deployment_row(identity: ResourceIdentity, revision: u64) -> ResourceListRow {
+        ResourceListRow {
+            identity,
+            revision: BackendRevision::new(revision),
+            labels: Default::default(),
+            summary: "Ready".into(),
+            created_at: String::new(),
+            projection: None,
+        }
+    }
+
+    fn overlapping_deployment_sources(
+        app: &mut K10sApp,
+    ) -> (WindowId, SubscriptionId, WindowId, SubscriptionId) {
+        let broad_window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::AddWorkloadInstance(
+                WorkloadKind::Deployments,
+            ))
+        {
+            app.handle_workspace_event(event);
+        }
+        let narrow_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| {
+                window.kind == crate::workspace::WindowKind::Workload(WorkloadKind::Deployments)
+                    && window.id != broad_window
+            })
+            .map(|window| window.id)
+            .next()
+            .unwrap();
+        app.web_set_namespace_scope(narrow_window, NamespaceScope::Namespace("default".into()));
+        let subscription_for = |app: &K10sApp, window| {
+            let key = app.window_subscriptions.get(&window).unwrap();
+            app.resource_subscriptions
+                .get(key)
+                .unwrap()
+                .live
+                .id()
+                .clone()
+        };
+        (
+            broad_window,
+            subscription_for(app, broad_window),
+            narrow_window,
+            subscription_for(app, narrow_window),
+        )
+    }
+
+    fn projected_detail_lifecycle(
+        app: &K10sApp,
+        identity: &ResourceIdentity,
+    ) -> Option<super::DetailLifecycle> {
+        app.build_resource_feed()
+            .detail_authority
+            .get(identity)
+            .map(|authority| authority.lifecycle)
+    }
+
     fn deployment_identity(name: &str) -> ResourceIdentity {
         ResourceIdentity {
             context: "dev-local".into(),
@@ -4971,6 +5440,232 @@ mod tests {
         assert!(
             app.pending_mutations.is_empty(),
             "revoked authority must block the command before client dispatch"
+        );
+    }
+
+    #[test]
+    fn detail_lifecycle_uses_newest_source_revision_and_gone_wins_equal_revision() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let identity = deployment_identity("web-frontend");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(identity.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            20,
+            vec![deployment_row(identity.clone(), 20)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, identity.clone(), 30);
+
+        apply_resource_changed(&mut app, &narrow, deployment_row(identity.clone(), 25));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone),
+            "an older Present from an overlapping source cannot revive newer Gone"
+        );
+
+        apply_resource_changed(&mut app, &narrow, deployment_row(identity.clone(), 30));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone),
+            "equal-revision Gone must dominate Present across sources"
+        );
+        assert!(
+            !app.mutation_authority_allows(&identity),
+            "final application dispatch must consume the ordered aggregate"
+        );
+    }
+
+    #[test]
+    fn replacement_snapshot_omission_marks_only_that_source_identity_gone() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let omitted = deployment_identity("web-frontend");
+        let narrow_only = deployment_identity("api-server");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(omitted.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            12,
+            vec![deployment_row(narrow_only.clone(), 12)],
+            true,
+        );
+
+        complete_resource_snapshot(&mut app, &broad, 20, Vec::new(), false);
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &omitted),
+            Some(super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            projected_detail_lifecycle(&app, &narrow_only),
+            Some(super::DetailLifecycle::Present),
+            "a broad-source omission cannot tombstone an unrelated exact identity from another source"
+        );
+    }
+
+    #[test]
+    fn retiring_gone_source_reveals_remaining_present_source() {
+        let (mut app, _) = ready_app();
+        let (broad_window, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let identity = deployment_identity("web-frontend");
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(identity.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            12,
+            vec![deployment_row(identity.clone(), 12)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, identity.clone(), 20);
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Gone)
+        );
+
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(broad_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        app.reconcile_selected_resource_streams();
+
+        assert!(!app.detail_lifecycles.contains_key(&broad));
+        assert_eq!(
+            projected_detail_lifecycle(&app, &identity),
+            Some(super::DetailLifecycle::Present),
+            "closing a source must retire only that source's tombstones"
+        );
+    }
+
+    #[test]
+    fn recreated_uid_is_independent_from_old_uid_tombstone_across_sources() {
+        let (mut app, _) = ready_app();
+        let (_, broad, _, narrow) = overlapping_deployment_sources(&mut app);
+        let old = deployment_identity("web-frontend");
+        let mut recreated = old.clone();
+        recreated.uid = "uid-web-frontend-recreated".into();
+        complete_resource_snapshot(
+            &mut app,
+            &broad,
+            10,
+            vec![deployment_row(old.clone(), 10)],
+            true,
+        );
+        complete_resource_snapshot(
+            &mut app,
+            &narrow,
+            15,
+            vec![deployment_row(recreated.clone(), 15)],
+            true,
+        );
+        apply_resource_gone(&mut app, &broad, old.clone(), 20);
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &old),
+            Some(super::DetailLifecycle::Gone)
+        );
+        assert_eq!(
+            projected_detail_lifecycle(&app, &recreated),
+            Some(super::DetailLifecycle::Present)
+        );
+    }
+
+    #[test]
+    fn lifecycle_tombstones_are_bounded_and_preserve_tracked_identity() {
+        const EXPECTED_TOMBSTONE_CAP: usize = 128;
+
+        let (mut app, _) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let key = app.window_subscriptions.get(&window).unwrap();
+        let subscription = app
+            .resource_subscriptions
+            .get(key)
+            .unwrap()
+            .live
+            .id()
+            .clone();
+        complete_resource_snapshot(&mut app, &subscription, 1, Vec::new(), true);
+        let pinned = deployment_identity("pinned-target");
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(pinned.clone()))
+        {
+            app.handle_workspace_event(event);
+        }
+        apply_resource_gone(&mut app, &subscription, pinned.clone(), 2);
+        for index in 0..(EXPECTED_TOMBSTONE_CAP + 64) {
+            let churn = deployment_identity(&format!("churn-{index}"));
+            apply_resource_gone(
+                &mut app,
+                &subscription,
+                churn,
+                u64::try_from(index).unwrap() + 3,
+            );
+        }
+
+        assert_eq!(
+            projected_detail_lifecycle(&app, &pinned),
+            Some(super::DetailLifecycle::Gone),
+            "tracked pinned identities survive cap eviction"
+        );
+        assert!(
+            app.detail_lifecycles
+                .values()
+                .map(|source| source.entries.len())
+                .sum::<usize>()
+                <= EXPECTED_TOMBSTONE_CAP + 1,
+            "untracked high-churn tombstones must remain bounded"
+        );
+
+        let pinned_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| {
+                matches!(
+                    &window.content,
+                    WindowContent::Detail(detail) if detail.identity == pinned
+                )
+            })
+            .map(|window| window.id)
+            .unwrap();
+        for event in app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(pinned_window))
+        {
+            app.handle_workspace_event(event);
+        }
+        assert!(
+            app.detail_lifecycles
+                .values()
+                .map(|source| source.entries.len())
+                .sum::<usize>()
+                <= EXPECTED_TOMBSTONE_CAP,
+            "an identity that is no longer pinned must join bounded tombstone eviction"
         );
     }
 

@@ -573,6 +573,11 @@ impl OperationDialogs {
         }
     }
 
+    /// Exact identities currently retained by open mutation dialogs.
+    pub fn targets(&self) -> impl Iterator<Item = &ResourceIdentity> {
+        self.windows.values().map(ActiveDialog::target)
+    }
+
     /// Mutable access to the dialog open on `window`.
     #[must_use]
     pub fn active_mut(&mut self, window: WindowId) -> Option<DialogHandle<'_>> {
