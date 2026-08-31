@@ -172,8 +172,14 @@ where
         .current_pos(position)
         .default_size(state.geometry.size)
         .frame(super::theme::window_frame(focused));
-    window = if free_window_resizing && state.kind != WindowKind::Detail {
-        window.min_size(Vec2::ZERO).scroll(true)
+    window = if free_window_resizing {
+        // Detail owns its finite body scroll region. Let it resize freely
+        // without enabling egui's outer-window scroll container.
+        if state.kind == WindowKind::Detail {
+            window.min_size(Vec2::ZERO)
+        } else {
+            window.min_size(Vec2::ZERO).scroll(true)
+        }
     } else {
         window.min_size(min_size)
     };
@@ -261,32 +267,34 @@ where
                     // Dedicated windows render only their pinned
                     // identity; they never read the integrated
                     // selection of any list window.
-                    if let Some(detail) = detail_state.as_ref()
-                        && let Some(presentation) =
+                    if let Some(detail) = detail_state.as_ref() {
+                        let freshness = dedicated_detail_freshness(detail, feed);
+                        if let Some(presentation) =
                             super::detail::presentation::DetailPresentationInput::from_feed(
                                 detail,
                                 feed,
                                 dedicated_detail_gone(detail, feed),
-                                feed.window_freshness.values().next(),
-                                feed.window_freshness.values().next().is_none_or(
+                                freshness,
+                                freshness.is_none_or(
                                     resource_window::WindowFreshness::mutations_allowed,
                                 ),
                             )
-                    {
-                        super::detail::show(
-                            ui,
-                            state.id,
-                            detail,
-                            &presentation,
-                            false,
-                            false,
-                            yaml,
-                            streams,
-                            dialogs,
-                            None,
-                            resource_actions,
-                            queued,
-                        );
+                        {
+                            super::detail::show(
+                                ui,
+                                state.id,
+                                detail,
+                                &presentation,
+                                false,
+                                false,
+                                yaml,
+                                streams,
+                                dialogs,
+                                None,
+                                resource_actions,
+                                queued,
+                            );
+                        }
                     }
                     false
                 }
@@ -378,4 +386,20 @@ fn dedicated_detail_gone<I: resource_window::RowIdentity>(
             || feed.services.is_some()
             || !feed.window_lists.is_empty()
             || !feed.window_services.is_empty())
+}
+
+fn dedicated_detail_freshness<'a, I: resource_window::RowIdentity>(
+    detail: &crate::workspace::DetailState<I>,
+    feed: &'a resource_window::ResourceFeed,
+) -> Option<&'a resource_window::WindowFreshness> {
+    let identity = detail.identity.as_row_identity()?;
+    feed.window_lists
+        .iter()
+        .chain(feed.window_services.iter())
+        .find_map(|(window, rows)| {
+            rows.iter()
+                .any(|row| &row.identity == identity)
+                .then(|| feed.window_freshness.get(window))
+                .flatten()
+        })
 }

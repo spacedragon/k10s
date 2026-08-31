@@ -4,16 +4,19 @@
 //! and independent tab state across views.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
-    BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind, RelatedGroup,
-    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    BackendRevision, DetailRow, DetailSection, EventRow, GroupVersionKind, OwnerReference,
+    RelatedGroup, ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
     ResourceRelationsResponse,
 };
 use k10s_ui::{
     ui::{
         ConnectionState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
-        SafeUiError, UiShell,
+        SafeUiError, UiShell, WindowFreshness,
     },
     workspace::{
         DetailTab as WorkspaceDetailTab, LauncherItem, WindowContent, WindowKind, WorkloadKind,
@@ -139,6 +142,208 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
     window.get_by_role_and_label(Role::Button, "Pop out ↗");
     window.get_by_role_and_label(Role::Button, "Maximize");
     window.get_by_label("Loading details");
+}
+
+#[test]
+fn detail_expansion_controls_are_transient_and_accessible() {
+    let mut harness = harness();
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(window.query_by_label("Context · dev-local").is_none());
+    window
+        .get_by_role_and_label(Role::Button, "More details")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Expand metadata")
+        .click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_label("Context · dev-local");
+}
+
+#[test]
+fn detail_expansion_is_independent_per_window() {
+    let mut harness = harness();
+    // Open the window we interact with last so it is not occluded by the
+    // other dedicated window's initial geometry.
+    for name in ["web-frontend-7d9f8-00001", "db-postgres-0"] {
+        harness
+            .state_mut()
+            .feed
+            .details
+            .insert(identity("Pod", name), pod_detail(name));
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity("Pod", name)));
+    }
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
+        .get_by_role_and_label(Role::Button, "More details")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Expand metadata")
+        .click();
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
+        .get_by_label("Context · dev-local");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
+            .query_by_label("Context · dev-local")
+            .is_none()
+    );
+}
+
+#[test]
+fn dedicated_cluster_scoped_title_and_copy_actions_use_pinned_identity() {
+    let mut harness = harness();
+    let node = ResourceIdentity {
+        context: CONTEXT.into(),
+        gvk: GroupVersionKind::core("v1", "Node"),
+        namespace: None,
+        name: "worker-a".into(),
+        uid: String::new(),
+    };
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(node));
+    harness.run_steps(4);
+
+    let detail = harness.get_by_role_and_label(Role::Window, "Node · worker-a");
+    detail.get_by_role_and_label(Role::Button, "Copy name");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Copy namespace")
+            .is_none()
+    );
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Copy UID")
+            .is_none()
+    );
+}
+
+#[test]
+fn dedicated_detail_uses_the_matching_source_window_freshness() {
+    let mut harness = harness();
+    let mut detail = deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    let target = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(target.clone(), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    let source = workload_window_id(harness.state().shell.workspace(), WorkloadKind::Deployments);
+    harness.state_mut().feed.window_lists.insert(
+        source,
+        vec![list_row(
+            "apps",
+            "v1",
+            "Deployment",
+            "web-frontend",
+            "20/20 ready",
+        )],
+    );
+    harness.state_mut().feed.window_freshness.insert(
+        source,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "30s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 1,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target));
+    harness.run_steps(4);
+
+    let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    detail.get_by_label("Freshness · stale");
+    assert!(
+        detail
+            .get_by_role_and_label(Role::Button, "Restart workload")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
+fn detail_overflow_opens_only_the_controller_owner() {
+    let mut harness = harness();
+    let mut detail = pod_detail("db-postgres-0");
+    detail.owner_references = vec![
+        OwnerReference {
+            gvk: GroupVersionKind::core("v1", "ConfigMap"),
+            name: "non-controller".into(),
+            uid: "config-uid".into(),
+            controller: false,
+        },
+        OwnerReference {
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "ReplicaSet".into(),
+            },
+            name: "web-frontend-7d9f8".into(),
+            uid: "replicaset-uid".into(),
+            controller: true,
+        },
+    ];
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(detail.identity.clone(), detail);
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "More")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Open owner web-frontend-7d9f8")
+        .click();
+    harness.run_steps(3);
+
+    assert_eq!(
+        pinned_identity(harness.state().shell.workspace()),
+        &ResourceIdentity {
+            context: CONTEXT.into(),
+            gvk: GroupVersionKind {
+                group: "apps".into(),
+                version: "v1".into(),
+                kind: "ReplicaSet".into(),
+            },
+            namespace: Some("default".into()),
+            name: "web-frontend-7d9f8".into(),
+            uid: "replicaset-uid".into(),
+        }
+    );
 }
 
 #[test]
@@ -515,6 +720,59 @@ fn workload_detail_is_a_selection_driven_bottom_panel() {
             .get_by_role_and_label(Role::Window, "Pods")
             .query_by_label("Details")
             .is_none()
+    );
+}
+
+#[test]
+fn restart_uses_the_pinned_target_and_respects_window_freshness() {
+    let mut harness = harness();
+    let mut detail = deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    let target = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(target.clone(), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(3);
+    let window_id =
+        workload_window_id(harness.state().shell.workspace(), WorkloadKind::Deployments);
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "Restart workload")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::Restart {
+            window: window_id,
+            target,
+        }]
+    );
+
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "30s ago".into(),
+            retry_in: "3s".into(),
+            attempt: 1,
+        },
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Deployments")
+            .get_by_role_and_label(Role::Button, "Restart workload")
+            .accesskit_node()
+            .is_disabled()
     );
 }
 

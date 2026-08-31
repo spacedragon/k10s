@@ -237,7 +237,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Detail"
+  Window label="Pod · default / api-0"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -250,26 +250,17 @@ Window
               Label value="Pod · default / api-0"
                 TextRun value="Pod · default / api-0"
               GenericContainer
-                Label value="Details"
-                  TextRun value="Details"
-                Label value="Kind Pod"
-                  TextRun value="Kind Pod"
-                Label value="Namespace default"
-                  TextRun value="Namespace default"
-                Label value="Context dev-local"
-                  TextRun value="Context dev-local"
-                Label value="UID uid-dev-local-pod-default-api-0"
-                  TextRun value="UID uid-dev-local-pod-default-api-0"
-              GenericContainer
                 Label value="Status · —"
                   TextRun value="Status · —"
                 Label value="Age · —"
                   TextRun value="Age · —"
                 Label value="Freshness · loading"
                   TextRun value="Freshness · loading"
+              GenericContainer
                 Button label="Copy name"
                 Button label="Copy namespace"
                 Button label="Copy UID"
+                Button label="More details"
                 Button label="Tab Overview"
                 Button label="Tab Events"
                 Button label="Tab YAML"

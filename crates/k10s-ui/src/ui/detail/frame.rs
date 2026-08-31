@@ -60,6 +60,26 @@ pub(super) fn show<I: RowIdentity>(
         };
         vital(ui, "", &freshness);
     });
+    if expansion.vitals {
+        ui.label(format!("Created · {}", input.metrics.age.unwrap_or("—")));
+    }
+    if expansion.labels {
+        ui.label(format!(
+            "Namespace · {}",
+            input.identity.namespace.as_deref().unwrap_or("—")
+        ));
+    }
+    if expansion.metadata {
+        ui.label(format!("Context · {}", input.identity.context));
+        ui.label(format!(
+            "UID · {}",
+            if input.identity.uid.is_empty() {
+                "—"
+            } else {
+                &input.identity.uid
+            }
+        ));
+    }
     ui.horizontal_wrapped(|ui| {
         copy(ui, "Copy name", &input.identity.name);
         if let Some(namespace) = input.identity.namespace.as_deref() {
