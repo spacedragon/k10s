@@ -323,6 +323,47 @@ fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
 }
 
 #[test]
+fn pod_tables_at_760_keep_wide_columns_reachable_via_horizontal_regions() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.conditions[0].message = Some("Containers are ready and accepting traffic".into());
+
+    let mut harness = harness(784.0, response);
+    let identity = pod_identity("web-0");
+    harness.state_mut().feed.metrics.insert(
+        identity.clone(),
+        ResourceMetricsResponse {
+            identity,
+            metrics: PodMetrics::unavailable(),
+            containers: vec![container_metrics("web", 125, 64)],
+        },
+    );
+    harness.run_steps(3);
+
+    let detail = pod_window(&harness);
+    let body = detail.get_by_role_and_label(Role::ScrollView, "Detail body");
+    assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
+    for label in [
+        "LAST EXIT",
+        "CPU / MEM",
+        "0 · Completed",
+        "125m / 64Mi",
+        "Containers are ready and accepting traffic",
+    ] {
+        detail.get_by_label(label);
+    }
+    for label in ["Pod containers table", "Pod conditions table"] {
+        let table = detail.get_by_role_and_label(Role::Table, label);
+        assert!(
+            body.rect().contains_rect(table.rect()),
+            "{label} viewport must stay inside the one vertical detail body"
+        );
+    }
+}
+
+#[test]
 fn pod_interaction_expands_labels_and_annotations_accessibly() {
     let mut harness = harness(1_100.0, healthy_detail());
     pod_window(&harness)

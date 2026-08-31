@@ -1,6 +1,6 @@
 //! Typed, feed-independent Pod Overview presentation.
 
-use egui::{Grid, RichText, Stroke};
+use egui::{Grid, RichText, ScrollArea, Stroke, accesskit::Role};
 use k10s_protocol::{
     ContainerStateProjection, ContainerTerminationProjection, EventsCondition, MetricsAvailability,
     OwnerReference, PodContainerPort, PodProjection, ResourceProjection, TransportProtocol,
@@ -372,53 +372,57 @@ fn show_operational(ui: &mut egui::Ui, window_id: WindowId, pod: &PodDetailProje
     }
 
     section(ui, &format!("CONTAINERS · {}", pod.containers.len()));
-    Grid::new(("k10s.detail.pod.containers", window_id.0))
-        .striped(true)
-        .show(ui, |ui| {
-            for heading in [
-                "NAME",
-                "IMAGE",
-                "STATE",
-                "READY",
-                "RESTARTS",
-                "LAST EXIT",
-                "CPU / MEM",
-            ] {
-                ui.label(RichText::new(heading).weak());
-            }
-            ui.end_row();
-            for container in &pod.containers {
-                ui.label(&container.name);
-                ui.label(&container.image);
-                ui.label(&container.state);
-                ui.label(&container.ready);
-                ui.label(&container.restarts);
-                ui.label(&container.last_exit);
-                ui.label(&container.metrics);
+    horizontal_table(ui, window_id, "containers", "Pod containers table", |ui| {
+        Grid::new(("k10s.detail.pod.containers", window_id.0))
+            .striped(true)
+            .show(ui, |ui| {
+                for heading in [
+                    "NAME",
+                    "IMAGE",
+                    "STATE",
+                    "READY",
+                    "RESTARTS",
+                    "LAST EXIT",
+                    "CPU / MEM",
+                ] {
+                    ui.label(RichText::new(heading).weak());
+                }
                 ui.end_row();
-            }
-        });
+                for container in &pod.containers {
+                    ui.label(&container.name);
+                    ui.label(&container.image);
+                    ui.label(&container.state);
+                    ui.label(&container.ready);
+                    ui.label(&container.restarts);
+                    ui.label(&container.last_exit);
+                    ui.label(&container.metrics);
+                    ui.end_row();
+                }
+            });
+    });
 
     section(ui, "CONDITIONS");
     if pod.conditions.is_empty() {
         ui.label("No conditions reported");
     } else {
-        Grid::new(("k10s.detail.pod.conditions", window_id.0))
-            .striped(true)
-            .show(ui, |ui| {
-                for heading in ["TYPE", "STATUS", "REASON", "MESSAGE", "LAST TRANSITION"] {
-                    ui.label(RichText::new(heading).weak());
-                }
-                ui.end_row();
-                for condition in &pod.conditions {
-                    ui.label(&condition.condition_type);
-                    ui.label(&condition.status);
-                    ui.label(&condition.reason);
-                    ui.label(&condition.message);
-                    ui.label(&condition.last_transition);
+        horizontal_table(ui, window_id, "conditions", "Pod conditions table", |ui| {
+            Grid::new(("k10s.detail.pod.conditions", window_id.0))
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in ["TYPE", "STATUS", "REASON", "MESSAGE", "LAST TRANSITION"] {
+                        ui.label(RichText::new(heading).weak());
+                    }
                     ui.end_row();
-                }
-            });
+                    for condition in &pod.conditions {
+                        ui.label(&condition.condition_type);
+                        ui.label(&condition.status);
+                        ui.label(&condition.reason);
+                        ui.label(&condition.message);
+                        ui.label(&condition.last_transition);
+                        ui.end_row();
+                    }
+                });
+        });
     }
 
     section(ui, "RECENT EVENTS");
@@ -438,6 +442,32 @@ fn show_operational(ui: &mut egui::Ui, window_id: WindowId, pod: &PodDetailProje
             }
         }
     }
+}
+
+fn horizontal_table(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    name: &'static str,
+    accessible_label: &'static str,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let table = ui.push_id(("k10s.detail.pod.table", name, window_id.0), |ui| {
+        ScrollArea::horizontal()
+            .id_salt(("k10s.detail.pod.table.scroll", name, window_id.0))
+            .auto_shrink([false, true])
+            .show(ui, content);
+    });
+    let rect = table.response.rect;
+    ui.ctx().accesskit_node_builder(table.response.id, |node| {
+        node.set_role(Role::Table);
+        node.set_label(accessible_label);
+        node.set_bounds(egui::accesskit::Rect {
+            x0: rect.left().into(),
+            y0: rect.top().into(),
+            x1: rect.right().into(),
+            y1: rect.bottom().into(),
+        });
+    });
 }
 
 fn show_metadata<I: RowIdentity>(
