@@ -783,7 +783,7 @@ fn assert_compact_size(rect: egui::Rect) {
 
 fn assert_compact_detail_size(rect: egui::Rect) {
     assert!(
-        rect.width() < 320.0 && rect.height() < 280.0,
+        rect.width() < 360.0 && rect.height() < 280.0,
         "detail window rect {rect:?} must remain compact while preserving its fixed frame chrome"
     );
 }

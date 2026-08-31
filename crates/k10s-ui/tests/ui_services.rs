@@ -4,10 +4,7 @@
 //! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
-use egui_kittest::{
-    Harness,
-    kittest::{NodeT as _, Queryable as _},
-};
+use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
@@ -325,6 +322,16 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
     integrated.get_by_label(
         "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
     );
+    assert_eq!(integrated.query_all_by_role(Role::ScrollView).count(), 1);
+    assert!(
+        integrated.rect().contains_rect(
+            integrated
+                .get_by_label(
+                    "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+                )
+                .rect()
+        )
+    );
 
     harness
         .state_mut()
@@ -431,7 +438,7 @@ fn stale_connection_shows_the_banner() {
 }
 
 #[test]
-fn stale_service_window_disables_its_yaml_launcher() {
+fn service_uses_yaml_tab_without_a_duplicate_edit_yaml_action() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
     let window = services_window_id(harness.state());
@@ -452,12 +459,12 @@ fn stale_service_window_disables_its_yaml_launcher() {
     );
     harness.run_steps(4);
 
+    let detail = harness.get_by_role_and_label(Role::Window, "Services");
+    detail.get_by_role_and_label(Role::Button, "Tab YAML");
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Services")
-            .get_by_role_and_label(Role::Button, "Edit YAML")
-            .accesskit_node()
-            .is_disabled()
+        detail
+            .query_by_role_and_label(Role::Button, "Edit YAML")
+            .is_none()
     );
 }
 

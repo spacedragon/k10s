@@ -491,12 +491,13 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     let deployment_window = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
         deployment_window
-            .get_by_role_and_label(Role::Button, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Scale…")
             .accesskit_node()
             .is_disabled()
     );
-    deployment_window
-        .get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
+    deployment_window.get_by_label(
+        "Scale, restart, delete, and YAML edits are disabled until this window is live",
+    );
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Scale workload")
@@ -514,7 +515,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Deployments")
-            .get_by_role_and_label(Role::Button, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Scale…")
             .accesskit_node()
             .is_disabled(),
         "the disconnected fallback gates cached detail controls"
@@ -720,8 +721,8 @@ fn a_gone_selection_beats_any_cached_detail_response() {
     );
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Age · 2026-08-21T00:00:00Z");
-    window.get_by_role_and_label(Role::Button, "Scale workload");
+    window.get_by_label("Structured details unavailable");
+    window.get_by_role_and_label(Role::Button, "Scale…");
 
     // The object is deleted behind the watch while the cache is hot.
     harness.state_mut().feed.lists.insert(
@@ -738,7 +739,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         "the gone row must leave the table"
     );
     window.get_by_label("This resource no longer exists");
-    for stale_control in ["Scale workload", "Delete resource", "Loading details"] {
+    for stale_control in ["Scale…", "Delete…", "Loading details"] {
         assert!(
             window.query_by_label(stale_control).is_none()
                 && window

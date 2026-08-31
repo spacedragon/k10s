@@ -268,15 +268,19 @@ where
                     // identity; they never read the integrated
                     // selection of any list window.
                     if let Some(detail) = detail_state.as_ref() {
-                        let freshness = dedicated_detail_freshness(detail, feed);
+                        let authority = detail
+                            .identity
+                            .as_row_identity()
+                            .and_then(|identity| feed.detail_authority.get(identity));
+                        let freshness = authority.map(|authority| &authority.freshness);
                         if let Some(presentation) =
                             super::detail::presentation::DetailPresentationInput::from_feed(
                                 detail,
                                 feed,
                                 dedicated_detail_gone(detail, feed),
                                 freshness,
-                                freshness.is_none_or(
-                                    resource_window::WindowFreshness::mutations_allowed,
+                                authority.is_some_and(
+                                    resource_window::DetailAuthority::mutations_allowed,
                                 ),
                             )
                         {
@@ -386,20 +390,4 @@ fn dedicated_detail_gone<I: resource_window::RowIdentity>(
             || feed.services.is_some()
             || !feed.window_lists.is_empty()
             || !feed.window_services.is_empty())
-}
-
-fn dedicated_detail_freshness<'a, I: resource_window::RowIdentity>(
-    detail: &crate::workspace::DetailState<I>,
-    feed: &'a resource_window::ResourceFeed,
-) -> Option<&'a resource_window::WindowFreshness> {
-    let identity = detail.identity.as_row_identity()?;
-    feed.window_lists
-        .iter()
-        .chain(feed.window_services.iter())
-        .find_map(|(window, rows)| {
-            rows.iter()
-                .any(|row| &row.identity == identity)
-                .then(|| feed.window_freshness.get(window))
-                .flatten()
-        })
 }

@@ -62,25 +62,6 @@ pub(super) fn show<I>(
     }
 }
 
-pub(super) fn show_actions<I: RowIdentity>(
-    ui: &mut egui::Ui,
-    window_id: WindowId,
-    view: &ResourceDetailResponse,
-    presentation: &super::presentation::DetailPresentationInput<'_>,
-    queued: &mut Vec<WorkspaceCommand<I>>,
-) {
-    if view.capabilities.can_edit_yaml
-        && ui
-            .add_enabled(
-                presentation.mutations_allowed,
-                egui::Button::new("Edit YAML"),
-            )
-            .clicked()
-    {
-        queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
-    }
-}
-
 /// The Service projection of a detail response, if populated.
 fn projection_of(view: &ResourceDetailResponse) -> Option<&ServiceProjection> {
     match &view.projection {

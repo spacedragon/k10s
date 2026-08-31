@@ -358,7 +358,7 @@ where
                         feed,
                         gone,
                         effective_freshness,
-                        effective_freshness.is_none_or(super::WindowFreshness::mutations_allowed),
+                        effective_freshness.is_some_and(super::WindowFreshness::mutations_allowed),
                     )
                 {
                     super::detail::show(

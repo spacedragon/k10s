@@ -147,7 +147,7 @@ pub(super) fn show<I>(
         detail_maximized,
         tabs_for_kind(&detail_identity_gvk(detail)),
         queued,
-        |ui, primary, actions| {
+        |ui, primary, actions, frame| {
             let view = match primary {
                 presentation::DetailPrimary::Loading => {
                     if !actions {
@@ -175,13 +175,12 @@ pub(super) fn show<I>(
                 if presentation.gone {
                     return;
                 }
-                if is_service_gvk(&detail_identity_gvk(detail)) {
-                    service::show_actions(ui, window_id, view, presentation, &mut body_queued);
-                } else {
+                if !is_service_gvk(&detail_identity_gvk(detail)) {
                     show_generic_actions(
                         ui,
                         window_id,
                         presentation,
+                        frame,
                         view,
                         dialogs,
                         resource_actions,
@@ -205,40 +204,63 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).group.is_empty()
                 && detail_identity_gvk(detail).version == "v1"
             {
-                if detail.active_tab == DetailTab::Overview && view.projection.is_none() {
-                    pod::show(ui, window_id, detail, presentation, &mut body_queued);
+                if detail.active_tab == DetailTab::Overview {
+                    if matches!(
+                        view.projection,
+                        Some(k10s_protocol::ResourceProjection::Pod(_))
+                    ) {
+                        pod::show(ui, window_id, detail, presentation, frame, &mut body_queued);
+                    } else {
+                        ui.label("Structured details unavailable");
+                    }
+                } else {
+                    show_generic_body(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        view,
+                        yaml,
+                        streams,
+                        dialogs,
+                        resource_actions,
+                        &mut body_queued,
+                    );
                 }
-                show_generic_body(
-                    ui,
-                    window_id,
-                    detail,
-                    presentation,
-                    view,
-                    yaml,
-                    streams,
-                    dialogs,
-                    resource_actions,
-                    &mut body_queued,
-                );
             } else if matches!(detail_identity_gvk(detail).kind.as_str(), "Deployment")
                 && detail_identity_gvk(detail).group == "apps"
                 && detail_identity_gvk(detail).version == "v1"
             {
-                if detail.active_tab == DetailTab::Overview && view.projection.is_none() {
-                    deployment::show(ui, window_id, detail, presentation, &mut body_queued);
+                if detail.active_tab == DetailTab::Overview {
+                    if matches!(
+                        view.projection,
+                        Some(k10s_protocol::ResourceProjection::Deployment(_))
+                    ) {
+                        deployment::show(
+                            ui,
+                            window_id,
+                            detail,
+                            presentation,
+                            frame,
+                            &mut body_queued,
+                        );
+                    } else {
+                        ui.label("Structured details unavailable");
+                    }
+                } else {
+                    show_generic_body(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        view,
+                        yaml,
+                        streams,
+                        dialogs,
+                        resource_actions,
+                        &mut body_queued,
+                    );
                 }
-                show_generic_body(
-                    ui,
-                    window_id,
-                    detail,
-                    presentation,
-                    view,
-                    yaml,
-                    streams,
-                    dialogs,
-                    resource_actions,
-                    &mut body_queued,
-                );
             } else {
                 show_generic_body(
                     ui,
@@ -321,18 +343,14 @@ fn show_generic_actions(
     ui: &mut egui::Ui,
     window_id: WindowId,
     presentation: &presentation::DetailPresentationInput<'_>,
+    frame: &presentation::DetailFrameProjection<'_>,
     view: &ResourceDetailResponse,
     dialogs: &mut dialogs::OperationDialogs,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
 ) {
-    if !presentation.mutations_allowed {
-        ui.label("Scale, delete, and YAML edits are disabled until this window is live");
-    }
-    if view.capabilities.can_scale {
-        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale"));
-        scale.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale workload")
-        });
+    if frame.actions.can_scale {
+        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
+        scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));
         if scale.clicked() {
             dialogs.open_scale(
                 window_id,
@@ -341,11 +359,13 @@ fn show_generic_actions(
             );
         }
     }
-    if view.capabilities.can_restart {
-        let restart = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Restart"));
-        restart.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restart workload")
-        });
+    if frame.actions.can_restart {
+        let restart = ui.add_enabled(
+            presentation.mutations_allowed,
+            egui::Button::new("Restart…"),
+        );
+        restart
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restart…"));
         if restart.clicked() {
             resource_actions.push(crate::ui::ResourceAction::Restart {
                 window: window_id,
@@ -353,11 +373,9 @@ fn show_generic_actions(
             });
         }
     }
-    if view.capabilities.can_delete {
-        let delete = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete"));
-        delete.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete resource")
-        });
+    if frame.actions.can_delete {
+        let delete = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete…"));
+        delete.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete…"));
         if delete.clicked() {
             dialogs.open_delete(window_id, presentation.identity.clone());
         }

@@ -21,12 +21,10 @@ fn identity<I: RowIdentity>(window: &Window<I>) -> String {
     if let WindowContent::Detail(detail) = &window.content
         && let Some(id) = detail.identity.as_row_identity()
     {
-        return format!(
-            "{} · {} / {}",
-            id.gvk.kind,
-            id.namespace.as_deref().unwrap_or("cluster"),
-            id.name
-        );
+        return match id.namespace.as_deref() {
+            Some(namespace) => format!("{} · {namespace} / {}", id.gvk.kind, id.name),
+            None => format!("{} · {}", id.gvk.kind, id.name),
+        };
     }
     let scope = match &window.content {
         WindowContent::Resource(state) => Some(&state.namespace_scope),

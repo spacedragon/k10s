@@ -144,6 +144,21 @@ pub enum RelationState {
     Failed(SafeUiError),
 }
 
+/// UI-owned freshness and mutation authority for one exact pinned identity.
+/// Dedicated Detail windows consume only this projection and never infer
+/// authority by searching arbitrary list windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailAuthority {
+    pub freshness: WindowFreshness,
+}
+
+impl DetailAuthority {
+    #[must_use]
+    pub fn mutations_allowed(&self) -> bool {
+        self.freshness.mutations_allowed()
+    }
+}
+
 /// Protocol rows and selectable types for one rendered frame.
 ///
 /// The application builds this from its client state; windows render it
@@ -157,6 +172,9 @@ pub struct ResourceFeed {
     /// Lifecycle of each open list window. Missing entries retain the legacy
     /// inference from connection and row state for compatibility.
     pub window_freshness: HashMap<WindowId, WindowFreshness>,
+    /// Exact-identity authority for dedicated Detail windows. Missing means
+    /// unavailable and mutations fail closed.
+    pub detail_authority: HashMap<ResourceIdentity, DetailAuthority>,
     /// Shared Namespace candidates for every namespaced list window.
     pub namespace_catalog: NamespaceCatalogState,
     /// Legacy kind-keyed fixture input. Production uses `window_lists` so
@@ -688,7 +706,7 @@ pub(super) fn show<I>(
                         feed,
                         gone,
                         effective_freshness,
-                        effective_freshness.is_none_or(WindowFreshness::mutations_allowed),
+                        effective_freshness.is_some_and(WindowFreshness::mutations_allowed),
                     )
                 {
                     super::detail::show(

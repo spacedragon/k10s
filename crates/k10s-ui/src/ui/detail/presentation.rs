@@ -3,7 +3,7 @@
 //! Callers resolve protocol feeds exactly once before invoking a kind body.
 //! That keeps integrated and dedicated views observationally identical.
 
-use k10s_protocol::{ResourceDetailResponse, ResourceIdentity};
+use k10s_protocol::{OwnerReference, ResourceDetailResponse, ResourceIdentity, ResourceProjection};
 
 use crate::ui::resource_window::RowIdentity;
 use crate::ui::{PrimaryDetailState, RelationState, ResourceFeed, WindowFreshness};
@@ -21,6 +21,43 @@ pub(crate) enum DetailPrimary<'a> {
 pub(crate) struct DetailMetrics<'a> {
     pub status: Option<&'a str>,
     pub age: Option<&'a str>,
+}
+
+/// Shared, per-window transient expansion state consumed by kind renderers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DetailExpansionState {
+    pub more_vitals: bool,
+    pub labels: bool,
+    pub metadata: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetailVital {
+    pub label: &'static str,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DetailActionProjection<'a> {
+    pub can_scale: bool,
+    pub can_restart: bool,
+    pub can_delete: bool,
+    pub verified_owner: Option<&'a OwnerReference>,
+}
+
+/// Frozen projection shared by the frame and Pod/Deployment renderers.
+/// Every field is resolved once from the exact pinned identity.
+pub(crate) struct DetailFrameProjection<'a> {
+    pub identity: &'a ResourceIdentity,
+    pub freshness: Option<&'a WindowFreshness>,
+    pub resource_metrics: Option<&'a k10s_protocol::ResourceMetricsResponse>,
+    pub relations: Option<&'a RelationState>,
+    pub actions: DetailActionProjection<'a>,
+    pub shortcut_labels: &'static [&'static str],
+    pub visible_vitals: Vec<DetailVital>,
+    pub overflow_vitals: Vec<DetailVital>,
+    pub vital_expansion_label: Option<&'static str>,
+    pub expansion: DetailExpansionState,
 }
 
 /// Everything a detail frame and a kind body may observe in one render.
@@ -83,6 +120,156 @@ impl<'a> DetailPresentationInput<'a> {
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })
+    }
+
+    pub(crate) fn frame_projection(
+        &'a self,
+        expansion: DetailExpansionState,
+    ) -> DetailFrameProjection<'a> {
+        let view = match self.primary {
+            DetailPrimary::Loaded(view) => Some(view),
+            DetailPrimary::Loading | DetailPrimary::Failed(_) => None,
+        };
+        let capabilities = view.map(|view| &view.capabilities);
+        let verified_owner = view.and_then(|view| {
+            view.owner_references.iter().find(|owner| {
+                owner.controller
+                    && !owner.uid.is_empty()
+                    && !owner.name.is_empty()
+                    && !owner.gvk.kind.is_empty()
+            })
+        });
+        let (visible_vitals, overflow_vitals, vital_expansion_label) =
+            typed_vitals(self.identity, view, self.metrics);
+        DetailFrameProjection {
+            identity: self.identity,
+            freshness: self.freshness,
+            resource_metrics: self.resource_metrics,
+            relations: self.relations,
+            actions: DetailActionProjection {
+                can_scale: capabilities.is_some_and(|caps| caps.can_scale),
+                can_restart: capabilities.is_some_and(|caps| caps.can_restart),
+                can_delete: capabilities.is_some_and(|caps| caps.can_delete),
+                verified_owner,
+            },
+            shortcut_labels: &["l Logs", "p Pods", "s Shell", "y YAML", "e Events"],
+            visible_vitals,
+            overflow_vitals,
+            vital_expansion_label,
+            expansion,
+        }
+    }
+}
+
+fn typed_vitals(
+    identity: &ResourceIdentity,
+    view: Option<&ResourceDetailResponse>,
+    generic: DetailMetrics<'_>,
+) -> (Vec<DetailVital>, Vec<DetailVital>, Option<&'static str>) {
+    match view.and_then(|view| view.projection.as_ref()) {
+        Some(ResourceProjection::Pod(pod)) => (
+            vec![
+                vital("Status", pod.phase.as_deref()),
+                DetailVital {
+                    label: "Ready",
+                    value: pair(pod.ready_containers, pod.total_containers),
+                },
+                vital_number("Restarts", pod.restart_count),
+                vital("Age", pod.created_at.as_deref()),
+            ],
+            vec![
+                vital("Node", pod.node_name.as_deref()),
+                vital("Pod IP", pod.pod_ip.as_deref()),
+            ],
+            Some("Pod"),
+        ),
+        Some(ResourceProjection::Deployment(deployment)) => (
+            vec![
+                DetailVital {
+                    label: "Rollout",
+                    value: deployment
+                        .conditions
+                        .iter()
+                        .find(|condition| condition.condition_type == "Progressing")
+                        .and_then(|condition| condition.reason.as_deref())
+                        .unwrap_or("—")
+                        .to_owned(),
+                },
+                DetailVital {
+                    label: "Ready",
+                    value: pair(deployment.ready_replicas, deployment.desired_replicas),
+                },
+                vital_number("Up-to-date", deployment.updated_replicas),
+                vital_number("Available", deployment.available_replicas),
+            ],
+            vec![
+                vital("Strategy", deployment.strategy.as_deref()),
+                vital("Age", deployment.created_at.as_deref()),
+            ],
+            Some("Deployment"),
+        ),
+        _ if identity.gvk.group.is_empty()
+            && identity.gvk.version == "v1"
+            && identity.gvk.kind == "Pod" =>
+        {
+            (
+                vec![
+                    vital("Status", None),
+                    DetailVital {
+                        label: "Ready",
+                        value: "—".into(),
+                    },
+                    vital_number("Restarts", None),
+                    vital("Age", None),
+                ],
+                vec![vital("Node", None), vital("Pod IP", None)],
+                Some("Pod"),
+            )
+        }
+        _ if identity.gvk.group == "apps"
+            && identity.gvk.version == "v1"
+            && identity.gvk.kind == "Deployment" =>
+        {
+            (
+                vec![
+                    vital("Rollout", None),
+                    DetailVital {
+                        label: "Ready",
+                        value: "—".into(),
+                    },
+                    vital_number("Up-to-date", None),
+                    vital_number("Available", None),
+                ],
+                vec![vital("Strategy", None), vital("Age", None)],
+                Some("Deployment"),
+            )
+        }
+        _ => (
+            vec![vital("Status", generic.status), vital("Age", generic.age)],
+            Vec::new(),
+            None,
+        ),
+    }
+}
+
+fn vital(label: &'static str, value: Option<&str>) -> DetailVital {
+    DetailVital {
+        label,
+        value: value.unwrap_or("—").to_owned(),
+    }
+}
+
+fn vital_number(label: &'static str, value: Option<u32>) -> DetailVital {
+    DetailVital {
+        label,
+        value: value.map_or_else(|| "—".to_owned(), |value| value.to_string()),
+    }
+}
+
+fn pair(left: Option<u32>, right: Option<u32>) -> String {
+    match (left, right) {
+        (Some(left), Some(right)) => format!("{left}/{right}"),
+        _ => "—".to_owned(),
     }
 }
 

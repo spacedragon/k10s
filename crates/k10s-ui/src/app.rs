@@ -21,8 +21,8 @@ use crate::ui::dialogs::DialogAction;
 use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
-    NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction, ResourceFeed,
-    SafeUiError, WindowFreshness,
+    DetailAuthority, NamespaceCatalogState, PrimaryDetailState, RelationState, ResourceAction,
+    ResourceFeed, SafeUiError, WindowFreshness,
 };
 use crate::workspace::{
     NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
@@ -1921,35 +1921,69 @@ impl K10sApp {
                 .unwrap_or(NamespaceCatalogState::Loading),
             (state, _) => state.clone(),
         };
+        let window_freshness: std::collections::HashMap<_, _> = window_lists
+            .iter()
+            .map(|(window, rows)| {
+                let state = if rows.is_empty() {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    WindowFreshness::Live {
+                        last_sync_age: "just now".into(),
+                    }
+                };
+                (*window, state)
+            })
+            .chain(window_services.iter().map(|(window, rows)| {
+                let state = if rows.is_empty() {
+                    WindowFreshness::ReadyEmpty
+                } else {
+                    WindowFreshness::Live {
+                        last_sync_age: "just now".into(),
+                    }
+                };
+                (*window, state)
+            }))
+            .chain(
+                self.window_freshness_overrides
+                    .iter()
+                    .map(|(window, state)| (*window, state.clone())),
+            )
+            .collect();
+        let mut authority_sources: BTreeMap<
+            k10s_protocol::ResourceIdentity,
+            Vec<&WindowFreshness>,
+        > = BTreeMap::new();
+        for (window, rows) in window_lists.iter().chain(window_services.iter()) {
+            let Some(freshness) = window_freshness.get(window) else {
+                continue;
+            };
+            for row in rows {
+                authority_sources
+                    .entry(row.identity.clone())
+                    .or_default()
+                    .push(freshness);
+            }
+        }
+        let detail_authority = authority_sources
+            .into_iter()
+            .map(|(identity, sources)| {
+                let freshness = if sources.len() == 1 {
+                    sources[0].clone()
+                } else if sources.iter().all(|source| source.mutations_allowed()) {
+                    WindowFreshness::Live {
+                        last_sync_age: "all sources live".into(),
+                    }
+                } else {
+                    WindowFreshness::Failed {
+                        message: "one or more authoritative sources are not live".into(),
+                    }
+                };
+                (identity, DetailAuthority { freshness })
+            })
+            .collect();
         ResourceFeed {
-            window_freshness: window_lists
-                .iter()
-                .map(|(window, rows)| {
-                    let state = if rows.is_empty() {
-                        WindowFreshness::ReadyEmpty
-                    } else {
-                        WindowFreshness::Live {
-                            last_sync_age: "just now".into(),
-                        }
-                    };
-                    (*window, state)
-                })
-                .chain(window_services.iter().map(|(window, rows)| {
-                    let state = if rows.is_empty() {
-                        WindowFreshness::ReadyEmpty
-                    } else {
-                        WindowFreshness::Live {
-                            last_sync_age: "just now".into(),
-                        }
-                    };
-                    (*window, state)
-                }))
-                .chain(
-                    self.window_freshness_overrides
-                        .iter()
-                        .map(|(window, state)| (*window, state.clone())),
-                )
-                .collect(),
+            window_freshness,
+            detail_authority,
             namespace_catalog,
             lists,
             window_lists,
