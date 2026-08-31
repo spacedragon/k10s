@@ -248,8 +248,6 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
-                Label value="Pod · default / api-0"
-                  TextRun value="Pod · default / api-0"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -263,7 +261,7 @@ Window
                       Label value="Age · —"
                         TextRun value="Age · —"
                       Button label="Show more Pod vitals"
-                      Label value="Freshness · unavailable"
+                      Label value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer

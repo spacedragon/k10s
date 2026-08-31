@@ -218,7 +218,7 @@ Window
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer
-                  Label value="Pod · default / db-postgres-0"
+                  Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"
                     TextRun value="Pod · default / db-postgres-0"
                   GenericContainer
                     Button label="Maximize"

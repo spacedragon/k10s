@@ -119,6 +119,7 @@ pub struct K10sApp {
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
+    log_session_sources: BTreeMap<WindowId, LogStreamSource>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
     /// Canonical resource watches retained by visible workspace demand;
     /// rebuilt automatically on reconnect by shared client recovery.
@@ -195,6 +196,15 @@ struct PendingStreamTicket {
     request: PendingRequest,
     route: StreamRoute,
     window: WindowId,
+    logs_source: Option<LogStreamSource>,
+}
+
+/// Complete source mode owned by one logs socket or in-flight ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogStreamSource {
+    target: StreamTarget,
+    since_seconds: Option<i64>,
+    previous: bool,
 }
 
 /// A window's in-flight workload mutation (scale or delete).
@@ -336,6 +346,7 @@ impl K10sApp {
             infrastructure_subscription: None,
             infrastructure_context: None,
             stream_sessions: BTreeMap::new(),
+            log_session_sources: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             window_subscriptions: BTreeMap::new(),
@@ -2462,10 +2473,17 @@ impl K10sApp {
     /// an action is drained, so the dialog's earlier enabled state is never
     /// sufficient authority on its own.
     fn mutation_authority_allows(&self, target: &ResourceIdentity) -> bool {
-        self.build_resource_feed()
-            .detail_authority
-            .get(target)
-            .is_some_and(DetailAuthority::mutations_allowed)
+        let primary_loaded = match self.primary_details.get(target) {
+            Some(PrimaryDetailState::Loaded(_)) => true,
+            Some(PrimaryDetailState::Loading | PrimaryDetailState::Failed(_)) => false,
+            None => self.details.contains_key(target),
+        };
+        primary_loaded
+            && self
+                .build_resource_feed()
+                .detail_authority
+                .get(target)
+                .is_some_and(DetailAuthority::mutations_allowed)
     }
 
     /// Drain rendering-time dialog actions into workload mutation commands.
@@ -3220,21 +3238,26 @@ impl K10sApp {
     fn refresh_relations(&mut self, now_ms: u64) {
         const RELATIONS_TTL_MS: u64 = 30_000;
         let current_context = self.client.local_ui().selected_context.as_deref();
-        let desired: Vec<ResourceIdentity> = self
+        let wants_relations = |detail: &crate::workspace::DetailState<ResourceIdentity>| {
+            detail.active_tab == crate::workspace::DetailTab::Pods
+                || (detail.active_tab == crate::workspace::DetailTab::Overview
+                    && detail.identity.gvk.group == "apps"
+                    && detail.identity.gvk.version == "v1"
+                    && detail.identity.gvk.kind == "Deployment")
+        };
+        let desired: std::collections::BTreeSet<ResourceIdentity> = self
             .shell
             .workspace()
             .windows()
             .iter()
             .filter_map(|window| match &window.content {
-                crate::workspace::WindowContent::Detail(detail)
-                    if detail.active_tab == crate::workspace::DetailTab::Pods =>
-                {
+                crate::workspace::WindowContent::Detail(detail) if wants_relations(detail) => {
                     detail.identity.as_row_identity().cloned()
                 }
                 crate::workspace::WindowContent::Resource(resource) => resource
                     .detail
                     .as_ref()
-                    .filter(|detail| detail.active_tab == crate::workspace::DetailTab::Pods)
+                    .filter(|detail| wants_relations(detail))
                     .and_then(|detail| detail.identity.as_row_identity())
                     .cloned(),
                 _ => None,
@@ -3512,6 +3535,7 @@ impl K10sApp {
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
             session.disconnect();
         }
+        self.log_session_sources.clear();
         for window in exec_windows {
             for event in self
                 .shell
@@ -3522,6 +3546,113 @@ impl K10sApp {
         }
         self.pending_stream_tickets.clear();
         self.shell.stream_stores_mut().connection_lost();
+    }
+
+    fn desired_log_source(&self, window: WindowId) -> Option<LogStreamSource> {
+        let target = self.current_stream_target(window, StreamRoute::Logs)?;
+        let view = self.shell.stream_stores().logs.get(window)?;
+        Some(LogStreamSource {
+            target,
+            since_seconds: view.since_seconds(),
+            previous: view.previous(),
+        })
+    }
+
+    /// Retire source modes that no longer match their owning log view and
+    /// replace them with one ticket for the full current mode.
+    fn reconcile_log_sources(
+        &mut self,
+        mut requested: BTreeMap<WindowId, LogStreamSource>,
+    ) -> Result<(), ClientError> {
+        let stale_pending = self
+            .pending_stream_tickets
+            .iter()
+            .filter(|(_, pending)| pending.route == StreamRoute::Logs)
+            .filter(|(_, pending)| {
+                pending.logs_source.as_ref() != self.desired_log_source(pending.window).as_ref()
+            })
+            .map(|(id, pending)| (id.clone(), pending.window))
+            .collect::<Vec<_>>();
+        let mut restart = std::collections::BTreeSet::new();
+        for (id, window) in stale_pending {
+            let Some(request) = self
+                .pending_stream_tickets
+                .get(&id)
+                .map(|pending| pending.request.clone())
+            else {
+                continue;
+            };
+            self.client.cancel(&request)?;
+            self.pending_stream_tickets.remove(&id);
+            let _ = self.client.take(request.clone());
+            let _ = self.client.take_failure(request);
+            restart.insert(window);
+        }
+
+        let stale_sessions = self
+            .stream_sessions
+            .iter()
+            .filter(|((_, route), _)| *route == StreamRoute::Logs)
+            .filter_map(|((window, _), session)| {
+                let desired = self.desired_log_source(*window);
+                let stale = self.log_session_sources.get(window).map_or_else(
+                    || desired.as_ref().map(|source| &source.target) != Some(session.target()),
+                    |current| desired.as_ref() != Some(current),
+                );
+                stale.then_some(*window)
+            })
+            .collect::<Vec<_>>();
+        for window in stale_sessions {
+            if let Some(mut session) = self.stream_sessions.remove(&(window, StreamRoute::Logs)) {
+                session.disconnect();
+            }
+            self.log_session_sources.remove(&window);
+            restart.insert(window);
+        }
+
+        for window in restart {
+            if let Some(source) = self.desired_log_source(window) {
+                requested.entry(window).or_insert(source);
+            }
+        }
+        for (window, source) in requested {
+            if self.desired_log_source(window).as_ref() != Some(&source) {
+                continue;
+            }
+            let already_pending = self.pending_stream_tickets.values().any(|pending| {
+                pending.window == window && pending.logs_source.as_ref() == Some(&source)
+            });
+            let already_live = self
+                .log_session_sources
+                .get(&window)
+                .is_some_and(|current| current == &source)
+                && self
+                    .stream_sessions
+                    .contains_key(&(window, StreamRoute::Logs));
+            if already_pending || already_live {
+                continue;
+            }
+            let request = self.client.begin(Query::StreamTicket {
+                target: source.target.clone(),
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+                since_seconds: source.since_seconds,
+                previous: source.previous,
+            })?;
+            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
+                view.connect();
+            }
+            self.pending_stream_tickets.insert(
+                request.id().clone(),
+                PendingStreamTicket {
+                    request,
+                    route: StreamRoute::Logs,
+                    window,
+                    logs_source: Some(source),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Reconcile live sessions against the authoritative workspace state:
@@ -3572,6 +3703,9 @@ impl K10sApp {
             if let Some(mut session) = self.stream_sessions.remove(&(window, route)) {
                 session.disconnect();
             }
+            if route == StreamRoute::Logs {
+                self.log_session_sources.remove(&window);
+            }
             let stores = self.shell.stream_stores_mut();
             match route {
                 StreamRoute::Logs => {
@@ -3601,6 +3735,7 @@ impl K10sApp {
     /// views and explicit shell connects, plus stdin/resize forwarding into
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
+        let mut requested_logs = BTreeMap::new();
         for (window, action) in self.shell.drain_log_actions() {
             let crate::ui::tools::LogsAction::OpenLogs {
                 target,
@@ -3608,30 +3743,19 @@ impl K10sApp {
                 previous,
                 ..
             } = action;
-            let request = self.client.begin(Query::StreamTicket {
-                target,
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
-                since_seconds,
-                previous,
-            })?;
-            // The tool moves to Connecting immediately; the Ready signal
-            // completes the attach.
-            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
-                view.connect();
-            }
-            self.pending_stream_tickets.insert(
-                request.id().clone(),
-                PendingStreamTicket {
-                    request,
-                    route: StreamRoute::Logs,
-                    window,
+            requested_logs.insert(
+                window,
+                LogStreamSource {
+                    target,
+                    since_seconds,
+                    previous,
                 },
             );
         }
+        self.reconcile_log_sources(requested_logs)?;
         for (window, target) in self.shell.drain_shell_connects() {
             let request = self.client.begin(Query::StreamTicket {
-                target: target.clone(),
+                target,
                 stream_type: k10s_protocol::StreamType::Exec,
                 tty: true,
                 since_seconds: None,
@@ -3647,6 +3771,7 @@ impl K10sApp {
                     request,
                     route: StreamRoute::Exec,
                     window,
+                    logs_source: None,
                 },
             );
         }
@@ -3683,25 +3808,42 @@ impl K10sApp {
                 request,
                 route,
                 window,
+                logs_source,
             } = entry;
-            if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request)
-                && let Err(error) = session_open(
+            let result = self.client.take(request);
+            if route == StreamRoute::Logs
+                && logs_source.as_ref() != self.desired_log_source(window).as_ref()
+            {
+                continue;
+            }
+            if let Some(QueryResult::StreamTicket(granted)) = result {
+                if let Err(error) = session_open(
                     &mut self.stream_sessions,
                     window,
                     route,
                     *granted,
                     &self.connection_url,
                     &self.access_token,
-                )
-            {
-                let reason = format!("could not open stream socket: {error}");
-                fail_stream_tool(&mut self.shell, window, route, &reason);
+                ) {
+                    let reason = format!("could not open stream socket: {error}");
+                    fail_stream_tool(&mut self.shell, window, route, &reason);
+                } else if let Some(source) = logs_source {
+                    self.log_session_sources.insert(window, source);
+                }
             }
         }
     }
 
     /// Project dedicated-socket events into the connected tools.
     fn poll_stream_sessions(&mut self) {
+        if let Err(error) = self.reconcile_log_sources(BTreeMap::new()) {
+            self.terminal_failure(error.to_string());
+            return;
+        }
+        if self.flush_outbound().is_err() {
+            self.terminal_failure("could not send stream request".to_owned());
+            return;
+        }
         self.finish_stream_tickets();
         self.reconcile_sessions();
         let keys: Vec<(WindowId, StreamRoute)> = self.stream_sessions.keys().copied().collect();
@@ -3782,6 +3924,7 @@ impl K10sApp {
                                     view.fail(&reason);
                                 }
                                 self.stream_sessions.remove(&key);
+                                self.log_session_sources.remove(&window);
                             }
                             StreamRoute::Exec => {
                                 if let Some(shell) = stores.shells.get_mut(window) {
@@ -5297,7 +5440,7 @@ mod tests {
         assert!(harness.state().infrastructure_request.is_none());
     }
 
-    fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+    pub(super) fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
         let bootstrap =
             ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
         let (mut app, state) = test_app(vec![ConnectionScript {
@@ -5591,6 +5734,12 @@ mod tests {
         );
         app.window_freshness_overrides
             .insert(older_window, older_source_freshness);
+        for identity in [&target, &unrelated] {
+            let detail = deployment_detail_fixture(identity);
+            app.details.insert(identity.clone(), detail.clone());
+            app.primary_details
+                .insert(identity.clone(), PrimaryDetailState::Loaded(detail));
+        }
         (app, older_window, target, unrelated)
     }
 
@@ -5945,10 +6094,14 @@ mod tests {
     }
 
     #[test]
-    fn revoked_dialog_authority_cannot_reach_app_mutation_dispatch() {
+    fn primary_loading_revokes_dialog_authority_before_mutation_dispatch() {
         let (mut app, _) = ready_app();
         let target = deployment_identity("web-frontend");
         let window = pin_deployment_without_request(&mut app, &target);
+        let detail = deployment_detail_fixture(&target);
+        app.details.insert(target.clone(), detail.clone());
+        app.primary_details
+            .insert(target.clone(), PrimaryDetailState::Loaded(detail));
         app.window_retained_rows.insert(
             window,
             vec![ResourceListRow {
@@ -5967,12 +6120,14 @@ mod tests {
             },
         );
         assert!(app.mutation_authority_allows(&target));
-        app.shell.dialogs_mut().open_scale(window, target, Some(20));
+        app.shell
+            .dialogs_mut()
+            .open_scale(window, target.clone(), Some(20));
 
-        // The dialog was valid when opened, then exact authority disappeared
-        // before submission reached the application layer.
-        app.window_retained_rows.remove(&window);
-        app.window_freshness_overrides.remove(&window);
+        // The dialog was valid when opened, then its exact primary detail
+        // began reloading before submission reached the application layer.
+        app.primary_details
+            .insert(target, PrimaryDetailState::Loading);
         app.shell.dialogs_mut().submit_active(window);
         app.process_dialog_actions().unwrap();
 
@@ -6638,13 +6793,14 @@ mod tests {
     }
 
     #[test]
-    fn controller_pods_demand_is_lazy_and_deduplicated() {
+    fn deployment_relations_are_demanded_on_overview_and_deduplicated_across_views() {
         let (mut app, state) = ready_app();
         let window = app
             .web_activate_workload(WorkloadKind::Deployments)
             .unwrap();
         let identity = deployment_identity("api");
         app.web_select_resource(window, identity.clone());
+        app.refresh_details_at(1);
         assert_eq!(
             state
                 .borrow()
@@ -6653,11 +6809,10 @@ mod tests {
                 .filter_map(request_kind)
                 .filter(|kind| kind == "resource.relations")
                 .count(),
-            0,
-            "primary selection must not eagerly request relations"
+            1,
+            "an open Deployment Overview demands rollout relations"
         );
         app.web_set_detail_tab(window, crate::workspace::DetailTab::Pods);
-        app.refresh_details_at(1);
         app.refresh_details_at(2);
         assert_eq!(
             state
@@ -6668,12 +6823,44 @@ mod tests {
                 .filter(|kind| kind == "resource.relations")
                 .count(),
             1,
-            "repeated frames share one pending relations request"
+            "switching Overview to Pods shares the pending relations request"
+        );
+
+        let dedicated = app
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()))
+            .into_iter()
+            .find_map(|event| match event {
+                WorkspaceEvent::Opened(window) => Some(window),
+                _ => None,
+            })
+            .expect("dedicated Deployment detail opens on Overview");
+        app.refresh_details_at(3);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            1,
+            "integrated and dedicated views deduplicate by exact identity"
         );
         assert!(matches!(
             app.relations.get(&identity),
             Some(crate::ui::RelationState::Loading)
         ));
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(window));
+        app.refresh_details_at(4);
+        assert!(app.relation_requests.contains_key(&identity));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(dedicated));
+        app.refresh_details_at(5);
+        assert!(app.relation_requests.is_empty());
+        assert!(app.relations.is_empty());
     }
 
     #[test]
@@ -6689,6 +6876,7 @@ mod tests {
                 window,
                 crate::workspace::DetailTab::Pods,
             ));
+        assert!(app.cancel_relation_request(&identity));
         app.relations.insert(
             identity.clone(),
             crate::ui::RelationState::Loaded {
@@ -6702,9 +6890,24 @@ mod tests {
                 refresh_error: None,
             },
         );
-        let before = state.borrow().sent.len();
+        let before_relations = state
+            .borrow()
+            .sent
+            .iter()
+            .filter_map(request_kind)
+            .filter(|kind| kind == "resource.relations")
+            .count();
         app.refresh_details_at(30_009);
-        assert_eq!(state.borrow().sent.len(), before);
+        assert_eq!(
+            state
+                .borrow()
+                .sent
+                .iter()
+                .filter_map(request_kind)
+                .filter(|kind| kind == "resource.relations")
+                .count(),
+            before_relations
+        );
         app.refresh_details_at(30_010);
         assert!(matches!(
             app.relations.get(&identity),
@@ -6714,12 +6917,14 @@ mod tests {
             })
         ));
         assert_eq!(
-            state.borrow().sent[before..]
+            state
+                .borrow()
+                .sent
                 .iter()
                 .filter_map(request_kind)
                 .filter(|kind| kind == "resource.relations")
                 .count(),
-            1
+            before_relations + 1
         );
     }
 
@@ -8541,10 +8746,10 @@ mod stream_lifecycle_tests {
         ResourceIdentity, StreamTarget, StreamType,
     };
 
-    use super::K10sApp;
-    use super::tests::test_app;
+    use super::tests::{ready_app, test_app};
+    use super::{K10sApp, LogStreamSource};
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::{LogsPhase, ShellPhase};
+    use crate::ui::tools::{LogsAction, LogsPhase, ShellPhase};
     use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
@@ -8582,6 +8787,32 @@ mod stream_lifecycle_tests {
             uid: format!("uid-{pod_name}"),
             container: container.into(),
         }
+    }
+
+    fn log_source(
+        target: StreamTarget,
+        since_seconds: Option<i64>,
+        previous: bool,
+    ) -> LogStreamSource {
+        LogStreamSource {
+            target,
+            since_seconds,
+            previous,
+        }
+    }
+
+    fn queue_logs(app: &mut K10sApp, window: crate::workspace::WindowId, target: StreamTarget) {
+        let logs = &mut app.shell.stream_stores_mut().logs;
+        logs.ensure(window, target.clone());
+        logs.queue(
+            window,
+            LogsAction::OpenLogs {
+                window,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
+        );
     }
 
     fn detail_with_container(
@@ -8785,6 +9016,144 @@ mod stream_lifecycle_tests {
             app.stream_sessions
                 .contains_key(&(window, StreamRoute::Logs)),
             "reconciliation retains the selected-container stream"
+        );
+    }
+
+    #[test]
+    fn changing_live_log_source_retires_only_that_window_and_requests_full_new_mode() {
+        let (mut app, _state) = ready_app();
+        let first = pod("first");
+        let second = pod("second");
+        let first_window = open_pod_detail(&mut app, &first);
+        let second_window = open_pod_detail(&mut app, &second);
+        let first_target = target_for(&first.name);
+        let second_target = target_for(&second.name);
+
+        for (window, target) in [
+            (first_window, first_target.clone()),
+            (second_window, second_target.clone()),
+        ] {
+            app.shell
+                .stream_stores_mut()
+                .logs
+                .ensure(window, target.clone())
+                .connect();
+            app.stream_sessions.insert(
+                (window, StreamRoute::Logs),
+                StreamSession::new(StreamRoute::Logs, target.clone(), false),
+            );
+            app.log_session_sources
+                .insert(window, log_source(target, Some(300), false));
+        }
+
+        let first_logs = app
+            .shell
+            .stream_stores_mut()
+            .logs
+            .get_mut(first_window)
+            .expect("first log view exists");
+        first_logs.select_container("metrics");
+        first_logs.set_previous(true);
+        first_logs.set_since_seconds(Some(900));
+        app.process_stream_requests().unwrap();
+
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(first_window, StreamRoute::Logs)),
+            "the stale live source is retired"
+        );
+        assert!(
+            app.stream_sessions
+                .contains_key(&(second_window, StreamRoute::Logs)),
+            "another window's live logs are untouched"
+        );
+        let replacement = app
+            .pending_stream_tickets
+            .values()
+            .find(|pending| pending.window == first_window)
+            .expect("replacement ticket is pending");
+        assert_eq!(
+            replacement.logs_source.as_ref(),
+            Some(&log_source(
+                target_for_container(&first.name, "metrics"),
+                Some(900),
+                true,
+            ))
+        );
+    }
+
+    #[test]
+    fn changing_pending_log_source_cancels_old_ticket_and_late_reply_cannot_attach() {
+        let (mut app, _state) = ready_app();
+        let first = pod("first-pending");
+        let second = pod("second-pending");
+        let first_window = open_pod_detail(&mut app, &first);
+        let second_window = open_pod_detail(&mut app, &second);
+        let first_target = target_for(&first.name);
+        let second_target = target_for(&second.name);
+        queue_logs(&mut app, first_window, first_target.clone());
+        queue_logs(&mut app, second_window, second_target);
+        app.process_stream_requests().unwrap();
+
+        let old_first = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == first_window)
+            .map(|(id, _)| id.clone())
+            .expect("first ticket is pending");
+        let other = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == second_window)
+            .map(|(id, _)| id.clone())
+            .expect("other ticket is pending");
+
+        let first_logs = app
+            .shell
+            .stream_stores_mut()
+            .logs
+            .get_mut(first_window)
+            .expect("first log view exists");
+        first_logs.select_container("metrics");
+        first_logs.set_previous(true);
+        first_logs.set_since_seconds(None);
+        app.process_stream_requests().unwrap();
+
+        assert!(!app.pending_stream_tickets.contains_key(&old_first));
+        assert!(app.pending_stream_tickets.contains_key(&other));
+        let replacement = app
+            .pending_stream_tickets
+            .iter()
+            .find(|(_, pending)| pending.window == first_window)
+            .expect("replacement ticket is pending");
+        assert_ne!(replacement.0, &old_first);
+        assert_eq!(
+            replacement.1.logs_source.as_ref(),
+            Some(&log_source(
+                target_for_container(&first.name, "metrics"),
+                None,
+                true,
+            ))
+        );
+
+        let _ = app.client.apply(k10s_protocol::ServerFrame {
+            kind: k10s_protocol::ServerKind::Response,
+            request_id: Some(old_first),
+            subscription_id: None,
+            sequence: None,
+            payload: serde_json::to_value(k10s_protocol::StreamTicketResponse {
+                ticket_id: "late-ticket".into(),
+                target: first_target,
+                stream_type: StreamType::Logs,
+                tty: false,
+            })
+            .unwrap(),
+        });
+        app.finish_stream_tickets();
+        assert!(
+            !app.stream_sessions
+                .contains_key(&(first_window, StreamRoute::Logs)),
+            "the retired ticket cannot attach a late socket"
         );
     }
 

@@ -1011,6 +1011,39 @@ fn dedicated_detail_uses_identity_bound_authority_not_arbitrary_source_windows()
 }
 
 #[test]
+fn integrated_detail_has_inner_identity_heading_but_dedicated_caption_is_not_duplicated() {
+    let mut harness = harness();
+    let target = identity("Deployment", "web-frontend");
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Heading, "Deployment · default / web-frontend");
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target));
+    harness.run_steps(4);
+    let dedicated =
+        harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    assert!(
+        dedicated
+            .query_by_role_and_label(Role::Heading, "Deployment · default / web-frontend")
+            .is_none(),
+        "the outer dedicated caption is the sole accessible identity"
+    );
+}
+
+#[test]
 fn dedicated_detail_without_identity_bound_authority_fails_closed() {
     let mut harness = harness();
     let mut response = deployment_detail("web-frontend");

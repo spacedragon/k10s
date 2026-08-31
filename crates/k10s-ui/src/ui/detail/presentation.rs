@@ -94,7 +94,7 @@ pub(crate) struct DetailActionProjection<'a> {
 /// Every field is resolved once from the exact pinned identity.
 pub(crate) struct DetailFrameProjection<'a> {
     pub identity: &'a ResourceIdentity,
-    pub freshness: Option<&'a WindowFreshness>,
+    pub freshness: DetailFreshness<'a>,
     #[allow(dead_code)] // Frozen for the Task-5 Pod renderer.
     pub resource_metrics: Option<&'a k10s_protocol::ResourceMetricsResponse>,
     #[allow(dead_code)] // Frozen for the Task-5 Pod/Deployment renderers.
@@ -105,6 +105,16 @@ pub(crate) struct DetailFrameProjection<'a> {
     pub overflow_vitals: Vec<DetailVital>,
     pub vital_expansion_label: Option<&'static str>,
     pub expansion: DetailExpansionState,
+}
+
+/// Effective detail freshness after primary loading and exact source
+/// authority have been combined for the pinned identity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DetailFreshness<'a> {
+    Loading,
+    Unavailable,
+    Gone,
+    Source(&'a WindowFreshness),
 }
 
 /// Everything a detail frame and a kind body may observe in one render.
@@ -164,7 +174,9 @@ impl<'a> DetailPresentationInput<'a> {
             freshness,
             now: SystemTime::now(),
             gone,
-            mutations_allowed,
+            mutations_allowed: mutations_allowed
+                && !gone
+                && matches!(primary, DetailPrimary::Loaded(_)),
             port_forward_available: feed.port_forward_available,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
@@ -185,7 +197,17 @@ impl<'a> DetailPresentationInput<'a> {
             typed_vitals(self.identity, view, self.metrics, self.now);
         DetailFrameProjection {
             identity: self.identity,
-            freshness: self.freshness,
+            freshness: if self.gone {
+                DetailFreshness::Gone
+            } else {
+                match self.primary {
+                    DetailPrimary::Loading => DetailFreshness::Loading,
+                    DetailPrimary::Failed(_) => DetailFreshness::Unavailable,
+                    DetailPrimary::Loaded(_) => self
+                        .freshness
+                        .map_or(DetailFreshness::Unavailable, DetailFreshness::Source),
+                }
+            },
             resource_metrics: self.resource_metrics,
             relations: self.relations,
             actions: DetailActionProjection {

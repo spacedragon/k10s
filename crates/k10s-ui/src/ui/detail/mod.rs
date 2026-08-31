@@ -93,9 +93,9 @@ enum DetailShortcut {
     OpenOwner,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DetailRuntimeAction {
-    PreviousLogs(WindowId),
+    PreviousLogs { window: WindowId, container: String },
 }
 
 fn shortcut_for_key(
@@ -359,11 +359,13 @@ pub(super) fn show<I>(
     );
     for action in runtime_actions {
         match action {
-            DetailRuntimeAction::PreviousLogs(window_id) => {
+            DetailRuntimeAction::PreviousLogs { window, container } => {
                 if let presentation::DetailPrimary::Loaded(view) = presentation.primary
                     && let Some(target) = stream_target(detail, view)
                 {
-                    streams.logs.ensure(window_id, target).set_previous(true);
+                    let logs = streams.logs.ensure(window, target);
+                    logs.select_container(&container);
+                    logs.set_previous(true);
                 }
             }
         }

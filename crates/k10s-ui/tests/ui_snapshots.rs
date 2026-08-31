@@ -25,7 +25,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, DetailLifecycle, ResourceFeed, UiShell, WindowFreshness,
+        ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
+        UiShell, WindowFreshness,
     },
     workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
@@ -487,6 +488,13 @@ fn pod_detail_disconnected_logs() {
 fn scale_dialog_with_conflict_reason() {
     let mut harness = harness();
     let target = list_row("apps", "v1", "Deployment", "api-server", "2/2 ready").identity;
+    let mut detail = pod_detail(&target.name);
+    detail.identity = target.clone();
+    harness
+        .state_mut()
+        .feed
+        .primary_details
+        .insert(target.clone(), PrimaryDetailState::Loaded(detail));
     harness.state_mut().feed.lists.insert(
         W::Deployments,
         vec![list_row(

@@ -83,9 +83,9 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
     pod.phase = Some("Running".into());
     pod.ready_containers = Some(1);
     pod.restart_count = Some(7);
-    pod.containers[0] = PodContainerProjection {
-        name: "web".into(),
-        image: Some("ghcr.io/example/web:1.2.3".into()),
+    pod.containers[1] = PodContainerProjection {
+        name: "sidecar".into(),
+        image: Some("ghcr.io/example/sidecar:1.2.3".into()),
         state: Some(ContainerStateProjection::Waiting {
             reason: Some("CrashLoopBackOff".into()),
         }),
@@ -141,7 +141,7 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
     for label in [
         "Status ▲ CrashLoopBackOff",
         "WHY IT'S FAILING",
-        "web · CrashLoopBackOff · exit 1 · Error",
+        "sidecar · CrashLoopBackOff · exit 1 · Error",
         "Waiting · CrashLoopBackOff",
         "1 · Error",
     ] {
@@ -172,6 +172,19 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
             .get(window_id)
             .expect("active log viewer remains bound")
             .previous()
+    );
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .logs
+            .get(window_id)
+            .expect("active log viewer remains bound")
+            .target()
+            .container,
+        "sidecar",
+        "Previous logs selects the exact failing container"
     );
     assert!(
         !harness
@@ -702,6 +715,67 @@ fn pod_interaction_lifecycle_states_keep_shared_frame_semantics() {
     let detail = pod_window(&stale);
     detail.get_by_label("This resource no longer exists");
     assert!(detail.query_by_label("CONTAINERS · 2").is_none());
+}
+
+#[test]
+fn detail_freshness_combines_primary_state_with_exact_source_authority() {
+    let identity = pod_identity("web-0");
+    let live = DetailAuthority {
+        freshness: WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+        lifecycle: DetailLifecycle::Present,
+    };
+
+    let mut harness = harness(1_100.0, healthy_detail());
+    harness
+        .state_mut()
+        .feed
+        .detail_authority
+        .insert(identity.clone(), live.clone());
+    harness
+        .state_mut()
+        .feed
+        .primary_details
+        .insert(identity.clone(), PrimaryDetailState::Loading);
+    harness.run_steps(3);
+    pod_window(&harness).get_by_label("Freshness · loading");
+
+    harness.state_mut().feed.primary_details.insert(
+        identity.clone(),
+        PrimaryDetailState::Failed(SafeUiError::new("detail denied")),
+    );
+    harness.run_steps(3);
+    let detail = pod_window(&harness);
+    detail.get_by_label("Freshness · unavailable");
+    assert!(
+        detail
+            .query_by_label("Freshness · live (just now)")
+            .is_none()
+    );
+
+    harness.state_mut().feed.primary_details.insert(
+        identity.clone(),
+        PrimaryDetailState::Loaded(healthy_detail()),
+    );
+    harness.run_steps(3);
+    pod_window(&harness).get_by_label("Freshness · live (just now)");
+
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::ReadyEmpty,
+            lifecycle: DetailLifecycle::Gone,
+        },
+    );
+    harness.run_steps(3);
+    let detail = pod_window(&harness);
+    detail.get_by_label("Freshness · gone");
+    assert!(
+        detail
+            .query_by_label("Freshness · live (just now)")
+            .is_none()
+    );
 }
 
 #[test]

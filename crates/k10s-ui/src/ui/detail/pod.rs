@@ -377,7 +377,10 @@ fn show_operational<I: RowIdentity>(
             failure.container, failure.reason, exit
         ));
         if ui.button("Previous logs").clicked() {
-            runtime_actions.push(super::DetailRuntimeAction::PreviousLogs(window_id));
+            runtime_actions.push(super::DetailRuntimeAction::PreviousLogs {
+                window: window_id,
+                container: failure.container.clone(),
+            });
             queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Logs));
         }
     }

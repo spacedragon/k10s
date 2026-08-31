@@ -9,8 +9,8 @@ use egui::{
 use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use super::presentation::{
-    DetailExpansionState, DetailFrameProjection, DetailPresentationInput, DetailPrimary,
-    DetailVital, DetailVitalTone,
+    DetailExpansionState, DetailFrameProjection, DetailFreshness, DetailPresentationInput,
+    DetailPrimary, DetailVital, DetailVitalTone,
 };
 use crate::ui::resource_window::RowIdentity;
 
@@ -42,7 +42,14 @@ pub(super) fn show<I: RowIdentity>(
     let mut projection = input.frame_projection(expansion);
     configure(&mut projection);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title(projection.identity)).strong().heading());
+        if integrated {
+            let title = title(projection.identity);
+            let heading = ui.label(RichText::new(&title).strong().heading());
+            ui.ctx().accesskit_node_builder(heading.id, |node| {
+                node.set_role(egui::accesskit::Role::Heading);
+                node.set_label(title);
+            });
+        }
         if integrated && !input.gone {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let maximize = ui.button(if detail_maximized {
@@ -78,7 +85,7 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     if wide {
-        show_vital_strip(&mut vitals_ui, &mut projection, input.gone, true);
+        show_vital_strip(&mut vitals_ui, &mut projection, true);
     } else {
         ScrollArea::horizontal()
             .id_salt(("k10s.detail.vitals.scroll", window_id.0))
@@ -86,7 +93,7 @@ pub(super) fn show<I: RowIdentity>(
             .stick_to_right(true)
             .show(&mut vitals_ui, |ui| {
                 ui.horizontal(|ui| {
-                    show_vital_strip(ui, &mut projection, input.gone, false);
+                    show_vital_strip(ui, &mut projection, false);
                 });
             });
     }
@@ -256,12 +263,7 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
     ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
 }
 
-fn show_vital_strip(
-    ui: &mut egui::Ui,
-    projection: &mut DetailFrameProjection<'_>,
-    gone: bool,
-    wide: bool,
-) {
+fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
     for metric in &projection.visible_vitals {
         vital(ui, metric);
     }
@@ -283,16 +285,27 @@ fn show_vital_strip(
         projection.expansion.more_vitals = false;
     }
     let freshness = match projection.freshness {
-        Some(crate::ui::WindowFreshness::Live { last_sync_age }) => {
+        DetailFreshness::Loading => "Freshness · loading".into(),
+        DetailFreshness::Unavailable => "Freshness · unavailable".into(),
+        DetailFreshness::Gone => "Freshness · gone".into(),
+        DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) => {
             format!("Freshness · live ({last_sync_age})")
         }
-        Some(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Freshness · stale".into(),
-        Some(crate::ui::WindowFreshness::Reconnecting { .. }) => "Freshness · reconnecting".into(),
-        Some(crate::ui::WindowFreshness::Forbidden { .. }) => "Freshness · forbidden".into(),
-        Some(crate::ui::WindowFreshness::Failed { .. }) => "Freshness · failed".into(),
-        Some(crate::ui::WindowFreshness::ReadyEmpty) => "Freshness · ready".into(),
-        None if gone => "Freshness · gone".into(),
-        None => "Freshness · unavailable".into(),
+        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => {
+            "Freshness · stale".into()
+        }
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => {
+            "Freshness · reconnecting".into()
+        }
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => {
+            "Freshness · forbidden".into()
+        }
+        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => {
+            "Freshness · failed".into()
+        }
+        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => {
+            "Freshness · ready".into()
+        }
     };
     ui.label(freshness);
 }

@@ -515,9 +515,16 @@ where
         self.dialogs.retain(|id| live_windows.contains(&id));
         self.dialogs
             .show(ui, connection == ConnectionState::Connected, |_, target| {
-                feed.detail_authority
-                    .get(target)
-                    .is_some_and(resource_window::DetailAuthority::mutations_allowed)
+                let primary_loaded = match feed.primary_details.get(target) {
+                    Some(PrimaryDetailState::Loaded(_)) => true,
+                    Some(PrimaryDetailState::Loading | PrimaryDetailState::Failed(_)) => false,
+                    None => feed.details.contains_key(target),
+                };
+                primary_loaded
+                    && feed
+                        .detail_authority
+                        .get(target)
+                        .is_some_and(resource_window::DetailAuthority::mutations_allowed)
             });
 
         if let Some((action, new_window)) = self.command_palette.show(ui.ctx(), contexts, feed) {
