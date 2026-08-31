@@ -54,6 +54,10 @@ fn deployments_gvk() -> Gvk {
     Gvk::new("apps", "v1", "Deployment")
 }
 
+fn replica_sets_gvk() -> Gvk {
+    Gvk::new("apps", "v1", "ReplicaSet")
+}
+
 fn pods_gvk() -> Gvk {
     Gvk::core("v1", "Pod")
 }
@@ -902,7 +906,8 @@ async fn service_details_carry_structured_projection() {
         k10s_protocol::TransportProtocol::Udp
     );
 
-    // Deployment details keep the projection absent.
+    // Deployment details carry the same authoritative rollout projection as
+    // their list rows.
     server.set_response(
         "/apis/apps/v1/namespaces/default/deployments/web",
         200,
@@ -911,7 +916,64 @@ async fn service_details_carry_structured_projection() {
     let deployment_detail = crate::detail(&kernel, reference(deployments_gvk(), "web", "uid-web"))
         .await
         .expect("deployment detail resolves");
-    assert!(deployment_detail.projection.is_none());
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) =
+        deployment_detail.projection
+    else {
+        panic!("deployment detail carries a Deployment projection")
+    };
+    assert_eq!(projection.desired_replicas, Some(3));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.labels.get("app").map(String::as_str),
+        Some("web")
+    );
+}
+
+#[tokio::test]
+async fn replica_set_details_carry_only_authoritative_rollout_fields() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/replicasets/web-12",
+        200,
+        &json!({
+            "kind": "ReplicaSet",
+            "apiVersion": "apps/v1",
+            "metadata": {
+                "name": "web-12",
+                "namespace": NS,
+                "uid": "uid-rs-web-12",
+                "resourceVersion": "43",
+                "creationTimestamp": "2026-08-21T00:01:00Z",
+                "annotations": {"deployment.kubernetes.io/revision": "12"},
+            },
+            "spec": {
+                "replicas": 4,
+                "selector": {"matchLabels": {"app": "web"}},
+                "template": {"spec": {"containers": [{"name": "web", "image": "example/web:v3"}]}},
+            },
+            "status": {"readyReplicas": 3},
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(
+        &kernel,
+        reference(replica_sets_gvk(), "web-12", "uid-rs-web-12"),
+    )
+    .await
+    .expect("ReplicaSet resolves");
+
+    let Some(k10s_protocol::ResourceProjection::ReplicaSet(projection)) = detail.projection else {
+        panic!("ReplicaSet detail carries a rollout projection")
+    };
+    assert_eq!(projection.revision, 12);
+    assert_eq!(projection.replicas, Some(4));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.created_at.as_deref(),
+        Some("2026-08-21T00:01:00Z")
+    );
 }
 
 #[tokio::test]

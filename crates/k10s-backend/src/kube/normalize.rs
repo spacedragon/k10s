@@ -19,6 +19,8 @@ use crate::port::{
 };
 use crate::runtime::supervisor::WatchRow;
 
+use super::deployment_projection::{deployment_projection, replica_set_projection};
+
 /// Normalize one cluster object into its list view-model row.
 ///
 /// `namespaced` and `namespace` describe the selection the object was listed
@@ -84,6 +86,17 @@ fn project(gvk: &Gvk, object: &kube::core::DynamicObject) -> Option<ResourceProj
         ("", "v1", "Service") => typed_object(object, |s: &k8s_openapi::api::core::v1::Service| {
             service_projection(s)
         }),
+        ("apps", "v1", "Deployment") => typed_object(
+            object,
+            |deployment: &k8s_openapi::api::apps::v1::Deployment| deployment_projection(deployment),
+        ),
+        ("apps", "v1", "ReplicaSet") => typed_object(
+            object,
+            |replica_set: &k8s_openapi::api::apps::v1::ReplicaSet| {
+                replica_set_projection(replica_set)
+            },
+        )
+        .flatten(),
         _ => None,
     }
 }
