@@ -1751,7 +1751,11 @@ fn workload_detail_is_a_selection_driven_bottom_panel() {
     );
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Pod · default / db-postgres-0")
+            .is_none()
+    );
     assert!(
         window
             .query_by_role_and_label(Role::Button, "Show details")
@@ -1768,7 +1772,7 @@ fn workload_detail_is_a_selection_driven_bottom_panel() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Details");
+    window.get_by_label("Pod · default / db-postgres-0");
     window
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();
@@ -1777,7 +1781,7 @@ fn workload_detail_is_a_selection_driven_bottom_panel() {
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Pods")
-            .query_by_label("Details")
+            .query_by_label("Pod · default / db-postgres-0")
             .is_none()
     );
 }
