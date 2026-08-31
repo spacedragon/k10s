@@ -10,10 +10,11 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, ContainerImageProjection, DeploymentProjection, EventRow, GroupVersionKind,
-    PodProjection, RelatedGroup, ReplicaSetProjection, ResourceCapabilities,
-    ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
-    ResourceProjection, ResourceRelationsResponse,
+    BackendRevision, ContainerImageProjection, ContainerStateProjection, DeploymentProjection,
+    EventRow, GroupVersionKind, PodContainerProjection, PodProjection, RelatedGroup,
+    ReplicaSetProjection, ResourceCapabilities, ResourceConditionProjection,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection,
+    ResourceRelationsResponse,
 };
 use k10s_ui::{
     ui::{
@@ -510,6 +511,46 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
     ] {
         window.get_by_label(label);
     }
+}
+
+#[test]
+fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    let mut row = pod_row("checkout-crashloop");
+    let Some(ResourceProjection::Pod(pod)) = row.projection.as_mut() else {
+        panic!("fixture carries typed Pod projection");
+    };
+    pod.containers = vec![PodContainerProjection {
+        name: "api".into(),
+        image: Some("ghcr.io/acme/checkout:broken".into()),
+        state: Some(ContainerStateProjection::Waiting {
+            reason: Some("CrashLoopBackOff".into()),
+        }),
+        ready: Some(false),
+        restart_count: Some(7),
+        last_termination: None,
+    }];
+    let relations = RelationState::Loaded {
+        response: Arc::new(ResourceRelationsResponse {
+            identity,
+            revision: BackendRevision::new(46),
+            groups: vec![RelatedGroup {
+                title: "Pods".into(),
+                gvk: GroupVersionKind::core("v1", "Pod"),
+                rows: vec![row],
+            }],
+        }),
+        loaded_at_ms: 1_000,
+        refreshing: false,
+        refresh_error: None,
+    };
+    let mut harness = harness(egui::vec2(1_050.0, 700.0));
+    open_detail(&mut harness, detail, Some(relations), [900.0, 560.0]);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    window.get_by_label("▲ CrashLoopBackOff");
+    assert!(window.query_by_label("● Running").is_none());
 }
 
 #[test]

@@ -6,8 +6,8 @@
 
 use egui::{Grid, RichText, ScrollArea, WidgetInfo, WidgetType, accesskit::Role};
 use k10s_protocol::{
-    DeploymentProjection, EventRow, EventsCondition, GroupVersionKind, ReplicaSetProjection,
-    ResourceIdentity, ResourceListRow, ResourceProjection,
+    ContainerStateProjection, DeploymentProjection, EventRow, EventsCondition, GroupVersionKind,
+    PodProjection, ReplicaSetProjection, ResourceIdentity, ResourceListRow, ResourceProjection,
 };
 
 use crate::ui::resource_window::RowIdentity;
@@ -425,7 +425,7 @@ fn pods_table<I: RowIdentity>(
                         pod.and_then(|pod| pair(pod.ready_containers, pod.total_containers))
                             .unwrap_or_else(|| "—".into()),
                     );
-                    pod_status(ui, pod.and_then(|pod| pod.phase.as_deref()));
+                    pod_status(ui, pod);
                     ui.label(number(pod.and_then(|pod| pod.restart_count)));
                     ui.label(value(pod.and_then(|pod| pod.node_name.as_deref())));
                     ui.label(format_age(
@@ -438,8 +438,33 @@ fn pods_table<I: RowIdentity>(
     });
 }
 
-fn pod_status(ui: &mut egui::Ui, phase: Option<&str>) {
-    let Some(phase) = phase else {
+fn pod_status(ui: &mut egui::Ui, pod: Option<&PodProjection>) {
+    let Some(pod) = pod else {
+        ui.label("—");
+        return;
+    };
+    if let Some((shape, text, color)) = pod.containers.iter().find_map(|container| match container
+        .state
+        .as_ref()?
+    {
+        ContainerStateProjection::Waiting {
+            reason: Some(reason),
+        } if !reason.is_empty() => Some(("▲", reason.as_str(), crate::ui::theme::WARNING)),
+        ContainerStateProjection::Terminated(termination) if termination.exit_code != 0 => {
+            termination
+                .reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| ("✕", reason, crate::ui::theme::DANGER))
+        }
+        ContainerStateProjection::Running
+        | ContainerStateProjection::Waiting { .. }
+        | ContainerStateProjection::Terminated(_) => None,
+    }) {
+        ui.label(RichText::new(format!("{shape} {text}")).color(color));
+        return;
+    }
+    let Some(phase) = pod.phase.as_deref() else {
         ui.label("—");
         return;
     };
