@@ -834,6 +834,12 @@ fn map_projection(projection: &ResourceProjection) -> WireProjection {
             conditions: pod.conditions.iter().map(map_condition).collect(),
             node_name: pod.node_name.clone(),
             pod_ip: pod.pod_ip.clone(),
+            host_ip: pod.host_ip.clone(),
+            qos_class: pod.qos_class.clone(),
+            priority: pod.priority,
+            service_account: pod.service_account.clone(),
+            restart_policy: pod.restart_policy.clone(),
+            ports: pod.ports.iter().map(map_pod_container_port).collect(),
             labels: pod.labels.clone(),
             annotations: pod.annotations.clone(),
             created_at: pod.created_at.clone(),
@@ -929,6 +935,22 @@ fn map_pod_container(
         ready: container.ready,
         restart_count: container.restart_count,
         last_termination: container.last_termination.as_ref().map(map_termination),
+    }
+}
+
+/// Map one backend declared Pod port onto its protocol-facing payload.
+#[must_use]
+fn map_pod_container_port(port: &crate::port::PodContainerPort) -> k10s_protocol::PodContainerPort {
+    k10s_protocol::PodContainerPort {
+        container_name: port.container_name.clone(),
+        name: port.name.clone(),
+        container_port: port.container_port,
+        host_port: port.host_port,
+        protocol: match port.protocol {
+            crate::port::TransportProtocol::Tcp => TransportProtocol::Tcp,
+            crate::port::TransportProtocol::Udp => TransportProtocol::Udp,
+            crate::port::TransportProtocol::Sctp => TransportProtocol::Sctp,
+        },
     }
 }
 

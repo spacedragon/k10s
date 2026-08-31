@@ -280,6 +280,25 @@ pub struct PodContainerProjection {
     pub last_termination: Option<ContainerTerminationProjection>,
 }
 
+/// One declared Pod container port, carrying the declaring container's exact
+/// name so clients never infer ownership from display text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodContainerPort {
+    /// Exact name of the container declaring this port.
+    pub container_name: String,
+    /// Declared port name, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Container port, validated by the backend to the TCP/UDP/SCTP range.
+    pub container_port: u16,
+    /// Optional host port, validated by the backend to the TCP/UDP/SCTP range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<u16>,
+    /// Declared transport protocol; Kubernetes defaults an omitted value to TCP.
+    pub protocol: TransportProtocol,
+}
+
 /// A normalized Pod projection used by list and detail responses.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +327,24 @@ pub struct PodProjection {
     /// Primary Pod IP, absent while unassigned or unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_ip: Option<String>,
+    /// Node IP hosting the Pod, absent while unscheduled or unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    /// Kubernetes QoS class, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos_class: Option<String>,
+    /// Explicit Pod priority, absent when the spec did not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Effective service account name, absent when the spec did not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    /// Declared Pod restart policy, absent when the spec did not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<String>,
+    /// Declared container ports in Pod spec order.
+    #[serde(default)]
+    pub ports: Vec<PodContainerPort>,
     /// Pod labels sorted by key.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,

@@ -65,12 +65,12 @@ pub use resource::{
     AttentionRow, BackendRevision, ContainerImageProjection, ContainerStateProjection,
     ContainerTerminationProjection, DeploymentProjection, DetailRow, DetailSection, EventRow,
     EventsCondition, GroupVersionKind, HealthLevel, NodeRow, OwnerReference,
-    PersistentVolumeClaimRow, PersistentVolumeRow, PodContainerProjection, PodProjection,
-    REQUEST_RESOURCE_RELATIONS, RelatedGroup, ReplicaSetProjection, ResourceCapabilities,
-    ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity, ResourceListRequest,
-    ResourceListResponse, ResourceListRow, ResourceProjection, ResourceRefRequest,
-    ResourceRelationsResponse, ResourceScope, ServicePort, ServiceProjection, StorageClassRow,
-    StorageInventory, TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
+    PersistentVolumeClaimRow, PersistentVolumeRow, PodContainerPort, PodContainerProjection,
+    PodProjection, REQUEST_RESOURCE_RELATIONS, RelatedGroup, ReplicaSetProjection,
+    ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity,
+    ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceProjection,
+    ResourceRefRequest, ResourceRelationsResponse, ResourceScope, ServicePort, ServiceProjection,
+    StorageClassRow, StorageInventory, TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use stream::{

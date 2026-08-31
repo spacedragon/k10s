@@ -960,16 +960,17 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
 
     use k10s_backend::port::{
         ContainerImageProjection, ContainerStateProjection, ContainerTerminationProjection,
-        DeploymentProjection, PodContainerProjection, PodProjection, ReplicaSetProjection,
-        ResourceConditionProjection, ResourceProjection, ResourceRecord, ResourceRef,
+        DeploymentProjection, PodContainerPort, PodContainerProjection, PodProjection,
+        ReplicaSetProjection, ResourceConditionProjection, ResourceProjection, ResourceRecord,
+        ResourceRef,
     };
     use k10s_protocol::{
         ContainerImageProjection as WireContainerImage,
         ContainerStateProjection as WireContainerState,
         ContainerTerminationProjection as WireTermination, DeploymentProjection as WireDeployment,
-        PodContainerProjection as WirePodContainer, PodProjection as WirePod,
-        ReplicaSetProjection as WireReplicaSet, ResourceConditionProjection as WireCondition,
-        ResourceProjection as WireProjection,
+        PodContainerPort as WirePodPort, PodContainerProjection as WirePodContainer,
+        PodProjection as WirePod, ReplicaSetProjection as WireReplicaSet,
+        ResourceConditionProjection as WireCondition, ResourceProjection as WireProjection,
     };
 
     fn record(kind: &str, projection: ResourceProjection) -> ResourceRecord {
@@ -1048,6 +1049,18 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
         conditions: vec![condition.clone()],
         node_name: Some("worker-a".into()),
         pod_ip: Some("10.42.0.7".into()),
+        host_ip: Some("192.168.0.17".into()),
+        qos_class: Some("Burstable".into()),
+        priority: Some(1_000),
+        service_account: Some("web".into()),
+        restart_policy: Some("Always".into()),
+        ports: vec![PodContainerPort {
+            container_name: "running".into(),
+            name: Some("http".into()),
+            container_port: 8080,
+            host_port: Some(18_080),
+            protocol: k10s_backend::TransportProtocol::Tcp,
+        }],
         labels: BTreeMap::from([("app".into(), "web".into())]),
         annotations: BTreeMap::from([("example.io/trace".into(), "enabled".into())]),
         created_at: Some("2026-08-21T00:00:00Z".into()),
@@ -1141,6 +1154,18 @@ fn typed_detail_projections_map_exhaustively_to_wire_shapes() {
             }],
             node_name: Some("worker-a".into()),
             pod_ip: Some("10.42.0.7".into()),
+            host_ip: Some("192.168.0.17".into()),
+            qos_class: Some("Burstable".into()),
+            priority: Some(1_000),
+            service_account: Some("web".into()),
+            restart_policy: Some("Always".into()),
+            ports: vec![WirePodPort {
+                container_name: "running".into(),
+                name: Some("http".into()),
+                container_port: 8080,
+                host_port: Some(18_080),
+                protocol: k10s_protocol::TransportProtocol::Tcp,
+            }],
             labels: BTreeMap::from([("app".into(), "web".into())]),
             annotations: BTreeMap::from([("example.io/trace".into(), "enabled".into())]),
             created_at: Some("2026-08-21T00:00:00Z".into()),

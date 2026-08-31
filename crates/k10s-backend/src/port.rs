@@ -594,6 +594,21 @@ pub struct PodContainerProjection {
     pub last_termination: Option<ContainerTerminationProjection>,
 }
 
+/// One declared Pod container port, retained with its declaring container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodContainerPort {
+    /// Exact name of the container declaring this port.
+    pub container_name: String,
+    /// Declared port name, when supplied.
+    pub name: Option<String>,
+    /// Container port validated to the TCP/UDP/SCTP range.
+    pub container_port: u16,
+    /// Optional host port validated to the TCP/UDP/SCTP range.
+    pub host_port: Option<u16>,
+    /// Declared transport protocol, defaulted by Kubernetes to TCP.
+    pub protocol: TransportProtocol,
+}
+
 /// A normalized Pod projection used by list and detail responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodProjection {
@@ -613,6 +628,18 @@ pub struct PodProjection {
     pub node_name: Option<String>,
     /// Primary Pod IP, absent while unassigned or unavailable.
     pub pod_ip: Option<String>,
+    /// Node IP hosting the Pod, absent while unscheduled or unavailable.
+    pub host_ip: Option<String>,
+    /// Kubernetes QoS class, absent when status is incomplete.
+    pub qos_class: Option<String>,
+    /// Explicit Pod priority, absent when the spec did not report one.
+    pub priority: Option<i32>,
+    /// Effective service account name, absent when the spec did not report one.
+    pub service_account: Option<String>,
+    /// Declared Pod restart policy, absent when the spec did not report one.
+    pub restart_policy: Option<String>,
+    /// Declared container ports in Pod spec order.
+    pub ports: Vec<PodContainerPort>,
     /// Pod labels sorted by key.
     pub labels: BTreeMap<String, String>,
     /// Pod annotations sorted by key.

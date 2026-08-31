@@ -10,12 +10,13 @@ use std::collections::BTreeMap;
 use k10s_protocol::{
     BackendRevision, ContainerImageProjection, ContainerMetrics, ContainerStateProjection,
     ContainerTerminationProjection, DeploymentProjection, EventsCondition, GroupVersionKind,
-    InfrastructureWatchSpec, MetricsAvailability, PodContainerProjection, PodMetrics,
-    PodProjection, REQUEST_RESOURCE_RELATIONS, ReplicaSetProjection, RequestId,
+    InfrastructureWatchSpec, MetricsAvailability, PodContainerPort, PodContainerProjection,
+    PodMetrics, PodProjection, REQUEST_RESOURCE_RELATIONS, ReplicaSetProjection, RequestId,
     ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceGone,
     ResourceIdentity, ResourceListResponse, ResourceListRow, ResourceMetricsResponse,
     ResourceProjection, ResourceRelationsResponse, ResourceScope, ResourceSnapshotPage,
-    ServerFrame, ServerKind, SubscriptionSelector, WorkloadKind, decode_server_frame,
+    ServerFrame, ServerKind, SubscriptionSelector, TransportProtocol, WorkloadKind,
+    decode_server_frame,
 };
 use serde_json::{Value, json};
 
@@ -377,6 +378,18 @@ fn detail_resource_projections_round_trip_typed_payloads() {
         conditions: vec![condition.clone()],
         node_name: Some("worker-1".into()),
         pod_ip: Some("10.12.9.22".into()),
+        host_ip: Some("192.168.1.10".into()),
+        qos_class: Some("Burstable".into()),
+        priority: Some(1_000),
+        service_account: Some("web".into()),
+        restart_policy: Some("Always".into()),
+        ports: vec![PodContainerPort {
+            container_name: "web".into(),
+            name: Some("http".into()),
+            container_port: 8080,
+            host_port: Some(18_080),
+            protocol: TransportProtocol::Tcp,
+        }],
         labels: BTreeMap::from([("app".into(), "web".into())]),
         annotations: BTreeMap::from([("example.com/owner".into(), "platform".into())]),
         created_at: Some("2026-08-20T00:00:00Z".into()),
@@ -429,6 +442,21 @@ fn detail_resource_projections_round_trip_typed_payloads() {
                 assert_eq!(encoded["conditions"][0]["conditionType"], json!("Ready"));
                 assert_eq!(encoded["nodeName"], json!("worker-1"));
                 assert_eq!(encoded["podIp"], json!("10.12.9.22"));
+                assert_eq!(encoded["hostIp"], json!("192.168.1.10"));
+                assert_eq!(encoded["qosClass"], json!("Burstable"));
+                assert_eq!(encoded["priority"], json!(1_000));
+                assert_eq!(encoded["serviceAccount"], json!("web"));
+                assert_eq!(encoded["restartPolicy"], json!("Always"));
+                assert_eq!(
+                    encoded["ports"],
+                    json!([{
+                        "containerName": "web",
+                        "name": "http",
+                        "containerPort": 8080,
+                        "hostPort": 18_080,
+                        "protocol": "tcp",
+                    }])
+                );
             }
             "deployment" => {
                 assert_eq!(encoded["desiredReplicas"], json!(3));
