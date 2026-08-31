@@ -18,7 +18,7 @@ use k10s_protocol::{
     ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness},
+    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness, tools::LogsAction},
     workspace::{
         BlockReason, BlockResolution, LauncherItem, WindowGeom, WindowId, WindowKind,
         WorkloadKind as WorkspaceWorkload, WorkspaceCommand, WorkspaceEvent,
@@ -889,12 +889,6 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         .click();
     harness.run_steps(4);
 
-    // Before anything connects the tool is explicitly disconnected.
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_role_and_label(Role::Button, "Connect logs");
-    window.get_by_label("Disconnected");
-
-    // Simulate a live session streaming two lines, then losing the socket.
     let id = logs_window;
     let target = StreamTarget {
         context: CONTEXT.to_owned(),
@@ -903,9 +897,26 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         uid: format!("uid-{CONTEXT}-pod-default-db-postgres-0"),
         container: "app".to_owned(),
     };
+    // Opening Logs automatically claims exactly one connection attempt.
+    assert_eq!(
+        harness.state_mut().shell.drain_log_actions(),
+        vec![(
+            id,
+            LogsAction::OpenLogs {
+                window: id,
+                target: target.clone(),
+                since_seconds: Some(300),
+                previous: false,
+            },
+        )]
+    );
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Connecting");
+
+    // Simulate a live session streaming two lines, then losing the socket.
     {
         let stores = harness.state_mut().shell.stream_stores_mut();
-        let view = stores.logs.ensure(id, target);
+        let view = stores.logs.ensure(id, target.clone());
         view.connect();
         view.attach();
         view.append("kubelet started pod");
@@ -928,7 +939,22 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
     window.get_by_label("kubelet started pod");
     window.get_by_label("container ready");
     window.get_by_label("Disconnected");
-    window.get_by_role_and_label(Role::Button, "Connect logs");
+    window
+        .get_by_role_and_label(Role::Button, "Retry logs")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_log_actions(),
+        vec![(
+            id,
+            LogsAction::OpenLogs {
+                window: id,
+                target,
+                since_seconds: Some(300),
+                previous: false,
+            },
+        )]
+    );
 }
 
 // ---------------------------------------------------------------------------
