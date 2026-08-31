@@ -447,19 +447,25 @@ fn pod_status(ui: &mut egui::Ui, pod: Option<&PodProjection>) {
         .state
         .as_ref()?
     {
-        ContainerStateProjection::Waiting {
-            reason: Some(reason),
-        } if !reason.is_empty() => Some(("▲", reason.as_str(), crate::ui::theme::WARNING)),
+        ContainerStateProjection::Waiting { reason } => Some((
+            "▲",
+            reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("Waiting")
+                .to_owned(),
+            crate::ui::theme::WARNING,
+        )),
         ContainerStateProjection::Terminated(termination) if termination.exit_code != 0 => {
-            termination
+            let text = termination
                 .reason
                 .as_deref()
                 .filter(|reason| !reason.is_empty())
-                .map(|reason| ("✕", reason, crate::ui::theme::DANGER))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Exit {}", termination.exit_code));
+            Some(("✕", text, crate::ui::theme::DANGER))
         }
-        ContainerStateProjection::Running
-        | ContainerStateProjection::Waiting { .. }
-        | ContainerStateProjection::Terminated(_) => None,
+        ContainerStateProjection::Running | ContainerStateProjection::Terminated(_) => None,
     }) {
         ui.label(RichText::new(format!("{shape} {text}")).color(color));
         return;

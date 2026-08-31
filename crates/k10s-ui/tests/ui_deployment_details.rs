@@ -10,11 +10,11 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, ContainerImageProjection, ContainerStateProjection, DeploymentProjection,
-    EventRow, GroupVersionKind, PodContainerProjection, PodProjection, RelatedGroup,
-    ReplicaSetProjection, ResourceCapabilities, ResourceConditionProjection,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection,
-    ResourceRelationsResponse,
+    BackendRevision, ContainerImageProjection, ContainerStateProjection,
+    ContainerTerminationProjection, DeploymentProjection, EventRow, GroupVersionKind,
+    PodContainerProjection, PodProjection, RelatedGroup, ReplicaSetProjection,
+    ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity,
+    ResourceListRow, ResourceProjection, ResourceRelationsResponse,
 };
 use k10s_ui::{
     ui::{
@@ -517,8 +517,8 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
 fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
     let detail = detail_with(Some(projection(Vec::new())));
     let identity = detail.identity.clone();
-    let mut row = pod_row("checkout-crashloop");
-    let Some(ResourceProjection::Pod(pod)) = row.projection.as_mut() else {
+    let mut waiting_row = pod_row("checkout-crashloop");
+    let Some(ResourceProjection::Pod(pod)) = waiting_row.projection.as_mut() else {
         panic!("fixture carries typed Pod projection");
     };
     pod.containers = vec![PodContainerProjection {
@@ -531,6 +531,23 @@ fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
         restart_count: Some(7),
         last_termination: None,
     }];
+    let mut terminated_row = pod_row("checkout-exited");
+    let Some(ResourceProjection::Pod(pod)) = terminated_row.projection.as_mut() else {
+        panic!("fixture carries typed Pod projection");
+    };
+    pod.containers = vec![PodContainerProjection {
+        name: "worker".into(),
+        image: Some("ghcr.io/acme/checkout:broken".into()),
+        state: Some(ContainerStateProjection::Terminated(
+            ContainerTerminationProjection {
+                exit_code: 137,
+                reason: None,
+            },
+        )),
+        ready: Some(false),
+        restart_count: Some(1),
+        last_termination: None,
+    }];
     let relations = RelationState::Loaded {
         response: Arc::new(ResourceRelationsResponse {
             identity,
@@ -538,7 +555,7 @@ fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
             groups: vec![RelatedGroup {
                 title: "Pods".into(),
                 gvk: GroupVersionKind::core("v1", "Pod"),
-                rows: vec![row],
+                rows: vec![waiting_row, terminated_row],
             }],
         }),
         loaded_at_ms: 1_000,
@@ -550,6 +567,7 @@ fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("▲ CrashLoopBackOff");
+    window.get_by_label("✕ Exit 137");
     assert!(window.query_by_label("● Running").is_none());
 }
 
