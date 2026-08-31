@@ -356,6 +356,7 @@ mod tests {
                     resource_metrics: None,
                     relations: None,
                     freshness: None,
+                    now: web_time::UNIX_EPOCH,
                     gone: false,
                     mutations_allowed: false,
                     port_forward_available: false,

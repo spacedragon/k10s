@@ -51,7 +51,7 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         "Status ● Running",
         "Ready · 2/2",
         "Restarts · 1",
-        "Age · 2026-08-27T01:02:03Z",
+        "Age · 4d 2h",
         "Node · worker-a",
         "Pod IP · 10.244.0.9",
         "CONTAINERS · 2",
@@ -624,7 +624,7 @@ fn healthy_detail() -> ResourceDetailResponse {
             annotations: [("checksum/config".into(), "abcdef".into())]
                 .into_iter()
                 .collect(),
-            created_at: Some("2026-08-27T01:02:03Z".into()),
+            created_at: Some(rfc3339_ago(4 * 24 * 60 * 60 + 2 * 60 * 60)),
         })),
     }
 }
@@ -639,4 +639,11 @@ fn container_metrics(name: &str, cpu: u64, memory_mib: u64) -> ContainerMetrics 
             collected_at: Some("2026-08-31T01:02:03Z".into()),
         },
     }
+}
+
+fn rfc3339_ago(seconds: u64) -> String {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+    jiff::Timestamp::try_from(then)
+        .expect("test timestamp is in Jiff's supported range")
+        .to_string()
 }

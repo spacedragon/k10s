@@ -303,7 +303,15 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).version == "v1"
             {
                 if detail.active_tab == DetailTab::Overview {
-                    deployment::show(ui, window_id, detail, presentation, frame, &mut body_queued);
+                    deployment::show(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        frame,
+                        resource_actions,
+                        &mut body_queued,
+                    );
                 } else {
                     show_generic_body(
                         ui,

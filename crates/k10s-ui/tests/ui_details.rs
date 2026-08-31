@@ -342,7 +342,7 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
 }
 
 #[test]
-fn typed_stub_does_not_expose_task5_metadata_controls() {
+fn typed_pod_overview_renders_real_content_and_metadata_controls() {
     let mut harness = harness();
     harness.state_mut().feed.details.insert(
         identity("Pod", "db-postgres-0"),
@@ -355,11 +355,13 @@ fn typed_stub_does_not_expose_task5_metadata_controls() {
         .click();
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Structured details unavailable");
+    window.get_by_label("Status ● Running");
+    window.get_by_label("CONTAINERS · 0");
     assert!(window.query_by_label("Context · dev-local").is_none());
+    window.get_by_role_and_label(Role::Button, "Show Pod metadata");
     assert!(
         window
-            .query_by_role_and_label(Role::Button, "Show metadata")
+            .query_by_label("Structured details unavailable")
             .is_none()
     );
 }
@@ -560,7 +562,7 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
 }
 
 #[test]
-fn typed_router_uses_stub_only_for_typed_overview_and_preserves_other_tabs() {
+fn typed_router_uses_pod_overview_and_preserves_other_tabs() {
     let mut harness = harness();
     harness.state_mut().feed.details.insert(
         identity("Pod", "db-postgres-0"),
@@ -582,10 +584,10 @@ fn typed_router_uses_stub_only_for_typed_overview_and_preserves_other_tabs() {
     );
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Structured details unavailable");
+    window.get_by_label("Status ● Running");
     assert!(
         window
-            .query_by_label("Pod structured detail renderer")
+            .query_by_label("Structured details unavailable")
             .is_none()
     );
     window
@@ -1322,7 +1324,7 @@ fn typed_pod_detail(name: &str) -> ResourceDetailResponse {
             .map(|index| (format!("label-{index}"), format!("value-{index}")))
             .collect(),
         annotations: Default::default(),
-        created_at: Some("2h".into()),
+        created_at: Some(rfc3339_ago(2 * 60 * 60)),
     }));
     detail
 }
@@ -1350,9 +1352,16 @@ fn typed_deployment_detail(name: &str) -> ResourceDetailResponse {
         template_annotations: Default::default(),
         labels: Default::default(),
         annotations: Default::default(),
-        created_at: Some("3d".into()),
+        created_at: Some(rfc3339_ago(3 * 24 * 60 * 60)),
     }));
     detail
+}
+
+fn rfc3339_ago(seconds: u64) -> String {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+    jiff::Timestamp::try_from(then)
+        .expect("test timestamp is in Jiff's supported range")
+        .to_string()
 }
 
 fn workload_window_id(
