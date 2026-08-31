@@ -7,7 +7,7 @@ use k10s_protocol::{
 };
 
 use crate::ui::resource_window::RowIdentity;
-use crate::workspace::{DetailState, WindowId, WorkspaceCommand};
+use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use super::presentation::{
     DetailFrameProjection, DetailPresentationInput, DetailPrimary, DetailVitalShape,
@@ -57,11 +57,11 @@ pub(super) fn show<I: RowIdentity>(
 
     if ui.available_width() >= 760.0 {
         ui.columns(2, |columns| {
-            show_operational(&mut columns[0], window_id, &pod);
+            show_operational(&mut columns[0], window_id, &pod, queued);
             show_metadata(&mut columns[1], window_id, &pod, frame, queued);
         });
     } else {
-        show_operational(ui, window_id, &pod);
+        show_operational(ui, window_id, &pod, queued);
         let label = if frame.expansion.metadata {
             "Hide Pod metadata"
         } else {
@@ -286,16 +286,16 @@ fn failure_projection(
             terminated: false,
         }),
         ContainerStateProjection::Terminated(termination) if termination.exit_code != 0 => {
-            Some(FailureProjection {
-                container: present(&container.name),
-                reason: termination
-                    .reason
-                    .as_deref()
-                    .map(present)
-                    .unwrap_or_else(|| format!("Exit {}", termination.exit_code)),
-                last_exit: Some(termination.clone()),
-                terminated: true,
-            })
+            termination
+                .reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| FailureProjection {
+                    container: present(&container.name),
+                    reason: present(reason),
+                    last_exit: Some(termination.clone()),
+                    terminated: true,
+                })
         }
         ContainerStateProjection::Running
         | ContainerStateProjection::Waiting { .. }
@@ -352,7 +352,12 @@ fn container_metrics(input: &DetailPresentationInput<'_>, name: &str) -> String 
     }
 }
 
-fn show_operational(ui: &mut egui::Ui, window_id: WindowId, pod: &PodDetailProjection) {
+fn show_operational<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    pod: &PodDetailProjection,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
     if let Some(failure) = &pod.failure {
         section(ui, "WHY IT'S FAILING");
         let exit = failure.last_exit.as_ref().map_or_else(
@@ -369,6 +374,9 @@ fn show_operational(ui: &mut egui::Ui, window_id: WindowId, pod: &PodDetailProje
             "{} · {} · {}",
             failure.container, failure.reason, exit
         ));
+        if ui.button("Previous logs").clicked() {
+            queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Logs));
+        }
     }
 
     section(ui, &format!("CONTAINERS · {}", pod.containers.len()));

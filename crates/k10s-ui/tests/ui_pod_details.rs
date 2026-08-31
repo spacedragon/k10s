@@ -14,7 +14,7 @@ use k10s_ui::{
         ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
         SafeUiError, UiShell, WindowFreshness,
     },
-    workspace::{WindowContent, WindowGeom, WindowKind, WorkspaceCommand},
+    workspace::{DetailTab, WindowContent, WindowGeom, WindowKind, WorkspaceCommand},
 };
 
 const CONTEXT: &str = "dev-local";
@@ -96,7 +96,7 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
             reason: Some("Error".into()),
         }),
     };
-    let harness = harness(1_100.0, response);
+    let mut harness = harness(1_100.0, response);
     let detail = pod_window(&harness);
 
     for label in [
@@ -108,6 +108,92 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
     ] {
         detail.get_by_label(label);
     }
+    detail
+        .get_by_role_and_label(Role::Button, "Previous logs")
+        .click();
+    harness.run_steps(3);
+    let active_tab = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find_map(|window| match &window.content {
+            WindowContent::Detail(detail) => Some(detail.active_tab),
+            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+        })
+        .expect("dedicated Pod detail remains open");
+    assert_eq!(active_tab, DetailTab::Logs);
+    pod_window(&harness).get_by_role_and_label(Role::CheckBox, "Previous");
+}
+
+#[test]
+fn projection_terminated_failure_requires_a_nonempty_authoritative_reason() {
+    for reason in [None, Some(String::new())] {
+        let mut response = healthy_detail();
+        let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+            panic!("fixture has a typed Pod projection");
+        };
+        pod.containers[0] = PodContainerProjection {
+            name: "web".into(),
+            image: Some("ghcr.io/example/web:1.2.3".into()),
+            state: Some(ContainerStateProjection::Terminated(
+                ContainerTerminationProjection {
+                    exit_code: 137,
+                    reason: reason.clone(),
+                },
+            )),
+            ready: Some(false),
+            restart_count: Some(1),
+            last_termination: Some(ContainerTerminationProjection {
+                exit_code: 137,
+                reason,
+            }),
+        };
+
+        let harness = harness(1_100.0, response);
+        let detail = pod_window(&harness);
+        detail.get_by_label("Terminated · —");
+        detail.get_by_label("137 · —");
+        assert!(detail.query_by_label("WHY IT'S FAILING").is_none());
+        assert!(
+            detail
+                .query_by_role_and_label(Role::Button, "Previous logs")
+                .is_none()
+        );
+        assert!(detail.query_by_label("Exit 137").is_none());
+    }
+}
+
+#[test]
+fn projection_terminated_failure_with_reason_exposes_previous_logs() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.containers[0] = PodContainerProjection {
+        name: "web".into(),
+        image: Some("ghcr.io/example/web:1.2.3".into()),
+        state: Some(ContainerStateProjection::Terminated(
+            ContainerTerminationProjection {
+                exit_code: 137,
+                reason: Some("OOMKilled".into()),
+            },
+        )),
+        ready: Some(false),
+        restart_count: Some(1),
+        last_termination: Some(ContainerTerminationProjection {
+            exit_code: 137,
+            reason: Some("OOMKilled".into()),
+        }),
+    };
+
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    detail.get_by_label("Status ✕ OOMKilled");
+    detail.get_by_label("WHY IT'S FAILING");
+    detail.get_by_label("web · OOMKilled · exit 137 · OOMKilled");
+    detail.get_by_role_and_label(Role::Button, "Previous logs");
 }
 
 #[test]
@@ -137,6 +223,11 @@ fn projection_succeeded_completion_is_not_a_failure() {
 
     detail.get_by_label("Status ● Succeeded");
     assert!(detail.query_by_label("WHY IT'S FAILING").is_none());
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Previous logs")
+            .is_none()
+    );
 }
 
 #[test]
