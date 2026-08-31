@@ -28,27 +28,6 @@ pub(super) fn show<I>(
 ) where
     I: RowIdentity,
 {
-    // Read-only panel: only the guarded YAML entry point.
-    if view.capabilities.can_edit_yaml {
-        ui.horizontal(|ui| {
-            let edit = ui.add_enabled(
-                presentation.mutations_allowed,
-                egui::Button::new("Edit YAML"),
-            );
-            edit.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    presentation.mutations_allowed,
-                    "Edit YAML".to_owned(),
-                )
-            });
-            if edit.clicked() {
-                queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
-            }
-        });
-        ui.separator();
-    }
-
     let projection = projection_of(view);
     match detail.active_tab {
         DetailTab::Overview => overview_tab(ui, window_id, projection),
@@ -80,6 +59,25 @@ pub(super) fn show<I>(
         // Services never offer workload tabs; a stale command targeting one
         // of them renders nothing rather than generic content.
         _ => {}
+    }
+}
+
+pub(super) fn show_actions<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    view: &ResourceDetailResponse,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    if view.capabilities.can_edit_yaml
+        && ui
+            .add_enabled(
+                presentation.mutations_allowed,
+                egui::Button::new("Edit YAML"),
+            )
+            .clicked()
+    {
+        queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
     }
 }
 

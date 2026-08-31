@@ -99,6 +99,10 @@ pub struct UiShell<I> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceAction {
+    Restart {
+        window: WindowId,
+        target: k10s_protocol::ResourceIdentity,
+    },
     RetryPrimary(k10s_protocol::ResourceIdentity),
     RetryRelations(k10s_protocol::ResourceIdentity),
     RetryNamespaceCatalog,

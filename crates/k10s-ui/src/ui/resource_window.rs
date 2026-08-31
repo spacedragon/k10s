@@ -179,6 +179,8 @@ pub struct ResourceFeed {
     pub primary_details: HashMap<ResourceIdentity, PrimaryDetailState>,
     /// Independently loaded controller relations, keyed by exact identity.
     pub relations: HashMap<ResourceIdentity, RelationState>,
+    /// Exact identity-matched resource and container metrics for detail panes.
+    pub metrics: HashMap<ResourceIdentity, k10s_protocol::ResourceMetricsResponse>,
     pub port_forward_available: bool,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
     pub port_forward_error: Option<String>,

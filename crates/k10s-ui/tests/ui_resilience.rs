@@ -647,8 +647,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .apply_workspace_command(tall_detail_pane(id));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Deployment");
+    window.get_by_label("Deployment · default / web-frontend");
 
     // The object is deleted behind the watch: the authoritative rows drop
     // it while this window still pins its identity.
@@ -666,7 +665,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         "the gone row must leave the table"
     );
     // Gone renders only the pinned identity header plus the banner.
-    window.get_by_label("Kind Deployment");
+    window.get_by_label("Deployment · default / web-frontend");
     window.get_by_label("This resource no longer exists");
     assert!(
         window.query_by_label("Loading details").is_none(),
@@ -678,7 +677,11 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Deployment · default / web-frontend")
+            .is_none()
+    );
 }
 
 #[test]
@@ -717,7 +720,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
     );
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Created 2026-08-21T00:00:00Z");
+    window.get_by_label("Age · 2026-08-21T00:00:00Z");
     window.get_by_role_and_label(Role::Button, "Scale workload");
 
     // The object is deleted behind the watch while the cache is hot.
@@ -749,7 +752,11 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Deployment · default / web-frontend")
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1107,7 @@ fn minimum_size_windows_keep_list_and_details_non_overlapping() {
     let window_rect = window.rect();
     let row = window.get_by_label("web-frontend-7d9f8-00001");
     let row_rect = row.rect();
-    let details = window.get_by_label("Details");
+    let details = window.get_by_label("Pod · default / db-postgres-0");
     let details_rect = details.rect();
 
     assert!(

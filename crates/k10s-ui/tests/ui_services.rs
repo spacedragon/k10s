@@ -331,7 +331,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
         .shell
         .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(service));
     harness.run_steps(4);
-    let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
+    let dedicated = harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
     assert!(
         dedicated
             .query_by_role_and_label(Role::Button, "Pop out ↗")
@@ -518,8 +518,7 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     harness.run_steps(8);
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Service");
+    window.get_by_label("Service · default / web-frontend");
     for tab in ["Tab Overview", "Tab Ports", "Tab Events", "Tab YAML"] {
         window.get_by_role_and_label(Role::Button, tab);
     }

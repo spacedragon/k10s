@@ -9,7 +9,7 @@
 
 mod deployment;
 mod events;
-mod frame;
+pub(super) mod frame;
 mod overview;
 mod pod;
 pub(super) mod presentation;
@@ -147,18 +147,22 @@ pub(super) fn show<I>(
         detail_maximized,
         tabs_for_kind(&detail_identity_gvk(detail)),
         queued,
-        |ui, primary| {
+        |ui, primary, actions| {
             let view = match primary {
                 presentation::DetailPrimary::Loading => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new());
-                        ui.label("Loading details");
-                    });
+                    if !actions {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new());
+                            ui.label("Loading details");
+                        });
+                    }
                     return;
                 }
                 presentation::DetailPrimary::Failed(error) => {
-                    ui.label(format!("Details unavailable: {}", error.message()));
-                    if ui.button("Retry details").clicked() {
+                    if !actions {
+                        ui.label(format!("Details unavailable: {}", error.message()));
+                    }
+                    if !actions && ui.button("Retry details").clicked() {
                         resource_actions.push(crate::ui::ResourceAction::RetryPrimary(
                             presentation.identity.clone(),
                         ));
@@ -167,6 +171,24 @@ pub(super) fn show<I>(
                 }
                 presentation::DetailPrimary::Loaded(view) => view,
             };
+            if actions {
+                if presentation.gone {
+                    return;
+                }
+                if is_service_gvk(&detail_identity_gvk(detail)) {
+                    service::show_actions(ui, window_id, view, presentation, &mut body_queued);
+                } else {
+                    show_generic_actions(
+                        ui,
+                        window_id,
+                        presentation,
+                        view,
+                        dialogs,
+                        resource_actions,
+                    );
+                }
+                return;
+            }
             if is_service_gvk(&detail_identity_gvk(detail)) {
                 service::show(
                     ui,
@@ -183,7 +205,9 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).group.is_empty()
                 && detail_identity_gvk(detail).version == "v1"
             {
-                pod::show(ui);
+                if detail.active_tab == DetailTab::Overview && view.projection.is_none() {
+                    pod::show(ui, window_id, detail, presentation, &mut body_queued);
+                }
                 show_generic_body(
                     ui,
                     window_id,
@@ -200,7 +224,9 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).group == "apps"
                 && detail_identity_gvk(detail).version == "v1"
             {
-                deployment::show(ui);
+                if detail.active_tab == DetailTab::Overview && view.projection.is_none() {
+                    deployment::show(ui, window_id, detail, presentation, &mut body_queued);
+                }
                 show_generic_body(
                     ui,
                     window_id,
@@ -241,62 +267,10 @@ fn show_generic_body<I: RowIdentity>(
     view: &ResourceDetailResponse,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
-    dialogs: &mut dialogs::OperationDialogs,
+    _dialogs: &mut dialogs::OperationDialogs,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        if view.capabilities.can_scale {
-            let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale"));
-            scale.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale workload")
-            });
-            if scale.clicked() {
-                dialogs.open_scale(
-                    window_id,
-                    presentation.identity.clone(),
-                    status_summary(view).and_then(summary_replicas),
-                );
-            }
-        }
-        if view.capabilities.can_restart {
-            let restart =
-                ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Restart"));
-            restart.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restart workload")
-            });
-        }
-        if view.capabilities.can_delete {
-            let delete =
-                ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete"));
-            delete.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete resource")
-            });
-            if delete.clicked() {
-                dialogs.open_delete(window_id, presentation.identity.clone());
-            }
-        }
-        if view.capabilities.can_view_logs {
-            action_button(ui, "View logs", "View logs");
-        }
-        if view.capabilities.can_exec {
-            action_button(ui, "Exec shell", "Exec shell");
-        }
-        if view.capabilities.can_edit_yaml
-            && ui
-                .add_enabled(
-                    presentation.mutations_allowed,
-                    egui::Button::new("Edit YAML"),
-                )
-                .clicked()
-        {
-            queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
-        }
-    });
-    if !presentation.mutations_allowed {
-        ui.label("Scale, delete, and YAML edits are disabled until this window is live");
-    }
-    ui.separator();
     match detail.active_tab {
         DetailTab::Overview => overview::show(ui, window_id, &view.sections),
         DetailTab::Pods => related::show(
@@ -340,6 +314,53 @@ fn show_generic_body<I: RowIdentity>(
             &mut streams.shells,
             stream_target(detail, view),
         ),
+    }
+}
+
+fn show_generic_actions(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    view: &ResourceDetailResponse,
+    dialogs: &mut dialogs::OperationDialogs,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
+) {
+    if !presentation.mutations_allowed {
+        ui.label("Scale, delete, and YAML edits are disabled until this window is live");
+    }
+    if view.capabilities.can_scale {
+        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale"));
+        scale.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale workload")
+        });
+        if scale.clicked() {
+            dialogs.open_scale(
+                window_id,
+                presentation.identity.clone(),
+                status_summary(view).and_then(summary_replicas),
+            );
+        }
+    }
+    if view.capabilities.can_restart {
+        let restart = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Restart"));
+        restart.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restart workload")
+        });
+        if restart.clicked() {
+            resource_actions.push(crate::ui::ResourceAction::Restart {
+                window: window_id,
+                target: presentation.identity.clone(),
+            });
+        }
+    }
+    if view.capabilities.can_delete {
+        let delete = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete"));
+        delete.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete resource")
+        });
+        if delete.clicked() {
+            dialogs.open_delete(window_id, presentation.identity.clone());
+        }
     }
 }
 
@@ -437,13 +458,6 @@ where
         },
         |identity| identity.gvk.clone(),
     )
-}
-
-fn action_button(ui: &mut egui::Ui, label: &str, accessible: &str) {
-    let button = ui.button(label);
-    button.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessible.to_owned())
-    });
 }
 
 #[cfg(test)]

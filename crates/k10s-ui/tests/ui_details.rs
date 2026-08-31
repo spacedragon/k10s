@@ -537,7 +537,7 @@ fn pod_edit_yaml_action_opens_the_read_only_manifest_before_editing() {
 
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "Edit YAML")
+        .get_by_role_and_label(Role::Button, "Tab YAML")
         .click();
     harness.run_steps(4);
 
@@ -575,9 +575,7 @@ fn identity_header_renders_from_the_pinned_identity() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Pod");
-    window.get_by_label("Namespace default");
+    window.get_by_label("Pod · default / db-postgres-0");
     window.get_by_label("Loading details");
 
     // Once resolved, the header shows the backend-asserted fields and the
@@ -588,8 +586,7 @@ fn identity_header_renders_from_the_pinned_identity() {
     );
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Created 2026-08-21T00:50:10Z");
-    window.get_by_label("UID uid-dev-local-pod-default-db-postgres-0");
+    window.get_by_label("Age · 2026-08-21T00:50:10Z");
     window.get_by_label("Status Running");
     assert!(window.query_by_label("Loading details").is_none());
 
@@ -788,8 +785,9 @@ fn popout_is_pinned_and_never_follows_later_selection() {
     );
 
     // The pinned window renders its own identity, not the integrated one.
-    let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
-    dedicated.get_by_label("UID uid-dev-local-deployment-default-web-frontend");
+    let dedicated =
+        harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    dedicated.get_by_role_and_label(Role::Button, "Copy UID");
     assert!(
         dedicated
             .query_by_role_and_label(Role::Button, "Pop out ↗")

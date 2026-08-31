@@ -31,6 +31,7 @@ pub(crate) struct DetailPresentationInput<'a> {
     pub identity: &'a ResourceIdentity,
     pub primary: DetailPrimary<'a>,
     pub metrics: DetailMetrics<'a>,
+    pub resource_metrics: Option<&'a k10s_protocol::ResourceMetricsResponse>,
     pub relations: Option<&'a RelationState>,
     pub freshness: Option<&'a WindowFreshness>,
     pub gone: bool,
@@ -70,6 +71,10 @@ impl<'a> DetailPresentationInput<'a> {
             identity,
             primary,
             metrics,
+            resource_metrics: feed
+                .metrics
+                .get(identity)
+                .filter(|metrics| metrics.identity == *identity),
             relations: feed.relations.get(identity),
             freshness,
             gone,

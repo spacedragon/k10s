@@ -8,10 +8,17 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 use super::presentation::{DetailPresentationInput, DetailPrimary};
 use crate::ui::resource_window::RowIdentity;
 
-pub(super) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
+#[derive(Default, Clone, Copy)]
+struct DetailExpansionState {
+    vitals: bool,
+    labels: bool,
+    metadata: bool,
+}
+
+pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
     match identity.namespace.as_deref() {
         Some(namespace) => format!("{} · {namespace} / {}", identity.gvk.kind, identity.name),
-        None => format!("{} · cluster / {}", identity.gvk.kind, identity.name),
+        None => format!("{} · {}", identity.gvk.kind, identity.name),
     }
 }
 
@@ -25,24 +32,16 @@ pub(super) fn show<I: RowIdentity>(
     detail_maximized: bool,
     tabs: &[DetailTab],
     queued: &mut Vec<WorkspaceCommand<I>>,
-    body: impl FnOnce(&mut egui::Ui, DetailPrimary<'_>),
+    mut content: impl FnMut(&mut egui::Ui, DetailPrimary<'_>, bool),
 ) {
+    let _resource_metrics = input.resource_metrics;
+    let expansion_id = egui::Id::new(("k10s.detail.expansion", window_id.0));
+    let mut expansion = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<DetailExpansionState>(expansion_id))
+        .unwrap_or_default();
     ui.label(RichText::new(title(input.identity)).strong().heading());
-    // Retain the terse identity fields as individually accessible labels for
-    // keyboard and assistive-technology users.
     ui.horizontal(|ui| {
-        ui.label("Details");
-        ui.label(format!("Kind {}", input.identity.gvk.kind));
-        match input.identity.namespace.as_deref() {
-            Some(namespace) => ui.label(format!("Namespace {namespace}")),
-            None => ui.label("Scope Cluster-scoped"),
-        };
-        ui.label(format!("Context {}", input.identity.context));
-        if !input.identity.uid.is_empty() {
-            ui.label(format!("UID {}", input.identity.uid));
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
         vital(ui, "Status", input.metrics.status.unwrap_or("—"));
         vital(ui, "Age", input.metrics.age.unwrap_or("—"));
         let freshness = match input.freshness {
@@ -60,9 +59,8 @@ pub(super) fn show<I: RowIdentity>(
             None => "Freshness · loading".into(),
         };
         vital(ui, "", &freshness);
-        if let Some(age) = input.metrics.age {
-            ui.label(format!("Created {age}"));
-        }
+    });
+    ui.horizontal_wrapped(|ui| {
         copy(ui, "Copy name", &input.identity.name);
         if let Some(namespace) = input.identity.namespace.as_deref() {
             copy(ui, "Copy namespace", namespace);
@@ -115,6 +113,12 @@ pub(super) fn show<I: RowIdentity>(
                 });
             }
         }
+        ui.menu_button("More details", |ui| {
+            ui.toggle_value(&mut expansion.vitals, "Expand vitals");
+            ui.toggle_value(&mut expansion.labels, "Expand labels");
+            ui.toggle_value(&mut expansion.metadata, "Expand metadata");
+        });
+        content(ui, input.primary, true);
         for tab in tabs {
             let active = *tab == detail.active_tab;
             let response = ui.selectable_label(active, super::tab_label(*tab));
@@ -130,6 +134,8 @@ pub(super) fn show<I: RowIdentity>(
             }
         }
     });
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(expansion_id, expansion));
     ui.separator();
     ScrollArea::vertical()
         .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
@@ -137,7 +143,7 @@ pub(super) fn show<I: RowIdentity>(
             if input.gone {
                 ui.label("This resource no longer exists");
             } else {
-                body(ui, input.primary);
+                content(ui, input.primary, false);
             }
         });
     ui.separator();

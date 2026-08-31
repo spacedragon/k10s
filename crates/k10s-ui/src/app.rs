@@ -1959,6 +1959,7 @@ impl K10sApp {
             details: self.details.clone().into_iter().collect(),
             primary_details: self.primary_details.clone().into_iter().collect(),
             relations: self.relations.clone().into_iter().collect(),
+            metrics: Default::default(),
             port_forward_available: self.client.port_forward_available(),
             port_forward_sessions: self
                 .client
@@ -2405,6 +2406,27 @@ impl K10sApp {
 
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
+            ResourceAction::Restart { window, target } => {
+                let idempotency_key = format!(
+                    "restart:{}:{}:{}",
+                    target.uid,
+                    window.0,
+                    self.clock_started.elapsed().as_nanos()
+                );
+                match self.client.begin_command(Command::Restart {
+                    target,
+                    idempotency_key,
+                }) {
+                    Ok(request) => {
+                        self.pending_mutations
+                            .insert(request.id().clone(), PendingMutation { request, window });
+                        if let Err(error) = self.flush_outbound() {
+                            self.terminal_failure(format!("{error:?}"));
+                        }
+                    }
+                    Err(error) => self.terminal_failure(error.to_string()),
+                }
+            }
             ResourceAction::RetryPrimary(identity) => {
                 if !self.cancel_detail_request(&identity) {
                     return;

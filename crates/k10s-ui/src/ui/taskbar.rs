@@ -43,6 +43,9 @@ fn identity<I: RowIdentity>(window: &Window<I>) -> String {
 }
 
 fn label<I: RowIdentity>(window: &Window<I>, active: bool, connection: ConnectionState) -> String {
+    if matches!(window.content, WindowContent::Detail(_)) {
+        return identity(window);
+    }
     let mut label = identity(window);
     if active {
         label.push_str(" · ● Active");
@@ -146,7 +149,7 @@ mod tests {
     use k10s_protocol::{GroupVersionKind, ResourceIdentity};
 
     #[test]
-    fn pinned_task_label_contains_kind_namespace_name_and_status_text() {
+    fn pinned_task_label_is_identity_only_even_when_state_changes() {
         let mut window = Window {
             id: WindowId(1),
             kind: WindowKind::Detail,
@@ -168,14 +171,14 @@ mod tests {
         };
         assert_eq!(
             label(&window, true, ConnectionState::Failed),
-            "Pod · payments / api-0 · ● Active · ↻ Stale data"
+            "Pod · payments / api-0"
         );
         if let WindowContent::Detail(detail) = &mut window.content {
             detail.yaml.dirty = true;
         }
         assert_eq!(
             label(&window, true, ConnectionState::Connecting),
-            "Pod · payments / api-0 · ● Active · ◆ Unsaved YAML · ↻ Stale data"
+            "Pod · payments / api-0"
         );
     }
 }
