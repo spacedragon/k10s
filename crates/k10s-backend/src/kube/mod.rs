@@ -795,32 +795,38 @@ impl KubeAdapter {
     ///
     /// The target's exact identity is verified first; candidates are swept
     /// once over the context's namespaced catalog inside the target's
-    /// namespace (cluster-wide for cluster-scoped targets), then resolved
-    /// transitively by controller owner UIDs only.
+    /// namespace (cluster-wide for cluster-scoped targets). Built-in
+    /// Deployments use only their known descendant types; other targets use
+    /// the full catalog. Candidates are resolved transitively by controller
+    /// owner UIDs only.
     async fn resource_relations(
         &self,
         reference: crate::port::ResourceRef,
     ) -> Result<QueryResult, BackendError> {
         let client = self.detail_client(&reference).await?;
+        let catalog = self.catalog_for(&reference.context).await?;
+        let descriptor = catalog
+            .types
+            .iter()
+            .find(|entry| entry.gvk == reference.gvk)
+            .ok_or(BackendError::NotFound)?;
         // Existence check with UID equality: relations on a vanished or
         // recreated object are typed not-founds, never guessed empties.
         let _ = read::get_resource(
             &client,
             &reference.gvk,
-            &self
-                .descriptor_for(&reference.context, &reference.gvk)
-                .await?
-                .plural,
+            &descriptor.plural,
             reference.namespace.is_some(),
             reference.namespace.as_deref(),
             &reference,
         )
         .await?;
 
+        let descriptors = owners::candidate_descriptors(&reference, &catalog.types);
         let candidates = owners::sweep_candidates(
             &client,
             &reference.context,
-            &self.catalog_for(&reference.context).await?.types,
+            &descriptors,
             reference.namespace.as_deref(),
         )
         .await;
