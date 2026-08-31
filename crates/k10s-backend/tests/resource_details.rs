@@ -251,19 +251,23 @@ async fn cluster_scoped_node_detail_reads_by_exact_identity() {
     hit_once(&server, "/api/v1/nodes/ip-10-0-0-5");
 }
 
-/// Controller-UID traversal: only objects whose *controller* owner UID chain
-/// reaches the target resolve. Labels never decide ownership, and a reused
-/// name with a different UID stays unrelated.
-#[tokio::test]
-async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
+/// Controller-UID traversal: only the Deployment's known descendant types
+/// are listed, and only objects whose *controller* owner UID chain reaches the
+/// target resolve. Labels never decide ownership, and a reused name with a
+/// different UID stays unrelated.
+#[tokio::test(start_paused = true)]
+async fn deployment_relations_follow_owner_uids_without_catalog_sweep() {
     let server = RecordedApiServer::standard();
+    let replicaset_list_path = "/apis/apps/v1/namespaces/default/replicasets";
+    let pod_list_path = "/api/v1/namespaces/default/pods";
+    let gadget_list_path = "/apis/k10s.example.com/v1alpha1/namespaces/default/gadgets";
     server.set_response(
         "/apis/apps/v1/namespaces/default/deployments/web",
         200,
         &recorded_deployment(),
     );
     server.set_response(
-        "/apis/apps/v1/namespaces/default/replicasets",
+        replicaset_list_path,
         200,
         &json!({
             "kind": "ReplicaSetList",
@@ -288,7 +292,7 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
         .to_string(),
     );
     server.set_response(
-        "/api/v1/namespaces/default/pods",
+        pod_list_path,
         200,
         &json!({
             "kind": "PodList",
@@ -358,15 +362,26 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
         })
         .to_string(),
     );
+    // Standard discovery includes this unrelated namespaced CRD. Deployment
+    // relations must never wait for or access its collection API.
+    server.set_hanging_path(gadget_list_path);
     let kernel = kernel(&server);
 
     let requested = reference(deployments_gvk(), "web", "uid-web");
-    let relations = match kernel
-        .query(Query::ResourceRelations {
+    let relations = match tokio::time::timeout(
+        Duration::from_millis(500),
+        kernel.query(Query::ResourceRelations {
             reference: requested.clone(),
-        })
-        .await
-        .expect("relations resolve independently")
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "deployment relations waited for unrelated {gadget_list_path} (hits: {})",
+            server.hit_count(gadget_list_path)
+        )
+    })
+    .expect("relations resolve independently")
     {
         KernelQueryResult::ResourceRelations(result) => result.wire_payload(),
         other => panic!("kernel must map relations into their wire payload, got {other:?}"),
@@ -406,6 +421,13 @@ async fn relations_traverse_controller_uids_not_labels_or_reused_names() {
             .flat_map(|group| &group.rows)
             .all(|row| row.revision == relations.revision),
         "the response revision is authoritative for every related row"
+    );
+    assert_eq!(server.hit_count(replicaset_list_path), 1);
+    assert_eq!(server.hit_count(pod_list_path), 1);
+    assert_eq!(
+        server.hit_count(gadget_list_path),
+        0,
+        "Deployment relations never access an unrelated CRD API"
     );
 }
 
