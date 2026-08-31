@@ -201,8 +201,201 @@ pub struct ResourceListRow {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ResourceProjection {
+    /// Normalized core/v1 Pod view model.
+    Pod(PodProjection),
+    /// Normalized apps/v1 Deployment view model.
+    Deployment(DeploymentProjection),
+    /// Normalized apps/v1 ReplicaSet rollout-history row.
+    ReplicaSet(ReplicaSetProjection),
     /// Normalized core/v1 Service view model.
     Service(ServiceProjection),
+}
+
+/// A normalized condition shared by Pod and Deployment projections.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceConditionProjection {
+    /// Kubernetes condition type, such as `Ready` or `Progressing`.
+    pub condition_type: String,
+    /// Kubernetes condition status (`True`, `False`, or `Unknown`).
+    pub status: String,
+    /// Machine-readable reason when the source reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Human-readable condition detail when the source reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Last transition time formatted as RFC 3339, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
+}
+
+/// Current lifecycle state of one Pod container.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ContainerStateProjection {
+    /// The container is currently running.
+    Running,
+    /// The container is waiting to start or restart.
+    Waiting {
+        /// Authoritative waiting reason, such as `CrashLoopBackOff`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The current container instance has terminated.
+    Terminated(ContainerTerminationProjection),
+}
+
+/// The most recent terminated instance of a restarted container.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerTerminationProjection {
+    /// Process exit code reported by the container runtime.
+    pub exit_code: i32,
+    /// Authoritative termination reason, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One normalized Pod container status row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodContainerProjection {
+    /// Exact container name used to join authoritative metrics samples.
+    pub name: String,
+    /// Declared container image, absent when Kubernetes did not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Current lifecycle state, absent when container status is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<ContainerStateProjection>,
+    /// Current readiness reported by container status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    /// Current restart count reported by container status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<u32>,
+    /// Most recent terminated instance, when a restart history exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_termination: Option<ContainerTerminationProjection>,
+}
+
+/// A normalized Pod projection used by list and detail responses.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodProjection {
+    /// Current Pod phase, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Number of ready containers, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_containers: Option<u32>,
+    /// Number of declared containers, absent when the spec is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_containers: Option<u32>,
+    /// Sum of authoritative container restart counts, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<u32>,
+    /// Containers in declaration order with status joined by exact name.
+    #[serde(default)]
+    pub containers: Vec<PodContainerProjection>,
+    /// Pod conditions in backend-normalized deterministic order.
+    #[serde(default)]
+    pub conditions: Vec<ResourceConditionProjection>,
+    /// Scheduled node name, absent while unscheduled or unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    /// Primary Pod IP, absent while unassigned or unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_ip: Option<String>,
+    /// Pod labels sorted by key.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Pod annotations sorted by key.
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    /// Creation time formatted as RFC 3339, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// One name/image pair from a workload Pod template.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerImageProjection {
+    /// Exact container name from the template.
+    pub name: String,
+    /// Declared image, absent when Kubernetes did not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+/// A normalized Deployment projection used by list and detail responses.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentProjection {
+    /// Desired replicas, absent when the spec is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_replicas: Option<u32>,
+    /// Ready replicas, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_replicas: Option<u32>,
+    /// Replicas updated to the current template, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_replicas: Option<u32>,
+    /// Available replicas, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_replicas: Option<u32>,
+    /// Deployment strategy, such as `RollingUpdate` or `Recreate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Match labels from the Deployment selector, sorted by key.
+    #[serde(default)]
+    pub selector: BTreeMap<String, String>,
+    /// Rolling-update maximum surge, normalized from integer or percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_surge: Option<String>,
+    /// Rolling-update maximum unavailable, normalized from integer or percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_unavailable: Option<String>,
+    /// Deployment conditions in backend-normalized deterministic order.
+    #[serde(default)]
+    pub conditions: Vec<ResourceConditionProjection>,
+    /// Container images declared by the Pod template.
+    #[serde(default)]
+    pub template_containers: Vec<ContainerImageProjection>,
+    /// Pod-template labels sorted by key.
+    #[serde(default)]
+    pub template_labels: BTreeMap<String, String>,
+    /// Pod-template annotations sorted by key.
+    #[serde(default)]
+    pub template_annotations: BTreeMap<String, String>,
+    /// Deployment labels sorted by key, including manager metadata.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Deployment annotations sorted by key, including manager metadata.
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    /// Creation time formatted as RFC 3339, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// A normalized ReplicaSet projection used by rollout-history rows.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaSetProjection {
+    /// Parsed Deployment revision; rows without one never use this projection.
+    pub revision: u64,
+    /// Desired replicas, absent when the spec is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
+    /// Ready replicas, absent when status is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_replicas: Option<u32>,
+    /// Creation time formatted as RFC 3339, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 /// Normalized core/v1 Service projection.
@@ -374,6 +567,9 @@ pub struct ResourceCapabilities {
     pub can_delete: bool,
     /// Scale actions are meaningful for this kind.
     pub can_scale: bool,
+    /// Restart actions are meaningful for this workload kind.
+    #[serde(default)]
+    pub can_restart: bool,
     /// Log tailing is available for this kind.
     pub can_view_logs: bool,
     /// Exec sessions are available for this kind.
@@ -386,6 +582,7 @@ impl Default for ResourceCapabilities {
             can_edit_yaml: true,
             can_delete: true,
             can_scale: false,
+            can_restart: false,
             can_view_logs: false,
             can_exec: false,
         }

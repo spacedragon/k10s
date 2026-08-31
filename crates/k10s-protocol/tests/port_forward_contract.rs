@@ -288,6 +288,7 @@ fn legacy_detail_responses_without_projections_still_decode() {
     });
     let decoded: ResourceDetailResponse = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded.projection, None);
+    assert!(!decoded.capabilities.can_restart);
 }
 
 #[test]
