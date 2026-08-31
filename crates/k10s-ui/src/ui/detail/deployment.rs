@@ -717,7 +717,7 @@ fn body_is_wide(width: f32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod shared_seam_tests {
     use super::body_is_wide;
 
     #[test]

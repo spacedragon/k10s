@@ -9,8 +9,6 @@ Window label="Deployment · payments / checkout"
         GenericContainer
           GenericContainer
             GenericContainer
-              Label value="Deployment · payments / checkout"
-                TextRun value="Deployment · payments / checkout"
             GenericContainer
               Label value="Rollout ● NewReplicaSetAvailable"
                 TextRun value="Rollout ● NewReplicaSetAvailable"
@@ -22,8 +20,8 @@ Window label="Deployment · payments / checkout"
                 TextRun value="Available · 3"
               Label value="Strategy · RollingUpdate"
                 TextRun value="Strategy · RollingUpdate"
-              Label value="Age · 2026-08-01T08:00:00Z"
-                TextRun value="Age · 2026-08-01T08:00:00Z"
+              Label value="Age · 30d"
+                TextRun value="Age · 30d"
               Label value="Freshness · live (just now)"
                 TextRun value="Freshness · live (just now)"
             GenericContainer
