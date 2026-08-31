@@ -19,10 +19,11 @@ use tokio::sync::broadcast;
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
     ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerMetricsSample,
-    ContextInfo, Gvk, KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult,
-    RecordEvent, RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection,
-    ResourceRecord, ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput,
-    Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
+    ContainerStateProjection, ContextInfo, Gvk, KubernetesAccess, MetricsSample, OperationId,
+    OwnerRef, PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
+    RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord, ResourceRef,
+    ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe, SubscriptionHandle,
+    TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -2001,6 +2002,44 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         name: &'a str,
         labels: &'a [(&'a str, &'a str)],
     ) -> RecordSeed<'a> {
+        let projection = (gvk.kind == "Pod").then(|| {
+            let running = summary == "Running";
+            ResourceProjection::Pod(PodProjection {
+                phase: Some(if running { "Running" } else { "Pending" }.into()),
+                ready_containers: Some(u32::from(running)),
+                total_containers: Some(1),
+                restart_count: Some(0),
+                containers: vec![PodContainerProjection {
+                    name: "app".into(),
+                    image: Some("example/fake-app:v1".into()),
+                    state: Some(if summary.contains("CrashLoopBackOff") {
+                        ContainerStateProjection::Waiting {
+                            reason: Some("CrashLoopBackOff".into()),
+                        }
+                    } else {
+                        ContainerStateProjection::Running
+                    }),
+                    ready: Some(running),
+                    restart_count: Some(0),
+                    last_termination: None,
+                }],
+                conditions: Vec::new(),
+                node_name: Some("fake-node".into()),
+                pod_ip: None,
+                host_ip: None,
+                qos_class: Some("Burstable".into()),
+                priority: None,
+                service_account: Some("default".into()),
+                restart_policy: Some("Always".into()),
+                ports: Vec::new(),
+                labels: labels
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                annotations: BTreeMap::new(),
+                created_at: Some(rfc3339(FAKE_EPOCH_SECS + offset_secs)),
+            })
+        });
         RecordSeed {
             offset_secs,
             summary,
@@ -2010,7 +2049,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             name,
             labels,
             owner_references: Vec::new(),
-            projection: None,
+            projection,
         }
     }
 
@@ -2430,6 +2469,20 @@ mod tests {
             .expect("the fake fixture exposes previous-log behavior");
         assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
         assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+        let pods = state
+            .records
+            .iter()
+            .filter(|record| record.reference.gvk == Gvk::core("v1", "Pod"));
+        for pod in pods {
+            let Some(ResourceProjection::Pod(projection)) = pod.projection.as_ref() else {
+                panic!(
+                    "fake Pod {} must carry a typed projection",
+                    pod.reference.name
+                );
+            };
+            assert_eq!(projection.containers.len(), 1);
+            assert_eq!(projection.containers[0].name, "app");
+        }
     }
 
     #[tokio::test]
