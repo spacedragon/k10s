@@ -319,16 +319,12 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
     let integrated = harness.get_by_role_and_label(Role::Window, "Services");
     integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
     integrated.get_by_role_and_label(Role::Button, "Maximize");
-    integrated.get_by_label(
-        "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
-    );
+    integrated.get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close");
     assert_eq!(integrated.query_all_by_role(Role::ScrollView).count(), 1);
     assert!(
         integrated.rect().contains_rect(
             integrated
-                .get_by_label(
-                    "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
-                )
+                .get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close",)
                 .rect()
         )
     );

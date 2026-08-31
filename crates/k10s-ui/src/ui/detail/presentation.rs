@@ -24,6 +24,7 @@ pub(crate) struct DetailMetrics<'a> {
 }
 
 /// Shared, per-window transient expansion state consumed by kind renderers.
+#[allow(dead_code)] // Labels/metadata are frozen Task-5 extension state.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DetailExpansionState {
     pub more_vitals: bool,
@@ -50,7 +51,9 @@ pub(crate) struct DetailActionProjection<'a> {
 pub(crate) struct DetailFrameProjection<'a> {
     pub identity: &'a ResourceIdentity,
     pub freshness: Option<&'a WindowFreshness>,
+    #[allow(dead_code)] // Frozen for the Task-5 Pod renderer.
     pub resource_metrics: Option<&'a k10s_protocol::ResourceMetricsResponse>,
+    #[allow(dead_code)] // Frozen for the Task-5 Pod/Deployment renderers.
     pub relations: Option<&'a RelationState>,
     pub actions: DetailActionProjection<'a>,
     pub shortcut_labels: &'static [&'static str],
@@ -131,14 +134,7 @@ impl<'a> DetailPresentationInput<'a> {
             DetailPrimary::Loading | DetailPrimary::Failed(_) => None,
         };
         let capabilities = view.map(|view| &view.capabilities);
-        let verified_owner = view.and_then(|view| {
-            view.owner_references.iter().find(|owner| {
-                owner.controller
-                    && !owner.uid.is_empty()
-                    && !owner.name.is_empty()
-                    && !owner.gvk.kind.is_empty()
-            })
-        });
+        let verified_owner = self.verified_owner();
         let (visible_vitals, overflow_vitals, vital_expansion_label) =
             typed_vitals(self.identity, view, self.metrics);
         DetailFrameProjection {
@@ -152,12 +148,40 @@ impl<'a> DetailPresentationInput<'a> {
                 can_delete: capabilities.is_some_and(|caps| caps.can_delete),
                 verified_owner,
             },
-            shortcut_labels: &["l Logs", "p Pods", "s Shell", "y YAML", "e Events"],
+            shortcut_labels: super::shortcut_labels_for(
+                &self.identity.gvk,
+                verified_owner.is_some(),
+            ),
             visible_vitals,
             overflow_vitals,
             vital_expansion_label,
             expansion,
         }
+    }
+
+    pub(crate) fn verified_owner(&self) -> Option<&OwnerReference> {
+        let DetailPrimary::Loaded(view) = self.primary else {
+            return None;
+        };
+        view.owner_references.iter().find(|owner| {
+            owner.controller
+                && !owner.uid.is_empty()
+                && !owner.name.is_empty()
+                && !owner.gvk.kind.is_empty()
+        })
+    }
+}
+
+pub(crate) fn owner_identity(
+    identity: &ResourceIdentity,
+    owner: &OwnerReference,
+) -> ResourceIdentity {
+    ResourceIdentity {
+        context: identity.context.clone(),
+        gvk: owner.gvk.clone(),
+        namespace: identity.namespace.clone(),
+        name: owner.name.clone(),
+        uid: owner.uid.clone(),
     }
 }
 

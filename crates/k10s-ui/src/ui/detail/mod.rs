@@ -86,6 +86,61 @@ fn shortcut_tab(key: egui::Key) -> Option<DetailTab> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailShortcut {
+    Tab(DetailTab),
+    CopyName,
+    OpenOwner,
+}
+
+fn shortcut_for_key(
+    key: egui::Key,
+    tabs: &[DetailTab],
+    has_verified_owner: bool,
+) -> Option<DetailShortcut> {
+    match key {
+        egui::Key::C => Some(DetailShortcut::CopyName),
+        egui::Key::O if has_verified_owner => Some(DetailShortcut::OpenOwner),
+        _ => shortcut_tab(key)
+            .filter(|tab| tabs.contains(tab))
+            .map(DetailShortcut::Tab),
+    }
+}
+
+fn shortcut_labels_for(
+    gvk: &GroupVersionKind,
+    has_verified_owner: bool,
+) -> &'static [&'static str] {
+    const POD: &[&str] = &["l logs", "s shell", "y yaml", "e events", "c copy name"];
+    const POD_OWNER: &[&str] = &[
+        "l logs",
+        "s shell",
+        "y yaml",
+        "e events",
+        "c copy name",
+        "o owner",
+    ];
+    const CONTROLLER: &[&str] = &["p pods", "y yaml", "e events", "c copy name"];
+    const CONTROLLER_OWNER: &[&str] = &["p pods", "y yaml", "e events", "c copy name", "o owner"];
+    const GENERIC: &[&str] = &["y yaml", "e events", "c copy name"];
+    const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
+
+    let tabs = tabs_for_kind(gvk);
+    if tabs.contains(&DetailTab::Logs) && tabs.contains(&DetailTab::Shell) {
+        if has_verified_owner { POD_OWNER } else { POD }
+    } else if tabs.contains(&DetailTab::Pods) {
+        if has_verified_owner {
+            CONTROLLER_OWNER
+        } else {
+            CONTROLLER
+        }
+    } else if has_verified_owner {
+        GENERIC_OWNER
+    } else {
+        GENERIC
+    }
+}
+
 /// Whether this GVK is exactly core/v1 `Service`.
 pub(super) fn is_service_gvk(gvk: &GroupVersionKind) -> bool {
     gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Service"
@@ -118,6 +173,8 @@ pub(super) fn show<I>(
         return;
     }
     if !ui.ctx().memory(|memory| memory.focused().is_some()) {
+        let tabs = tabs_for_kind(&detail_identity_gvk(detail));
+        let verified_owner = presentation.verified_owner();
         let shortcut = ui.input(|input| {
             [
                 egui::Key::L,
@@ -125,15 +182,28 @@ pub(super) fn show<I>(
                 egui::Key::S,
                 egui::Key::Y,
                 egui::Key::E,
+                egui::Key::C,
+                egui::Key::O,
             ]
             .into_iter()
             .find(|key| input.key_pressed(*key))
-            .and_then(shortcut_tab)
+            .and_then(|key| shortcut_for_key(key, tabs, verified_owner.is_some()))
         });
-        if let Some(tab) =
-            shortcut.filter(|tab| tabs_for_kind(&detail_identity_gvk(detail)).contains(tab))
-        {
-            queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
+        match shortcut {
+            Some(DetailShortcut::Tab(tab)) => {
+                queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
+            }
+            Some(DetailShortcut::CopyName) => {
+                ui.ctx().copy_text(presentation.identity.name.clone());
+            }
+            Some(DetailShortcut::OpenOwner) => {
+                if let Some(owner) = verified_owner {
+                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                        &presentation::owner_identity(presentation.identity, owner),
+                    )));
+                }
+            }
+            None => {}
         }
     }
 
@@ -205,14 +275,7 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).version == "v1"
             {
                 if detail.active_tab == DetailTab::Overview {
-                    if matches!(
-                        view.projection,
-                        Some(k10s_protocol::ResourceProjection::Pod(_))
-                    ) {
-                        pod::show(ui, window_id, detail, presentation, frame, &mut body_queued);
-                    } else {
-                        ui.label("Structured details unavailable");
-                    }
+                    pod::show(ui, window_id, detail, presentation, frame, &mut body_queued);
                 } else {
                     show_generic_body(
                         ui,
@@ -232,21 +295,7 @@ pub(super) fn show<I>(
                 && detail_identity_gvk(detail).version == "v1"
             {
                 if detail.active_tab == DetailTab::Overview {
-                    if matches!(
-                        view.projection,
-                        Some(k10s_protocol::ResourceProjection::Deployment(_))
-                    ) {
-                        deployment::show(
-                            ui,
-                            window_id,
-                            detail,
-                            presentation,
-                            frame,
-                            &mut body_queued,
-                        );
-                    } else {
-                        ui.label("Structured details unavailable");
-                    }
+                    deployment::show(ui, window_id, detail, presentation, frame, &mut body_queued);
                 } else {
                     show_generic_body(
                         ui,
@@ -480,7 +529,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{pod_container, shortcut_tab};
+    use super::{DetailShortcut, pod_container, shortcut_for_key, shortcut_tab};
     use crate::workspace::DetailTab;
 
     #[test]
@@ -491,6 +540,24 @@ mod tests {
         assert_eq!(shortcut_tab(egui::Key::Y), Some(DetailTab::Yaml));
         assert_eq!(shortcut_tab(egui::Key::E), Some(DetailTab::Events));
         assert_eq!(shortcut_tab(egui::Key::Enter), None);
+
+        let pod_tabs = [
+            DetailTab::Overview,
+            DetailTab::Events,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+            DetailTab::Shell,
+        ];
+        assert_eq!(
+            shortcut_for_key(egui::Key::C, &pod_tabs, false),
+            Some(DetailShortcut::CopyName)
+        );
+        assert_eq!(shortcut_for_key(egui::Key::P, &pod_tabs, false), None);
+        assert_eq!(shortcut_for_key(egui::Key::O, &pod_tabs, false), None);
+        assert_eq!(
+            shortcut_for_key(egui::Key::O, &pod_tabs, true),
+            Some(DetailShortcut::OpenOwner)
+        );
     }
 
     #[test]

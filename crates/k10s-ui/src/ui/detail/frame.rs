@@ -36,7 +36,7 @@ pub(super) fn show<I: RowIdentity>(
         .unwrap_or_default();
     let mut projection = input.frame_projection(expansion);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title(input.identity)).strong().heading());
+        ui.label(RichText::new(title(projection.identity)).strong().heading());
         if integrated && !input.gone {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let maximize = ui.button(if detail_maximized {
@@ -156,21 +156,15 @@ pub(super) fn show<I: RowIdentity>(
         let ui = &mut actions_ui;
         ui.spacing_mut().item_spacing.x = 4.0;
         content(ui, input.primary, true, &mut projection);
-        let namespace = input.identity.namespace.as_deref();
-        let uid = (!input.identity.uid.is_empty()).then_some(input.identity.uid.as_str());
+        let namespace = projection.identity.namespace.as_deref();
+        let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
         if owner.is_some() || namespace.is_some() || uid.is_some() {
             ui.menu_button("Actions", |ui| {
                 if let Some(owner) = owner {
                     let label = format!("Open owner {}", owner.name);
                     if ui.button(&label).clicked() {
                         queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                            &k10s_protocol::ResourceIdentity {
-                                context: input.identity.context.clone(),
-                                gvk: owner.gvk.clone(),
-                                namespace: input.identity.namespace.clone(),
-                                name: owner.name.clone(),
-                                uid: owner.uid.clone(),
-                            },
+                            &super::presentation::owner_identity(projection.identity, owner),
                         )));
                         ui.close();
                     }
@@ -183,7 +177,7 @@ pub(super) fn show<I: RowIdentity>(
                 }
             });
         }
-        copy(ui, "Copy name", &input.identity.name);
+        copy(ui, "Copy name", &projection.identity.name);
     }
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
@@ -250,62 +244,5 @@ fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.to_owned()));
     if response.clicked() {
         ui.ctx().copy_text(value.to_owned());
-    }
-}
-
-/// Minimal Task-4 body hook used by typed stubs until their final renderers
-/// replace only their internals. Values shown here are authoritative typed
-/// projection fields, never fabricated placeholders.
-pub(super) fn show_typed_stub(
-    ui: &mut egui::Ui,
-    kind: &str,
-    labels: &std::collections::BTreeMap<String, String>,
-    frame: &mut DetailFrameProjection<'_>,
-) {
-    ui.label(format!("{kind} structured detail renderer"));
-    if let Some(metrics) = frame.resource_metrics {
-        debug_assert_eq!(&metrics.identity, frame.identity);
-    }
-    let _relation_state_is_available = frame.relations.is_some();
-    if ui.clip_rect().width() < 760.0 {
-        let label = if frame.expansion.metadata {
-            "Hide metadata"
-        } else {
-            "Show metadata"
-        };
-        if ui.button(label).clicked() {
-            frame.expansion.metadata = !frame.expansion.metadata;
-        }
-        if frame.expansion.metadata {
-            ui.label(format!("Context · {}", frame.identity.context));
-            if let Some(namespace) = frame.identity.namespace.as_deref() {
-                ui.label(format!("Namespace · {namespace}"));
-            }
-            if !frame.identity.uid.is_empty() {
-                ui.label(format!("UID · {}", frame.identity.uid));
-            }
-        }
-    }
-    if !labels.is_empty() {
-        ui.heading("Labels");
-        let visible = if frame.expansion.labels {
-            labels.len()
-        } else {
-            labels.len().min(4)
-        };
-        for (key, value) in labels.iter().take(visible) {
-            ui.label(format!("{key}={value}"));
-        }
-        let hidden = labels.len().saturating_sub(4);
-        if hidden > 0 {
-            let label = if frame.expansion.labels {
-                format!("Hide {hidden} labels")
-            } else {
-                format!("Show {hidden} more labels")
-            };
-            if ui.button(label).clicked() {
-                frame.expansion.labels = !frame.expansion.labels;
-            }
-        }
     }
 }

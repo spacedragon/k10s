@@ -278,7 +278,7 @@ Window
                       Label value="Loading details"
                         TextRun value="Loading details"
               GenericContainer
-                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
     Splitter
     Splitter
     Splitter

@@ -204,9 +204,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
             harness.get_by_role_and_label(Role::Window, "StatefulSet · default / database");
         assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
         let footer = detail
-            .get_by_label(
-                "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
-            )
+            .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close")
             .rect();
         assert!(detail.rect().contains_rect(footer));
         assert!(
@@ -234,7 +232,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
         footer_before,
         detail
             .get_by_label(
-                "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+                "Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close",
             )
             .rect()
     );
@@ -278,7 +276,7 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
 }
 
 #[test]
-fn detail_expansion_controls_are_transient_and_accessible() {
+fn typed_stub_does_not_expose_task5_metadata_controls() {
     let mut harness = harness();
     harness.state_mut().feed.details.insert(
         identity("Pod", "db-postgres-0"),
@@ -291,14 +289,13 @@ fn detail_expansion_controls_are_transient_and_accessible() {
         .click();
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("Structured details unavailable");
     assert!(window.query_by_label("Context · dev-local").is_none());
-    harness
-        .get_by_role_and_label(Role::Button, "Show metadata")
-        .click();
-    harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_label("Context · dev-local");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Show metadata")
+            .is_none()
+    );
 }
 
 #[test]
@@ -321,23 +318,23 @@ fn detail_expansion_is_independent_per_window() {
 
     harness
         .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_role_and_label(Role::Button, "Show metadata")
+        .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(2);
 
     harness
         .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_label("Context · dev-local");
+        .get_by_label("Node · worker-a");
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
-            .query_by_label("Context · dev-local")
+            .query_by_label("Node · worker-a")
             .is_none()
     );
 }
 
 #[test]
-fn width_aware_typed_vitals_and_labels_use_exact_collapsed_contract() {
+fn width_aware_typed_vitals_use_exact_collapsed_contract() {
     let mut harness = harness();
     let pod = typed_pod_detail("db-postgres-0");
     let pod_identity = pod.identity.clone();
@@ -374,21 +371,19 @@ fn width_aware_typed_vitals_and_labels_use_exact_collapsed_contract() {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Node · worker-a").is_none());
-    assert!(detail.query_by_label("label-4=value-4").is_none());
     detail
         .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .click();
-    harness.run_steps(3);
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
     detail.get_by_label("Node · worker-a");
     detail.get_by_label("Pod IP · 10.244.0.9");
     detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
-    detail.get_by_label("label-4=value-4");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Show metadata")
+            .is_none()
+    );
 }
 
 #[test]
@@ -484,10 +479,10 @@ fn typed_router_uses_stub_only_for_typed_overview_and_preserves_other_tabs() {
     );
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Pod structured detail renderer");
+    window.get_by_label("Structured details unavailable");
     assert!(
         window
-            .query_by_label("Structured details unavailable")
+            .query_by_label("Pod structured detail renderer")
             .is_none()
     );
     window
@@ -497,6 +492,143 @@ fn typed_router_uses_stub_only_for_typed_overview_and_preserves_other_tabs() {
     harness
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_label("Started container started");
+}
+
+#[test]
+fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
+    let mut pod_harness = harness();
+    pod_harness.state_mut().feed.details.insert(
+        identity("Pod", "db-postgres-0"),
+        typed_pod_detail("db-postgres-0"),
+    );
+    open(&mut pod_harness, LauncherItem::Workload(WorkloadKind::Pods));
+    pod_harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    pod_harness.run_steps(3);
+    let pod = pod_harness.get_by_role_and_label(Role::Window, "Pods");
+    pod.get_by_label(
+        "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
+    );
+
+    let mut deployment_harness = harness();
+    deployment_harness.state_mut().feed.details.insert(
+        identity("Deployment", "web-frontend"),
+        typed_deployment_detail("web-frontend"),
+    );
+    open(
+        &mut deployment_harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    deployment_harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_role_and_label(Role::Button, "web-frontend")
+        .click();
+    deployment_harness.run_steps(3);
+    deployment_harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close");
+
+    let mut generic_harness = harness();
+    let node = ResourceIdentity {
+        context: CONTEXT.into(),
+        gvk: GroupVersionKind::core("v1", "Node"),
+        namespace: None,
+        name: "worker-a".into(),
+        uid: String::new(),
+    };
+    generic_harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(node));
+    generic_harness.run_steps(3);
+    generic_harness
+        .get_by_role_and_label(Role::Window, "Node · worker-a")
+        .get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close");
+}
+
+#[test]
+fn detail_footer_exposes_owner_shortcut_only_for_verified_owner() {
+    let mut harness = harness();
+    let mut response = typed_pod_detail("db-postgres-0");
+    response.owner_references.push(OwnerReference {
+        gvk: GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "ReplicaSet".into(),
+        },
+        name: "web-frontend-7d9f8".into(),
+        uid: "uid-owner".into(),
+        controller: true,
+    });
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(response.identity.clone(), response.clone());
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(response.identity));
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
+        .get_by_label(
+            "Shortcuts: l logs · s shell · y yaml · e events · c copy name · o owner · Esc restore/close",
+        );
+}
+
+#[test]
+fn detail_verified_owner_shortcut_executes_the_advertised_command() {
+    let mut harness = harness();
+    let mut response = typed_pod_detail("db-postgres-0");
+    let owner = OwnerReference {
+        gvk: GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "ReplicaSet".into(),
+        },
+        name: "web-frontend-7d9f8".into(),
+        uid: "uid-owner".into(),
+        controller: true,
+    };
+    response.owner_references.push(owner.clone());
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(response.identity.clone(), response);
+    open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(3);
+    if let Some(focused) = harness.ctx.memory(|memory| memory.focused()) {
+        harness
+            .ctx
+            .memory_mut(|memory| memory.surrender_focus(focused));
+    }
+
+    harness.key_press(egui::Key::O);
+    harness.run_steps(2);
+    let expected_owner = ResourceIdentity {
+        context: CONTEXT.into(),
+        gvk: owner.gvk,
+        namespace: Some("default".into()),
+        name: owner.name,
+        uid: owner.uid,
+    };
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .any(|window| matches!(&window.content, WindowContent::Detail(detail) if detail.identity == expected_owner))
+    );
 }
 
 #[test]

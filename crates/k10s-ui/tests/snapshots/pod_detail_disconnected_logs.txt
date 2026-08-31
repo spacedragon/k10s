@@ -244,8 +244,8 @@ Window
                         Label value="kubelet started pod"
                           TextRun value="kubelet started pod"
                 GenericContainer
-                  Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
-                    TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                  Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
+                    TextRun value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
     Splitter
     Splitter
     Splitter
