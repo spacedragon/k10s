@@ -787,11 +787,43 @@ fn payload_text(payloads: &[&Value]) -> String {
 async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
     use std::sync::{Arc, Mutex as StdMutex};
 
+    use k10s_backend::port::{
+        ContainerStateProjection, PodContainerProjection, PodProjection, ResourceProjection,
+    };
     use k10s_backend::runtime::{ListedState, WatchRow, WatchSource, WatchUpdate};
     use k10s_backend::{BackendEvent, Gvk, ResourceRef, Subscribe};
 
     fn pods_gvk() -> Gvk {
         Gvk::core("v1", "Pod")
+    }
+
+    fn pod_projection() -> ResourceProjection {
+        ResourceProjection::Pod(PodProjection {
+            phase: Some("Running".into()),
+            ready_containers: Some(1),
+            total_containers: Some(1),
+            restart_count: Some(0),
+            containers: vec![PodContainerProjection {
+                name: "app".into(),
+                image: Some("example/fake-app:v1".into()),
+                state: Some(ContainerStateProjection::Running),
+                ready: Some(true),
+                restart_count: Some(0),
+                last_termination: None,
+            }],
+            conditions: Vec::new(),
+            node_name: Some("fake-node".into()),
+            pod_ip: None,
+            host_ip: None,
+            qos_class: Some("Burstable".into()),
+            priority: None,
+            service_account: Some("default".into()),
+            restart_policy: Some("Always".into()),
+            ports: Vec::new(),
+            labels: [("app".into(), "web".into())].into_iter().collect(),
+            annotations: Default::default(),
+            created_at: Some("2026-08-21T00:00:00Z".into()),
+        })
     }
 
     #[derive(Debug)]
@@ -821,7 +853,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                         summary: String::new(),
                         created_at: "2026-08-21T00:00:00Z".into(),
                         owner_references: Vec::new(),
-                        projection: None,
+                        projection: Some(pod_projection()),
                     }],
                 })
             })
@@ -938,7 +970,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                 summary: "CrashLoopBackOff".into(),
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
-                projection: None,
+                projection: Some(pod_projection()),
             }),
             WatchUpdate::Delete(ResourceRef {
                 context: "contract-mock".into(),
