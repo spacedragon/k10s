@@ -9,7 +9,6 @@ Window label="Deployment · payments / checkout"
         GenericContainer
           GenericContainer
             GenericContainer
-            GenericContainer
               Label value="Rollout ● NewReplicaSetAvailable"
                 TextRun value="Rollout ● NewReplicaSetAvailable"
               Label value="Ready · 3/3"
@@ -161,6 +160,7 @@ Window label="Deployment · payments / checkout"
                         Label value="UID · uid-deployment-checkout"
                           TextRun value="UID · uid-deployment-checkout"
                         Label value="Context · deployment-test"
+                          TextRun value="Context · deployment-test"
               ScrollBar
             GenericContainer
               Label value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"

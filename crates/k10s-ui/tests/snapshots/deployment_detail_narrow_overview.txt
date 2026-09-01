@@ -9,7 +9,6 @@ Window label="Deployment · payments / checkout"
         GenericContainer
           GenericContainer
             GenericContainer
-            GenericContainer
               GenericContainer
                 GenericContainer
                   GenericContainer
