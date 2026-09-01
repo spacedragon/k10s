@@ -172,6 +172,7 @@ fn main() {
         context: "dev-local".to_owned(),
         gvk: pod_gvk,
         namespace: None,
+        identity: None,
     });
     let start = Instant::now();
     let mut handle = rt.block_on(subscribe_future).expect("watch subscribes");

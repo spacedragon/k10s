@@ -308,6 +308,7 @@ mod tests {
                 context: "active".into(),
                 gvk: Gvk::core("v1", "Pod"),
                 namespace: Some("default".into()),
+                identity: None,
             },
             Arc::new(PendingWatch),
         );

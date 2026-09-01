@@ -82,7 +82,7 @@ pub use stream::{
 pub use subscription::{
     RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, ResourceChanged, ResourceGone,
     ResourceSnapshotPage, ResourceTypeEntry, ResourceTypesRequest, ResourceTypesResponse,
-    ResourceWatchSpec, SubscriptionSelector,
+    ResourceWatchIdentity, ResourceWatchSpec, SubscriptionSelector,
 };
 
 /// Major protocol version.
@@ -92,4 +92,5 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// v1.2 added the Service resource projection and port-forward session
 /// lifecycle payloads. v1.3 added Pod, Deployment, and ReplicaSet
 /// projections, per-container metrics, and restart capability metadata.
-pub const PROTOCOL_MINOR: u16 = 3;
+/// v1.4 added exact-identity resource watches for dedicated Detail authority.
+pub const PROTOCOL_MINOR: u16 = 4;

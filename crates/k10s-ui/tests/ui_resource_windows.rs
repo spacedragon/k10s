@@ -1946,6 +1946,132 @@ fn detail_close_is_in_identity_row() {
 }
 
 #[test]
+fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
+    for kind in [WorkspaceWorkload::Deployments, WorkspaceWorkload::Pods] {
+        for size in [[700.0, 500.0], [640.0, 420.0]] {
+            let mut fixture = Fixture::default();
+            let id = fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                    LauncherItem::Workload(kind),
+                ))
+                .into_iter()
+                .find_map(|event| match event {
+                    k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                    _ => None,
+                })
+                .expect("workload window opens");
+            set_geometry(&mut fixture, id, size);
+            fixture
+                .shell
+                .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 0.37));
+            let rows = fixture.feed.lists[&kind].clone();
+            let title = match kind {
+                WorkspaceWorkload::Deployments => "Deployments",
+                WorkspaceWorkload::Pods => "Pods",
+                _ => unreachable!("the regression covers representative shared workload layouts"),
+            };
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1_440.0, 900.0))
+                .with_pixels_per_point(1.0)
+                .build_ui_state(render, fixture);
+            harness.run_steps(4);
+            let expected = harness
+                .state()
+                .shell
+                .workspace()
+                .windows()
+                .iter()
+                .find(|window| window.id == id)
+                .expect("workload window remains open")
+                .geometry;
+            let expected_size = harness
+                .get_by_role_and_label(Role::Window, title)
+                .rect()
+                .size();
+
+            for command in [
+                WorkspaceCommand::SelectRow(id, rows[0].identity.clone()),
+                WorkspaceCommand::ClearSelection(id),
+                WorkspaceCommand::SelectRow(id, rows[1].identity.clone()),
+                WorkspaceCommand::MaximizeDetailPane(id),
+                WorkspaceCommand::RestoreDetailPane(id),
+            ] {
+                harness.state_mut().shell.apply_workspace_command(command);
+                harness.run_steps(4);
+                let geometry = harness
+                    .state()
+                    .shell
+                    .workspace()
+                    .windows()
+                    .iter()
+                    .find(|window| window.id == id)
+                    .expect("workload window remains open")
+                    .geometry;
+                assert_eq!(geometry, expected, "{title} geometry changed");
+                assert!(
+                    (harness
+                        .get_by_role_and_label(Role::Window, title)
+                        .rect()
+                        .size()
+                        - expected_size)
+                        .length()
+                        <= 1.0,
+                    "{title} outer rectangle changed"
+                );
+            }
+
+            let split_window = harness.get_by_role_and_label(Role::Window, title);
+            let first_row_label = format!("Select resource {}", rows[0].identity.name);
+            let list_anchor_before = split_window
+                .get_by_role_and_label(Role::Button, &first_row_label)
+                .rect();
+            let detail_body_before = split_window
+                .get_by_role_and_label(Role::ScrollView, "Detail body")
+                .rect();
+            assert!(
+                detail_body_before.height() > 0.0
+                    && detail_body_before.bottom() <= split_window.rect().bottom() + 1.0,
+                "{title} detail overflow must remain in its finite scroll region"
+            );
+
+            harness
+                .state_mut()
+                .shell
+                .apply_workspace_command(WorkspaceCommand::MaximizeDetailPane(id));
+            harness.run_steps(4);
+            let maximized = harness.get_by_role_and_label(Role::Window, title);
+            assert!(
+                maximized
+                    .query_by_role_and_label(Role::Button, &first_row_label)
+                    .is_none(),
+                "{title} maximize must reallocate the interior away from the list"
+            );
+            maximized.get_by_role_and_label(Role::ScrollView, "Detail body");
+
+            harness
+                .state_mut()
+                .shell
+                .apply_workspace_command(WorkspaceCommand::RestoreDetailPane(id));
+            harness.run_steps(4);
+            let restored = harness.get_by_role_and_label(Role::Window, title);
+            let list_anchor_after = restored
+                .get_by_role_and_label(Role::Button, &first_row_label)
+                .rect();
+            let detail_body_after = restored
+                .get_by_role_and_label(Role::ScrollView, "Detail body")
+                .rect();
+            assert!(
+                (list_anchor_after.min - list_anchor_before.min).length() <= 1.0
+                    && (detail_body_after.min - detail_body_before.min).length() <= 1.0
+                    && (detail_body_after.size() - detail_body_before.size()).length() <= 1.0,
+                "{title} restore must recover the prior list/detail allocation"
+            );
+        }
+    }
+}
+
+#[test]
 fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     let mut harness = harness();
     open(

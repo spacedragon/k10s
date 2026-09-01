@@ -1713,6 +1713,7 @@ impl KubernetesAccess for FakeKubernetes {
                     context,
                     gvk,
                     namespace,
+                    identity,
                 } => {
                     let mut state = self.lock();
                     if !state.contexts.iter().any(|c| c.name == context) {
@@ -1723,6 +1724,10 @@ impl KubernetesAccess for FakeKubernetes {
                         .iter()
                         .filter(|record| {
                             state.matches_selector(&record.reference, &context, &gvk, &namespace)
+                                && identity.as_ref().is_none_or(|wanted| {
+                                    wanted.name == record.reference.name
+                                        && wanted.uid == record.reference.uid
+                                })
                         })
                         .cloned()
                         .collect();
@@ -1738,10 +1743,18 @@ impl KubernetesAccess for FakeKubernetes {
                     // snapshot is published while the state lock still
                     // protects the snapshot cut, so later mutations can only
                     // enqueue deltas after this initial event.
+                    let identity = identity.map(|identity| ResourceRef {
+                        context: context.clone(),
+                        gvk: gvk.clone(),
+                        namespace: namespace.clone(),
+                        name: identity.name,
+                        uid: identity.uid,
+                    });
                     let (sender, receiver) = state.watches.register(WatchSelector {
                         context,
                         gvk,
                         namespace,
+                        identity,
                     });
                     let _ = sender.send(crate::port::BackendEvent::Snapshot(snapshot));
                     drop(state);
@@ -2864,6 +2877,7 @@ mod tests {
                 context: "dev-local".into(),
                 gvk: Gvk::core("v1", "Pod"),
                 namespace: Some("default".into()),
+                identity: None,
             })
             .await
             .expect("pod watch subscribes");

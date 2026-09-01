@@ -237,6 +237,8 @@ Window
                         Button label="Actions"
                         Button label="Copy name"
                 GenericContainer
+                  Label value="log stream disconnected"
+                    TextRun value="log stream disconnected"
                   Label value="LOG SOURCE"
                     TextRun value="LOG SOURCE"
                   GenericContainer
@@ -247,7 +249,7 @@ Window
                     GenericContainer
                       GenericContainer
                         ComboBox value="Since: 5m"
-                    Button label="Connect logs"
+                    Button label="Retry logs"
                     Label value="Disconnected"
                       TextRun value="Disconnected"
                   Label value="VIEW"
@@ -258,8 +260,9 @@ Window
                     CheckBox label="Wrap"
                     Button label="Export"
                   GenericContainer
-                    Label value="kubelet started pod"
-                      TextRun value="kubelet started pod"
+                    GenericContainer
+                      Label value="kubelet started pod"
+                        TextRun value="kubelet started pod"
                 GenericContainer
                   Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
                     TextRun value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"

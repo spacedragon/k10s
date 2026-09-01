@@ -338,6 +338,7 @@ pub enum Subscribe {
         context: String,
         gvk: Gvk,
         namespace: Option<String>,
+        identity: Option<ResourceWatchIdentity>,
     },
     /// Watch coalescible infrastructure telemetry for one context.
     Infrastructure { context: String },
@@ -354,6 +355,13 @@ pub enum Subscribe {
     /// subscribers immediately receive the current state of every live
     /// (nonterminal) operation so reconnecting sessions resynchronize.
     Operations,
+}
+
+/// Name and UID completing an exact resource-watch selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceWatchIdentity {
+    pub name: String,
+    pub uid: String,
 }
 
 /// Result of a query to the Kubernetes adapter.

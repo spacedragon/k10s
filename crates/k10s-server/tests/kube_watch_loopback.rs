@@ -191,6 +191,7 @@ async fn subscribe(ws: &mut Ws, subscription_id: &str) {
             kind: "Deployment".into(),
         },
         namespace: Some("default".into()),
+        identity: None,
     };
     ws.send(Message::Text(
         json!({

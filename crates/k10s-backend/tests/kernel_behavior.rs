@@ -190,6 +190,7 @@ async fn fake_scale_keeps_deployment_projection_consistent_in_list_and_watch_row
             context: "dev-local".into(),
             gvk: Gvk::new("apps", "v1", "Deployment"),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await
         .expect("deployment watch subscribes");
@@ -258,6 +259,7 @@ async fn resource_watch_subscriptions_open_with_a_bounded_snapshot_stream() {
             context: "dev-local".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await
         .unwrap();
@@ -293,6 +295,7 @@ async fn unknown_context_queries_and_watches_are_not_found() {
             context: "missing".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: None,
+            identity: None,
         })
         .await
         .unwrap_err();

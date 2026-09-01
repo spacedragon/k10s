@@ -18,7 +18,7 @@ use k10s_protocol::{
 use k10s_ui::{
     ui::{
         ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, RelationState,
-        ResourceAction, ResourceFeed, SafeUiError, UiShell, WindowFreshness,
+        ResourceAction, ResourceFeed, SafeUiError, UiShell, WindowFreshness, tools::LogsAction,
     },
     workspace::{
         DetailTab as WorkspaceDetailTab, LauncherItem, WindowContent, WindowGeom, WindowKind,
@@ -1367,23 +1367,86 @@ fn crashloop_logs_default_to_previous_with_complete_toolbar() {
         .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.run_steps(3);
+    assert!(harness.state_mut().shell.drain_log_actions().is_empty());
+    let window_id = workload_window_id(harness.state().shell.workspace(), WorkloadKind::Pods);
     harness
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Tab Logs")
         .click();
-    harness.run_steps(4);
+    // One frame applies the tab command; the next is the first Logs render.
+    harness.run_steps(2);
+
+    let expected_target = k10s_protocol::StreamTarget {
+        context: CONTEXT.to_owned(),
+        namespace: "default".to_owned(),
+        pod: "web-frontend-7d9f8-00001".to_owned(),
+        uid: format!("uid-{CONTEXT}-pod-default-web-frontend-7d9f8-00001"),
+        container: "app".to_owned(),
+    };
+    assert_eq!(
+        harness.state_mut().shell.drain_log_actions(),
+        vec![(
+            window_id,
+            LogsAction::OpenLogs {
+                window: window_id,
+                target: expected_target.clone(),
+                since_seconds: Some(300),
+                previous: true,
+            },
+        )]
+    );
+    harness.run_steps(3);
+    assert!(harness.state_mut().shell.drain_log_actions().is_empty());
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     for label in ["Previous", "Wrap"] {
         window.get_by_role_and_label(Role::CheckBox, label);
     }
-    for label in ["Connect logs", "Export"] {
-        window.get_by_role_and_label(Role::Button, label);
-    }
+    window.get_by_role_and_label(Role::Button, "Export");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Connect logs")
+            .is_none()
+    );
+    assert!(
+        window
+            .query_by_role_and_label(Role::CheckBox, "Follow")
+            .is_none()
+    );
     window.get_by_role_and_label(Role::TextInput, "Find in logs");
     window.get_by_label(
         "CrashLoopBackOff: showing logs from the previous terminated container by default",
     );
+
+    harness
+        .state_mut()
+        .shell
+        .stream_stores_mut()
+        .logs
+        .get_mut(window_id)
+        .expect("logs view exists")
+        .fail("ticket expired safely");
+    harness.run_steps(1);
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    window.get_by_label("ticket expired safely");
+    window
+        .get_by_role_and_label(Role::Button, "Retry logs")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_log_actions(),
+        vec![(
+            window_id,
+            LogsAction::OpenLogs {
+                window: window_id,
+                target: expected_target,
+                since_seconds: Some(300),
+                previous: true,
+            },
+        )]
+    );
+    harness.run_steps(2);
+    assert!(harness.state_mut().shell.drain_log_actions().is_empty());
 }
 
 impl Default for Fixture {

@@ -15,7 +15,7 @@ use k10s_protocol::{
 use k10s_ui::{
     ui::{
         ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
-        SafeUiError, UiShell, WindowFreshness,
+        SafeUiError, UiShell, WindowFreshness, tools::LogsPhase,
     },
     workspace::{DetailTab, WindowContent, WindowGeom, WindowKind, WorkspaceCommand},
 };
@@ -844,6 +844,7 @@ fn detail_freshness_combines_primary_state_with_exact_source_authority() {
 #[test]
 fn pod_interaction_non_overview_tools_stay_on_existing_router_flows() {
     let mut harness = harness(1_100.0, healthy_detail());
+    let window_id = detail_window_id(&harness);
     pod_window(&harness)
         .get_by_role_and_label(Role::Button, "Tab Events")
         .click();
@@ -862,7 +863,22 @@ fn pod_interaction_non_overview_tools_stay_on_existing_router_flows() {
     harness.run_steps(3);
     let detail = pod_window(&harness);
     detail.get_by_role_and_label(Role::CheckBox, "Previous");
-    detail.get_by_role_and_label(Role::Button, "Connect logs");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Connect logs")
+            .is_none()
+    );
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .stream_stores()
+            .logs
+            .get(window_id)
+            .expect("Logs tab creates its viewer")
+            .phase(),
+        LogsPhase::Connecting
+    );
 
     detail
         .get_by_role_and_label(Role::Button, "Tab Shell")
