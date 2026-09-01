@@ -15,19 +15,22 @@ use crate::workspace::{AgeMode, SortSpec, WindowId, WorkloadKind};
 
 use super::responsive_table::ColumnSpec;
 
+// Reference column hierarchy: fixed widths for the scannable columns and a
+// flex Name, so the remaining width goes to Image (the column people reach
+// for when checking which revision is still running).
 const DEPLOYMENT_COLUMNS: [ColumnSpec; 6] = [
-    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::required("namespace", 150.0),
     ColumnSpec::elastic("name", 180.0),
-    ColumnSpec::required("ready", 56.0),
-    ColumnSpec::hideable("status", 112.0, 1),
-    ColumnSpec::hideable("image", 180.0, 0),
+    ColumnSpec::required("ready", 60.0),
+    ColumnSpec::hideable("status", 104.0, 1),
+    ColumnSpec::hideable("image", 230.0, 0),
     ColumnSpec::required("created", 56.0),
 ];
 const POD_COLUMNS: [ColumnSpec; 7] = [
-    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::required("namespace", 150.0),
     ColumnSpec::elastic("name", 180.0),
-    ColumnSpec::required("ready", 56.0),
-    ColumnSpec::required("status", 112.0),
+    ColumnSpec::required("ready", 60.0),
+    ColumnSpec::required("status", 104.0),
     ColumnSpec::hideable("restarts", 64.0, 1),
     ColumnSpec::hideable("node", 120.0, 0),
     ColumnSpec::required("created", 56.0),
@@ -228,33 +231,38 @@ where
                     for index in range.start.max(header_rows)..range.end {
                         let row = &rows[index - header_rows];
                         let selected = is_selected(row);
-                        let name = if selected {
-                            format!("▶ {}", row.identity.name)
-                        } else {
-                            format!("  {}", row.identity.name)
-                        };
+                        // The whole row carries the selection: a full-width
+                        // fill plus a 3px left accent, painted before the
+                        // cells so they render on top. No per-cell highlight
+                        // and no disclosure marker.
+                        let row_min = ui.cursor().min;
+                        if selected {
+                            let row_rect = egui::Rect::from_min_max(
+                                row_min,
+                                row_min + egui::vec2(table_width, row_height),
+                            );
+                            let painter = ui.painter();
+                            painter.rect_filled(row_rect, 0.0, super::theme::SELECTED_ROW);
+                            painter.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(row_min.x, row_min.y),
+                                    egui::pos2(row_min.x + 3.0, row_min.y + row_height),
+                                ),
+                                0.0,
+                                super::theme::ACCENT,
+                            );
+                        }
                         for column in &columns.visible {
-                            let numeric = matches!(column.key, "ready" | "restarts");
+                            let numeric = matches!(column.key, "ready" | "restarts" | "created");
                             super::responsive_table::sized_cell(ui, column.width, numeric, |ui| {
                                 match column.key {
                                     "namespace" => {
                                         ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                                     }
                                     "name" => {
-                                        let name_button =
-                                            ui.add(
-                                                egui::Button::new(if selected {
-                                                    egui::RichText::new(&name).strong()
-                                                } else {
-                                                    egui::RichText::new(&name)
-                                                })
-                                                .selected(selected)
-                                                .stroke(if selected {
-                                                    egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
-                                                } else {
-                                                    egui::Stroke::NONE
-                                                }),
-                                            );
+                                        let name_button = ui.add(
+                                            egui::Button::new(&row.identity.name).frame(false),
+                                        );
                                         let label = super::responsive_table::row_action_label(
                                             "resource",
                                             &row.identity.name,
@@ -285,10 +293,10 @@ where
                                         });
                                     }
                                     "status" => {
-                                        ui.label(resource_status(row));
+                                        status_label(ui, resource_status(row).as_ref());
                                     }
                                     "ready" => {
-                                        right_label(ui, resource_ready(row));
+                                        ready_label(ui, row);
                                     }
                                     "image" => {
                                         super::responsive_table::elided_label(
@@ -362,13 +370,6 @@ pub(super) fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
         _ => Cow::Borrowed(&row.summary),
     }
 }
-fn resource_ready(row: &ResourceListRow) -> String {
-    match row.projection.as_ref() {
-        Some(ResourceProjection::Deployment(p)) => ready_pair(p.ready_replicas, p.desired_replicas),
-        Some(ResourceProjection::Pod(p)) => ready_pair(p.ready_containers, p.total_containers),
-        _ => "—".into(),
-    }
-}
 fn ready_pair(ready: Option<u32>, desired: Option<u32>) -> String {
     match (ready, desired) {
         (Some(ready), Some(desired)) => format!("{ready}/{desired}"),
@@ -404,6 +405,100 @@ fn resource_node(row: &ResourceListRow) -> String {
 fn right_label(ui: &mut egui::Ui, value: String) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.label(value);
+    });
+}
+
+/// A shape and a color both carry the status signal so a wall of identical
+/// ready counts stays scannable; danger beats warning beats healthy.
+fn status_tone(status: &str) -> (char, egui::Color32) {
+    let lowered = status.to_lowercase();
+    if lowered.contains("fail")
+        || lowered.contains("error")
+        || lowered.contains("crashloop")
+        || lowered.contains("backoff")
+        || lowered.contains("terminating")
+    {
+        ('\u{2715}', super::theme::DANGER)
+    } else if lowered.contains("progress")
+        || lowered.contains("pending")
+        || lowered.contains("partial")
+        || is_degraded_ready_status(&lowered)
+    {
+        ('\u{25b2}', super::theme::WARNING)
+    } else if lowered.contains("ready")
+        || lowered.contains("available")
+        || lowered.contains("running")
+        || lowered.contains("succeeded")
+        || lowered.contains("completed")
+    {
+        ('\u{25cf}', super::theme::HEALTHY)
+    } else {
+        ('\u{25cf}', super::theme::MUTED_TEXT)
+    }
+}
+
+/// A "1/2 ready" style summary whose ready count is below its target.
+fn is_degraded_ready_status(lowered: &str) -> bool {
+    if let Some(stem) = lowered
+        .find("ready")
+        .or_else(|| lowered.find("container"))
+        .or_else(|| lowered.find("pod"))
+    {
+        let head: Vec<char> = lowered[..stem].chars().collect();
+        let mut ready: Option<u32> = None;
+        let mut desired: Option<u32> = None;
+        for ch in head.iter().rev() {
+            if ch.is_ascii_digit() {
+                let digit = ch.to_digit(10).unwrap_or(0);
+                ready = Some(digit + ready.map(|r| r * 10).unwrap_or(0));
+            } else if *ch == '/' {
+                desired = ready.take();
+            } else if ch.is_whitespace() || *ch == '\u{00b7}' {
+                break;
+            }
+        }
+        if let (Some(ready), Some(desired)) = (ready, desired) {
+            return ready < desired;
+        }
+    }
+    false
+}
+
+/// Render the status cell with its tone glyph and color, keeping the full
+/// text accessible and on the hover tooltip.
+fn status_label(ui: &mut egui::Ui, status: &str) {
+    let (glyph, color) = status_tone(status);
+    let text = format!("{} {}", glyph, status);
+    let response = ui.colored_label(color, text);
+    // The glyph is purely visual; the accessible label stays the clean status
+    // text so semantic queries and screen readers never see the shape.
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, status.to_owned()));
+    response.on_hover_text(status);
+}
+
+/// Render the ready/desired count, turning yellow when ready is below its
+/// target so shortfalls read at a glance.
+fn ready_label(ui: &mut egui::Ui, row: &ResourceListRow) {
+    let (text, degraded) = match row.projection.as_ref() {
+        Some(ResourceProjection::Deployment(p)) => {
+            let degraded =
+                matches!((p.ready_replicas, p.desired_replicas), (Some(r), Some(d)) if r < d);
+            (ready_pair(p.ready_replicas, p.desired_replicas), degraded)
+        }
+        Some(ResourceProjection::Pod(p)) => {
+            let degraded =
+                matches!((p.ready_containers, p.total_containers), (Some(r), Some(t)) if r < t);
+            (ready_pair(p.ready_containers, p.total_containers), degraded)
+        }
+        _ => ("\u{2014}".into(), false),
+    };
+    let color = if degraded {
+        super::theme::WARNING
+    } else {
+        super::theme::TEXT
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.colored_label(color, text);
     });
 }
 #[cfg(test)]

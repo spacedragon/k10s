@@ -240,7 +240,7 @@ Window
                                 TextRun value="—"
                           GenericContainer
                             Label value="2/2 ready"
-                              TextRun value="2/2 ready"
+                              TextRun value="● 2/2 ready"
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"

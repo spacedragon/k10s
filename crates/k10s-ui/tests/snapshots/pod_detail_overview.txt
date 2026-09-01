@@ -243,7 +243,7 @@ Window
                                 TextRun value="—"
                           GenericContainer
                             Label value="Running"
-                              TextRun value="Running"
+                              TextRun value="● Running"
                           GenericContainer
                             GenericContainer
                               Label value="—"
