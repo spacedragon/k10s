@@ -233,22 +233,18 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
+                      Label value="Status ● —"
                       GenericContainer
                         GenericContainer
-                          Label value="Status ● —"
-                            TextRun value="Status ● —"
+                      Label value="Ready · —"
                       GenericContainer
                         GenericContainer
-                          Label value="Ready · —"
-                            TextRun value="Ready · —"
+                      Label value="Restarts · —"
                       GenericContainer
                         GenericContainer
-                          Label value="Restarts · —"
-                            TextRun value="Restarts · —"
+                      Label value="Age · —"
                       GenericContainer
                         GenericContainer
-                          Label value="Age · —"
-                            TextRun value="Age · —"
                       Button label="Show more Pod vitals"
               GenericContainer
                 Label value="Freshness · loading"
@@ -267,7 +263,6 @@ Window
                   GenericContainer
                     GenericContainer
                       Button label="Actions"
-                      Button label="Copy name"
               ScrollView label="Detail body"
                 GenericContainer
                   GenericContainer

@@ -913,9 +913,27 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
         [900.0, 560.0],
     );
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    for action in ["Scale…", "Restart…", "Delete…", "Copy name"] {
+    for action in ["Scale…", "Restart…", "Delete…", "Actions"] {
         window.get_by_role_and_label(Role::Button, action);
     }
+    // Copy name no longer occupies the action row; it lives in the
+    // Actions overflow menu.
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Copy name")
+            .is_none(),
+        "Copy name must not occupy the action row"
+    );
+    window
+        .get_by_role_and_label(Role::Button, "Actions")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_role_and_label(Role::Button, "Copy name");
+    harness
+        .get_by_role_and_label(Role::Button, "Actions")
+        .click();
+    harness.run_steps(1);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close");
     assert!(window.query_by_label("Roll back…").is_none());
 

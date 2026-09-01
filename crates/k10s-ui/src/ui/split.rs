@@ -4,14 +4,17 @@
 //! pane keeps a larger one; extreme split ratios clamp to those minima so
 //! neither pane can ever collapse while both are visible.
 
-use egui::{Align, Layout, UiBuilder, Vec2};
+use egui::{
+    Align, Align2, FontFamily, FontId, Layout, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo,
+    WidgetType,
+};
 
 /// Hard minimum height of the resource list pane.
 pub(super) const LIST_PANE_MIN: f32 = 120.0;
 /// Hard minimum height of the integrated detail pane.
 pub(super) const DETAIL_PANE_MIN: f32 = 180.0;
 /// Height of the draggable separator between panes.
-const SEPARATOR_HEIGHT: f32 = 8.0;
+const SEPARATOR_HEIGHT: f32 = 9.0;
 
 /// Compute `(list_height, detail_height)` for `total` available points.
 ///
@@ -63,7 +66,7 @@ pub(super) fn show_vertical<R, S>(
 
     let mut bottom_result = None;
     if detail_visible && detail_height > 0.0 {
-        let (_, separator) =
+        let (grip_rect, separator) =
             ui.allocate_exact_size(Vec2::new(width, SEPARATOR_HEIGHT), egui::Sense::drag());
         if separator.dragged() {
             let delta = separator.drag_delta().y / total.max(1.0);
@@ -72,6 +75,29 @@ pub(super) fn show_vertical<R, S>(
         if separator.hovered() || separator.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
+        // Visible grip: a distinct fill, a bottom rule, and a centered drag
+        // hint so the resizable relationship is discoverable without moving
+        // the pointer. Painted (not a widget) so it never steals the drag.
+        let grip_color = egui::Color32::from_rgb(33, 36, 40);
+        let rule_color = crate::ui::theme::BORDER.gamma_multiply(0.6);
+        let hint_color = crate::ui::theme::MUTED_TEXT.gamma_multiply(0.55);
+        let painter = ui.ctx().layer_painter(ui.layer_id());
+        painter.rect_filled(grip_rect, 0.0, grip_color);
+        painter.rect_stroke(
+            grip_rect,
+            0.0,
+            Stroke::new(1.0, rule_color),
+            StrokeKind::Inside,
+        );
+        let hint_font = FontId::new(9.0, FontFamily::Monospace);
+        painter.text(
+            grip_rect.center(),
+            Align2::CENTER_CENTER,
+            "•••  drag  •••",
+            hint_font,
+            hint_color,
+        );
+        separator.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail split grip"));
 
         bottom_result = Some(show_fixed_pane(
             ui,

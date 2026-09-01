@@ -236,7 +236,7 @@ pub(super) fn show<I>(
         |ui, primary, actions, frame| {
             let view = match primary {
                 presentation::DetailPrimary::Loading => {
-                    if !actions {
+                    if actions.is_none() {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new());
                             ui.label("Loading details");
@@ -248,35 +248,40 @@ pub(super) fn show<I>(
                     return;
                 }
                 presentation::DetailPrimary::Failed(error) => {
-                    if !actions {
+                    if actions.is_none() {
                         ui.label(format!("Details unavailable: {}", error.message()));
                     }
-                    if !actions && ui.button("Retry details").clicked() {
+                    if actions.is_none() && ui.button("Retry details").clicked() {
                         resource_actions.push(crate::ui::ResourceAction::RetryPrimary(
                             presentation.identity.clone(),
                         ));
                     }
-                    if !actions && is_service_gvk(&detail_identity_gvk(detail)) {
+                    if actions.is_none() && is_service_gvk(&detail_identity_gvk(detail)) {
                         service::show_unavailable(ui, window_id, presentation);
                     }
                     return;
                 }
                 presentation::DetailPrimary::Loaded(view) => view,
             };
-            if actions {
+            if let Some(segment) = actions {
                 if presentation.gone {
                     return;
                 }
                 if !is_service_gvk(&detail_identity_gvk(detail)) {
-                    show_generic_actions(
-                        ui,
-                        window_id,
-                        presentation,
-                        frame,
-                        view,
-                        dialogs,
-                        resource_actions,
-                    );
+                    match segment {
+                        frame::DetailActionSegment::Delete => {
+                            show_delete_action(ui, window_id, presentation, frame, view, dialogs)
+                        }
+                        frame::DetailActionSegment::Primary => show_primary_actions(
+                            ui,
+                            window_id,
+                            presentation,
+                            frame,
+                            view,
+                            dialogs,
+                            resource_actions,
+                        ),
+                    }
                 }
                 return;
             }
@@ -459,7 +464,33 @@ fn show_generic_body<I: RowIdentity>(
     }
 }
 
-fn show_generic_actions(
+/// The destructive `Delete…` button, rendered rightmost in the reference
+/// action row and styled as a danger control.
+fn show_delete_action(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    frame: &presentation::DetailFrameProjection<'_>,
+    _view: &ResourceDetailResponse,
+    dialogs: &mut dialogs::OperationDialogs,
+) {
+    if frame.actions.can_delete {
+        let danger = ui.add_enabled(
+            presentation.mutations_allowed,
+            egui::Button::new(egui::RichText::new("Delete…").color(crate::ui::theme::DANGER))
+                .fill(egui::Color32::from_rgb(48, 28, 28))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(125, 65, 65))),
+        );
+        danger.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete…"));
+        if danger.clicked() {
+            dialogs.open_delete(window_id, presentation.identity.clone());
+        }
+    }
+}
+
+/// `Restart…` and `Scale…`, rendered left of the `Actions` overflow
+/// menu (Restart then Scale in the right-to-left action layout).
+fn show_primary_actions(
     ui: &mut egui::Ui,
     window_id: WindowId,
     presentation: &presentation::DetailPresentationInput<'_>,
@@ -468,17 +499,6 @@ fn show_generic_actions(
     dialogs: &mut dialogs::OperationDialogs,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
 ) {
-    if frame.actions.can_scale {
-        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
-        scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));
-        if scale.clicked() {
-            dialogs.open_scale(
-                window_id,
-                presentation.identity.clone(),
-                suggested_replicas(view),
-            );
-        }
-    }
     if frame.actions.can_restart {
         let restart = ui.add_enabled(
             presentation.mutations_allowed,
@@ -493,11 +513,15 @@ fn show_generic_actions(
             });
         }
     }
-    if frame.actions.can_delete {
-        let delete = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete…"));
-        delete.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete…"));
-        if delete.clicked() {
-            dialogs.open_delete(window_id, presentation.identity.clone());
+    if frame.actions.can_scale {
+        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
+        scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));
+        if scale.clicked() {
+            dialogs.open_scale(
+                window_id,
+                presentation.identity.clone(),
+                suggested_replicas(view),
+            );
         }
     }
 }
