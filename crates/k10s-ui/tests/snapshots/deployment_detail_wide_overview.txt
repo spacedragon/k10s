@@ -132,7 +132,7 @@ Window label="Deployment · payments / checkout"
                           GenericContainer
                             GenericContainer
                               Label value="Image (api): ghcr.io/acme/checkout:v4"
-                                TextRun value="…"
+                                TextRun value="gh…:v4"
                             GenericContainer
                               Button label="Copy Image (api)"
                           Label value="Replicas · 3/3 available"
@@ -146,7 +146,7 @@ Window label="Deployment · payments / checkout"
                           GenericContainer
                             GenericContainer
                               Label value="Selector: app=checkout"
-                                TextRun value="…"
+                                TextRun value="ap…ut"
                             GenericContainer
                               Button label="Copy Selector"
                           Label value="Template labels · app=checkout"

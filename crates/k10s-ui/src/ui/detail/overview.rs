@@ -70,8 +70,12 @@ pub(super) fn long_value(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
     ui.label(RichText::new(label).weak());
     ui.horizontal(|ui| {
         let copy_width = if available.is_some() { 48.0 } else { 0.0 };
-        let remaining = (ui.max_rect().right() - ui.cursor().left()).max(1.0);
-        let value_width = (remaining - copy_width - ui.spacing().item_spacing.x).max(1.0);
+        // Grid intrinsic sizing may report zero available width. The clip is
+        // already the bounded parent cell/column viewport, so establish a
+        // stable one-cell row from it before measuring the value.
+        let clipped = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+        let row_width = clipped.min(320.0);
+        let value_width = (row_width - copy_width - ui.spacing().item_spacing.x).max(1.0);
         let mut limit =
             unicode_segmentation::UnicodeSegmentation::graphemes(original, true).count();
         let mut shown = original.to_owned();
@@ -214,6 +218,32 @@ mod responsive_contract_tests {
                 .query_by_role_and_label(Role::Button, "Copy Image")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn painted_long_values_keep_short_text_and_meaningful_complex_ends() {
+        let long = "仓库/团队/e\u{301}/👨‍👩‍👧‍👦/非常非常非常长的镜像名称:v42";
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(360.0, 180.0))
+            .build_ui(move |ui| {
+                super::long_value(ui, "Image", Some("repo/app:v1"));
+                super::long_value(ui, "Annotation", Some(long));
+            });
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_role(Role::TextRun)
+                .filter_map(|node| node.value())
+                .any(|value| value == "repo/app:v1")
+        );
+        let painted = harness
+            .query_all_by_role(Role::TextRun)
+            .filter_map(|node| node.value())
+            .find(|value| value.contains('…') && value.ends_with(":v42"))
+            .expect("long complex value paints a meaningful elided prefix and suffix");
+        assert!(painted.starts_with('仓'));
+        harness.get_by_role_and_label(Role::Button, "Copy Image");
+        harness.get_by_role_and_label(Role::Button, "Copy Annotation");
     }
 
     #[test]
