@@ -5,17 +5,40 @@
 //! never duplicates authoritative data into local state.
 
 use egui::{ScrollArea, WidgetInfo, WidgetType};
-use k10s_protocol::ResourceListRow;
+use k10s_protocol::{ResourceListRow, ResourceProjection};
 
 use super::responsive_table::RowAction;
 use crate::workspace::{SortSpec, WindowId};
 
-/// Column sort keys in display order.
-const COLUMNS: [(&str, &str); 4] = [
-    ("Namespace", "namespace"),
-    ("Name", "name"),
-    ("Status", "status"),
-    ("Created", "created"),
+use super::responsive_table::ColumnSpec;
+
+const DEPLOYMENT_COLUMNS: [ColumnSpec; 6] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::required("ready", 56.0),
+    ColumnSpec::hideable("status", 112.0, 1),
+    ColumnSpec::hideable("image", 180.0, 0),
+    ColumnSpec::required("created", 56.0),
+];
+const POD_COLUMNS: [ColumnSpec; 7] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::required("ready", 56.0),
+    ColumnSpec::required("status", 112.0),
+    ColumnSpec::hideable("restarts", 64.0, 1),
+    ColumnSpec::hideable("node", 120.0, 0),
+    ColumnSpec::required("created", 56.0),
+];
+const GENERIC_NAMESPACED: [ColumnSpec; 4] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::hideable("status", 120.0, 0),
+    ColumnSpec::hideable("created", 56.0, 1),
+];
+const GENERIC_CLUSTER: [ColumnSpec; 3] = [
+    ColumnSpec::elastic("name", 220.0),
+    ColumnSpec::hideable("status", 120.0, 0),
+    ColumnSpec::hideable("created", 56.0, 1),
 ];
 
 /// Outcome of rendering one table frame.
@@ -131,6 +154,15 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
+    let specs = match rows.first().and_then(|row| row.projection.as_ref()) {
+        Some(ResourceProjection::Deployment(_)) => &DEPLOYMENT_COLUMNS[..],
+        Some(ResourceProjection::Pod(_)) => &POD_COLUMNS[..],
+        _ if namespaced => &GENERIC_NAMESPACED[..],
+        _ => &GENERIC_CLUSTER[..],
+    };
+    let columns = super::responsive_table::resolve_columns(specs, ui.available_width());
+    let _resolved_table_width: f32 = columns.visible.iter().map(|column| column.width).sum();
+    let _horizontal_scroll = columns.horizontal_scroll;
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
@@ -139,69 +171,174 @@ where
                 .min_col_width(72.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
-                        for (visible, key) in COLUMNS {
-                            if visible == "Namespace" && !namespaced {
-                                continue;
+                        for column in &columns.visible {
+                            let visible = column_title(column.key);
+                            if matches!(column.key, "namespace" | "name" | "status" | "created") {
+                                sort_header(ui, title, visible, column.key, sort, &mut actions);
+                            } else {
+                                ui.label(visible);
                             }
-                            sort_header(ui, title, visible, key, sort, &mut actions);
                         }
                         ui.end_row();
                     }
 
                     for index in range.start.max(header_rows)..range.end {
                         let row = &rows[index - header_rows];
-                        if namespaced {
-                            ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
-                        }
                         let selected = is_selected(row);
                         let name = if selected {
                             format!("▶ {}", row.identity.name)
                         } else {
                             format!("  {}", row.identity.name)
                         };
-                        let name_button = ui.add(
-                            egui::Button::new(if selected {
-                                egui::RichText::new(name).strong()
-                            } else {
-                                egui::RichText::new(name)
-                            })
-                            .selected(selected)
-                            .stroke(if selected {
-                                egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
-                            } else {
-                                egui::Stroke::NONE
-                            }),
-                        );
-                        let label = super::responsive_table::row_action_label(
-                            "resource",
-                            &row.identity.name,
-                            selected,
-                        );
-                        name_button.widget_info(move || {
-                            WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
-                        });
-                        let popped_out = super::responsive_table::row_interaction(
-                            &name_button,
-                            gesture_table_id,
-                            identity_of(row),
-                            selected,
-                        );
-                        if popped_out.is_some() {
-                            actions.popped_out = popped_out;
-                        }
-                        name_button.context_menu(|ui| {
-                            if ui.button("Open dedicated window").clicked() {
-                                actions.popped_out = Some(identity_of(row));
-                                ui.close();
+                        for column in &columns.visible {
+                            match column.key {
+                                "namespace" => {
+                                    ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
+                                }
+                                "name" => {
+                                    let name_button = ui.add(
+                                        egui::Button::new(if selected {
+                                            egui::RichText::new(&name).strong()
+                                        } else {
+                                            egui::RichText::new(&name)
+                                        })
+                                        .selected(selected)
+                                        .stroke(
+                                            if selected {
+                                                egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
+                                            } else {
+                                                egui::Stroke::NONE
+                                            },
+                                        ),
+                                    );
+                                    let label = super::responsive_table::row_action_label(
+                                        "resource",
+                                        &row.identity.name,
+                                        selected,
+                                    );
+                                    name_button.widget_info(move || {
+                                        WidgetInfo::selected(
+                                            WidgetType::Button,
+                                            true,
+                                            selected,
+                                            label.clone(),
+                                        )
+                                    });
+                                    let popped_out = super::responsive_table::row_interaction(
+                                        &name_button,
+                                        gesture_table_id,
+                                        identity_of(row),
+                                        selected,
+                                    );
+                                    if popped_out.is_some() {
+                                        actions.popped_out = popped_out;
+                                    }
+                                    name_button.context_menu(|ui| {
+                                        if ui.button("Open dedicated window").clicked() {
+                                            actions.popped_out = Some(identity_of(row));
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                                "status" => {
+                                    ui.label(resource_status(row));
+                                }
+                                "ready" => {
+                                    right_label(ui, resource_ready(row));
+                                }
+                                "image" => {
+                                    elided_label(ui, resource_image(row), 28);
+                                }
+                                "restarts" => {
+                                    right_label(ui, resource_restarts(row));
+                                }
+                                "node" => {
+                                    elided_label(ui, resource_node(row), 20);
+                                }
+                                "created" => {
+                                    ui.monospace(
+                                        row.created_at.get(..10).unwrap_or(&row.created_at),
+                                    );
+                                }
+                                _ => {}
                             }
-                        });
-                        ui.label(row.summary.clone());
-                        ui.monospace(row.created_at.clone());
+                        }
                         ui.end_row();
                     }
                 });
         });
     actions
+}
+
+fn column_title(key: &str) -> &'static str {
+    match key {
+        "namespace" => "Namespace",
+        "name" => "Name",
+        "ready" => "Ready",
+        "status" => "Status",
+        "image" => "Image",
+        "restarts" => "Restarts",
+        "node" => "Node",
+        "created" => "Age",
+        _ => "",
+    }
+}
+fn resource_status(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p.phase.clone().unwrap_or_else(|| "—".into()),
+        _ => row.summary.clone(),
+    }
+}
+fn resource_ready(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Deployment(p)) => format!(
+            "{}/{}",
+            p.ready_replicas.unwrap_or(0),
+            p.desired_replicas.unwrap_or(0)
+        ),
+        Some(ResourceProjection::Pod(p)) => format!(
+            "{}/{}",
+            p.ready_containers.unwrap_or(0),
+            p.total_containers.unwrap_or(0)
+        ),
+        _ => "—".into(),
+    }
+}
+fn resource_image(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Deployment(p)) => p
+            .template_containers
+            .iter()
+            .filter_map(|c| c.image.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "—".into(),
+    }
+}
+fn resource_restarts(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p
+            .restart_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+        _ => "—".into(),
+    }
+}
+fn resource_node(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p.node_name.clone().unwrap_or_else(|| "—".into()),
+        _ => "—".into(),
+    }
+}
+fn right_label(ui: &mut egui::Ui, value: String) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(value);
+    });
+}
+fn elided_label(ui: &mut egui::Ui, value: String, max: usize) {
+    let compact = super::responsive_table::middle_elide(&value, max);
+    let response = ui.label(compact).on_hover_text(&value);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
 }
 
 fn sort_header<I>(
@@ -222,7 +359,10 @@ fn sort_header<I>(
         "↓"
     };
     ui.horizontal(|ui| {
-        ui.label(visible);
+        let header = ui.label(visible);
+        if key == "created" {
+            header.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Created"));
+        }
         let button = ui.small_button(arrow);
         let label = format!("Sort {} by {key}", title.to_lowercase());
         button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));

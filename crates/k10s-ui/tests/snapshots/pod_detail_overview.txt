@@ -205,15 +205,15 @@ Window
                             Button label="Sort pods by status"
                           GenericContainer
                             Label value="Created"
-                              TextRun value="Created"
+                              TextRun value="Age"
                             Button label="Sort pods by created"
                           Label value="default"
                             TextRun value="default"
                           Button label="Clear selection for resource db-postgres-0"
                           Label value="Running"
                             TextRun value="Running"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                          Label value="2026-08-21"
+                            TextRun value="2026-08-21"
               Unknown
               GenericContainer
                 GenericContainer

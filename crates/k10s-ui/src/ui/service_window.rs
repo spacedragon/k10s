@@ -16,14 +16,13 @@ use super::ConnectionState;
 use super::resource_window::ResourceFeed;
 use super::resource_window::RowIdentity;
 
-/// Column sort keys in display order.
-const COLUMNS: [(&str, &str); 6] = [
-    ("Name", "name"),
-    ("Namespace", "namespace"),
-    ("Type", "type"),
-    ("Cluster IP", "cluster_ip"),
-    ("Ports", "ports"),
-    ("Age", "age"),
+const RESPONSIVE_COLUMNS: [super::responsive_table::ColumnSpec; 6] = [
+    super::responsive_table::ColumnSpec::required("namespace", 112.0),
+    super::responsive_table::ColumnSpec::elastic("name", 180.0),
+    super::responsive_table::ColumnSpec::hideable("type", 88.0, 1),
+    super::responsive_table::ColumnSpec::hideable("cluster_ip", 120.0, 0),
+    super::responsive_table::ColumnSpec::elastic("ports", 180.0),
+    super::responsive_table::ColumnSpec::required("age", 56.0),
 ];
 
 /// Wire protocol of a port as a compact display label.
@@ -440,6 +439,10 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
+    let columns =
+        super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, ui.available_width());
+    let _resolved_table_width: f32 = columns.visible.iter().map(|column| column.width).sum();
+    let _horizontal_scroll = columns.horizontal_scroll;
     ScrollArea::both()
         .id_salt(("k10s.service.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
@@ -448,8 +451,14 @@ where
                 .min_col_width(72.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
-                        for (visible, key) in COLUMNS {
-                            sort_header(ui, visible, key, sort, &mut actions);
+                        for column in &columns.visible {
+                            sort_header(
+                                ui,
+                                service_column_title(column.key),
+                                column.key,
+                                sort,
+                                &mut actions,
+                            );
                         }
                         ui.end_row();
                     }
@@ -460,6 +469,7 @@ where
                             ui,
                             row,
                             gesture_table_id,
+                            &columns,
                             &is_selected,
                             &identity_of,
                             &mut actions,
@@ -475,6 +485,7 @@ fn service_row<I>(
     ui: &mut egui::Ui,
     row: &ResourceListRow,
     gesture_table_id: egui::Id,
+    columns: &super::responsive_table::ResolvedColumns,
     is_selected: impl Fn(&ResourceListRow) -> bool,
     identity_of: impl Fn(&ResourceListRow) -> I,
     actions: &mut TableActions<I>,
@@ -482,49 +493,84 @@ fn service_row<I>(
     I: Clone + Send + Sync + 'static,
 {
     let selected = is_selected(row);
-    let name_button = if selected {
-        ui.button(egui::RichText::new(row.identity.name.clone()).strong())
-    } else {
-        ui.button(row.identity.name.clone())
-    };
-    let accessible =
-        super::responsive_table::row_action_label("service", &row.identity.name, selected);
-    name_button
-        .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    let popped_out = super::responsive_table::row_interaction(
-        &name_button,
-        gesture_table_id,
-        identity_of(row),
-        selected,
-    );
-    if popped_out.is_some() {
-        actions.popped_out = popped_out;
+    for column in &columns.visible {
+        match column.key {
+            "namespace" => {
+                ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
+            }
+            "name" => {
+                let name_button = if selected {
+                    ui.button(egui::RichText::new(row.identity.name.clone()).strong())
+                } else {
+                    ui.button(row.identity.name.clone())
+                };
+                let accessible = super::responsive_table::row_action_label(
+                    "service",
+                    &row.identity.name,
+                    selected,
+                );
+                name_button.widget_info(move || {
+                    WidgetInfo::labeled(WidgetType::Button, true, accessible.clone())
+                });
+                let popped_out = super::responsive_table::row_interaction(
+                    &name_button,
+                    gesture_table_id,
+                    identity_of(row),
+                    selected,
+                );
+                if popped_out.is_some() {
+                    actions.popped_out = popped_out;
+                }
+                name_button.context_menu(|ui| {
+                    if ui.button("Open dedicated window").clicked() {
+                        actions.popped_out = Some(identity_of(row));
+                        ui.close();
+                    }
+                });
+            }
+            "type" => {
+                ui.label(
+                    service_projection(row)
+                        .map(|p| p.service_type.as_str())
+                        .unwrap_or("—"),
+                );
+            }
+            "cluster_ip" => {
+                let value = service_projection(row)
+                    .map(cluster_ip_column_label)
+                    .unwrap_or_else(|| "—".into());
+                let compact = super::responsive_table::middle_elide(&value, 20);
+                let response = ui.label(compact).on_hover_text(&value);
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+            }
+            "ports" => {
+                let value = service_projection(row)
+                    .map(ports_column_label)
+                    .unwrap_or_else(|| "—".into());
+                let compact = super::responsive_table::middle_elide(&value, 28);
+                let response = ui.label(compact).on_hover_text(&value);
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+            }
+            "age" => {
+                ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));
+            }
+            _ => {}
+        }
     }
-    name_button.context_menu(|ui| {
-        if ui.button("Open dedicated window").clicked() {
-            actions.popped_out = Some(identity_of(row));
-            ui.close();
-        }
-    });
+}
 
-    ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
-
-    // Every structured column renders strictly from the projection; rows
-    // without one stay blank placeholders and never fall back to summary.
-    match service_projection(row) {
-        Some(projection) => {
-            ui.label(projection.service_type.clone());
-            ui.label(cluster_ip_column_label(projection));
-            ui.label(ports_column_label(projection));
-        }
-        None => {
-            ui.label("—");
-            ui.label("—");
-            ui.label("—");
-        }
+fn service_column_title(key: &str) -> &'static str {
+    match key {
+        "namespace" => "Namespace",
+        "name" => "Name",
+        "type" => "Type",
+        "cluster_ip" => "Cluster IP",
+        "ports" => "Ports",
+        "age" => "Age",
+        _ => "",
     }
-
-    ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));
 }
 
 fn sort_header<I>(

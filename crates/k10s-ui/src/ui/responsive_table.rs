@@ -4,6 +4,136 @@ pub(super) enum RowAction<I> {
     ClearSelection,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ColumnSpec {
+    pub key: &'static str,
+    pub min_width: f32,
+    pub elastic: bool,
+    hide_priority: Option<u8>,
+}
+
+impl ColumnSpec {
+    pub const fn required(key: &'static str, min_width: f32) -> Self {
+        Self {
+            key,
+            min_width,
+            elastic: false,
+            hide_priority: None,
+        }
+    }
+
+    pub const fn elastic(key: &'static str, min_width: f32) -> Self {
+        Self {
+            key,
+            min_width,
+            elastic: true,
+            hide_priority: None,
+        }
+    }
+
+    pub const fn hideable(key: &'static str, min_width: f32, hide_priority: u8) -> Self {
+        Self {
+            key,
+            min_width,
+            elastic: false,
+            hide_priority: Some(hide_priority),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ResolvedColumn {
+    pub key: &'static str,
+    pub width: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ResolvedColumns {
+    pub visible: Vec<ResolvedColumn>,
+    pub horizontal_scroll: bool,
+}
+
+impl ResolvedColumns {
+    #[cfg(test)]
+    pub fn contains(&self, key: &str) -> bool {
+        self.visible.iter().any(|column| column.key == key)
+    }
+    #[cfg(test)]
+    pub fn width(&self, key: &str) -> Option<f32> {
+        self.visible
+            .iter()
+            .find(|column| column.key == key)
+            .map(|column| column.width)
+    }
+    #[cfg(test)]
+    fn visible_keys(&self) -> Vec<&'static str> {
+        self.visible.iter().map(|column| column.key).collect()
+    }
+}
+
+pub(super) fn resolve_columns(specs: &[ColumnSpec], available_width: f32) -> ResolvedColumns {
+    let mut visible = vec![true; specs.len()];
+    let mut total: f32 = specs.iter().map(|column| column.min_width).sum();
+    let mut hideable: Vec<_> = specs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| column.hide_priority.map(|priority| (priority, index)))
+        .collect();
+    hideable.sort_by_key(|&(priority, index)| (priority, index));
+    for (_, index) in hideable {
+        if total <= available_width {
+            break;
+        }
+        visible[index] = false;
+        total -= specs[index].min_width;
+    }
+    let horizontal_scroll = total > available_width;
+    let elastic_count = specs
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| visible[*index] && column.elastic)
+        .count();
+    let extra = if horizontal_scroll || elastic_count == 0 {
+        0.0
+    } else {
+        (available_width - total).max(0.0) / elastic_count as f32
+    };
+    let visible = specs
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| visible[*index])
+        .map(|(_, column)| ResolvedColumn {
+            key: column.key,
+            width: column.min_width + if column.elastic { extra } else { 0.0 },
+        })
+        .collect();
+    ResolvedColumns {
+        visible,
+        horizontal_scroll,
+    }
+}
+
+/// Unicode-safe compact representation retaining both identifying ends.
+pub(super) fn middle_elide(value: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let tagged_suffix = value.rfind(':').map(|byte| value[byte..].chars().count());
+    let suffix = tagged_suffix
+        .filter(|count| *count < max_chars - 1)
+        .unwrap_or((max_chars - 1) / 2);
+    let prefix = max_chars - 1 - suffix;
+    chars[..prefix]
+        .iter()
+        .chain(std::iter::once(&'…'))
+        .chain(chars[chars.len() - suffix..].iter())
+        .collect()
+}
+
 impl<I> RowAction<I> {
     pub(super) fn into_command(
         self,
@@ -98,5 +228,88 @@ where
         None
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SERVICE: [ColumnSpec; 6] = [
+        ColumnSpec::required("namespace", 112.0),
+        ColumnSpec::elastic("name", 180.0),
+        ColumnSpec::hideable("type", 88.0, 1),
+        ColumnSpec::hideable("cluster_ip", 120.0, 0),
+        ColumnSpec::elastic("ports", 180.0),
+        ColumnSpec::required("age", 56.0),
+    ];
+
+    #[test]
+    fn resolver_hides_in_priority_order_and_restores_deterministically() {
+        let wide = resolve_columns(&SERVICE, 1_000.0);
+        assert_eq!(
+            wide.visible_keys(),
+            vec!["namespace", "name", "type", "cluster_ip", "ports", "age"]
+        );
+        assert!(!wide.horizontal_scroll);
+
+        let compact = resolve_columns(&SERVICE, 640.0);
+        assert!(!compact.contains("cluster_ip"));
+        assert!(compact.contains("type"));
+
+        let restored = resolve_columns(&SERVICE, 1_000.0);
+        assert_eq!(restored.visible_keys(), wide.visible_keys());
+    }
+
+    #[test]
+    fn resolver_never_compresses_minima_and_reports_overflow() {
+        let required = [
+            ColumnSpec::required("namespace", 400.0),
+            ColumnSpec::elastic("name", 300.0),
+        ];
+        let resolved = resolve_columns(&required, 640.0);
+        assert!(resolved.horizontal_scroll);
+        assert_eq!(resolved.width("namespace"), Some(400.0));
+        assert_eq!(resolved.width("name"), Some(300.0));
+    }
+
+    #[test]
+    fn adapter_fixtures_fit_wide_and_apply_exact_compact_priorities() {
+        let deployment = [
+            ColumnSpec::required("namespace", 112.0),
+            ColumnSpec::elastic("name", 180.0),
+            ColumnSpec::required("ready", 56.0),
+            ColumnSpec::hideable("status", 112.0, 1),
+            ColumnSpec::hideable("image", 180.0, 0),
+            ColumnSpec::required("age", 56.0),
+        ];
+        let pod = [
+            ColumnSpec::required("namespace", 112.0),
+            ColumnSpec::elastic("name", 180.0),
+            ColumnSpec::required("ready", 56.0),
+            ColumnSpec::required("status", 112.0),
+            ColumnSpec::hideable("restarts", 64.0, 1),
+            ColumnSpec::hideable("node", 120.0, 0),
+            ColumnSpec::required("age", 56.0),
+        ];
+        for fixture in [&deployment[..], &pod[..], &SERVICE[..]] {
+            assert_eq!(
+                resolve_columns(fixture, 1_000.0).visible.len(),
+                fixture.len()
+            );
+        }
+        assert!(!resolve_columns(&deployment, 640.0).contains("image"));
+        assert!(resolve_columns(&deployment, 640.0).contains("status"));
+        assert!(!resolve_columns(&pod, 640.0).contains("node"));
+        assert!(resolve_columns(&pod, 640.0).contains("restarts"));
+    }
+
+    #[test]
+    fn middle_elision_preserves_image_tag_and_unicode_boundaries() {
+        let image = "ghcr.io/containers/kubernetes-mcp:v0.3.1";
+        let compact = middle_elide(image, 24);
+        assert!(compact.ends_with(":v0.3.1"));
+        assert!(compact.chars().count() <= 24);
+        assert_eq!(middle_elide("部署镜像:v1", 6), "部署…:v1");
     }
 }

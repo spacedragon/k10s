@@ -229,15 +229,15 @@ Window
                             Button label="Sort deployments by status"
                           GenericContainer
                             Label value="Created"
-                              TextRun value="Created"
+                              TextRun value="Age"
                             Button label="Sort deployments by created"
                           Label value="default"
                             TextRun value="default"
                           Button label="Select resource healthy-api"
                           Label value="2/2 ready"
                             TextRun value="2/2 ready"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                          Label value="2026-08-21"
+                            TextRun value="2026-08-21"
     Splitter
     Splitter
     Splitter
@@ -292,15 +292,15 @@ Window
                             Button label="Sort pods by status"
                           GenericContainer
                             Label value="Created"
-                              TextRun value="Created"
+                              TextRun value="Age"
                             Button label="Sort pods by created"
                           Label value="default"
                             TextRun value="default"
                           Button label="Select resource cached-pod"
                           Label value="Running"
                             TextRun value="Running"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                          Label value="2026-08-21"
+                            TextRun value="2026-08-21"
     Splitter
     Splitter
     Splitter
@@ -462,15 +462,15 @@ Window
                             Button label="Sort cronjobs by status"
                           GenericContainer
                             Label value="Created"
-                              TextRun value="Created"
+                              TextRun value="Age"
                             Button label="Sort cronjobs by created"
                           Label value="default"
                             TextRun value="default"
                           Button label="Select resource nightly"
                           Label value="Active 0"
                             TextRun value="Active 0"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                          Label value="2026-08-21"
+                            TextRun value="2026-08-21"
     Splitter
     Splitter
     Splitter
