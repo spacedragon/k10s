@@ -424,10 +424,10 @@ where
             }
             WorkspaceCommand::ToggleDetailPane(id) => {
                 self.with_resource_mut(id, |resource| {
-                    resource.detail_visible = !resource.detail_visible;
+                    resource.detail_visible = true;
                 });
                 self.with_service_mut(id, |service| {
-                    service.detail_visible = !service.detail_visible;
+                    service.detail_visible = true;
                 });
                 Vec::new()
             }

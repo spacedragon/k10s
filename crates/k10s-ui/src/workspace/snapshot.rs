@@ -86,7 +86,7 @@ impl PersistedListView {
             filters: resource.filters.clone(),
             sort: resource.sort.clone(),
             split_ratio: resource.split_ratio,
-            detail_visible: resource.detail_visible,
+            detail_visible: true,
             custom_kind: resource.custom_kind.clone(),
         }
     }
@@ -101,7 +101,7 @@ impl PersistedListView {
             filters: BTreeMap::new(),
             sort: service.sort.clone(),
             split_ratio: service.split_ratio,
-            detail_visible: service.detail_visible,
+            detail_visible: true,
             custom_kind: None,
         }
     }
@@ -116,7 +116,7 @@ impl PersistedListView {
             filters: self.filters,
             sort: self.sort,
             split_ratio,
-            detail_visible: self.detail_visible,
+            detail_visible: true,
             custom_kind: self.custom_kind,
             ..Default::default()
         }
@@ -131,7 +131,7 @@ impl PersistedListView {
             search: self.search,
             sort: self.sort,
             split_ratio,
-            detail_visible: self.detail_visible,
+            detail_visible: true,
             ..Default::default()
         }
     }

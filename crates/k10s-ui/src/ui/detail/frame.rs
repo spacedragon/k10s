@@ -41,7 +41,7 @@ pub(super) fn show<I: RowIdentity>(
         .unwrap_or_default();
     let mut projection = input.frame_projection(expansion);
     configure(&mut projection);
-    ui.horizontal(|ui| {
+    let identity_row = ui.horizontal(|ui| {
         if integrated {
             let title = title(projection.identity);
             let heading = ui.label(RichText::new(&title).strong().heading());
@@ -50,28 +50,49 @@ pub(super) fn show<I: RowIdentity>(
                 node.set_label(title);
             });
         }
-        if integrated && !input.gone {
+        if integrated {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let maximize = ui.button(if detail_maximized {
-                    "Restore split"
-                } else {
-                    "Maximize"
+                let clear = ui.button("×");
+                clear.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, true, "Clear selection")
                 });
-                if maximize.clicked() {
-                    queued.push(if detail_maximized {
-                        WorkspaceCommand::RestoreDetailPane(window_id)
-                    } else {
-                        WorkspaceCommand::MaximizeDetailPane(window_id)
-                    });
+                if clear.clicked() {
+                    queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
-                if ui.button("Pop out ↗").clicked() {
-                    queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                        detail.identity.clone(),
-                    ));
+                if !input.gone {
+                    let maximize = ui.button(if detail_maximized {
+                        "Restore split"
+                    } else {
+                        "Maximize"
+                    });
+                    if maximize.clicked() {
+                        queued.push(if detail_maximized {
+                            WorkspaceCommand::RestoreDetailPane(window_id)
+                        } else {
+                            WorkspaceCommand::MaximizeDetailPane(window_id)
+                        });
+                    }
+                    if ui.button("Pop out ↗").clicked() {
+                        queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                            detail.identity.clone(),
+                        ));
+                    }
                 }
             });
         }
     });
+    let identity_semantics = ui.interact(
+        identity_row.response.rect,
+        ui.id().with(("k10s.detail.identity", window_id.0)),
+        Sense::hover(),
+    );
+    identity_semantics
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail identity row"));
+    ui.ctx()
+        .accesskit_node_builder(identity_semantics.id, |node| {
+            node.set_role(egui::accesskit::Role::GenericContainer);
+            node.set_label("Detail identity row");
+        });
     let vitals_width = ui.available_width();
     let wide = vitals_width >= 760.0;
     let (vitals_rect, _) = ui.allocate_exact_size(

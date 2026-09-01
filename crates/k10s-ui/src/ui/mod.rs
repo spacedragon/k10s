@@ -8,6 +8,7 @@ mod launcher;
 mod overview;
 mod resource_table;
 mod resource_window;
+mod responsive_table;
 mod service_window;
 mod split;
 mod taskbar;

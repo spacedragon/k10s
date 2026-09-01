@@ -7,6 +7,7 @@
 use egui::{ScrollArea, WidgetInfo, WidgetType};
 use k10s_protocol::ResourceListRow;
 
+use super::responsive_table::RowAction;
 use crate::workspace::{SortSpec, WindowId};
 
 /// Column sort keys in display order.
@@ -20,7 +21,7 @@ const COLUMNS: [(&str, &str); 4] = [
 /// Outcome of rendering one table frame.
 pub(super) struct TableActions<I> {
     /// A row was clicked; carries the mapped window identity.
-    pub selected: Option<I>,
+    pub row_action: Option<RowAction<I>>,
     /// A row was double-clicked or popped out via its context menu; the
     /// identity is cloned for a dedicated pinned detail window.
     pub popped_out: Option<I>,
@@ -33,7 +34,7 @@ pub(super) struct TableActions<I> {
 impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
-            selected: None,
+            row_action: None,
             popped_out: None,
             sort: None,
             cleared: false,
@@ -174,7 +175,11 @@ where
                             WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
                         });
                         if name_button.clicked() {
-                            actions.selected = Some(identity_of(row));
+                            actions.row_action = Some(if selected {
+                                RowAction::ClearSelection
+                            } else {
+                                RowAction::Select(identity_of(row))
+                            });
                         }
                         if name_button.double_clicked() {
                             actions.popped_out = Some(identity_of(row));

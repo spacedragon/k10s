@@ -705,9 +705,6 @@ pub(super) fn show<I>(
         },
         |ui| {
             if let Some(detail) = state.detail.as_ref() {
-                if ui.button("Clear selection").clicked() {
-                    queued.push(WorkspaceCommand::ClearSelection(window_id));
-                }
                 if let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
@@ -781,8 +778,15 @@ pub(super) fn show<I>(
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        if let Some(identity) = actions.selected {
-            queued.push(WorkspaceCommand::SelectRow(window_id, identity));
+        if let Some(action) = actions.row_action {
+            queued.push(match action {
+                super::responsive_table::RowAction::Select(identity) => {
+                    WorkspaceCommand::SelectRow(window_id, identity)
+                }
+                super::responsive_table::RowAction::ClearSelection => {
+                    WorkspaceCommand::ClearSelection(window_id)
+                }
+            });
         }
         // Double-click and the row context menu pop a dedicated window out;
         // it clones the stable identity at open time and never follows this

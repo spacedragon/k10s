@@ -171,7 +171,7 @@ fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 
 /// Outcome of rendering one Services table frame.
 struct TableActions<I> {
-    selected: Option<I>,
+    row_action: Option<super::responsive_table::RowAction<I>>,
     popped_out: Option<I>,
     sort: Option<SortSpec>,
 }
@@ -179,7 +179,7 @@ struct TableActions<I> {
 impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
-            selected: None,
+            row_action: None,
             popped_out: None,
             sort: None,
         }
@@ -262,15 +262,6 @@ where
                 crate::workspace::NamespaceScope::AllNamespaces,
             ));
         }
-
-        let toggle_label = if state.detail_visible {
-            "Hide details"
-        } else {
-            "Show details"
-        };
-        if ui.button(toggle_label).clicked() {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
-        }
     });
     super::resource_window::show_namespace_catalog_status(
         ui,
@@ -327,7 +318,7 @@ where
     // was deleted (or is gone behind the watch); it must never be shown as
     // merely "loading".
     let gone = state.detail.is_some() && detail_row.is_none();
-    let detail_shown = state.detail_visible && state.detail.is_some();
+    let detail_shown = state.detail.is_some();
     let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
@@ -350,9 +341,6 @@ where
         },
         |ui| {
             if let Some(detail) = state.detail.as_ref() {
-                if ui.button("Clear selection").clicked() {
-                    queued.push(WorkspaceCommand::ClearSelection(window_id));
-                }
                 if let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
@@ -394,8 +382,15 @@ where
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        if let Some(identity) = actions.selected {
-            queued.push(WorkspaceCommand::SelectRow(window_id, identity));
+        if let Some(action) = actions.row_action {
+            queued.push(match action {
+                super::responsive_table::RowAction::Select(identity) => {
+                    WorkspaceCommand::SelectRow(window_id, identity)
+                }
+                super::responsive_table::RowAction::ClearSelection => {
+                    WorkspaceCommand::ClearSelection(window_id)
+                }
+            });
         }
         // Double-click and the row context menu pop a dedicated window out.
         if let Some(identity) = actions.popped_out {
@@ -409,8 +404,6 @@ where
     {
         if ui.input(|input| input.modifiers.any()) && !gone {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
-        } else if !state.detail_visible {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
         }
     }
 
@@ -485,7 +478,8 @@ fn service_row<I>(
 ) where
     I: Clone,
 {
-    let name_button = if is_selected(row) {
+    let selected = is_selected(row);
+    let name_button = if selected {
         ui.button(egui::RichText::new(row.identity.name.clone()).strong())
     } else {
         ui.button(row.identity.name.clone())
@@ -494,7 +488,11 @@ fn service_row<I>(
     name_button
         .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
     if name_button.clicked() {
-        actions.selected = Some(identity_of(row));
+        actions.row_action = Some(if selected {
+            super::responsive_table::RowAction::ClearSelection
+        } else {
+            super::responsive_table::RowAction::Select(identity_of(row))
+        });
     }
     if name_button.double_clicked() {
         actions.popped_out = Some(identity_of(row));

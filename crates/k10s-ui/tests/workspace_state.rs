@@ -416,7 +416,7 @@ fn list_window_commands_drive_the_services_window_independently() {
         service.split_ratio, 1.0,
         "ratios clamp to the unit interval"
     );
-    assert!(!service.detail_visible);
+    assert!(service.detail_visible);
 
     // The workload window keeps fully independent state.
     let resource = state.resource_state(pods).unwrap();
@@ -777,7 +777,7 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
 }
 
 #[test]
-fn list_windows_have_independent_split_and_detail_visibility() {
+fn list_windows_have_independent_splits_and_compatibility_toggle_cannot_hide_detail() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let first = open_pods(&mut state);
     let second = open_pods(&mut state);
@@ -797,9 +797,9 @@ fn list_windows_have_independent_split_and_detail_visibility() {
     assert!((first_state.split_ratio - 0.3).abs() < f32::EPSILON);
     assert_eq!(second_state.split_ratio, 0.5);
     assert!(first_state.detail_visible);
-    assert!(!second_state.detail_visible);
+    assert!(second_state.detail_visible);
 
-    // Ratios clamp to the unit interval and survive pane toggling.
+    // Ratios clamp to the unit interval and survive the compatibility command.
     events(&mut state, WorkspaceCommand::SetSplitRatio(first, 1.7));
     let first_state = match &state.window(first).unwrap().content {
         WindowContent::Resource(resource) => resource,
