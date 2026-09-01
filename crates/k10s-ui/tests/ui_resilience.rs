@@ -319,7 +319,7 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("api-server");
+    window.get_by_label("Select resource api-server");
     assert!(
         window
             .query_by_label("No resources match these filters")
@@ -359,7 +359,7 @@ fn stale_connections_banner_every_data_window_as_text() {
             .accesskit_node()
             .is_disabled()
     );
-    window.get_by_label("db-postgres-0");
+    window.get_by_label("Select resource db-postgres-0");
 
     // Status must survive without color: the dot carries its state in its
     // accessible value and the refresh control relabels as Retry.
@@ -448,7 +448,7 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .click();
     let live = harness.get_by_role_and_label(Role::Window, "Pods");
     live.get_by_label("● Live · synced 4s ago");
-    live.get_by_label("cached-pod");
+    live.get_by_label("Select resource cached-pod");
 
     let forbidden = harness.get_by_role_and_label(Role::Window, "StatefulSets");
     forbidden.get_by_label(
@@ -494,7 +494,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     harness.run_steps(2);
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "stale-api")
+        .get_by_role_and_label(Role::Button, "Select resource stale-api")
         .click();
     harness.run_steps(2);
     let detail = deployment_detail("stale-api");
@@ -665,7 +665,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
 
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
     harness
@@ -687,7 +687,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
         window
-            .query_by_role_and_label(Role::Button, "web-frontend")
+            .query_by_role_and_label(Role::Button, "Select resource web-frontend")
             .is_none(),
         "the gone row must leave the table"
     );
@@ -735,7 +735,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
 
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
 
@@ -760,7 +760,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
         window
-            .query_by_role_and_label(Role::Button, "web-frontend")
+            .query_by_role_and_label(Role::Button, "Select resource web-frontend")
             .is_none(),
         "the gone row must leave the table"
     );
@@ -837,7 +837,7 @@ fn a_custom_kind_missing_after_a_context_switch_falls_back_to_the_picker() {
         ));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    window.get_by_label("traffic-overview");
+    window.get_by_label("Select resource traffic-overview");
 
     // Switching contexts drops every authoritative row and the new
     // context's types do not include the previously picked GVK.
@@ -899,7 +899,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
     let logs_window = workload_id(harness.state(), WorkspaceWorkload::Pods);
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
     harness
@@ -1069,7 +1069,7 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
         .expect("sort header present");
     let row = labels
         .iter()
-        .position(|label| label == "api-server")
+        .position(|label| label == "Select resource api-server")
         .expect("row button present");
     assert!(search < sort);
     assert!(sort < row, "toolbar precedes table controls");
@@ -1126,13 +1126,13 @@ fn minimum_size_windows_keep_list_and_details_non_overlapping() {
         ));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     let window_rect = window.rect();
-    let row = window.get_by_label("web-frontend-7d9f8-00001");
+    let row = window.get_by_label("Select resource web-frontend-7d9f8-00001");
     let row_rect = row.rect();
     let details = window.get_by_label("Pod · default / db-postgres-0");
     let details_rect = details.rect();

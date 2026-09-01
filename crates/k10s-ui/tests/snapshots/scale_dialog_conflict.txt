@@ -209,7 +209,7 @@ Window
                             Button label="Sort deployments by created"
                           Label value="default"
                             TextRun value="default"
-                          Button label="api-server"
+                          Button label="Select resource api-server"
                           Label value="2/2 ready"
                             TextRun value="2/2 ready"
                           Label value="2026-08-21T00:00:00Z"

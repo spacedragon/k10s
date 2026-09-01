@@ -434,7 +434,7 @@ fn pod_detail_overview_with_resolved_response() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
     let identity = harness
@@ -474,7 +474,7 @@ fn pod_detail_disconnected_logs() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
     let identity = harness

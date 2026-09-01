@@ -252,6 +252,7 @@ fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
+        .with_step_dt(0.05)
         .build_ui_state(render, Fixture::default())
 }
 
@@ -444,8 +445,8 @@ fn same_kind_windows_render_their_own_window_keyed_rows() {
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    harness.get_by_label("pod-first");
-    harness.get_by_label("pod-second");
+    harness.get_by_label("Select resource pod-first");
+    harness.get_by_label("Select resource pod-second");
 }
 
 #[test]
@@ -512,7 +513,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         for header in ["Name", "Status", "Created"] {
             window.get_by_label(header);
         }
-        window.get_by_label("sample-one");
+        window.get_by_label("Select resource sample-one");
         window.get_by_label("1/1 ready");
     }
 
@@ -542,7 +543,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         window.get_by_label(header);
     }
     window.get_by_role_and_label(Role::ComboBox, "Namespace");
-    window.get_by_label("traffic-overview");
+    window.get_by_label("Select resource traffic-overview");
 }
 
 #[test]
@@ -624,7 +625,7 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
         "ignored cluster scope intent is preserved for a later namespaced GVK"
     );
-    window.get_by_label("dashboards.monitoring.example.com");
+    window.get_by_label("Select resource dashboards.monitoring.example.com");
     window.get_by_label("Established");
 
     window
@@ -975,14 +976,25 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness.run_steps(4);
     let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
-        deployments.get_by_label("web-frontend").rect().top()
-            < deployments.get_by_label("api-server").rect().top(),
+        deployments
+            .get_by_label("Select resource web-frontend")
+            .rect()
+            .top()
+            < deployments
+                .get_by_label("Select resource api-server")
+                .rect()
+                .top(),
         "descending creation order must put web-frontend first"
     );
     let pods = harness.get_by_role_and_label(Role::Window, "Pods");
     assert!(
-        pods.get_by_label("web-frontend-7d9f8-00001").rect().top()
-            < pods.get_by_label("db-postgres-0").rect().top(),
+        pods.get_by_label("Select resource web-frontend-7d9f8-00001")
+            .rect()
+            .top()
+            < pods
+                .get_by_label("Select resource db-postgres-0")
+                .rect()
+                .top(),
         "the unsorted window must keep its original order"
     );
 
@@ -999,11 +1011,11 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness.run_steps(4);
 
     let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
-    deployments.get_by_label("api-server");
+    deployments.get_by_label("Select resource api-server");
     assert!(deployments.query_by_label("web-frontend").is_none());
     let pods = harness.get_by_role_and_label(Role::Window, "Pods");
-    pods.get_by_label("web-frontend-7d9f8-00001");
-    pods.get_by_label("db-postgres-0");
+    pods.get_by_label("Select resource web-frontend-7d9f8-00001");
+    pods.get_by_label("Select resource db-postgres-0");
 
     // Two instances of the same kind keep fully independent namespace state.
     harness
@@ -1065,7 +1077,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
 
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
@@ -1082,7 +1094,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 0.0));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("web-frontend-7d9f8-00001");
+    window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
     harness
@@ -1091,7 +1103,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("web-frontend-7d9f8-00001");
+    window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
     // Clearing selection removes the contextual bottom panel.
@@ -1115,7 +1127,7 @@ fn selected_row_second_click_clears_selection_and_detail() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
 
-    let row_label = "db-postgres-0";
+    let row_label = "Select resource db-postgres-0";
     harness
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, row_label)
@@ -1130,7 +1142,7 @@ fn selected_row_second_click_clears_selection_and_detail() {
 
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, row_label)
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
@@ -1146,6 +1158,71 @@ fn selected_row_second_click_clears_selection_and_detail() {
 }
 
 #[test]
+fn resource_double_click_opens_dedicated_without_selecting_or_guarding() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0");
+    row.click();
+    row.click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .is_none()
+    );
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
+fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(4);
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
+    row.click();
+    row.click();
+    harness.run_steps(4);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert!(resource.selection.is_some());
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
 fn detail_close_is_in_identity_row() {
     let mut harness = harness();
     open(
@@ -1154,7 +1231,7 @@ fn detail_close_is_in_identity_row() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
@@ -1177,7 +1254,7 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
 
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
@@ -1191,8 +1268,12 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         .type_text("web");
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_role_and_label(Role::Button, "web-frontend");
-    assert!(window.query_by_label("api-server").is_none());
+    window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
+    assert!(
+        window
+            .query_by_label("Select resource api-server")
+            .is_none()
+    );
 
     // A fresh snapshot replaces every row; the local filter and selection
     // survive the resync and follow the updated row content.
@@ -1231,12 +1312,14 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_role_and_label(Role::Button, "web-frontend");
+    window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
     assert!(
-        window.query_by_label("api-server").is_none(),
+        window
+            .query_by_label("Select resource api-server")
+            .is_none(),
         "the resynced snapshot must honor the surviving filter"
     );
-    assert!(window.query_by_label("checkout").is_none());
+    assert!(window.query_by_label("Select resource checkout").is_none());
     window.get_by_label("18/18 ready");
 
     // Clearing the filter reveals the rest of the resynced snapshot.
@@ -1245,6 +1328,6 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("api-server");
-    window.get_by_label("checkout");
+    window.get_by_label("Select resource api-server");
+    window.get_by_label("Select resource checkout");
 }

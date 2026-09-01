@@ -209,7 +209,7 @@ Window
                             Button label="Sort pods by created"
                           Label value="default"
                             TextRun value="default"
-                          Button label="db-postgres-0"
+                          Button label="Clear selection for resource db-postgres-0"
                           Label value="Running"
                             TextRun value="Running"
                           Label value="2026-08-21T00:00:00Z"

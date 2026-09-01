@@ -83,6 +83,8 @@ pub enum WorkspaceCommand<I> {
     MaximizeDetailPane(WindowId),
     /// Return from a focused detail view to the remembered split.
     RestoreDetailPane(WindowId),
+    /// Legacy compatibility command. It only normalizes `detail_visible` to
+    /// true and cannot hide a selected integrated Detail.
     ToggleDetailPane(WindowId),
     /// Pick (or clear) the resource type of a custom-resources window. The
     /// key is the canonical `group/version/kind` string of a picker entry.

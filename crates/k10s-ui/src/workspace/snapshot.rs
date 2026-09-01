@@ -50,7 +50,8 @@ pub struct PersistedListView {
     /// Fraction of the window height given to the list pane.
     #[serde(default = "default_split_ratio")]
     pub split_ratio: f32,
-    /// Whether the integrated detail pane is visible.
+    /// Legacy compatibility input. Deserialized values are accepted, but
+    /// live restoration and subsequent serialization normalize this to true.
     #[serde(default = "default_true")]
     pub detail_visible: bool,
     /// Selected type of a custom-resources window (`group/version/kind`).
