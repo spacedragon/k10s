@@ -30,12 +30,26 @@ pub(super) fn two_column(
         ui.allocate_ui_with_layout(
             egui::vec2(left, 0.0),
             egui::Layout::top_down(egui::Align::Min),
-            operational,
+            |ui| {
+                let marker = ui
+                    .allocate_response(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
+                marker.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Other, true, "Operational detail column")
+                });
+                operational(ui);
+            },
         );
         ui.allocate_ui_with_layout(
             egui::vec2(right, 0.0),
             egui::Layout::top_down(egui::Align::Min),
-            configuration,
+            |ui| {
+                let marker = ui
+                    .allocate_response(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
+                marker.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Other, true, "Configuration detail column")
+                });
+                configuration(ui);
+            },
         );
     });
     true

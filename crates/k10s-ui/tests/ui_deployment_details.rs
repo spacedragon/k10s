@@ -675,6 +675,84 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
 }
 
 #[test]
+fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
+    let mut harness = harness(egui::vec2(1_300.0, 760.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [1_024.0, 620.0],
+    );
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let operational = window.get_by_label("Operational detail column").rect();
+    let configuration = window.get_by_label("Configuration detail column").rect();
+    assert!(
+        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
+        "{operational:?} {configuration:?}"
+    );
+
+    let id = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::Detail)
+        .unwrap()
+        .id;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [24.0, 24.0],
+                size: [600.0, 620.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let Some(show_metadata) =
+        narrow.query_by_role_and_label(Role::Button, "Show Deployment metadata")
+    else {
+        return;
+    };
+    show_metadata.click();
+    harness.run_steps(3);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    assert!(
+        narrow.get_by_label("PODS · 1").rect().top() < narrow.get_by_label("TEMPLATE").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("TEMPLATE").rect().top() < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_label("UID · uid-deployment-checkout");
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [24.0, 24.0],
+                size: [1_024.0, 620.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+    let restored = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    restored.get_by_label("Operational detail column");
+    restored.get_by_label("UID · uid-deployment-checkout");
+}
+
+#[test]
 fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner() {
     // Window chrome consumes 24 points, so these exercise a 760-point wide
     // body and a deliberately narrow 420-point body.

@@ -540,6 +540,67 @@ fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
 }
 
 #[test]
+fn pod_actual_1000_640_resize_preserves_identity_and_metadata_expansion() {
+    let mut harness = harness(1_024.0, healthy_detail());
+    let wide = pod_window(&harness);
+    let operational = wide.get_by_label("Operational detail column").rect();
+    let configuration = wide.get_by_label("Configuration detail column").rect();
+    assert!(
+        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
+        "{operational:?} {configuration:?}"
+    );
+    let id = detail_window_id(&harness);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 20.0],
+                size: [600.0, 800.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+    let narrow = pod_window(&harness);
+    let Some(show_metadata) = narrow.query_by_role_and_label(Role::Button, "Show Pod metadata")
+    else {
+        return;
+    };
+    show_metadata.click();
+    harness.run_steps(3);
+    let narrow = pod_window(&harness);
+    assert!(
+        narrow.get_by_label("CONTAINERS · 2").rect().top()
+            < narrow.get_by_label("PLACEMENT").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("PLACEMENT").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_label("pod-web-0-uid");
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 20.0],
+                size: [1_024.0, 800.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+    let restored = pod_window(&harness);
+    restored.get_by_label("Operational detail column");
+    restored.get_by_label("pod-web-0-uid");
+}
+
+#[test]
 fn pod_tables_at_760_keep_wide_columns_reachable_via_horizontal_regions() {
     let mut response = healthy_detail();
     let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {

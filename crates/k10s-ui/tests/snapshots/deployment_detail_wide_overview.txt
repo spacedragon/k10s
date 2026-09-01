@@ -59,6 +59,7 @@ Window label="Deployment · payments / checkout"
                 GenericContainer
                   GenericContainer
                     GenericContainer
+                      Unknown label="Operational detail column"
                       Label value="PODS · 1"
                         TextRun value="PODS · 1"
                       Table label="Deployment Pods table"
@@ -121,6 +122,7 @@ Window label="Deployment · payments / checkout"
                         TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · "
                         TextRun value="2026-08-30T10:01:00Z"
                     GenericContainer
+                      Unknown label="Configuration detail column"
                       Label value="TEMPLATE"
                         TextRun value="TEMPLATE"
                       GenericContainer
