@@ -251,6 +251,7 @@ mod tests {
             context: "dev".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: Some("default".into()),
+            identity: None,
         }
     }
 

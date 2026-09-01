@@ -42,6 +42,29 @@ pub struct ResourceWatchSpec {
     /// Optional namespace restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// Optional exact object identity for a dedicated live authority watch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ResourceWatchIdentity>,
+}
+
+/// Name and UID completing an exact resource-watch identity.
+///
+/// Context, GVK, and namespace remain canonical on [`ResourceWatchSpec`];
+/// keeping only the remaining fields here avoids duplicating that data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceWatchIdentity {
+    pub name: String,
+    pub uid: String,
+}
+
+impl From<&ResourceIdentity> for ResourceWatchIdentity {
+    fn from(identity: &ResourceIdentity) -> Self {
+        Self {
+            name: identity.name.clone(),
+            uid: identity.uid.clone(),
+        }
+    }
 }
 
 impl ResourceWatchSpec {
@@ -62,6 +85,42 @@ impl ResourceWatchSpec {
                 .namespace
                 .as_ref()
                 .is_none_or(|wanted| Some(wanted.as_str()) == identity.namespace.as_deref())
+            && self
+                .identity
+                .as_ref()
+                .is_none_or(|wanted| wanted.name == identity.name && wanted.uid == identity.uid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(uid: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "api".into(),
+            uid: uid.into(),
+        }
+    }
+
+    #[test]
+    fn exact_watch_matches_every_identity_field_including_uid() {
+        let wanted = identity("uid-old");
+        let spec = ResourceWatchSpec {
+            context: wanted.context.clone(),
+            gvk: wanted.gvk.clone(),
+            namespace: wanted.namespace.clone(),
+            identity: Some((&wanted).into()),
+        };
+
+        assert!(spec.matches(&wanted));
+        assert!(
+            !spec.matches(&identity("uid-recreated")),
+            "a same-name replacement must not satisfy pinned UID authority"
+        );
     }
 }
 

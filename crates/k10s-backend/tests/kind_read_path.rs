@@ -398,6 +398,7 @@ async fn live_kind_cluster_serves_the_complete_normalized_read_path() {
             context: "k10s-limited".into(),
             gvk: gvk("", "v1", "Pod"),
             namespace: Some("k10s-read".into()),
+            identity: None,
         })
         .await
         .unwrap();

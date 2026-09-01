@@ -24,6 +24,8 @@ pub struct WatchSelector {
     pub gvk: Gvk,
     /// Namespace restriction; `None` watches every namespace.
     pub namespace: Option<String>,
+    /// Exact identity constraint for a dedicated Detail authority watch.
+    pub identity: Option<ResourceRef>,
 }
 
 impl WatchSelector {
@@ -36,6 +38,10 @@ impl WatchSelector {
                 .namespace
                 .as_ref()
                 .is_none_or(|watched| Some(watched.as_str()) == reference.namespace.as_deref())
+            && self
+                .identity
+                .as_ref()
+                .is_none_or(|wanted| wanted == reference)
     }
 }
 
@@ -132,9 +138,16 @@ mod tests {
             context: "dev".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: None,
+            identity: None,
         };
         let scoped = WatchSelector {
             namespace: Some("default".into()),
+            ..all.clone()
+        };
+        let pinned = pod_ref("web");
+        let exact = WatchSelector {
+            namespace: pinned.namespace.clone(),
+            identity: Some(pinned.clone()),
             ..all.clone()
         };
         let other_namespace = ResourceRef {
@@ -143,6 +156,11 @@ mod tests {
         };
         assert!(all.matches(&kube_ref_default()));
         assert!(scoped.matches(&kube_ref_default()));
+        assert!(exact.matches(&pinned));
+        assert!(!exact.matches(&ResourceRef {
+            uid: "uid-recreated".into(),
+            ..pinned
+        }));
         assert!(
             !scoped.matches(&other_namespace),
             "other namespaces stay out"
@@ -164,11 +182,13 @@ mod tests {
             context: "dev".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: None,
+            identity: None,
         });
         drop(hub.register(WatchSelector {
             context: "dev".into(),
             gvk: Gvk::core("v1", "Pod"),
             namespace: Some("kube-system".into()),
+            identity: None,
         }));
 
         let reference = kube_ref_default();

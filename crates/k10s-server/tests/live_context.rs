@@ -182,6 +182,7 @@ async fn run_smoke(
                 context: wanted_context.to_owned(),
                 gvk: GroupVersionKind::core("v1", "Pod"),
                 namespace: Some(namespace),
+                identity: None,
             }))
             .map_err(|_| "Pod selector could not serialize".to_owned())?,
         },

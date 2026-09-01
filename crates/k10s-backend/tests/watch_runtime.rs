@@ -28,6 +28,7 @@ fn pod_selector(namespace: Option<&str>) -> WatchSelector {
         context: "dev".into(),
         gvk: pods_gvk(),
         namespace: namespace.map(str::to_owned),
+        identity: None,
     }
 }
 
@@ -787,6 +788,7 @@ async fn unknown_context_and_gvk_are_typed_not_founds_on_the_adapter() {
             context: "missing".into(),
             gvk: pods_gvk(),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await;
     assert!(
@@ -799,6 +801,7 @@ async fn unknown_context_and_gvk_are_typed_not_founds_on_the_adapter() {
             context: "dev".into(),
             gvk: Gvk::new("example.com", "v1", "DoesNotExist"),
             namespace: None,
+            identity: None,
         })
         .await;
     assert!(
@@ -831,6 +834,7 @@ async fn scope_and_capability_violations_are_typed_rejections() {
             context: "dev".into(),
             gvk: Gvk::core("v1", "Node"),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await;
     assert!(
@@ -866,6 +870,7 @@ async fn scope_and_capability_violations_are_typed_rejections() {
             context: "dev".into(),
             gvk: Gvk::core("v1", "ConfigMap"),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await;
     assert!(
@@ -908,6 +913,7 @@ async fn kube_adapter_serves_a_scripted_resource_watch() {
             context: "dev".into(),
             gvk: pods_gvk(),
             namespace: Some("default".into()),
+            identity: None,
         })
         .await
         .expect("scripted resource watch subscribes");

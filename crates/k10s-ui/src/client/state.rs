@@ -770,6 +770,7 @@ pub struct ClientState {
     local_ui: LocalUiState,
     session_id: Option<SessionId>,
     server_instance_id: Option<String>,
+    negotiated_protocol_minor: Option<u16>,
 }
 
 impl std::fmt::Debug for ClientState {
@@ -854,6 +855,7 @@ impl ClientState {
             local_ui: LocalUiState::default(),
             session_id: None,
             server_instance_id: None,
+            negotiated_protocol_minor: None,
         }
     }
 
@@ -861,6 +863,13 @@ impl ClientState {
     #[must_use]
     pub fn phase(&self) -> ClientPhase {
         self.phase
+    }
+
+    /// Whether the negotiated peer supports exact-identity resource watches.
+    #[must_use]
+    pub fn exact_resource_watches_available(&self) -> bool {
+        self.negotiated_protocol_minor
+            .is_some_and(|minor| minor >= 4)
     }
 
     /// Start a fresh connection and queue the credential-bearing `Hello` frame.
@@ -871,6 +880,7 @@ impl ClientState {
         self.reconnecting = false;
         self.session_id = None;
         self.server_instance_id = None;
+        self.negotiated_protocol_minor = None;
         self.last_acked_sequence = None;
         self.outbound.clear();
         self.live_subscriptions.clear();
@@ -1005,8 +1015,40 @@ impl ClientState {
         kind: impl Into<String>,
         namespace: Option<String>,
     ) -> Result<LiveSubscription, ClientError> {
+        self.subscribe_resource_exact(context, group, version, kind, namespace, None)
+    }
+
+    /// Start a resource watch optionally pinned to one exact object identity.
+    pub fn subscribe_resource_exact(
+        &mut self,
+        context: impl Into<String>,
+        group: impl Into<String>,
+        version: impl Into<String>,
+        kind: impl Into<String>,
+        namespace: Option<String>,
+        identity: Option<ResourceIdentity>,
+    ) -> Result<LiveSubscription, ClientError> {
         if self.phase != ClientPhase::Ready {
             return Err(ClientError::InvalidState("client is not ready"));
+        }
+        let context = context.into();
+        let gvk = k10s_protocol::GroupVersionKind {
+            group: group.into(),
+            version: version.into(),
+            kind: kind.into(),
+        };
+        if let Some(identity) = &identity {
+            if !self.exact_resource_watches_available() {
+                return Err(ClientError::InvalidState(
+                    "server does not support exact resource watches",
+                ));
+            }
+            if identity.context != context || identity.gvk != gvk || identity.namespace != namespace
+            {
+                return Err(ClientError::InvalidState(
+                    "exact resource identity does not match watch selector",
+                ));
+            }
         }
         let limit = self.live_subscription_limit();
         if self.live_subscriptions.len() >= limit {
@@ -1015,13 +1057,10 @@ impl ClientState {
         let id = SubscriptionId::new(format!("resource-{}", self.next_subscription_id));
         self.next_subscription_id = self.next_subscription_id.saturating_add(1);
         let spec = k10s_protocol::ResourceWatchSpec {
-            context: context.into(),
-            gvk: k10s_protocol::GroupVersionKind {
-                group: group.into(),
-                version: version.into(),
-                kind: kind.into(),
-            },
+            context,
+            gvk,
             namespace,
+            identity: identity.as_ref().map(Into::into),
         };
         let selector = serde_json::to_value(SubscriptionSelector::Resource(spec.clone())).map_err(
             |error| ClientError::Protocol(format!("could not encode selector: {error}")),
@@ -1951,6 +1990,7 @@ impl ClientState {
                     });
                 }
                 self.phase = ClientPhase::Ready;
+                self.negotiated_protocol_minor = Some(welcome.protocol.minor.min(PROTOCOL_MINOR));
                 if matches!(welcome.resume_status, ResumeStatus::Fresh) {
                     self.last_acked_sequence = None;
                 }

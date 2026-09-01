@@ -589,6 +589,7 @@ async fn subscribe_warm_watch(
             context: context.to_owned(),
             gvk: pods_gvk(),
             namespace: Some(NS.into()),
+            identity: None,
         })
         .await
         .expect("watch subscribes");
@@ -614,6 +615,7 @@ async fn warm_selection_state_clears_across_a_successful_switch() {
         context: CONTEXT_A.into(),
         gvk: pods_gvk(),
         namespace: Some(NS.into()),
+        identity: None,
     };
     assert_eq!(world.watches.live_selections(), 1);
     assert_eq!(

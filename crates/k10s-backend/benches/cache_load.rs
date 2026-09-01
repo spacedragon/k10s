@@ -43,6 +43,7 @@ fn main() {
             context: "dev-local".into(),
             gvk: gvk.clone(),
             namespace: None,
+            identity: None,
         }))
         .unwrap();
     let mut events = watch.take_events().unwrap();
@@ -89,6 +90,7 @@ fn main() {
                 context: "dev-local".into(),
                 gvk: gvk.clone(),
                 namespace: None,
+                identity: None,
             }))
             .unwrap();
         let mut receiver = relist.take_events().unwrap();

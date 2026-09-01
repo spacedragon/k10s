@@ -152,7 +152,13 @@ impl SelectionPublisher {
             .publish_order
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (revision, records) = self.cache.replace(listed.rows.clone(), &self.revisions);
+        let rows = listed
+            .rows
+            .iter()
+            .filter(|row| self.selector.matches(&row.reference))
+            .cloned()
+            .collect();
+        let (revision, records) = self.cache.replace(rows, &self.revisions);
         let _ = self.sender.send(BackendEvent::Snapshot(ResourceListData {
             context: self.selector.context.clone(),
             gvk: self.selector.gvk.clone(),
@@ -165,6 +171,13 @@ impl SelectionPublisher {
 
     /// Apply one live delta and broadcast it.
     pub fn apply_update(&self, update: WatchUpdate) {
+        let reference = match &update {
+            WatchUpdate::Upsert(row) => &row.reference,
+            WatchUpdate::Delete(reference) => reference,
+        };
+        if !self.selector.matches(reference) {
+            return;
+        }
         let _order = self
             .publish_order
             .lock()

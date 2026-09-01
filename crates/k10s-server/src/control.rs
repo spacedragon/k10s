@@ -854,7 +854,18 @@ pub(crate) async fn serve_socket(
                                     config.max_resource_subscriptions_per_session
                                 ),
                             ))
+                        } else if spec.identity.is_some() && negotiated_protocol.minor < 4 {
+                            Err((
+                                ErrorCode::UnsupportedMessage,
+                                "exact resource watches require protocol minor 4".to_owned(),
+                            ))
                         } else {
+                            let exact_identity = spec.identity.as_ref().map(|identity| {
+                                k10s_backend::ResourceWatchIdentity {
+                                    name: identity.name.clone(),
+                                    uid: identity.uid.clone(),
+                                }
+                            });
                             match kernel
                                 .subscribe(BackendSubscribe::ResourceWatch {
                                     context: spec.context,
@@ -864,6 +875,7 @@ pub(crate) async fn serve_socket(
                                         kind: spec.gvk.kind,
                                     },
                                     namespace: spec.namespace,
+                                    identity: exact_identity,
                                 })
                                 .await
                             {

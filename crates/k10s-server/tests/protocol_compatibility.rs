@@ -402,14 +402,16 @@ fn checksum(values: &[Value]) -> String {
 }
 
 #[tokio::test]
-async fn current_protocol_reports_minor_three_and_still_negotiates_minor_two() {
-    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 3);
+async fn current_protocol_reports_minor_four_and_still_negotiates_older_minors() {
+    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 4);
     let (server, _fake) = spawn_server().await;
 
     let (_v12, welcome12) = connect_with_minor(&server, 2).await;
     assert_eq!(welcome12.protocol, ProtocolVersion { major: 1, minor: 2 });
     let (_v13, welcome13) = connect_with_minor(&server, 3).await;
     assert_eq!(welcome13.protocol, ProtocolVersion { major: 1, minor: 3 });
+    let (_v14, welcome14) = connect_with_minor(&server, 4).await;
+    assert_eq!(welcome14.protocol, ProtocolVersion { major: 1, minor: 4 });
 
     server.shutdown().await.unwrap();
 }
