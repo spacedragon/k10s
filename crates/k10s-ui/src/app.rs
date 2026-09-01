@@ -2655,13 +2655,19 @@ impl K10sApp {
         self.refresh_details_at(now_ms);
     }
 
-    fn restart_namespace_catalog(&mut self) {
-        if let Some((_, subscription)) = self.namespace_subscription.take() {
-            let _ = self.client.unsubscribe(&subscription);
+    fn restart_namespace_catalog_after_preflight(&mut self) -> Result<(), ClientError> {
+        if let Some((_, subscription)) = &self.namespace_subscription
+            && self.client.unsubscribe(subscription)?
+        {
+            let (_, subscription) = self
+                .namespace_subscription
+                .take()
+                .expect("the unsubscribed Namespace handle was present");
             self.retire_detail_lifecycle_source(subscription.id());
         }
         self.namespace_rejected_context = None;
         self.namespace_catalog = NamespaceCatalogState::Loading;
+        Ok(())
     }
 
     fn handle_resource_action(&mut self, action: ResourceAction) {
@@ -2715,7 +2721,15 @@ impl K10sApp {
             // Task 6 owns namespace-catalog lifecycle and consumes this
             // already-stable shell action variant there.
             ResourceAction::RetryNamespaceCatalog => {
-                self.restart_namespace_catalog();
+                let removals = usize::from(self.namespace_subscription.is_some());
+                if let Err(error) = self
+                    .client
+                    .preflight_subscription_changes(removals, 1)
+                    .and_then(|()| self.restart_namespace_catalog_after_preflight())
+                {
+                    self.terminal_failure(error.to_string());
+                    return;
+                }
                 self.reconcile_selected_resource_streams();
             }
             action @ (ResourceAction::RetryWindow(window)
@@ -2741,7 +2755,17 @@ impl K10sApp {
                 if matches!(action, ResourceAction::FullResyncWindow(_))
                     && matches!(key.scope, SubscriptionScope::Namespaced(_))
                 {
-                    self.restart_namespace_catalog();
+                    let namespace_removals = usize::from(self.namespace_subscription.is_some());
+                    let window_removals =
+                        usize::from(self.resource_subscriptions.contains_key(&key));
+                    if let Err(error) = self
+                        .client
+                        .preflight_subscription_changes(namespace_removals + window_removals, 2)
+                        .and_then(|()| self.restart_namespace_catalog_after_preflight())
+                    {
+                        self.terminal_failure(error.to_string());
+                        return;
+                    }
                 }
                 self.rejected_subscription_keys.remove(&key);
                 let affected: Vec<_> = self
@@ -8032,6 +8056,40 @@ mod tests {
         assert_eq!(app.window_subscriptions.get(&window), Some(&key));
         assert_eq!(app.client.live_subscription_count(), desired_before);
         assert_eq!(app.client.phase(), ClientPhase::Ready);
+    }
+
+    #[test]
+    fn saturated_full_resync_retains_namespace_and_window_subscription_ownership() {
+        let (mut app, _state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let key = app.window_subscriptions.get(&window).cloned().unwrap();
+        let namespace = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let _extra = app
+            .client
+            .subscribe_resource(
+                "dev-local",
+                "",
+                "v1",
+                "ConfigMap",
+                Some("default".to_owned()),
+            )
+            .unwrap();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        let desired_before = app.client.live_subscription_count();
+
+        app.handle_resource_action(ResourceAction::FullResyncWindow(window));
+
+        assert_eq!(
+            app.namespace_subscription
+                .as_ref()
+                .map(|(_, live)| live.id()),
+            Some(&namespace)
+        );
+        assert!(app.resource_subscriptions.contains_key(&key));
+        assert_eq!(app.window_subscriptions.get(&window), Some(&key));
+        assert_eq!(app.client.live_subscription_count(), desired_before);
     }
 
     #[test]
