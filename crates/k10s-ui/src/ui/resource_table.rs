@@ -7,6 +7,7 @@
 use egui::{ScrollArea, WidgetInfo, WidgetType};
 use k10s_protocol::{ResourceListRow, ResourceProjection};
 use std::borrow::Cow;
+use web_time::SystemTime;
 
 use super::responsive_table::RowAction;
 use crate::workspace::{SortSpec, WindowId, WorkloadKind};
@@ -282,9 +283,19 @@ where
                                         );
                                     }
                                     "created" => {
-                                        ui.monospace(
-                                            row.created_at.get(..10).unwrap_or(&row.created_at),
+                                        let age = super::detail::presentation::format_age(
+                                            Some(&row.created_at),
+                                            SystemTime::now(),
                                         );
+                                        let response =
+                                            ui.monospace(age).on_hover_text(&row.created_at);
+                                        response.widget_info(|| {
+                                            WidgetInfo::labeled(
+                                                WidgetType::Label,
+                                                true,
+                                                "Resource age",
+                                            )
+                                        });
                                     }
                                     _ => {}
                                 }

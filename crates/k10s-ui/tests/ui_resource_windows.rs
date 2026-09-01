@@ -500,6 +500,20 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     let compact = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(compact.query_by_label("Image").is_none());
     compact.get_by_label("Status");
+    let first_age_value_left = compact
+        .get_all_by_label("Resource age")
+        .map(|node| node.rect().left())
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        compact
+            .get_all_by_label("Resource age")
+            .all(|node| node.rect().width() <= 56.0),
+        "compact Age values must fit the resolved 56-point column"
+    );
+    assert!(
+        compact.get_by_label("2/2").rect().right() <= first_age_value_left,
+        "compact Ready values must not overlap the adjacent Age column"
+    );
     let rect = compact.rect();
     let target = rect.min + egui::vec2(1_000.0, 520.0);
     harness.hover_at(rect.max);

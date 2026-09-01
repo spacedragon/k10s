@@ -9,6 +9,7 @@ use egui::{ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     ResourceListRow, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
+use web_time::SystemTime;
 
 use crate::workspace::{ServiceWindowState, SortSpec, WindowId, WorkspaceCommand};
 
@@ -562,7 +563,13 @@ fn service_row<I>(
                 super::responsive_table::elided_label(ui, value, 28);
             }
             "age" => {
-                ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));
+                let age = super::detail::presentation::format_age(
+                    Some(&row.created_at),
+                    SystemTime::now(),
+                );
+                let response = ui.monospace(age).on_hover_text(&row.created_at);
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Service age"));
             }
             _ => {}
         });

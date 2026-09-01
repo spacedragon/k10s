@@ -348,7 +348,7 @@ fn age_vital(created_at: Option<&str>, now: SystemTime) -> DetailVital {
     DetailVital::new("Age", format_age(created_at, now))
 }
 
-fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
+pub(crate) fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;

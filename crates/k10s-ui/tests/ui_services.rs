@@ -784,10 +784,12 @@ fn list_columns_render_strictly_from_projections() {
     window.get_by_label("http 80→8080/TCP");
     // Multi-port rows join their compact labels.
     window.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
-    assert_eq!(
-        window.get_all_by_label("2026-08-21").count(),
-        2,
-        "the Age column renders the creation-date portion monospaced"
+    assert_eq!(window.get_all_by_label("Service age").count(), 2);
+    assert!(
+        window
+            .get_all_by_label("Service age")
+            .all(|node| node.rect().width() <= 56.0),
+        "Service Age values fit their compact column"
     );
 
     // The summary text is never rendered anywhere in this window.

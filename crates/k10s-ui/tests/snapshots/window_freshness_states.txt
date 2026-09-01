@@ -257,8 +257,8 @@ Window
                             Label value="—"
                               TextRun value="—"
                           GenericContainer
-                            Label value="2026-08-21"
-                              TextRun value="2026-08-21"
+                            Label value="Resource age"
+                              TextRun value="11d"
     Splitter
     Splitter
     Splitter
@@ -348,8 +348,8 @@ Window
                             Label value="—"
                               TextRun value="—"
                           GenericContainer
-                            Label value="2026-08-21"
-                              TextRun value="2026-08-21"
+                            Label value="Resource age"
+                              TextRun value="11d"
     Splitter
     Splitter
     Splitter
@@ -526,8 +526,8 @@ Window
                             Label value="Active 0"
                               TextRun value="Active 0"
                           GenericContainer
-                            Label value="2026-08-21"
-                              TextRun value="2026-08-21"
+                            Label value="Resource age"
+                              TextRun value="11d"
     Splitter
     Splitter
     Splitter
