@@ -46,7 +46,12 @@ impl Default for Fixture {
     fn default() -> Self {
         Self {
             shell: UiShell::new(),
-            feed: ResourceFeed::default(),
+            feed: ResourceFeed {
+                render_time: Some(
+                    web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800),
+                ),
+                ..ResourceFeed::default()
+            },
             response: None,
             selected_context: CONTEXT.to_owned(),
             connection: ConnectionState::Connected,

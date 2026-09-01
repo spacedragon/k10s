@@ -117,6 +117,7 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
+    render_time: SystemTime,
     workload_kind: WorkloadKind,
     title: &str,
     namespaced: bool,
@@ -285,7 +286,7 @@ where
                                     "created" => {
                                         let age = super::detail::presentation::format_age(
                                             Some(&row.created_at),
-                                            SystemTime::now(),
+                                            render_time,
                                         );
                                         let response =
                                             ui.monospace(age).on_hover_text(&row.created_at);

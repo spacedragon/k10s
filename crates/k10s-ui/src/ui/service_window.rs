@@ -328,6 +328,7 @@ where
             show_table(
                 ui,
                 window_id,
+                feed.render_time.unwrap_or_else(SystemTime::now),
                 !state.search.is_empty()
                     || state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces,
                 state.sort.as_ref(),
@@ -410,6 +411,7 @@ where
 fn show_table<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
+    render_time: SystemTime,
     filters_active: bool,
     sort: Option<&SortSpec>,
     rows: &[&ResourceListRow],
@@ -483,6 +485,7 @@ where
                         service_row(
                             ui,
                             row,
+                            render_time,
                             gesture_table_id,
                             &columns,
                             &is_selected,
@@ -496,9 +499,11 @@ where
     actions
 }
 
+#[allow(clippy::too_many_arguments)]
 fn service_row<I>(
     ui: &mut egui::Ui,
     row: &ResourceListRow,
+    render_time: SystemTime,
     gesture_table_id: egui::Id,
     columns: &super::responsive_table::ResolvedColumns,
     is_selected: impl Fn(&ResourceListRow) -> bool,
@@ -563,10 +568,8 @@ fn service_row<I>(
                 super::responsive_table::elided_label(ui, value, 28);
             }
             "age" => {
-                let age = super::detail::presentation::format_age(
-                    Some(&row.created_at),
-                    SystemTime::now(),
-                );
+                let age =
+                    super::detail::presentation::format_age(Some(&row.created_at), render_time);
                 let response = ui.monospace(age).on_hover_text(&row.created_at);
                 response
                     .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Service age"));

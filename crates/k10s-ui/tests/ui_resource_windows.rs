@@ -258,7 +258,10 @@ fn harness() -> Harness<'static, Fixture> {
 }
 
 fn default_feed() -> ResourceFeed {
-    let mut feed = ResourceFeed::default();
+    let mut feed = ResourceFeed {
+        render_time: Some(web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800)),
+        ..ResourceFeed::default()
+    };
     feed.lists.insert(
         WorkspaceWorkload::Deployments,
         vec![

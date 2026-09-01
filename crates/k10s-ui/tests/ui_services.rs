@@ -37,6 +37,8 @@ impl Default for Fixture {
             connection: ConnectionState::Connected,
             context_namespace: None,
         };
+        fixture.feed.render_time =
+            Some(web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800));
         fixture.feed.services = Some(vec![
             service_row(
                 "web-frontend",

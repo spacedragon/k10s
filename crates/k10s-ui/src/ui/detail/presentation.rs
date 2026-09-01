@@ -401,6 +401,13 @@ pub(crate) fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
     "<1m".to_owned()
 }
 
+pub(crate) fn system_time_from_rfc3339(value: &str) -> Option<SystemTime> {
+    let timestamp = value.parse::<jiff::Timestamp>().ok()?;
+    let seconds = u64::try_from(timestamp.as_second()).ok()?;
+    let nanos = u32::try_from(timestamp.subsec_nanosecond()).ok()?;
+    UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+}
+
 fn vital_number(label: &'static str, value: Option<u32>) -> DetailVital {
     DetailVital::new(
         label,
@@ -444,6 +451,13 @@ mod tests {
 
     fn fixed_now() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(NOW_SECONDS)
+    }
+
+    #[test]
+    fn backend_timestamp_provides_a_deterministic_render_clock() {
+        let parsed = super::system_time_from_rfc3339("1970-01-02T00:00:00Z").unwrap();
+        assert_eq!(parsed.duration_since(UNIX_EPOCH).unwrap().as_secs(), 86_400);
+        assert!(super::system_time_from_rfc3339("not-rfc3339").is_none());
     }
 
     #[test]

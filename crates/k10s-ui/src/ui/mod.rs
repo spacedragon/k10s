@@ -2,6 +2,7 @@
 
 mod command_palette;
 mod detail;
+pub(crate) use detail::presentation::system_time_from_rfc3339;
 pub mod dialogs;
 mod infrastructure;
 mod launcher;

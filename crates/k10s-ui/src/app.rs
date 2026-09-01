@@ -535,7 +535,11 @@ impl K10sApp {
             .as_deref()
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
-        let feed = self.build_resource_feed();
+        let mut feed = self.build_resource_feed();
+        feed.render_time = response
+            .as_ref()
+            .and_then(|snapshot| crate::ui::system_time_from_rfc3339(&snapshot.generated_at))
+            .or_else(|| Some(web_time::SystemTime::now()));
         let refresh = self.shell.show_with_contexts_and_resources_load(
             ui,
             connection,
@@ -2230,6 +2234,7 @@ impl K10sApp {
             })
             .collect();
         ResourceFeed {
+            render_time: None,
             window_freshness,
             detail_authority,
             namespace_catalog,

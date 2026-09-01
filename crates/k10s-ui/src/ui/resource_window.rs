@@ -13,6 +13,7 @@ use k10s_protocol::{
     GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
     ResourceRelationsResponse, ResourceTypeEntry,
 };
+use web_time::SystemTime;
 
 use crate::workspace::{DetailTab, ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
@@ -176,6 +177,10 @@ impl DetailAuthority {
 /// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
+    /// One clock sample shared by every relative-age cell in a rendered frame.
+    /// Production derives it from the backend snapshot timestamp; deterministic
+    /// fixtures pin it explicitly.
+    pub render_time: Option<SystemTime>,
     /// Lifecycle of each open list window. Missing entries retain the legacy
     /// inference from connection and row state for compatibility.
     pub window_freshness: HashMap<WindowId, WindowFreshness>,
@@ -693,6 +698,7 @@ pub(super) fn show<I>(
             super::resource_table::show(
                 ui,
                 window_id,
+                feed.render_time.unwrap_or_else(SystemTime::now),
                 kind,
                 title,
                 namespaced,
