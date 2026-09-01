@@ -168,6 +168,21 @@ pub(super) fn sized_cell(
     );
 }
 
+/// Paint a compact cell while keeping its full value accessible. A hover
+/// tooltip exists only when the displayed text was actually elided.
+pub(super) fn elided_label(ui: &mut egui::Ui, value: String, max_chars: usize) {
+    let compact = middle_elide(&value, max_chars);
+    let changed = compact != value;
+    let response = ui.label(compact);
+    let response = if changed {
+        response.on_hover_text(&value)
+    } else {
+        response
+    };
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, value.clone()));
+}
+
 impl<I> RowAction<I> {
     pub(super) fn into_command(
         self,

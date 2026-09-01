@@ -1692,13 +1692,11 @@ fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
         .get_by_role_and_label(Role::Button, "Select resource pod-000")
         .click();
     harness.step();
-    for _ in 0..1 {
-        harness
-            .get_by_role_and_label(Role::Window, "Pods")
-            .get_by_role_and_label(Role::Button, "Select resource pod-000")
-            .scroll_down();
-        harness.step();
-    }
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource pod-000")
+        .scroll_down();
+    harness.step();
     harness.run_steps(6);
     let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
     assert!(
@@ -1726,6 +1724,31 @@ fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
             .map(|identity| format!("Select resource {}", identity.name))
             .as_deref(),
         Some("Select resource pod-000")
+    );
+    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    let later_index = (1..500)
+        .find(|index| {
+            recycled
+                .query_by_role_and_label(Role::Button, &format!("Select resource pod-{index:03}"))
+                .is_some()
+        })
+        .expect("a later recycled row is visible");
+    let later_label = format!("Select resource pod-{later_index:03}");
+    recycled
+        .get_by_role_and_label(Role::Button, &later_label)
+        .click();
+    harness.run_steps(10);
+    let expected_name = format!("pod-{later_index:03}");
+    let selection = &harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(workload_id(harness.state(), WorkspaceWorkload::Pods))
+        .unwrap()
+        .selection;
+    assert_eq!(
+        selection.as_ref().map(|identity| identity.name.as_str()),
+        Some(expected_name.as_str())
     );
 }
 

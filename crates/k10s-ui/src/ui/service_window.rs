@@ -554,31 +554,13 @@ fn service_row<I>(
                 let value = service_projection(row)
                     .map(cluster_ip_column_label)
                     .unwrap_or_else(|| "—".into());
-                let compact = super::responsive_table::middle_elide(&value, 20);
-                let changed = compact != value;
-                let response = ui.label(compact);
-                let response = if changed {
-                    response.on_hover_text(&value)
-                } else {
-                    response
-                };
-                response
-                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+                super::responsive_table::elided_label(ui, value, 20);
             }
             "ports" => {
                 let value = service_projection(row)
                     .map(ports_column_label)
                     .unwrap_or_else(|| "—".into());
-                let compact = super::responsive_table::middle_elide(&value, 28);
-                let changed = compact != value;
-                let response = ui.label(compact);
-                let response = if changed {
-                    response.on_hover_text(&value)
-                } else {
-                    response
-                };
-                response
-                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+                super::responsive_table::elided_label(ui, value, 28);
             }
             "age" => {
                 ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));

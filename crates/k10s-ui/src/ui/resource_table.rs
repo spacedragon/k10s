@@ -265,13 +265,21 @@ where
                                         right_label(ui, resource_ready(row));
                                     }
                                     "image" => {
-                                        elided_label(ui, resource_image(row), 28);
+                                        super::responsive_table::elided_label(
+                                            ui,
+                                            resource_image(row),
+                                            28,
+                                        );
                                     }
                                     "restarts" => {
                                         right_label(ui, resource_restarts(row));
                                     }
                                     "node" => {
-                                        elided_label(ui, resource_node(row), 20);
+                                        super::responsive_table::elided_label(
+                                            ui,
+                                            resource_node(row),
+                                            20,
+                                        );
                                     }
                                     "created" => {
                                         ui.monospace(
@@ -356,18 +364,6 @@ fn right_label(ui: &mut egui::Ui, value: String) {
         ui.label(value);
     });
 }
-fn elided_label(ui: &mut egui::Ui, value: String, max: usize) {
-    let compact = super::responsive_table::middle_elide(&value, max);
-    let changed = compact != value;
-    let response = ui.label(compact);
-    let response = if changed {
-        response.on_hover_text(&value)
-    } else {
-        response
-    };
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
-}
-
 #[cfg(test)]
 mod tests {
     use super::ready_pair;
