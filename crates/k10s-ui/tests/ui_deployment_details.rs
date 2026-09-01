@@ -928,7 +928,7 @@ fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     assert_eq!(window.query_all_by_role(Role::ScrollView).count(), 1);
     let footer = window
-        .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close")
+        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
         .rect();
     assert!(window.rect().contains_rect(footer));
 }
@@ -998,7 +998,7 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
         .click();
     harness.run_steps(1);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window.get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close");
+    window.get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection");
     assert!(window.query_by_label("Roll back…").is_none());
 
     harness.state_mut().feed.detail_authority.insert(
@@ -1134,4 +1134,70 @@ fn deployment_accessibility_snapshots_cover_wide_and_narrow_overview() {
         [759.0, 520.0],
     );
     snapshot_deployment_window(&narrow, "narrow_overview");
+}
+
+#[test]
+fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
+    // The Detail body must scroll/clip within its own rect so no overview
+    // content paints underneath the shortcut footer, which is fixed at the
+    // bottom of the detail pane.
+    let mut harness = harness(egui::vec2(1_240.0, 820.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [1_050.0, 700.0],
+    );
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+
+    // The footer is fixed at the bottom of the detail window.
+    let footer_before = window
+        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .rect();
+    assert!(
+        footer_before.top() > window.rect().bottom() - footer_before.height() - 12.0,
+        "footer must sit at the bottom of the detail window: footer={footer_before:?} window={:?}",
+        window.rect()
+    );
+
+    // The body is a scroll area, so tall overview content scrolls inside it
+    // instead of painting under the footer.
+    let scroll = window
+        .query_by_role_and_label(Role::ScrollView, "Detail body")
+        .expect("the Detail body must be a scroll view");
+    let body_rect = scroll.rect();
+    assert!(
+        body_rect.bottom() <= footer_before.top() + 1.0,
+        "the body scroll area must end at or above the footer: body={body_rect:?} footer={footer_before:?}"
+    );
+
+    // Scroll the body and confirm the footer stays fixed while content moves.
+    scroll.scroll_to_me();
+    harness.hover_at(body_rect.center());
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 240.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let footer_after = window
+        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .rect();
+    assert!(
+        (footer_after.center() - footer_before.center()).length() <= 1.0,
+        "the footer must stay fixed while the body scrolls: before={footer_before:?} after={footer_after:?}"
+    );
+
+    // The operational and configuration columns must not overlap across the
+    // 1.35:1 split.
+    let operational = window.get_by_label("Operational detail column").rect();
+    let configuration = window.get_by_label("Configuration detail column").rect();
+    assert!(
+        operational.right() <= configuration.left() + 1.0,
+        "columns must not overlap across the split: operational={operational:?} configuration={configuration:?}"
+    );
 }

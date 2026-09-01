@@ -739,9 +739,7 @@ fn pod_interaction_lifecycle_states_keep_shared_frame_semantics() {
     let detail = pod_window(&loading);
     detail.get_by_label("Loading details");
     detail.get_by_label("Status ● —");
-    detail.get_by_label(
-        "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
-    );
+    detail.get_by_label("l logs · s shell · y yaml · e events · c copy name · Esc clear selection");
 
     loading.state_mut().feed.primary_details.insert(
         identity.clone(),
