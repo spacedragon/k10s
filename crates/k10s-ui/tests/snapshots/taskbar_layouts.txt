@@ -248,7 +248,6 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
-              GenericContainer
                 GenericContainer
                   GenericContainer
                     GenericContainer

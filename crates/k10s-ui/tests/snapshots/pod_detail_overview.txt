@@ -216,13 +216,14 @@ Window
                             TextRun value="2026-08-21T00:00:00Z"
               Unknown
               GenericContainer
-                Button label="Clear selection"
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"
                     TextRun value="Pod · default / db-postgres-0"
                   GenericContainer
+                    Button label="Clear selection"
                     Button label="Maximize"
                     Button label="Pop out ↗"
+                GenericContainer label="Detail identity row"
                 GenericContainer
                   GenericContainer
                     GenericContainer

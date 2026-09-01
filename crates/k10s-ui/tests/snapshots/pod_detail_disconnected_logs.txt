@@ -186,13 +186,14 @@ Window
                     Label value="Namespace"
                       TextRun value="Namespace"
               GenericContainer
-                Button label="Clear selection"
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"
                     TextRun value="Pod · default / db-postgres-0"
                   GenericContainer
+                    Button label="Clear selection"
                     Button label="Restore split"
                     Button label="Pop out ↗"
+                GenericContainer label="Detail identity row"
                 GenericContainer
                   GenericContainer
                     GenericContainer
