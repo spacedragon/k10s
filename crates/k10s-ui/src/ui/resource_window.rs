@@ -215,7 +215,9 @@ pub struct ResourceFeed {
 ///
 /// Production instantiates the shell with [`ResourceIdentity`] itself;
 /// static prototypes may map every row onto `()`.
-pub trait RowIdentity: Clone + Eq + std::hash::Hash + std::fmt::Debug {
+pub trait RowIdentity:
+    Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static
+{
     /// Convert one protocol identity into this workspace's identity type.
     #[must_use]
     fn from_row_identity(identity: &ResourceIdentity) -> Self;

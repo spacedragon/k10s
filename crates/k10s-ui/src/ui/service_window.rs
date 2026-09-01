@@ -418,10 +418,11 @@ fn show_table<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
 ) -> TableActions<I>
 where
-    I: Clone + std::fmt::Debug + std::hash::Hash,
+    I: Clone + Send + Sync + 'static,
 {
     let mut actions = TableActions::default();
     let gesture_table_id = egui::Id::new(("k10s.service.table-gesture", window_id.0));
+    actions.row_action = super::responsive_table::poll_row_action(ui.ctx(), gesture_table_id);
     if rows.is_empty() {
         // Distinguish "the context has no services at all" from "the
         // active filters removed everything".
@@ -478,7 +479,7 @@ fn service_row<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
     actions: &mut TableActions<I>,
 ) where
-    I: Clone + std::fmt::Debug + std::hash::Hash,
+    I: Clone + Send + Sync + 'static,
 {
     let selected = is_selected(row);
     let name_button = if selected {
@@ -490,18 +491,12 @@ fn service_row<I>(
         super::responsive_table::row_action_label("service", &row.identity.name, selected);
     name_button
         .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    let identity = identity_of(row);
-    let row_id = gesture_table_id.with(&identity);
-    let (row_action, popped_out) = super::responsive_table::row_interaction(
+    let popped_out = super::responsive_table::row_interaction(
         &name_button,
         gesture_table_id,
-        row_id,
-        identity,
+        identity_of(row),
         selected,
     );
-    if row_action.is_some() {
-        actions.row_action = row_action;
-    }
     if popped_out.is_some() {
         actions.popped_out = popped_out;
     }

@@ -424,6 +424,64 @@ fn clicking_another_service_replaces_the_pending_row_action() {
 }
 
 #[test]
+fn hidden_service_row_action_expires_once_at_table_scope() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, "api-server".into()));
+    harness.run_steps(10);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .is_none(),
+        "the pending clear must execute while its row is filtered out"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, String::new()));
+    harness.run_steps(10);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("api-server"),
+        "restoring the old row must not replay its consumed clear"
+    );
+}
+
+#[test]
 fn cross_row_service_double_click_does_not_change_integrated_selection() {
     let mut harness = harness();
     open_via_launcher(&mut harness);

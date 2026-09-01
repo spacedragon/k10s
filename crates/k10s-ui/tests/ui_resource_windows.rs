@@ -1211,6 +1211,67 @@ fn clicking_another_resource_replaces_the_pending_row_action() {
 }
 
 #[test]
+fn hidden_resource_row_action_expires_once_at_table_scope() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, "web-frontend".into()));
+    harness.run_steps(10);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .is_none(),
+        "the pending clear must execute while its row is filtered out"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, String::new()));
+    harness.run_steps(10);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend-7d9f8-00001"),
+        "restoring the old row must not replay its consumed clear"
+    );
+}
+
+#[test]
 fn cross_row_resource_double_click_does_not_change_integrated_selection() {
     let mut harness = harness();
     open(

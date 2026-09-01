@@ -26,38 +26,57 @@ pub(super) fn row_action_label(kind: &str, name: &str, selected: bool) -> String
     }
 }
 
-#[derive(Clone, Copy)]
-struct PendingRowGesture {
-    row_id: egui::Id,
+#[derive(Clone)]
+struct PendingRowGesture<I> {
+    identity: I,
     clear_selection: bool,
     deadline: f64,
 }
 
-impl Default for PendingRowGesture {
-    fn default() -> Self {
-        Self {
-            row_id: egui::Id::NULL,
-            clear_selection: false,
-            deadline: 0.0,
-        }
+fn pending_id(table_id: egui::Id) -> egui::Id {
+    table_id.with("k10s.table.pending-row-action")
+}
+
+/// Consume a due gesture independently of which rows virtualization renders.
+pub(super) fn poll_row_action<I>(ctx: &egui::Context, table_id: egui::Id) -> Option<RowAction<I>>
+where
+    I: Clone + Send + Sync + 'static,
+{
+    let pending_id = pending_id(table_id);
+    let (now, another_click) = ctx.input(|input| (input.time, input.pointer.any_click()));
+    let pending = ctx.data_mut(|data| data.get_temp::<PendingRowGesture<I>>(pending_id));
+    if let Some(pending) = pending
+        && now >= pending.deadline
+        && !another_click
+    {
+        ctx.data_mut(|data| data.remove::<PendingRowGesture<I>>(pending_id));
+        Some(if pending.clear_selection {
+            RowAction::ClearSelection
+        } else {
+            RowAction::Select(pending.identity)
+        })
+    } else {
+        None
     }
 }
 
-/// Resolve one row response against one table-scoped pending gesture. Every
-/// single click waits for egui's configured double-click interval.
-pub(super) fn row_interaction<I: Clone>(
+/// Arm, replace, or cancel the table-scoped gesture from one row response.
+/// Every single click waits for egui's configured double-click interval.
+pub(super) fn row_interaction<I>(
     response: &egui::Response,
     table_id: egui::Id,
-    row_id: egui::Id,
     identity: I,
     selected: bool,
-) -> (Option<RowAction<I>>, Option<I>) {
-    let pending_id = table_id.with("k10s.table.pending-row-action");
+) -> Option<I>
+where
+    I: Clone + Send + Sync + 'static,
+{
+    let pending_id = pending_id(table_id);
     if response.double_clicked() {
         response
             .ctx
-            .data_mut(|data| data.remove_temp::<PendingRowGesture>(pending_id));
-        (None, Some(identity))
+            .data_mut(|data| data.remove::<PendingRowGesture<I>>(pending_id));
+        Some(identity)
     } else if response.clicked() {
         let now = response.ctx.input(|input| input.time);
         let delay = response
@@ -67,7 +86,7 @@ pub(super) fn row_interaction<I: Clone>(
             data.insert_temp(
                 pending_id,
                 PendingRowGesture {
-                    row_id,
+                    identity,
                     clear_selection: selected,
                     deadline: now + delay,
                 },
@@ -76,30 +95,8 @@ pub(super) fn row_interaction<I: Clone>(
         response
             .ctx
             .request_repaint_after(std::time::Duration::from_secs_f64(delay));
-        (None, None)
+        None
     } else {
-        let (now, another_click) = response
-            .ctx
-            .input(|input| (input.time, input.pointer.any_click()));
-        let pending = response
-            .ctx
-            .data_mut(|data| data.get_temp::<PendingRowGesture>(pending_id));
-        if let Some(pending) = pending
-            && pending.row_id == row_id
-            && now >= pending.deadline
-            && !another_click
-        {
-            response
-                .ctx
-                .data_mut(|data| data.remove_temp::<PendingRowGesture>(pending_id));
-            let action = if pending.clear_selection {
-                RowAction::ClearSelection
-            } else {
-                RowAction::Select(identity)
-            };
-            (Some(action), None)
-        } else {
-            (None, None)
-        }
+        None
     }
 }
