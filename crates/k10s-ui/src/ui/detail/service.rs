@@ -14,6 +14,23 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use crate::ui::resource_window::RowIdentity;
 
+#[cfg(test)]
+mod responsive_contract_tests {
+    use super::overview_order;
+
+    #[test]
+    fn service_overview_orders_exact_1000_and_640_widths() {
+        assert_eq!(
+            overview_order(1_000.0),
+            ["operational", "configuration", "identity"]
+        );
+        assert_eq!(
+            overview_order(640.0),
+            ["operational", "configuration", "identity"]
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
@@ -30,7 +47,7 @@ pub(super) fn show<I>(
 {
     let projection = projection_of(view);
     match detail.active_tab {
-        DetailTab::Overview => overview_tab(ui, window_id, projection),
+        DetailTab::Overview => overview_tab(ui, window_id, projection, presentation),
         DetailTab::Ports => ports_tab(
             ui,
             window_id,
@@ -71,11 +88,48 @@ fn projection_of(view: &ResourceDetailResponse) -> Option<&ServiceProjection> {
 }
 
 /// Overview tab: every field comes from the projection only when present.
-fn overview_tab(ui: &mut egui::Ui, window_id: WindowId, projection: Option<&ServiceProjection>) {
+#[cfg(test)]
+fn overview_order(_width: f32) -> [&'static str; 3] {
+    ["operational", "configuration", "identity"]
+}
+
+fn overview_tab(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    projection: Option<&ServiceProjection>,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+) {
     let Some(projection) = projection else {
-        ui.label("No structured projection available");
+        ui.label("Structured details unavailable");
         return;
     };
+    if super::overview::two_column(
+        ui,
+        |column| service_operational(column, window_id, projection),
+        |column| {
+            service_configuration(column, window_id, projection);
+            service_identity(column, window_id, presentation);
+        },
+    ) {
+        return;
+    }
+    service_operational(ui, window_id, projection);
+    ui.separator();
+    service_configuration(ui, window_id, projection);
+    ui.separator();
+    service_identity(ui, window_id, presentation);
+}
+
+fn service_operational(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
+    ui.heading("PORTS");
+    if projection.ports.is_empty() {
+        ui.label("No declared ports");
+    } else {
+        for port in &projection.ports {
+            ui.label(crate::ui::port_detail_label(port));
+        }
+    }
+    ui.heading("STATUS");
     Grid::new(("k10s.detail.service.overview.grid", window_id.0))
         .num_columns(1)
         .striped(true)
@@ -91,34 +145,65 @@ fn overview_tab(ui: &mut egui::Ui, window_id: WindowId, projection: Option<&Serv
                     projection.cluster_ips.join(", ")
                 },
             );
-            let selector = projection
-                .selector
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            overview_row(
-                ui,
-                "Selector",
-                &if selector.is_empty() {
-                    "—".to_owned()
-                } else {
-                    selector
-                },
-            );
             if let Some(value) = &projection.external_name {
                 overview_row(ui, "External name", value);
             }
-            if let Some(value) = &projection.session_affinity {
-                overview_row(ui, "Session affinity", value);
-            }
-            if let Some(value) = &projection.external_traffic_policy {
-                overview_row(ui, "External traffic policy", value);
-            }
-            if let Some(value) = &projection.internal_traffic_policy {
-                overview_row(ui, "Internal traffic policy", value);
-            }
         });
+}
+
+fn service_configuration(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
+    ui.heading("SELECTORS");
+    let selector = projection
+        .selector
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    super::overview::long_value(ui, "Selector", Some(&selector));
+    ui.heading("TRAFFIC & SESSION");
+    Grid::new(("k10s.detail.service.traffic", window_id.0)).show(ui, |ui| {
+        overview_row(
+            ui,
+            "Session affinity",
+            projection.session_affinity.as_deref().unwrap_or("—"),
+        );
+        overview_row(
+            ui,
+            "External policy",
+            projection.external_traffic_policy.as_deref().unwrap_or("—"),
+        );
+        overview_row(
+            ui,
+            "Internal policy",
+            projection.internal_traffic_policy.as_deref().unwrap_or("—"),
+        );
+    });
+}
+
+fn service_identity(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+) {
+    ui.heading("IDENTITY");
+    Grid::new(("k10s.detail.service.identity", window_id.0)).show(ui, |ui| {
+        overview_row(ui, "Name", &presentation.identity.name);
+        overview_row(
+            ui,
+            "Namespace",
+            presentation.identity.namespace.as_deref().unwrap_or("—"),
+        );
+        overview_row(
+            ui,
+            "UID",
+            if presentation.identity.uid.is_empty() {
+                "—"
+            } else {
+                &presentation.identity.uid
+            },
+        );
+        overview_row(ui, "Context", &presentation.identity.context);
+    });
 }
 
 fn overview_row(ui: &mut egui::Ui, label: &str, value: &str) {

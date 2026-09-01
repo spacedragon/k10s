@@ -407,8 +407,8 @@ fn deployment_projection_complete_uses_typed_fields_only() {
         "Images · api=ghcr.io/acme/checkout:v4",
         "Replicas · 2/3 ready",
         "TEMPLATE",
-        "Image (api) · ghcr.io/acme/checkout:v4",
-        "Selector · app=checkout",
+        "Image (api): ghcr.io/acme/checkout:v4",
+        "Selector: app=checkout",
         "MANAGED BY",
         "Manager · Helm",
         "Helm release · checkout-prod",
@@ -504,8 +504,8 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
         "Available · —",
         "Strategy · —",
         "Age · —",
-        "Image (api) · —",
-        "Selector · —",
+        "Image (api): —",
+        "Selector: —",
         "Manager · —",
         "Created · —",
     ] {
@@ -800,7 +800,7 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("team · payments");
-    window.get_by_label("meta.helm.sh/release-name · checkout-prod");
+    window.get_by_label("meta.helm.sh/release-name: checkout-prod");
     window.get_by_role_and_label(Role::Button, "Hide 2 labels");
     window.get_by_role_and_label(Role::Button, "Hide annotations");
     assert!(window.query_by_label("Roll back…").is_none());

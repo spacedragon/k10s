@@ -1049,15 +1049,15 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Type ClusterIP");
     window.get_by_label("Cluster IPs 10.96.0.10");
-    window.get_by_label("Selector app=web");
-    assert!(window.query_by_label("Session affinity ClientIP").is_none());
+    window.get_by_label("Selector: app=web");
+    window.get_by_label("Session affinity —");
     assert!(
         window
             .query_by_label("External traffic policy Local")
             .is_none(),
         "absent traffic policies must not render"
     );
-    assert!(window.query_by_label("Internal traffic policy").is_none());
+    window.get_by_label("Internal policy —");
 
     // With policies present they render verbatim.
     harness
@@ -1072,8 +1072,8 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Session affinity ClientIP");
-    window.get_by_label("External traffic policy Local");
-    window.get_by_label("Internal traffic policy Cluster");
+    window.get_by_label("External policy Local");
+    window.get_by_label("Internal policy Cluster");
 }
 
 #[test]

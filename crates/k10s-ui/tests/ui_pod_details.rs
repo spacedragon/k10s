@@ -65,7 +65,7 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         "LABELS · 6",
         "ANNOTATIONS · 1",
         "IDENTITY",
-        "ghcr.io/example/web:1.2.3",
+        "Image: ghcr.io/example/web:1.2.3",
         "125m / 64Mi",
         "18m / 16Mi",
         "Started · container started · ×2 · 1m",
@@ -598,7 +598,7 @@ fn pod_interaction_expands_labels_and_annotations_accessibly() {
     harness.run_steps(3);
     let detail = pod_window(&harness);
     detail.get_by_label("checksum/config");
-    detail.get_by_label("abcdef");
+    detail.get_by_label("checksum/config: abcdef");
 }
 
 #[test]

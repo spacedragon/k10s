@@ -391,7 +391,13 @@ fn show_generic_body<I: RowIdentity>(
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     match detail.active_tab {
-        DetailTab::Overview => overview::show(ui, window_id, &view.sections),
+        DetailTab::Overview => overview::show(
+            ui,
+            window_id,
+            &view.sections,
+            presentation.identity,
+            presentation.metrics,
+        ),
         DetailTab::Pods => related::show(
             ui,
             presentation.identity,
