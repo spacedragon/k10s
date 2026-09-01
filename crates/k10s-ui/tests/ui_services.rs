@@ -308,8 +308,13 @@ fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
     }
     let compact_port = wide.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
     compact_port.hover();
-    harness.run_steps(2);
-    harness.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
+    harness.run_steps(15);
+    assert!(
+        harness
+            .get_all_by_label("https 443→https/TCP, metrics 9100→9100/UDP")
+            .count()
+            >= 2
+    );
 
     let rect = harness
         .get_by_role_and_label(Role::Window, "Services")
@@ -325,10 +330,23 @@ fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
     harness.run_steps(3);
     let compact = harness.get_by_role_and_label(Role::Window, "Services");
     assert!(compact.query_by_label("Cluster IP").is_none());
-    compact.get_by_label("Type");
-    for key in ["namespace", "name", "type", "ports", "age"] {
+    assert!(compact.query_by_label("Type").is_none());
+    for key in ["namespace", "name", "ports", "age"] {
         compact.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
     }
+    let rect = compact.rect();
+    let target = rect.min + egui::vec2(1_000.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let restored = harness.get_by_role_and_label(Role::Window, "Services");
+    restored.get_by_label("Cluster IP");
+    restored.get_by_label("Type");
 }
 
 #[test]

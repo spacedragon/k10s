@@ -467,8 +467,13 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     assert!(wide.get_by_label("2/2").rect().right() > wide.get_by_label("Ready").rect().center().x);
     wide.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
         .hover();
-    harness.run_steps(2);
-    harness.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1");
+    harness.run_steps(15);
+    assert!(
+        harness
+            .get_all_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
+            .count()
+            >= 2
+    );
 
     let rect = harness
         .get_by_role_and_label(Role::Window, "Deployments")
@@ -485,6 +490,19 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     let compact = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(compact.query_by_label("Image").is_none());
     compact.get_by_label("Status");
+    let rect = compact.rect();
+    let target = rect.min + egui::vec2(1_000.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let restored = harness.get_by_role_and_label(Role::Window, "Deployments");
+    restored.get_by_label("Image");
+    restored.get_by_label("Status");
 }
 
 #[test]
@@ -520,6 +538,204 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
     window.get_by_label("Name");
     window.get_by_label("Status");
     window.get_by_label("Age");
+    let rect = window.rect();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    harness.run_steps(2);
+    let target = rect.min + egui::vec2(350.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let medium = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(medium.query_by_label("Status").is_none());
+    medium.get_by_label("Age");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(180.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Custom Resources")
+            .query_by_label("Age")
+            .is_none()
+    );
+}
+
+#[test]
+fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Pods).unwrap()[0].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"Running","readyContainers":1,"totalContainers":1,"restartCount":7,"nodeName":"worker-with-a-long-name"})).unwrap(),
+    );
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Pods");
+    for header in [
+        "Namespace",
+        "Name",
+        "Ready",
+        "Status",
+        "Restarts",
+        "Node",
+        "Age",
+    ] {
+        assert!(wide.get_all_by_label(header).count() >= 1);
+    }
+    for key in ["ready", "restarts", "node"] {
+        assert!(
+            wide.query_by_role_and_label(Role::Button, format!("Sort pods by {key}").as_str())
+                .is_none()
+        );
+    }
+    assert!(
+        wide.get_by_label("7").rect().right() > wide.get_by_label("Restarts").rect().center().x
+    );
+    let rect = wide.rect();
+    let target = rect.min + egui::vec2(680.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let medium = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(medium.query_by_label("Node").is_none());
+    medium.get_by_label("Restarts");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(520.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .query_by_label("Restarts")
+            .is_none()
+    );
+}
+
+#[test]
+fn responsive_generic_namespaced_hides_status_then_age() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::StatefulSets,
+        vec![list_row(
+            "apps",
+            "v1",
+            "StatefulSet",
+            Some("default"),
+            "database",
+            "Ready",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::StatefulSets),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [640.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    for header in ["Namespace", "Name", "Status", "Age"] {
+        assert!(wide.get_all_by_label(header).count() >= 1);
+    }
+    let rect = wide.rect();
+    let target = rect.min + egui::vec2(450.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(8);
+    let medium = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    assert!(medium.query_by_label("Status").is_none());
+    medium.get_by_label("Age");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(180.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "StatefulSets")
+            .query_by_label("Age")
+            .is_none()
+    );
 }
 
 #[test]

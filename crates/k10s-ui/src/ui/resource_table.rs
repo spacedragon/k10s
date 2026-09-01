@@ -8,7 +8,7 @@ use egui::{ScrollArea, WidgetInfo, WidgetType};
 use k10s_protocol::{ResourceListRow, ResourceProjection};
 
 use super::responsive_table::RowAction;
-use crate::workspace::{SortSpec, WindowId};
+use crate::workspace::{SortSpec, WindowId, WorkloadKind};
 
 use super::responsive_table::ColumnSpec;
 
@@ -116,6 +116,7 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
+    workload_kind: WorkloadKind,
     title: &str,
     namespaced: bool,
     search: &str,
@@ -154,13 +155,18 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
-    let specs = match rows.first().and_then(|row| row.projection.as_ref()) {
-        Some(ResourceProjection::Deployment(_)) => &DEPLOYMENT_COLUMNS[..],
-        Some(ResourceProjection::Pod(_)) => &POD_COLUMNS[..],
+    let specs = match workload_kind {
+        WorkloadKind::Deployments => &DEPLOYMENT_COLUMNS[..],
+        WorkloadKind::Pods => &POD_COLUMNS[..],
         _ if namespaced => &GENERIC_NAMESPACED[..],
         _ => &GENERIC_CLUSTER[..],
     };
-    let columns = super::responsive_table::resolve_columns(specs, ui.available_width());
+    let column_spacing = ui.spacing().item_spacing.x;
+    let table_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let columns = super::responsive_table::resolve_columns(specs, table_width, column_spacing);
     debug_assert_eq!(
         columns.horizontal_scroll,
         columns
@@ -168,14 +174,15 @@ where
             .iter()
             .map(|column| column.width)
             .sum::<f32>()
-            > ui.available_width()
+            + column_spacing * columns.visible.len().saturating_sub(1) as f32
+            > table_width
     );
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
-                .min_col_width(72.0)
+                .min_col_width(0.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
                         for column in &columns.visible {

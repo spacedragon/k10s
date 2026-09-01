@@ -202,6 +202,9 @@ Window
                                 TextRun value="Name"
                               Button label="Sort deployments by name"
                           GenericContainer
+                            Label value="Ready"
+                              TextRun value="Ready"
+                          GenericContainer
                             GenericContainer
                               Label value="Status"
                                 TextRun value="Status"
@@ -216,6 +219,10 @@ Window
                           GenericContainer
                             Button label="Select resource api-server"
                           GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
                             Label value="2/2 ready"
                               TextRun value="2/2 ready"
                           GenericContainer
@@ -225,6 +232,10 @@ Window
                               TextRun value="default"
                           GenericContainer
                             Button label="Select resource customer-notification-dispatcher-with-a-long-release-suffix"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
                           GenericContainer
                             Label value="0/3 ready · ImagePullBackOff"
                               TextRun value="0/3 ready · ImagePullBackOff"
@@ -236,6 +247,10 @@ Window
                           GenericContainer
                             Button label="Select resource web-frontend"
                           GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
                             Label value="20/20 ready"
                               TextRun value="20/20 ready"
                           GenericContainer
@@ -245,6 +260,10 @@ Window
                               TextRun value="default"
                           GenericContainer
                             Button label="Select resource retired-data-migration"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
                           GenericContainer
                             Label value="Completed · 1/1 succeeded"
                               TextRun value="Completed · 1/1 succeeded"

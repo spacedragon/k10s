@@ -693,6 +693,7 @@ pub(super) fn show<I>(
             super::resource_table::show(
                 ui,
                 window_id,
+                kind,
                 title,
                 namespaced,
                 &state.search,

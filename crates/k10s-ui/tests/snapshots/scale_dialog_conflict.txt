@@ -202,6 +202,9 @@ Window
                                 TextRun value="Name"
                               Button label="Sort deployments by name"
                           GenericContainer
+                            Label value="Ready"
+                              TextRun value="Ready"
+                          GenericContainer
                             GenericContainer
                               Label value="Status"
                                 TextRun value="Status"
@@ -216,6 +219,10 @@ Window
                               TextRun value="default"
                           GenericContainer
                             Button label="Select resource api-server"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
                           GenericContainer
                             Label value="2/2 ready"
                               TextRun value="2/2 ready"

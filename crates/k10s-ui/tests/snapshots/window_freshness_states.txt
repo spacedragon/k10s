@@ -226,10 +226,16 @@ Window
                                 TextRun value="Name"
                               Button label="Sort deployments by name"
                           GenericContainer
+                            Label value="Ready"
+                              TextRun value="Ready"
+                          GenericContainer
                             GenericContainer
                               Label value="Status"
                                 TextRun value="Status"
                               Button label="Sort deployments by status"
+                          GenericContainer
+                            Label value="Image"
+                              TextRun value="Image"
                           GenericContainer
                             GenericContainer
                               Label value="Age"
@@ -241,8 +247,15 @@ Window
                           GenericContainer
                             Button label="Select resource healthy-api"
                           GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
                             Label value="2/2 ready"
                               TextRun value="2/2 ready"
+                          GenericContainer
+                            Label value="—"
+                              TextRun value="—"
                           GenericContainer
                             Label value="2026-08-21"
                               TextRun value="2026-08-21"
@@ -297,10 +310,19 @@ Window
                                 TextRun value="Name"
                               Button label="Sort pods by name"
                           GenericContainer
+                            Label value="Ready"
+                              TextRun value="Ready"
+                          GenericContainer
                             GenericContainer
                               Label value="Status"
                                 TextRun value="Status"
                               Button label="Sort pods by status"
+                          GenericContainer
+                            Label value="Restarts"
+                              TextRun value="Restarts"
+                          GenericContainer
+                            Label value="Node"
+                              TextRun value="Node"
                           GenericContainer
                             GenericContainer
                               Label value="Age"
@@ -312,8 +334,19 @@ Window
                           GenericContainer
                             Button label="Select resource cached-pod"
                           GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
                             Label value="Running"
                               TextRun value="Running"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
+                            Label value="—"
+                              TextRun value="—"
                           GenericContainer
                             Label value="2026-08-21"
                               TextRun value="2026-08-21"

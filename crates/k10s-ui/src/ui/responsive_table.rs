@@ -71,9 +71,23 @@ impl ResolvedColumns {
     }
 }
 
-pub(super) fn resolve_columns(specs: &[ColumnSpec], available_width: f32) -> ResolvedColumns {
+pub(super) fn resolve_columns(
+    specs: &[ColumnSpec],
+    available_width: f32,
+    column_spacing: f32,
+) -> ResolvedColumns {
     let mut visible = vec![true; specs.len()];
-    let mut total: f32 = specs.iter().map(|column| column.min_width).sum();
+    let occupied = |visible: &[bool]| {
+        let count = visible.iter().filter(|shown| **shown).count();
+        specs
+            .iter()
+            .zip(visible)
+            .filter(|(_, shown)| **shown)
+            .map(|(column, _)| column.min_width)
+            .sum::<f32>()
+            + column_spacing * count.saturating_sub(1) as f32
+    };
+    let mut total = occupied(&visible);
     let mut hideable: Vec<_> = specs
         .iter()
         .enumerate()
@@ -85,7 +99,7 @@ pub(super) fn resolve_columns(specs: &[ColumnSpec], available_width: f32) -> Res
             break;
         }
         visible[index] = false;
-        total -= specs[index].min_width;
+        total = occupied(&visible);
     }
     let horizontal_scroll = total > available_width;
     let elastic_count = specs
@@ -266,18 +280,18 @@ mod tests {
 
     #[test]
     fn resolver_hides_in_priority_order_and_restores_deterministically() {
-        let wide = resolve_columns(&SERVICE, 1_000.0);
+        let wide = resolve_columns(&SERVICE, 1_000.0, 8.0);
         assert_eq!(
             wide.visible_keys(),
             vec!["namespace", "name", "type", "cluster_ip", "ports", "age"]
         );
         assert!(!wide.horizontal_scroll);
 
-        let compact = resolve_columns(&SERVICE, 640.0);
+        let compact = resolve_columns(&SERVICE, 640.0, 8.0);
         assert!(!compact.contains("cluster_ip"));
-        assert!(compact.contains("type"));
+        assert!(!compact.contains("type"));
 
-        let restored = resolve_columns(&SERVICE, 1_000.0);
+        let restored = resolve_columns(&SERVICE, 1_000.0, 8.0);
         assert_eq!(restored.visible_keys(), wide.visible_keys());
     }
 
@@ -287,7 +301,7 @@ mod tests {
             ColumnSpec::required("namespace", 400.0),
             ColumnSpec::elastic("name", 300.0),
         ];
-        let resolved = resolve_columns(&required, 640.0);
+        let resolved = resolve_columns(&required, 640.0, 8.0);
         assert!(resolved.horizontal_scroll);
         assert_eq!(resolved.width("namespace"), Some(400.0));
         assert_eq!(resolved.width("name"), Some(300.0));
@@ -314,14 +328,25 @@ mod tests {
         ];
         for fixture in [&deployment[..], &pod[..], &SERVICE[..]] {
             assert_eq!(
-                resolve_columns(fixture, 1_000.0).visible.len(),
+                resolve_columns(fixture, 1_000.0, 8.0).visible.len(),
                 fixture.len()
             );
         }
-        assert!(!resolve_columns(&deployment, 640.0).contains("image"));
-        assert!(resolve_columns(&deployment, 640.0).contains("status"));
-        assert!(!resolve_columns(&pod, 640.0).contains("node"));
-        assert!(resolve_columns(&pod, 640.0).contains("restarts"));
+        assert!(!resolve_columns(&deployment, 640.0, 8.0).contains("image"));
+        assert!(resolve_columns(&deployment, 640.0, 8.0).contains("status"));
+        assert!(!resolve_columns(&pod, 640.0, 8.0).contains("node"));
+        assert!(resolve_columns(&pod, 640.0, 8.0).contains("restarts"));
+        for fixture in [&deployment[..], &pod[..], &SERVICE[..]] {
+            let resolved = resolve_columns(fixture, 1_000.0, 8.0);
+            let painted = resolved
+                .visible
+                .iter()
+                .map(|column| column.width)
+                .sum::<f32>()
+                + 8.0 * resolved.visible.len().saturating_sub(1) as f32;
+            assert!(painted <= 1_000.0);
+            assert!((painted - 1_000.0).abs() < 0.01);
+        }
     }
 
     #[test]

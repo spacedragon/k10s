@@ -439,8 +439,13 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
+    let column_spacing = ui.spacing().item_spacing.x;
+    let table_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
     let columns =
-        super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, ui.available_width());
+        super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, table_width, column_spacing);
     debug_assert_eq!(
         columns.horizontal_scroll,
         columns
@@ -448,14 +453,15 @@ where
             .iter()
             .map(|column| column.width)
             .sum::<f32>()
-            > ui.available_width()
+            + column_spacing * columns.visible.len().saturating_sub(1) as f32
+            > table_width
     );
     ScrollArea::both()
         .id_salt(("k10s.service.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.service.table", window_id.0))
                 .striped(true)
-                .min_col_width(72.0)
+                .min_col_width(0.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
                         for column in &columns.visible {
