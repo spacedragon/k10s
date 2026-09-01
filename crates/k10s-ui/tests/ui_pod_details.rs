@@ -549,29 +549,24 @@ fn pod_actual_1000_640_resize_preserves_identity_and_metadata_expansion() {
         (operational.width() / configuration.width() - 1.35).abs() < 0.02,
         "{operational:?} {configuration:?}"
     );
-    let id = detail_window_id(&harness);
     harness
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            id,
-            WindowGeom {
-                position: [20.0, 20.0],
-                size: [600.0, 800.0],
-                collapsed: false,
-            },
-        ));
+    let rect = pod_window(&harness).rect();
+    let target = rect.min + egui::vec2(664.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
     harness.run_steps(4);
     let narrow = pod_window(&harness);
-    let Some(show_metadata) = narrow.query_by_role_and_label(Role::Button, "Show Pod metadata")
-    else {
-        return;
-    };
-    show_metadata.click();
+    narrow
+        .get_by_role_and_label(Role::Button, "Show Pod metadata")
+        .click();
     harness.run_steps(3);
     let narrow = pod_window(&harness);
     assert!(
@@ -583,21 +578,33 @@ fn pod_actual_1000_640_resize_preserves_identity_and_metadata_expansion() {
             < narrow.get_by_label("IDENTITY").rect().top()
     );
     narrow.get_by_label("pod-web-0-uid");
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            id,
-            WindowGeom {
-                position: [20.0, 20.0],
-                size: [1_024.0, 800.0],
-                collapsed: false,
-            },
-        ));
+    let rect = narrow.rect();
+    let target = rect.min + egui::vec2(1_024.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
     harness.run_steps(4);
     let restored = pod_window(&harness);
     restored.get_by_label("Operational detail column");
     restored.get_by_label("pod-web-0-uid");
+    let rect = restored.rect();
+    let target = rect.min + egui::vec2(664.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let final_narrow = pod_window(&harness);
+    final_narrow.get_by_role_and_label(Role::Button, "Hide Pod metadata");
+    final_narrow.get_by_label("PLACEMENT");
+    final_narrow.get_by_label("pod-web-0-uid");
 }
 
 #[test]

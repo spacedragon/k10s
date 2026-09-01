@@ -693,38 +693,26 @@ fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
         "{operational:?} {configuration:?}"
     );
 
-    let id = harness
-        .state()
-        .shell
-        .workspace()
-        .windows()
-        .iter()
-        .find(|window| window.kind == WindowKind::Detail)
-        .unwrap()
-        .id;
     harness
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            id,
-            WindowGeom {
-                position: [24.0, 24.0],
-                size: [600.0, 620.0],
-                collapsed: false,
-            },
-        ));
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
+        .rect();
+    let target = rect.min + egui::vec2(664.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
     harness.run_steps(4);
     let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    let Some(show_metadata) =
-        narrow.query_by_role_and_label(Role::Button, "Show Deployment metadata")
-    else {
-        return;
-    };
-    show_metadata.click();
+    narrow
+        .get_by_role_and_label(Role::Button, "Show Deployment metadata")
+        .click();
     harness.run_steps(3);
     let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     assert!(
@@ -735,21 +723,34 @@ fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
     );
     narrow.get_by_label("UID · uid-deployment-checkout");
 
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            id,
-            WindowGeom {
-                position: [24.0, 24.0],
-                size: [1_024.0, 620.0],
-                collapsed: false,
-            },
-        ));
+    let rect = narrow.rect();
+    let target = rect.min + egui::vec2(1_024.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
     harness.run_steps(4);
     let restored = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     restored.get_by_label("Operational detail column");
     restored.get_by_label("UID · uid-deployment-checkout");
+    let rect = restored.rect();
+    let target = rect.min + egui::vec2(664.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let final_narrow =
+        harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    final_narrow.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
+    final_narrow.get_by_label("TEMPLATE");
+    final_narrow.get_by_label("UID · uid-deployment-checkout");
 }
 
 #[test]
