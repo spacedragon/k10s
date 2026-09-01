@@ -9502,6 +9502,69 @@ mod tests {
         list_window.get_by_label("Select resource beta");
         list_window.get_by_label("2 deployments");
     }
+
+    #[test]
+    fn deployment_selected_row_reports_selection_without_disclosure_marker() {
+        let (mut app, window) = deployment_list_app();
+        app.web_select_resource(window, deployment_identity("alpha"));
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments \u{00b7} all namespaces",
+        );
+
+        // The selected row keeps its clean action affordance and reports the
+        // selected state through the accessibility tree (the full-row fill is
+        // the visual cue for it).
+        let selected_button = list_window.get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Clear selection for resource alpha",
+        );
+        assert_eq!(
+            selected_button.accesskit_node().toggled(),
+            Some(egui::accesskit::Toggled::True),
+            "the selected row button is flagged toggled-on for assistive tech"
+        );
+
+        // No row in the list carries a disclosure triangle: the triangle prefix
+        // was removed from the name cell, and detail opens in the detail pane.
+        let triangles: Vec<String> = list_window
+            .children_recursive()
+            .filter_map(|node| node.accesskit_node().value())
+            .filter(|value| value.contains('\u{25b6}'))
+            .collect();
+        assert!(
+            triangles.is_empty(),
+            "no row carries a disclosure triangle, got {triangles:?}"
+        );
+    }
+
+    #[test]
+    fn deployment_status_renders_tone_glyph_with_clean_access_label() {
+        let (app, _) = deployment_list_app();
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments \u{00b7} all namespaces",
+        );
+
+        // The status cell paints a tone glyph (\u{25cf} for a Ready row) but the
+        // accessible text stays the clean status value.
+        let status_labels: Vec<Option<String>> = list_window
+            .children_recursive()
+            .filter(|node| node.accesskit_node().value().as_deref() == Some("Ready"))
+            .map(|node| {
+                node.children()
+                    .find_map(|child| child.accesskit_node().value())
+            })
+            .collect();
+        assert!(
+            status_labels
+                .iter()
+                .any(|run| run.as_deref() == Some("\u{25cf} Ready")),
+            "a Ready status renders its healthy tone glyph, got {status_labels:?}"
+        );
+    }
 }
 
 #[cfg(test)]

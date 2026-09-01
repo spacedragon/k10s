@@ -267,7 +267,7 @@ Window
                                 TextRun value="—"
                           GenericContainer
                             Label value="2/2 ready"
-                              TextRun value="2/2 ready"
+                              TextRun value="● 2/2 ready"
                           GenericContainer
                             Label value="—"
                               TextRun value="—"
@@ -369,7 +369,7 @@ Window
                                 TextRun value="—"
                           GenericContainer
                             Label value="Running"
-                              TextRun value="Running"
+                              TextRun value="● Running"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -613,7 +613,7 @@ Window
                             Button label="Select resource nightly"
                           GenericContainer
                             Label value="Active 0"
-                              TextRun value="Active 0"
+                              TextRun value="● Active 0"
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
