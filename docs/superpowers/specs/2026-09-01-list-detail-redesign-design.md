@@ -41,8 +41,15 @@ Columns use three roles:
 
 - fixed critical columns for compact numeric or state values;
 - elastic identity columns such as Name;
-- lower-priority columns that may shrink or be hidden through the existing
-  column controls at narrow widths.
+- lower-priority columns that hide automatically by responsive priority at
+  narrow widths.
+
+User-configurable column visibility and persistence are not part of this
+scope. Each resource adapter declares a deterministic priority order. The
+shared table measures the available content width, allocates fixed columns,
+gives the Name column the remainder, and then removes lower-priority columns in
+adapter order until Name retains its declared minimum. Columns reappear in the
+reverse order when the window grows, without changing user state.
 
 Namespace and Name remain discoverable. Numeric values align right. Status uses
 text plus shape/color rather than color alone. Long image and identifier values
@@ -61,9 +68,22 @@ All three paths call the same guarded workspace command. Dirty YAML and live
 shell blockers continue through the existing navigation guard; selection is
 not discarded silently.
 
+The shared row interaction receives both the row identity and current
+selection. It emits `SelectRow(identity)` for a different row and
+`ClearSelection(window_id)` for the already-selected row; it never emits a
+second `SelectRow` for a toggle-off gesture. If the guard blocks or defers the
+clear command, the row, Detail state, and selection highlight remain intact.
+
 When no selection exists, integrated Detail content collapses and the list
 receives the released height. A splitter grip remains only when it represents a
 real, restorable split state.
+
+All resource windows adopt selection-derived Detail visibility. The Service
+window's legacy Hide/Show details control is removed. A restored snapshot with
+`detail_visible = false` is accepted for compatibility but ignored: no Detail
+appears without a live selection, and selecting a row shows Detail. New
+snapshots serialize the compatibility field as `true` until a later snapshot
+schema revision removes it.
 
 ## Shared Detail Frame
 
@@ -82,18 +102,36 @@ selection-close affordance. Their pinned identity and lifecycle stay unchanged.
 Vitals are independent chips containing a small muted label and a readable
 value. They never wrap into another row and are never partially clipped.
 Resource adapters mark priorities; lower-priority vitals move into an
-accessible `Show more` control when width is insufficient. Failure and warning
-states retain text and shape indicators.
+accessible `Show more` popover when width is insufficient. The popover lists
+the hidden chips vertically and never expands the vital strip. Failure and
+warning states retain text and shape indicators. Ties use declaration order so
+repeated resize operations are stable.
 
-The body owns the only vertical scroll area for a Detail tab. Header, tabs,
-actions, and footer stay fixed. Tables and exceptional long values may scroll
-horizontally only when elision would destroy required information.
+Overview and Events each give their shared body the only vertical scroll area
+for that tab. Header, tabs, actions, and footer stay fixed. Tables and
+exceptional long values may scroll horizontally only when elision would destroy
+required information. Tool tabs (Logs, Shell, YAML editor, and Service port
+forward) replace the shared body scroller with their existing dedicated
+viewport; the frame does not wrap those viewports in another vertical
+ScrollArea. Thus every `(window, tab)` has exactly one vertical scroll owner and
+tool interaction remains unchanged.
 
 ## Responsive Overview
 
-At wide widths, Overview uses two columns with the operational/table side wider
-than the configuration/KV side (approximately `1.35 : 1`). At narrow widths it
-becomes one column ordered as operational state, configuration, then identity.
+At content widths of 760 points or more, Overview uses two columns with the
+operational/table side and configuration/KV side assigned a `1.35 : 1` share
+after the gutter. Below 760 points it becomes one column ordered as operational
+state, configuration, then identity. Layout tests use 1000-point and 640-point
+content widths; resizing across 760 points must not change selection, scroll
+state, tab, or vital declaration order.
+
+At 1000 points every adapter shows all required vitals inline. At 640 points,
+Deployment preserves Rollout, Ready, Up-to-date, and Available; Pod preserves
+Status, Ready, Restarts, and Age; Service and generic kinds preserve Status,
+Age, and freshness. Remaining values appear in the `Show more` popover in
+declaration order. If even the preserved chips cannot fit, the strip scrolls
+horizontally as a last-resort accessibility fallback rather than clipping or
+wrapping.
 
 Long KV fields such as image, selector, and annotations use a two-line form:
 the label occupies its own line, while the value receives the full column
@@ -124,6 +162,23 @@ commands such as copying a name or namespace remain available when safe.
 Missing values render explicit unavailable copy or `—`; the UI does not infer
 Kubernetes state from unrelated fields. A missing typed projection preserves
 YAML and other existing tabs and shows a structured-details-unavailable body.
+
+Shared actions follow this matrix. `Yes` means visible and enabled when the
+resource capability allows it; `View` means read-only access; `No` means hidden
+or disabled with the existing explanatory tooltip.
+
+| State | Pop out | Copy identity | Logs/Shell | YAML view | YAML edit/apply | Scale/Restart/Delete | Port forward |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Live | Yes | Yes | Yes | View | Yes | Yes | Yes |
+| Loading/reconnecting with pinned identity | Yes | Yes | No | No | No | No | No |
+| Stale or failed with last good data | Yes | Yes | No | View | No | No | No |
+| Forbidden | Yes | Yes | No | No | No | No | No |
+| Gone | Yes | Yes | No | View when cached | No | No | No |
+| Legacy/missing typed projection | Yes | Yes | capability-driven | View | capability-driven | capability-driven | capability-driven |
+
+Maximize/Restore is frame-local and remains enabled whenever integrated Detail
+exists. Tabs with no authoritative or cached content render their current
+unavailable state rather than starting a new request through a disabled action.
 
 ## Accessibility and Keyboard Behavior
 
