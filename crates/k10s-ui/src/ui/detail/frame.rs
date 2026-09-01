@@ -71,7 +71,7 @@ pub(super) fn show<I: RowIdentity>(
                 node.set_label(title);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let clear = ui.button("×");
+                let clear = ui.button("×").on_hover_text("Clear selection");
                 clear.widget_info(|| {
                     WidgetInfo::labeled(WidgetType::Button, true, "Clear selection")
                 });
@@ -438,7 +438,11 @@ fn show_vital_strip(
     } else if let Some(kind) = projection.vital_expansion_label
         && !projection.overflow_vitals.is_empty()
     {
-        let response = ui.button(format!("Show more {kind} vitals"));
+        let response = ui.button(if projection.expansion.more_vitals {
+            format!("Hide more {kind} vitals")
+        } else {
+            format!("Show more {kind} vitals")
+        });
         if response.clicked() {
             projection.expansion.more_vitals = !projection.expansion.more_vitals;
         }
@@ -701,7 +705,7 @@ mod tests {
                     WindowId(77),
                     &detail,
                     &input,
-                    false,
+                    true,
                     false,
                     &[],
                     &mut Vec::new(),
@@ -728,6 +732,11 @@ mod tests {
         harness.get_by_label("Status ✕ Configured");
         harness.get_by_label("Body observed Configured");
         assert!(harness.query_by_label("Status · Pending").is_none());
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Clear selection")
+            .hover();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Clear selection");
     }
 
     #[test]
@@ -888,6 +897,7 @@ mod tests {
             .click();
         harness.run_steps(2);
         harness.get_by_label("Pod vital overflow popover");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Hide more Pod vitals");
         let node = harness.get_by_label("Node · worker-a").rect();
         let ip = harness.get_by_label("Pod IP · 10.0.0.2").rect();
         assert!(node.top() < ip.top(), "overflow declaration order changed");
@@ -902,6 +912,7 @@ mod tests {
                 .query_by_label("Pod vital overflow popover")
                 .is_none()
         );
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals");
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
             .click();
@@ -917,6 +928,7 @@ mod tests {
                 .query_by_label("Pod vital overflow popover")
                 .is_none()
         );
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals");
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
             .click();
