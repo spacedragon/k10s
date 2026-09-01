@@ -22,7 +22,6 @@ const COLUMNS: [(&str, &str); 4] = [
 pub(super) struct TableActions<I> {
     /// A row was clicked; carries the mapped window identity.
     pub row_action: Option<RowAction<I>>,
-    pub cancel_single_click_guard: bool,
     /// A row was double-clicked or popped out via its context menu; the
     /// identity is cloned for a dedicated pinned detail window.
     pub popped_out: Option<I>,
@@ -36,7 +35,6 @@ impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
             row_action: None,
-            cancel_single_click_guard: false,
             popped_out: None,
             sort: None,
             cleared: false,
@@ -180,19 +178,17 @@ where
                         name_button.widget_info(move || {
                             WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
                         });
-                        let (row_action, popped_out, cancel_guard) =
-                            super::responsive_table::row_interaction(
-                                &name_button,
-                                identity_of(row),
-                                selected,
-                            );
+                        let (row_action, popped_out) = super::responsive_table::row_interaction(
+                            &name_button,
+                            identity_of(row),
+                            selected,
+                        );
                         if row_action.is_some() {
                             actions.row_action = row_action;
                         }
                         if popped_out.is_some() {
                             actions.popped_out = popped_out;
                         }
-                        actions.cancel_single_click_guard |= cancel_guard;
                         name_button.context_menu(|ui| {
                             if ui.button("Open dedicated window").clicked() {
                                 actions.popped_out = Some(identity_of(row));

@@ -1120,7 +1120,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
 }
 
 #[test]
-fn selected_row_second_click_clears_selection_and_detail() {
+fn selected_row_single_click_eventually_clears_selection_once() {
     let mut harness = harness();
     open(
         &mut harness,
@@ -1132,7 +1132,7 @@ fn selected_row_second_click_clears_selection_and_detail() {
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, row_label)
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Pods")
@@ -1144,7 +1144,7 @@ fn selected_row_second_click_clears_selection_and_detail() {
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
     let resource = harness
@@ -1155,6 +1155,7 @@ fn selected_row_second_click_clears_selection_and_detail() {
         .expect("Pods window has resource state");
     assert!(resource.selection.is_none());
     assert!(resource.detail.is_none());
+    assert!(harness.state().shell.workspace().pending().is_none());
 }
 
 #[test]
@@ -1187,6 +1188,53 @@ fn resource_double_click_opens_dedicated_without_selecting_or_guarding() {
 }
 
 #[test]
+fn selected_clean_resource_double_click_across_frames_preserves_detail() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert!(resource.selection.is_some());
+    assert_eq!(
+        resource.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
 fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
     let mut harness = harness();
     open(
@@ -1208,7 +1256,12 @@ fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
     row.click();
-    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
     harness.run_steps(4);
 
     let resource = harness

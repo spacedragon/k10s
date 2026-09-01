@@ -349,7 +349,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
 }
 
 #[test]
-fn service_selected_row_second_click_clears_selection_and_detail() {
+fn selected_service_single_click_eventually_clears_selection_once() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
     let window = services_window_id(harness.state());
@@ -359,12 +359,12 @@ fn service_selected_row_second_click_clears_selection_and_detail() {
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, row_label)
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
     harness
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let service = harness
         .state()
@@ -374,6 +374,7 @@ fn service_selected_row_second_click_clears_selection_and_detail() {
         .expect("Services window has service state");
     assert!(service.selection.is_none());
     assert!(service.detail.is_none());
+    assert!(harness.state().shell.workspace().pending().is_none());
 }
 
 #[test]
@@ -403,6 +404,50 @@ fn service_double_click_opens_dedicated_without_selecting_or_guarding() {
 }
 
 #[test]
+fn selected_clean_service_double_click_across_frames_preserves_detail() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert!(service.selection.is_some());
+    assert_eq!(
+        service.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
+}
+
+#[test]
 fn selected_dirty_service_double_click_preserves_selection_and_skips_guard() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
@@ -421,7 +466,12 @@ fn selected_dirty_service_double_click_preserves_selection_and_skips_guard() {
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend");
     row.click();
-    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
     harness.run_steps(4);
 
     assert!(

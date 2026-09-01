@@ -172,7 +172,6 @@ fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 /// Outcome of rendering one Services table frame.
 struct TableActions<I> {
     row_action: Option<super::responsive_table::RowAction<I>>,
-    cancel_single_click_guard: bool,
     popped_out: Option<I>,
     sort: Option<SortSpec>,
 }
@@ -181,7 +180,6 @@ impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
             row_action: None,
-            cancel_single_click_guard: false,
             popped_out: None,
             sort: None,
         }
@@ -381,20 +379,10 @@ where
     }
 
     if let Some(actions) = list_actions {
-        if actions.cancel_single_click_guard {
-            queued.push(WorkspaceCommand::ResolveBlock(
-                crate::workspace::BlockResolution::Cancel,
-            ));
-        }
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        let guarded_double_click = actions.cancel_single_click_guard
-            && state
-                .detail
-                .as_ref()
-                .is_some_and(|detail| detail.yaml.dirty || detail.shell.connected);
-        if let Some(action) = actions.row_action.filter(|_| !guarded_double_click) {
+        if let Some(action) = actions.row_action {
             queued.push(action.into_command(window_id));
         }
         // Double-click and the row context menu pop a dedicated window out.
@@ -493,7 +481,7 @@ fn service_row<I>(
         super::responsive_table::row_action_label("service", &row.identity.name, selected);
     name_button
         .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    let (row_action, popped_out, cancel_guard) =
+    let (row_action, popped_out) =
         super::responsive_table::row_interaction(&name_button, identity_of(row), selected);
     if row_action.is_some() {
         actions.row_action = row_action;
@@ -501,7 +489,6 @@ fn service_row<I>(
     if popped_out.is_some() {
         actions.popped_out = popped_out;
     }
-    actions.cancel_single_click_guard |= cancel_guard;
     name_button.context_menu(|ui| {
         if ui.button("Open dedicated window").clicked() {
             actions.popped_out = Some(identity_of(row));

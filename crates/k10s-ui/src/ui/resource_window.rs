@@ -766,11 +766,6 @@ pub(super) fn show<I>(
     }
 
     if let Some(actions) = list_actions {
-        if actions.cancel_single_click_guard {
-            queued.push(WorkspaceCommand::ResolveBlock(
-                crate::workspace::BlockResolution::Cancel,
-            ));
-        }
         if actions.cleared {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
             if namespaced {
@@ -783,12 +778,7 @@ pub(super) fn show<I>(
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        let guarded_double_click = actions.cancel_single_click_guard
-            && state
-                .detail
-                .as_ref()
-                .is_some_and(|detail| detail.yaml.dirty || detail.shell.connected);
-        if let Some(action) = actions.row_action.filter(|_| !guarded_double_click) {
+        if let Some(action) = actions.row_action {
             queued.push(action.into_command(window_id));
         }
         // Double-click and the row context menu pop a dedicated window out;
