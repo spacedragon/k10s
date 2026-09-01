@@ -218,51 +218,52 @@ Window
               GenericContainer
                 Button label="Clear selection"
                 GenericContainer
+                  Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"
+                    TextRun value="Pod · default / db-postgres-0"
                   GenericContainer
-                    GenericContainer
-                      Label value="Details"
-                        TextRun value="Details"
-                      Label value="POD"
-                        TextRun value="POD"
-                      Label value="db-postgres-0"
-                        TextRun value="db-postgres-0"
-                    GenericContainer
-                      Label value="Kind Pod"
-                        TextRun value="Kind Pod"
-                      Label value="Namespace default"
-                        TextRun value="Namespace default"
-                      Label value="Context dev-local"
-                        TextRun value="Context dev-local"
-                    GenericContainer
-                      Label value="UID uid-dev-local-pod-default-db-postgres-0"
-                        TextRun value="UID uid-dev-local-pod-default-db-postgres-0"
-                      Label value="Created 2026-08-21T00:50:10Z"
-                        TextRun value="Created 2026-08-21T00:50:10Z"
-                      Label value="Fresh · live"
-                        TextRun value="Fresh · live"
-                  Button label="Pop out ↗"
-                  Button label="Maximize"
-                GenericContainer
-                  Button label="Tab Overview"
-                  Button label="Tab Events"
-                  Button label="Tab YAML"
-                  Button label="Tab Logs"
-                  Button label="Tab Shell"
-                GenericContainer
-                  Button label="Delete resource"
-                  Button label="View logs"
-                  Button label="Exec shell"
-                  Button label="Edit YAML"
+                    Button label="Maximize"
+                    Button label="Pop out ↗"
                 GenericContainer
                   GenericContainer
-                    Label value="Overview"
-                      TextRun value="Overview"
                     GenericContainer
                       GenericContainer
-                        Label value="Status Running"
-                          TextRun value="Status Running"
-                Label value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
-                  TextRun value="Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close"
+                        Label value="Status ● —"
+                          TextRun value="Status ● —"
+                        Label value="Ready · —"
+                          TextRun value="Ready · —"
+                        Label value="Restarts · —"
+                          TextRun value="Restarts · —"
+                        Label value="Age · —"
+                          TextRun value="Age · —"
+                        Button label="Show more Pod vitals"
+                        Label value="Freshness · unavailable"
+                          TextRun value="Freshness · unavailable"
+                Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
+                  TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Tab Overview"
+                        Button label="Tab Events"
+                        Button label="Tab YAML"
+                        Button label="Tab Logs"
+                        Button label="Tab Shell"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      GenericContainer
+                        Button label="Delete…"
+                        Button label="Actions"
+                        Button label="Copy name"
+                ScrollView label="Detail body"
+                  GenericContainer
+                    GenericContainer
+                      Label value="Structured details unavailable"
+                        TextRun value="Structured details unavailable"
+                GenericContainer
+                  Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
+                    TextRun value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
     Splitter
     Splitter
     Splitter

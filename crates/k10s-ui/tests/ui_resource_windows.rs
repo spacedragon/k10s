@@ -781,6 +781,13 @@ fn assert_compact_size(rect: egui::Rect) {
     );
 }
 
+fn assert_compact_detail_size(rect: egui::Rect) {
+    assert!(
+        rect.width() < 360.0 && rect.height() < 280.0,
+        "detail window rect {rect:?} must remain compact while preserving its fixed frame chrome"
+    );
+}
+
 fn resize_window_toward_compact(
     harness: &mut Harness<'static, Fixture>,
     title: &str,
@@ -892,7 +899,9 @@ fn normal_and_free_modes_apply_detail_size_policy() {
         .build_ui_state(render, fixture(false));
     normal.run_steps(4);
     assert_normal_size(
-        normal.get_by_role_and_label(Role::Window, "Detail").rect(),
+        normal
+            .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
+            .rect(),
         egui::vec2(640.0, 420.0),
     );
 
@@ -901,7 +910,10 @@ fn normal_and_free_modes_apply_detail_size_policy() {
         .with_pixels_per_point(1.0)
         .build_ui_state(render, fixture(true));
     free.run_steps(4);
-    assert_compact_size(free.get_by_role_and_label(Role::Window, "Detail").rect());
+    assert_compact_detail_size(
+        free.get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
+            .rect(),
+    );
 }
 
 #[test]
@@ -1058,9 +1070,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Pod");
-    window.get_by_label("Namespace default");
+    window.get_by_label("Pod · default / db-postgres-0");
     // Without a resolved backend response the pane keeps its pinned
     // identity header and shows a loading state.
     window.get_by_label("Loading details");
@@ -1073,7 +1083,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("web-frontend-7d9f8-00001");
-    window.get_by_label("Details");
+    window.get_by_label("Pod · default / db-postgres-0");
 
     harness
         .state_mut()
@@ -1082,7 +1092,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("web-frontend-7d9f8-00001");
-    window.get_by_label("Details");
+    window.get_by_label("Pod · default / db-postgres-0");
 
     // Clearing selection removes the contextual bottom panel.
     window
@@ -1090,7 +1100,11 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Pod · default / db-postgres-0")
+            .is_none()
+    );
 }
 
 #[test]

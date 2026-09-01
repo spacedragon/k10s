@@ -11,7 +11,7 @@ use k10s_backend::testkit::RecordedApiServer;
 use k10s_backend::{
     BackendKernel, ContextInfo, FakeKubernetes, KernelQueryResult, KubeAdapter, Query, Subscribe,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Real-kubeconfig fixture carrying credential material that must never reach
 /// the wire.
@@ -355,7 +355,8 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
         assert!(!text.contains("resource_version"), "{label}: rv leaked");
     }
 
-    // Row-level shape parity (row counts differ by dataset design).
+    // Base row fields are common across adapters. The recorded adapter has a
+    // typed Pod projection; legacy fake fixture rows intentionally omit it.
     let fake_rows = fake_payload["rows"].as_array().unwrap();
     let kube_rows = kube_payload["rows"].as_array().unwrap();
     assert!(!fake_rows.is_empty() && !kube_rows.is_empty());
@@ -367,10 +368,9 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
             .collect::<std::collections::BTreeSet<_>>()
     };
     for kube_row in kube_rows {
-        assert_eq!(
-            row_keys(&fake_rows[0]),
-            row_keys(kube_row),
-            "row keys drifted between adapters"
+        assert!(
+            row_keys(&fake_rows[0]).is_subset(&row_keys(kube_row)),
+            "normalized rows retain every legacy base field"
         );
         let identity_keys = |row: &Value| {
             row["identity"]
@@ -386,6 +386,7 @@ async fn fake_and_kube_adapters_agree_on_resource_list_shape() {
     // Both adapters produce honest summaries on the same projection: the
     // kube pod carries the phase from its recorded status.
     assert_eq!(kube_rows[0]["summary"], "Running");
+    assert_eq!(kube_rows[0]["projection"]["kind"], "pod");
 }
 
 /// Shared resource-detail wire contract: the fake adapter's stored records
@@ -500,6 +501,7 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
                 "identity",
                 "manifest",
                 "ownerReferences",
+                "projection",
                 "related",
                 "revision",
                 "sections"
@@ -563,6 +565,35 @@ async fn fake_and_kube_adapters_agree_on_resource_detail_shape() {
         assert!(!text.contains("\"resourceVersion\""), "{label}: rv leaked");
         assert!(text.contains("manifest"), "{label}: manifest missing");
     }
+
+    assert_eq!(
+        kube_payload["projection"],
+        json!({
+            "kind": "deployment",
+            "desiredReplicas": 2,
+            "readyReplicas": 2,
+            "selector": {},
+            "conditions": [],
+            "templateContainers": [],
+            "templateLabels": {},
+            "templateAnnotations": {},
+            "labels": {"app": "web"},
+            "annotations": {},
+            "createdAt": "2026-08-21T00:00:00Z",
+        }),
+        "recorded kube Deployment detail preserves only typed source fields"
+    );
+    assert_eq!(fake_payload["projection"]["kind"], "deployment");
+    assert_eq!(fake_payload["projection"]["desiredReplicas"], 20);
+    assert_eq!(fake_payload["projection"]["readyReplicas"], 20);
+    assert_eq!(
+        fake_payload["projection"]["templateContainers"],
+        json!([{"name": "web", "image": "example/web-frontend:v1"}])
+    );
+    assert_eq!(
+        fake_payload["projection"]["conditions"][0]["reason"],
+        "MinimumReplicasAvailable"
+    );
 
     // Relations are deliberately independent so detail shape never inherits
     // the latency of a catalog-wide owner traversal.
@@ -657,9 +688,9 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
         200,
         &format!(
             r#"{{"kind":"PodMetricsList","apiVersion":"metrics.k8s.io/v1beta1","metadata":{{}},"items":[
-      {{"metadata":{{"name":"web","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+      {{"metadata":{{"name":"web","namespace":"default","uid":"uid-kube-web"}},"timestamp":"{sampled_at}","window":"30s",
        "containers":[{{"name":"app","usage":{{"cpu":"220m","memory":"134217728Ki"}}}}]}},
-      {{"metadata":{{"name":"half","namespace":"default"}},"timestamp":"{sampled_at}","window":"30s",
+      {{"metadata":{{"name":"half","namespace":"default","uid":"uid-kube-half"}},"timestamp":"{sampled_at}","window":"30s",
        "containers":[{{"name":"app","usage":{{"cpu":"90m"}}}}]}}
     ]}}"#
         ),
@@ -728,11 +759,16 @@ async fn fake_and_kube_adapters_agree_on_resource_metrics_shape() {
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(
                 keys,
-                ["identity", "metrics"]
+                ["containers", "identity", "metrics"]
                     .map(str::to_owned)
                     .into_iter()
                     .collect(),
                 "{label}: resource-metrics top-level keys drifted"
+            );
+            assert_eq!(
+                payload["containers"].as_array().map(Vec::len),
+                if label == "absent" { Some(0) } else { Some(1) },
+                "{label}: available container samples retain exact names"
             );
         }
         // Per-case availability agrees, and the present-key sets match.
@@ -781,11 +817,43 @@ fn payload_text(payloads: &[&Value]) -> String {
 async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
     use std::sync::{Arc, Mutex as StdMutex};
 
+    use k10s_backend::port::{
+        ContainerStateProjection, PodContainerProjection, PodProjection, ResourceProjection,
+    };
     use k10s_backend::runtime::{ListedState, WatchRow, WatchSource, WatchUpdate};
     use k10s_backend::{BackendEvent, Gvk, ResourceRef, Subscribe};
 
     fn pods_gvk() -> Gvk {
         Gvk::core("v1", "Pod")
+    }
+
+    fn pod_projection() -> ResourceProjection {
+        ResourceProjection::Pod(PodProjection {
+            phase: Some("Running".into()),
+            ready_containers: Some(1),
+            total_containers: Some(1),
+            restart_count: Some(0),
+            containers: vec![PodContainerProjection {
+                name: "app".into(),
+                image: Some("example/fake-app:v1".into()),
+                state: Some(ContainerStateProjection::Running),
+                ready: Some(true),
+                restart_count: Some(0),
+                last_termination: None,
+            }],
+            conditions: Vec::new(),
+            node_name: Some("fake-node".into()),
+            pod_ip: None,
+            host_ip: None,
+            qos_class: Some("Burstable".into()),
+            priority: None,
+            service_account: Some("default".into()),
+            restart_policy: Some("Always".into()),
+            ports: Vec::new(),
+            labels: [("app".into(), "web".into())].into_iter().collect(),
+            annotations: Default::default(),
+            created_at: Some("2026-08-21T00:00:00Z".into()),
+        })
     }
 
     #[derive(Debug)]
@@ -815,7 +883,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                         summary: String::new(),
                         created_at: "2026-08-21T00:00:00Z".into(),
                         owner_references: Vec::new(),
-                        projection: None,
+                        projection: Some(pod_projection()),
                     }],
                 })
             })
@@ -932,7 +1000,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                 summary: "CrashLoopBackOff".into(),
                 created_at: "2026-08-21T00:00:00Z".into(),
                 owner_references: Vec::new(),
-                projection: None,
+                projection: Some(pod_projection()),
             }),
             WatchUpdate::Delete(ResourceRef {
                 context: "contract-mock".into(),

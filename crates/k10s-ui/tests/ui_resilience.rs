@@ -13,9 +13,10 @@ use egui_kittest::{
     kittest::{NodeT as _, Queryable as _},
 };
 use k10s_protocol::{
-    BackendRevision, CapacityUsage, ClusterTotals, DetailRow, DetailSection, GroupVersionKind,
-    InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, NodeRow,
-    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow, StreamTarget,
+    BackendRevision, CapacityUsage, ClusterTotals, ContainerStateProjection, DetailRow,
+    DetailSection, GroupVersionKind, InfrastructureResponse, MetricsAvailability, MetricsCondition,
+    MetricsStatus, NodeRow, PodContainerProjection, PodProjection, ResourceCapabilities,
+    ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection, StreamTarget,
 };
 use k10s_ui::{
     ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness, tools::LogsAction},
@@ -184,8 +185,33 @@ fn pod_detail(name: &str) -> ResourceDetailResponse {
             can_exec: true,
             ..ResourceCapabilities::default()
         },
-        manifest: format!("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {name}\n"),
-        projection: None,
+        manifest: "SENTINEL MANIFEST: runtime tools must not parse this".into(),
+        projection: Some(ResourceProjection::Pod(PodProjection {
+            phase: Some("Running".into()),
+            ready_containers: Some(1),
+            total_containers: Some(1),
+            restart_count: Some(0),
+            containers: vec![PodContainerProjection {
+                name: "app".into(),
+                image: None,
+                state: Some(ContainerStateProjection::Running),
+                ready: Some(true),
+                restart_count: Some(0),
+                last_termination: None,
+            }],
+            conditions: Vec::new(),
+            node_name: None,
+            pod_ip: None,
+            host_ip: None,
+            qos_class: None,
+            priority: None,
+            service_account: None,
+            restart_policy: None,
+            ports: Vec::new(),
+            labels: Default::default(),
+            annotations: Default::default(),
+            created_at: None,
+        })),
     }
 }
 
@@ -491,12 +517,13 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     let deployment_window = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
         deployment_window
-            .get_by_role_and_label(Role::Button, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Scale…")
             .accesskit_node()
             .is_disabled()
     );
-    deployment_window
-        .get_by_label("Scale, delete, and YAML edits are disabled until this window is live");
+    deployment_window.get_by_label(
+        "Scale, restart, delete, and YAML edits are disabled until this window is live",
+    );
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Scale workload")
@@ -514,7 +541,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Deployments")
-            .get_by_role_and_label(Role::Button, "Scale workload")
+            .get_by_role_and_label(Role::Button, "Scale…")
             .accesskit_node()
             .is_disabled(),
         "the disconnected fallback gates cached detail controls"
@@ -647,8 +674,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .apply_workspace_command(tall_detail_pane(id));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Deployment");
+    window.get_by_label("Deployment · default / web-frontend");
 
     // The object is deleted behind the watch: the authoritative rows drop
     // it while this window still pins its identity.
@@ -666,7 +692,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         "the gone row must leave the table"
     );
     // Gone renders only the pinned identity header plus the banner.
-    window.get_by_label("Kind Deployment");
+    window.get_by_label("Deployment · default / web-frontend");
     window.get_by_label("This resource no longer exists");
     assert!(
         window.query_by_label("Loading details").is_none(),
@@ -678,7 +704,11 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Deployment · default / web-frontend")
+            .is_none()
+    );
 }
 
 #[test]
@@ -717,8 +747,8 @@ fn a_gone_selection_beats_any_cached_detail_response() {
     );
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("Created 2026-08-21T00:00:00Z");
-    window.get_by_role_and_label(Role::Button, "Scale workload");
+    window.get_by_label("Structured details unavailable");
+    window.get_by_role_and_label(Role::Button, "Scale…");
 
     // The object is deleted behind the watch while the cache is hot.
     harness.state_mut().feed.lists.insert(
@@ -735,7 +765,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         "the gone row must leave the table"
     );
     window.get_by_label("This resource no longer exists");
-    for stale_control in ["Scale workload", "Delete resource", "Loading details"] {
+    for stale_control in ["Scale…", "Delete…", "Loading details"] {
         assert!(
             window.query_by_label(stale_control).is_none()
                 && window
@@ -749,7 +779,11 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    assert!(window.query_by_label("Details").is_none());
+    assert!(
+        window
+            .query_by_label("Deployment · default / web-frontend")
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,7 +1160,7 @@ fn minimum_size_windows_keep_list_and_details_non_overlapping() {
     let window_rect = window.rect();
     let row = window.get_by_label("web-frontend-7d9f8-00001");
     let row_rect = row.rect();
-    let details = window.get_by_label("Details");
+    let details = window.get_by_label("Pod · default / db-postgres-0");
     let details_rect = details.rect();
 
     assert!(

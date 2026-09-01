@@ -12,11 +12,11 @@ use k10s_protocol::{
     REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
     REQUEST_RESOURCE_RELATIONS, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
     ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResourceRefRequest, ResourceRelationsResponse, ResourceTypesRequest,
-    ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind,
-    ServerPayload, SessionId, StreamTarget, StreamTicketRequest, StreamTicketResponse, StreamType,
-    Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe, YamlApplyRequest, YamlOutcome,
-    YamlValidateRequest,
+    ResourceListRow, ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse,
+    ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
+    ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
+    StreamTicketResponse, StreamType, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
+    YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -203,6 +203,8 @@ pub enum Query {
     DeletePreflight(k10s_protocol::DeletePreflightRequest),
     /// Resolve related resources independently of the primary detail.
     ResourceRelations(ResourceIdentity),
+    /// Retrieve availability-gated metrics for one exact Pod identity.
+    ResourceMetrics(ResourceIdentity),
     /// List the selectable resource types of one context.
     ResourceTypes(ResourceTypesRequest),
     /// Retrieve Overview, Nodes, Storage, and cluster metrics for a context.
@@ -388,6 +390,8 @@ pub enum QueryResult {
     DeletePreflight(Box<k10s_protocol::DeletePreflightResponse>),
     /// Independently resolved related resource groups.
     ResourceRelations(Box<ResourceRelationsResponse>),
+    /// Availability-gated metrics for one exact Pod identity.
+    ResourceMetrics(Box<ResourceMetricsResponse>),
     /// Selectable resource types of one context (built-ins and CRDs).
     ResourceTypes(Box<ResourceTypesResponse>),
     /// Complete infrastructure projection.
@@ -535,6 +539,7 @@ impl PendingAction {
             Self::Query(Query::ResourceDetail(_)) => "resource.detail",
             Self::Query(Query::DeletePreflight(_)) => k10s_protocol::REQUEST_DELETE_PREFLIGHT,
             Self::Query(Query::ResourceRelations(_)) => REQUEST_RESOURCE_RELATIONS,
+            Self::Query(Query::ResourceMetrics(_)) => "resource.metrics",
             Self::Query(Query::ResourceTypes(_)) => "resource.types",
             Self::Query(Query::Infrastructure(_)) => "infrastructure.get",
             Self::Query(Query::YamlValidate { .. }) => "yaml.validate",
@@ -580,6 +585,9 @@ impl PendingAction {
             }),
             Self::Query(Query::DeletePreflight(request)) => encode(request),
             Self::Query(Query::ResourceRelations(identity)) => encode(ResourceRefRequest {
+                identity: identity.clone(),
+            }),
+            Self::Query(Query::ResourceMetrics(identity)) => encode(ResourceRefRequest {
                 identity: identity.clone(),
             }),
             Self::Query(Query::ResourceTypes(request)) => encode(request),
@@ -1755,6 +1763,26 @@ impl ClientState {
                     }
                     QueryResult::ResourceRelations(Box::new(relations))
                 }
+                PendingAction::Query(Query::ResourceMetrics(identity)) => {
+                    let metrics: ResourceMetricsResponse = frame
+                        .decode_response_payload()
+                        .map_err(|error| ClientError::Protocol(error.message))?;
+                    if metrics.identity != *identity {
+                        self.pending.remove(&id);
+                        self.completed_failures.insert(
+                            id.clone(),
+                            ErrorFrame::new(
+                                ErrorCode::InvalidRequest,
+                                "resource metrics response did not match request",
+                                Retryability::Never,
+                                ErrorScope::Request,
+                                id.as_str(),
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    QueryResult::ResourceMetrics(Box::new(metrics))
+                }
                 PendingAction::Query(Query::ResourceTypes(_)) => {
                     let types: ResourceTypesResponse = frame
                         .decode_response_payload()
@@ -2139,7 +2167,9 @@ impl ClientState {
                     retain_failure = matches!(
                         pending.action,
                         PendingAction::Query(
-                            Query::Infrastructure(_) | Query::ResourceRelations(_)
+                            Query::Infrastructure(_)
+                                | Query::ResourceRelations(_)
+                                | Query::ResourceMetrics(_)
                         )
                     );
                     pending.cancelled

@@ -33,11 +33,11 @@ pub use operation::{
 pub use port::{
     AdapterError, ApiResourceDescriptor, BackendError, BackendEvent, Command, ContextAvailability,
     ContextInfo, ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, MetricsSample,
-    OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, Query, QueryResult,
-    RecordEvent, RecordEventsCondition, RelatedData, RelatedRecordGroup, ResourceListData,
-    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
-    ServiceProjection, StreamGrant, StreamInput, StreamKind, StreamRouteKind, Subscribe,
-    SubscriptionHandle, TargetPort, TransportProtocol,
+    OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, PodContainerPort,
+    Query, QueryResult, RecordEvent, RecordEventsCondition, RelatedData, RelatedRecordGroup,
+    ResourceListData, ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData,
+    ServicePort, ServiceProjection, StreamGrant, StreamInput, StreamKind, StreamRouteKind,
+    Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use port_forward::{
     PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,

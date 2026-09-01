@@ -54,6 +54,10 @@ fn deployments_gvk() -> Gvk {
     Gvk::new("apps", "v1", "Deployment")
 }
 
+fn replica_sets_gvk() -> Gvk {
+    Gvk::new("apps", "v1", "ReplicaSet")
+}
+
 fn pods_gvk() -> Gvk {
     Gvk::core("v1", "Pod")
 }
@@ -902,7 +906,8 @@ async fn service_details_carry_structured_projection() {
         k10s_protocol::TransportProtocol::Udp
     );
 
-    // Deployment details keep the projection absent.
+    // Deployment details carry the same authoritative rollout projection as
+    // their list rows.
     server.set_response(
         "/apis/apps/v1/namespaces/default/deployments/web",
         200,
@@ -911,5 +916,192 @@ async fn service_details_carry_structured_projection() {
     let deployment_detail = crate::detail(&kernel, reference(deployments_gvk(), "web", "uid-web"))
         .await
         .expect("deployment detail resolves");
-    assert!(deployment_detail.projection.is_none());
+    let Some(k10s_protocol::ResourceProjection::Deployment(projection)) =
+        deployment_detail.projection
+    else {
+        panic!("deployment detail carries a Deployment projection")
+    };
+    assert_eq!(projection.desired_replicas, Some(3));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.labels.get("app").map(String::as_str),
+        Some("web")
+    );
+}
+
+#[tokio::test]
+async fn replica_set_details_carry_only_authoritative_rollout_fields() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/apis/apps/v1/namespaces/default/replicasets/web-12",
+        200,
+        &json!({
+            "kind": "ReplicaSet",
+            "apiVersion": "apps/v1",
+            "metadata": {
+                "name": "web-12",
+                "namespace": NS,
+                "uid": "uid-rs-web-12",
+                "resourceVersion": "43",
+                "creationTimestamp": "2026-08-21T00:01:00Z",
+                "annotations": {"deployment.kubernetes.io/revision": "12"},
+            },
+            "spec": {
+                "replicas": 4,
+                "selector": {"matchLabels": {"app": "web"}},
+                "template": {"spec": {"containers": [
+                    {"name": "web", "image": "example/web:v3"},
+                    {"name": "sidecar"}
+                ]}},
+            },
+            "status": {"readyReplicas": 3},
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(
+        &kernel,
+        reference(replica_sets_gvk(), "web-12", "uid-rs-web-12"),
+    )
+    .await
+    .expect("ReplicaSet resolves");
+
+    let Some(k10s_protocol::ResourceProjection::ReplicaSet(projection)) = detail.projection else {
+        panic!("ReplicaSet detail carries a rollout projection")
+    };
+    assert_eq!(projection.revision, 12);
+    assert_eq!(projection.replicas, Some(4));
+    assert_eq!(projection.ready_replicas, Some(3));
+    assert_eq!(
+        projection.images,
+        vec![
+            k10s_protocol::ContainerImageProjection {
+                name: "web".into(),
+                image: Some("example/web:v3".into()),
+            },
+            k10s_protocol::ContainerImageProjection {
+                name: "sidecar".into(),
+                image: None,
+            },
+        ]
+    );
+    assert_eq!(
+        projection.created_at.as_deref(),
+        Some("2026-08-21T00:01:00Z")
+    );
+}
+
+#[tokio::test]
+async fn pod_details_carry_the_same_authoritative_projection_as_list_rows() {
+    let server = RecordedApiServer::standard();
+    server.set_response(
+        "/api/v1/namespaces/default/pods/web",
+        200,
+        &json!({
+            "kind": "Pod",
+            "apiVersion": "v1",
+            "metadata": {
+                "name": "web",
+                "namespace": NS,
+                "uid": "uid-pod-web",
+                "resourceVersion": "44",
+                "creationTimestamp": "2026-08-21T00:00:00Z",
+                "labels": {"app": "web"},
+                "annotations": {"example.io/trace": "enabled"},
+            },
+            "spec": {
+                "serviceAccountName": "web",
+                "restartPolicy": "Always",
+                "priority": 1000,
+                "containers": [{
+                    "name": "app",
+                    "image": "example/web:v1",
+                    "ports": [{"name": "http", "containerPort": 8080}]
+                }]
+            },
+            "status": {
+                "phase": "Running",
+                "hostIP": "192.168.1.7",
+                "podIP": "10.42.0.7",
+                "qosClass": "Burstable",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{
+                    "name": "app",
+                    "image": "example/web:v1",
+                    "ready": true,
+                    "restartCount": 2,
+                    "state": {"running": {}}
+                }]
+            }
+        })
+        .to_string(),
+    );
+    let kernel = kernel(&server);
+
+    let detail = detail(&kernel, reference(pods_gvk(), "web", "uid-pod-web"))
+        .await
+        .expect("pod resolves");
+
+    let Some(k10s_protocol::ResourceProjection::Pod(projection)) = detail.projection else {
+        panic!("pod detail carries a Pod projection")
+    };
+    assert_eq!(projection.phase.as_deref(), Some("Running"));
+    assert_eq!(projection.ready_containers, Some(1));
+    assert_eq!(projection.restart_count, Some(2));
+    assert_eq!(projection.host_ip.as_deref(), Some("192.168.1.7"));
+    assert_eq!(projection.qos_class.as_deref(), Some("Burstable"));
+    assert_eq!(projection.service_account.as_deref(), Some("web"));
+    assert_eq!(projection.ports[0].container_name, "app");
+    assert_eq!(projection.ports[0].container_port, 8080);
+}
+
+/// Restart capability must mirror the existing mutation allow-list exactly:
+/// only the three pod-template workloads accepted by `Command::Restart`
+/// advertise the action.
+#[test]
+fn restart_capability_matches_supported_workload_kinds() {
+    use std::collections::BTreeMap;
+
+    use k10s_backend::kernel::ResourceDetailResult;
+    use k10s_backend::{RecordEventsCondition, ResourceRecord};
+
+    let cases = [
+        (Gvk::new("apps", "v1", "Deployment"), true),
+        (Gvk::new("apps", "v1", "StatefulSet"), true),
+        (Gvk::new("apps", "v1", "DaemonSet"), true),
+        (Gvk::new("apps", "v1", "ReplicaSet"), false),
+        (Gvk::new("batch", "v1", "Job"), false),
+        (Gvk::new("batch", "v1", "CronJob"), false),
+        (Gvk::core("v1", "Pod"), false),
+        (Gvk::core("v1", "Service"), false),
+    ];
+
+    for (gvk, expected) in cases {
+        let kind = gvk.kind.clone();
+        let detail = ResourceDetailResult::new(ResourceRecord {
+            reference: ResourceRef {
+                context: CONTEXT.into(),
+                gvk,
+                namespace: Some(NS.into()),
+                name: "target".into(),
+                uid: format!("uid-{kind}"),
+            },
+            revision: 1,
+            labels: BTreeMap::new(),
+            summary: "ready".into(),
+            created_at: "2026-08-21T00:00:00Z".into(),
+            owner_references: Vec::new(),
+            events: Vec::new(),
+            events_condition: RecordEventsCondition::Available,
+            manifest: String::new(),
+            projection: None,
+        })
+        .wire_payload();
+
+        assert_eq!(
+            detail.capabilities.can_restart, expected,
+            "restart capability drifted for {kind}"
+        );
+    }
 }

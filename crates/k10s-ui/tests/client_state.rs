@@ -1,9 +1,10 @@
 use k10s_protocol::{
-    BackendRevision, BootstrapResponse, CapacityUsage, ClientKind, ClusterTotals, ErrorCode,
-    ErrorFrame, ErrorScope, Event, GroupVersionKind, InfrastructureRequest, InfrastructureResponse,
-    MetricsAvailability, MetricsCondition, MetricsStatus, ProtocolVersion, RequestId,
-    ResourceIdentity, ResourceRefRequest, ResourceRelationsResponse, ResumeStatus, Retryability,
-    ServerFrame, ServerKind, SessionId, StorageInventory, Subscribed, SubscriptionId, Welcome,
+    BackendRevision, BootstrapResponse, CapacityUsage, ClientKind, ClusterTotals, ContainerMetrics,
+    ErrorCode, ErrorFrame, ErrorScope, Event, GroupVersionKind, InfrastructureRequest,
+    InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, PodMetrics,
+    ProtocolVersion, RequestId, ResourceIdentity, ResourceMetricsResponse, ResourceRefRequest,
+    ResourceRelationsResponse, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId,
+    StorageInventory, Subscribed, SubscriptionId, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, Query, QueryResult,
@@ -140,6 +141,132 @@ fn resource_relations_response_must_echo_the_exact_requested_identity() {
         assert!(!failure.safe_message.contains("uid-from-an-older-object"));
         assert!(!failure.safe_message.contains("production"));
     }
+}
+
+#[test]
+fn resource_metrics_query_encodes_and_decodes_named_container_samples() {
+    let mut client = ready_client();
+    let identity = ResourceIdentity {
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        ..relation_identity()
+    };
+    let request = client
+        .begin(Query::ResourceMetrics(identity.clone()))
+        .unwrap();
+
+    let frame = client.take_outbound().unwrap();
+    let k10s_protocol::ClientPayload::Request(envelope) = frame.decode_payload().unwrap() else {
+        panic!("expected request");
+    };
+    assert_eq!(envelope.request_kind, "resource.metrics");
+    assert_eq!(
+        serde_json::from_value::<ResourceRefRequest>(envelope.payload).unwrap(),
+        ResourceRefRequest {
+            identity: identity.clone()
+        }
+    );
+
+    let response = ResourceMetricsResponse {
+        identity,
+        metrics: PodMetrics {
+            availability: MetricsAvailability::Available,
+            cpu_millicores: Some(125),
+            memory_bytes: Some(64 * 1024 * 1024),
+            collected_at: Some("2026-08-31T12:00:00Z".into()),
+        },
+        containers: vec![
+            ContainerMetrics {
+                name: "app".into(),
+                metrics: PodMetrics {
+                    availability: MetricsAvailability::Available,
+                    cpu_millicores: Some(100),
+                    memory_bytes: Some(48 * 1024 * 1024),
+                    collected_at: Some("2026-08-31T12:00:00Z".into()),
+                },
+            },
+            ContainerMetrics {
+                name: "metrics-sidecar".into(),
+                metrics: PodMetrics {
+                    availability: MetricsAvailability::Partial,
+                    cpu_millicores: Some(25),
+                    memory_bytes: None,
+                    collected_at: Some("2026-08-31T12:00:00Z".into()),
+                },
+            },
+        ],
+    };
+    client
+        .apply(ServerFrame::response(
+            request.id().clone(),
+            response.clone(),
+        ))
+        .unwrap();
+    assert_eq!(
+        client.take(request),
+        Some(QueryResult::ResourceMetrics(Box::new(response)))
+    );
+}
+
+#[test]
+fn resource_metrics_response_must_echo_the_exact_requested_identity() {
+    let expected = ResourceIdentity {
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        ..relation_identity()
+    };
+    let mut client = ready_client();
+    let request = client
+        .begin(Query::ResourceMetrics(expected.clone()))
+        .unwrap();
+    let _outbound = client.take_outbound().unwrap();
+
+    client
+        .apply(ServerFrame::response(
+            request.id().clone(),
+            ResourceMetricsResponse {
+                identity: ResourceIdentity {
+                    uid: "replacement-pod-uid".into(),
+                    ..expected
+                },
+                metrics: PodMetrics::unavailable(),
+                containers: vec![],
+            },
+        ))
+        .unwrap();
+
+    assert!(!client.is_pending(&request));
+    assert!(client.take(request.clone()).is_none());
+    let failure = client.take_failure(request).expect("mismatch is isolated");
+    assert_eq!(failure.code, ErrorCode::InvalidRequest);
+    assert_eq!(
+        failure.safe_message,
+        "resource metrics response did not match request"
+    );
+    assert!(!failure.safe_message.contains("replacement-pod-uid"));
+}
+
+#[test]
+fn resource_metrics_failure_is_retained_for_the_query_owner() {
+    let mut client = ready_client();
+    let identity = ResourceIdentity {
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        ..relation_identity()
+    };
+    let request = client.begin(Query::ResourceMetrics(identity)).unwrap();
+    let _outbound = client.take_outbound().unwrap();
+
+    let applied = client.apply(request_error_frame(
+        request.id(),
+        ErrorCode::Unauthorized,
+        Retryability::Never,
+    ));
+
+    assert!(matches!(applied, Err(ClientError::Server(_))));
+    assert_eq!(client.phase(), ClientPhase::Ready);
+    assert!(!client.is_pending(&request));
+    assert_eq!(
+        client.take_failure(request).expect("failure retained").code,
+        ErrorCode::Unauthorized
+    );
 }
 
 #[test]

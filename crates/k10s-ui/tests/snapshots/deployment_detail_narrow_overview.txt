@@ -1,0 +1,117 @@
+Window label="Deployment · payments / checkout"
+  GenericContainer
+    GenericContainer
+      GenericContainer
+        GenericContainer
+          Button label="Hide"
+          Button label="Close window"
+          Unknown
+        GenericContainer
+          GenericContainer
+            GenericContainer
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    Label value="Rollout ▲ ReplicaSetUpdated"
+                    Label value="Ready · 3/3"
+                      TextRun value="Ready · 3/3"
+                    Label value="Up-to-date · 3"
+                      TextRun value="Up-to-date · 3"
+                    Label value="Available · 3"
+                      TextRun value="Available · 3"
+                    Button label="Show more Deployment vitals"
+                    Label value="Freshness · live (just now)"
+                      TextRun value="Freshness · live (just now)"
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    Button label="Tab Overview"
+                    Button label="Tab Pods"
+                    Button label="Tab Events"
+                    Button label="Tab YAML"
+            GenericContainer
+              GenericContainer
+                GenericContainer
+                  GenericContainer
+                    Button label="Scale…"
+                    Button label="Restart…"
+                    Button label="Delete…"
+                    Button label="Actions"
+                    Button label="Copy name"
+            ScrollView label="Detail body"
+              GenericContainer
+                GenericContainer
+                  Label value="PODS · 1"
+                    TextRun value="PODS · 1"
+                  Table label="Deployment Pods table"
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Name"
+                              TextRun value="Name"
+                            Label value="Ready"
+                              TextRun value="Ready"
+                            Label value="Status"
+                              TextRun value="Status"
+                            Label value="Restarts"
+                              TextRun value="Restarts"
+                            Label value="Node"
+                              TextRun value="Node"
+                            Label value="Age"
+                              TextRun value="Age"
+                            Button label="Pod · payments / checkout-4-x7k9p"
+                            Label value="1/1"
+                              TextRun value="1/1"
+                            Label value="● Running"
+                              TextRun value="● Running"
+                            Label value="2"
+                              TextRun value="2"
+                            Label value="worker-a"
+                              TextRun value="worker-a"
+                            Label value="—"
+                              TextRun value="—"
+                  Label value="ROLLOUT HISTORY"
+                    TextRun value="ROLLOUT HISTORY"
+                  Table label="Deployment rollout history table"
+                    GenericContainer
+                      GenericContainer
+                        GenericContainer
+                          GenericContainer
+                            Label value="Revision"
+                              TextRun value="Revision"
+                            Label value="ReplicaSet"
+                              TextRun value="ReplicaSet"
+                            Label value="Images"
+                              TextRun value="Images"
+                            Label value="Replicas"
+                              TextRun value="Replicas"
+                            Label value="Created"
+                            Label value="Revision 4 · checkout-4"
+                              TextRun value="Revision 4 · checkout-4"
+                            Label value="checkout-4"
+                              TextRun value="checkout-4"
+                            Label value="Images · api=ghcr.io/acme/checkout:v4"
+                              TextRun value="Images · api=ghcr.io/acme/checkout:v4"
+                            Label value="Replicas · 2/3 ready"
+                              TextRun value="Replicas · 2/3 ready"
+                            Label value="Created · 2026-08-30T09:55:00Z"
+                    ScrollBar
+                  Label value="RECENT ROLLOUT EVENTS"
+                    TextRun value="RECENT ROLLOUT EVENTS"
+                  Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
+                    TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
+                  Button label="Show Deployment metadata"
+            GenericContainer
+              Label value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"
+                TextRun value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"
+  Splitter
+  Splitter
+  Splitter
+  Splitter
+  Splitter
+  Splitter
+  Splitter
+  Splitter

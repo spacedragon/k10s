@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use axum::extract::ws::Message;
 use tokio::sync::Notify;
 
+use crate::compatibility::SessionProtocol;
+
 /// Priority class for bounded outbound scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -55,6 +57,7 @@ pub struct Scheduler {
     reliable_reserve: usize,
     state: Arc<Mutex<State>>,
     ready: Arc<Notify>,
+    protocol: SessionProtocol,
 }
 
 impl Scheduler {
@@ -68,7 +71,21 @@ impl Scheduler {
                 closed: false,
             })),
             ready: Arc::new(Notify::new()),
+            protocol: SessionProtocol::current(),
         }
+    }
+
+    /// Bind all subsequent outbound serialization to the version negotiated
+    /// for this control session.
+    pub(crate) fn set_negotiated_protocol(&self, protocol: k10s_protocol::ProtocolVersion) {
+        self.protocol.set_negotiated(protocol);
+    }
+
+    /// Serialize one payload through the same per-session compatibility
+    /// policy used by the queue boundary. Snapshot checksums use this form so
+    /// they cover the exact compatible bytes sent to the client.
+    pub(crate) fn compatible_value<T: serde::Serialize>(&self, value: T) -> serde_json::Value {
+        self.protocol.compatible_value(value)
     }
 
     pub fn enqueue(&self, priority: Priority, message: Message) -> Result<(), EnqueueError> {
@@ -82,7 +99,7 @@ impl Scheduler {
         }
         state.queue.push_back(Entry {
             priority,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: None,
             sequence: None,
         });
@@ -107,7 +124,7 @@ impl Scheduler {
         let (sequence, message) = build()?;
         state.queue.push_back(Entry {
             priority: Priority::P1,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: None,
             sequence: Some(sequence),
         });
@@ -135,7 +152,7 @@ impl Scheduler {
         let (sequence, message) = build()?;
         state.queue.push_back(Entry {
             priority: Priority::P0,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: None,
             sequence: Some(sequence),
         });
@@ -165,7 +182,7 @@ impl Scheduler {
             .iter_mut()
             .find(|entry| entry.p2_identity.as_ref() == Some(&p2_identity))
         {
-            entry.message = message;
+            entry.message = self.protocol.prepare_message(message);
             return Ok(());
         }
         let p2_limit = self.capacity.saturating_sub(self.reliable_reserve);
@@ -184,7 +201,7 @@ impl Scheduler {
         }
         state.queue.push_back(Entry {
             priority: Priority::P2,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: Some(p2_identity),
             sequence: None,
         });
@@ -224,7 +241,7 @@ impl Scheduler {
                 .expect("sequenced P2 entries retain their connection sequence");
             let (sequence, message) = build(Some(queued_sequence))?;
             debug_assert_eq!(sequence, queued_sequence);
-            entry.message = message;
+            entry.message = self.protocol.prepare_message(message);
             return Ok(());
         }
         let p2_limit = self.capacity.saturating_sub(self.reliable_reserve);
@@ -244,7 +261,7 @@ impl Scheduler {
         let (sequence, message) = build(None)?;
         state.queue.push_back(Entry {
             priority: Priority::P2,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: Some(p2_identity),
             sequence: Some(sequence),
         });
@@ -281,7 +298,7 @@ impl Scheduler {
         let (sequence, message) = build()?;
         state.queue.push_back(Entry {
             priority: Priority::P2,
-            message,
+            message: self.protocol.prepare_message(message),
             p2_identity: Some(P2Identity::RecoveryBarrier),
             sequence: Some(sequence),
         });

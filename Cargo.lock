@@ -1761,6 +1761,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "ewebsock",
+ "jiff",
  "k10s-protocol",
  "kittest",
  "serde",

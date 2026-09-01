@@ -149,7 +149,7 @@ impl LogsTool {
     pub fn set_previous(&mut self, previous: bool) {
         if self.previous != previous {
             self.previous = previous;
-            self.reset_source_attempt();
+            self.reset_source_history();
         }
     }
 
@@ -168,7 +168,7 @@ impl LogsTool {
     pub fn set_since_seconds(&mut self, since_seconds: Option<i64>) {
         if self.since_seconds != since_seconds {
             self.since_seconds = since_seconds;
-            self.reset_source_attempt();
+            self.reset_source_history();
         }
     }
 
@@ -184,9 +184,17 @@ impl LogsTool {
     pub fn select_container(&mut self, container: &str) {
         if self.target.container != container {
             self.target.container = container.to_owned();
-            self.lines.clear();
-            self.reset_source_attempt();
+            self.reset_source_history();
         }
+    }
+
+    fn reset_source_history(&mut self) {
+        self.lines.clear();
+        self.truncated_lines = 0;
+        self.dropped_while_paused = 0;
+        self.total_received = 0;
+        self.since_received = None;
+        self.reset_source_attempt();
     }
 
     #[must_use]

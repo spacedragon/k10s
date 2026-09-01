@@ -237,7 +237,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Detail"
+  Window label="Pod · default / api-0"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -248,36 +248,44 @@ Window
           GenericContainer
             GenericContainer
               GenericContainer
+              GenericContainer
                 GenericContainer
                   GenericContainer
-                    Label value="Details"
-                      TextRun value="Details"
-                    Label value="POD"
-                      TextRun value="POD"
-                    Label value="api-0"
-                      TextRun value="api-0"
-                  GenericContainer
-                    Label value="Kind Pod"
-                      TextRun value="Kind Pod"
-                    Label value="Namespace default"
-                      TextRun value="Namespace default"
-                    Label value="Context dev-local"
-                      TextRun value="Context dev-local"
-                  GenericContainer
-                    Label value="UID uid-dev-local-pod-default-api-0"
-                      TextRun value="UID uid-dev-local-pod-default-api-0"
-                    Label value="Refreshing…"
-                      TextRun value="Refreshing…"
+                    GenericContainer
+                      Label value="Status ● —"
+                        TextRun value="Status ● —"
+                      Label value="Ready · —"
+                        TextRun value="Ready · —"
+                      Label value="Restarts · —"
+                        TextRun value="Restarts · —"
+                      Label value="Age · —"
+                        TextRun value="Age · —"
+                      Button label="Show more Pod vitals"
+                      Label value="Freshness · loading"
               GenericContainer
-                Button label="Tab Overview"
-                Button label="Tab Events"
-                Button label="Tab YAML"
-                Button label="Tab Logs"
-                Button label="Tab Shell"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Tab Overview"
+                      Button label="Tab Events"
+                      Button label="Tab YAML"
+                      Button label="Tab Logs"
+                      Button label="Tab Shell"
               GenericContainer
-                ProgressIndicator
-                Label value="Loading details"
-                  TextRun value="Loading details"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      Button label="Actions"
+                      Button label="Copy name"
+              ScrollView label="Detail body"
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ProgressIndicator
+                      Label value="Loading details"
+                        TextRun value="Loading details"
+              GenericContainer
+                Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
     Splitter
     Splitter
     Splitter

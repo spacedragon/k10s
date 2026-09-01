@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k10s Detail 重新规划</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{color-scheme:dark;--page:#151515;--canvas:#141414;--panel:#181818;--line:#3a3a3a;--text:#d2d2d2;--muted:#8a8a8a;--faint:#6b6b6b;
+        --blue:#55aef5;--bluebg:#17678e;--titlebar:#1f6087;--green:#58b883;--yellow:#d9ac55;--red:#e36b6b}
+  body{background:var(--page);color:#e2e2e2;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55;padding:32px}
+  h2{font-size:24px;margin-bottom:8px}h3{font-size:17px;margin:0}
+  .subtitle{color:#9a9a9a;margin-bottom:24px}
+  .wrap{max-width:1180px;margin:0 auto 30px}
+  .head{display:flex;align-items:baseline;gap:12px;margin-bottom:5px}
+  .head span{color:var(--muted);font-size:13px}
+  .why{color:#8f8f8f;font-size:13px;border-left:2px solid #2f6b88;padding:2px 0 2px 10px;margin-bottom:12px}
+  .why b{color:#bcbcbc;font-weight:500}
+
+  /* ---- window chrome ---- */
+  .win{border:1px solid #3f6f8c;border-radius:7px;overflow:hidden;background:var(--panel);color:var(--text);
+       font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;box-shadow:0 14px 34px #0009}
+  .titlebar{display:flex;align-items:center;gap:9px;height:32px;padding:0 10px;background:var(--titlebar);color:#e8f4fb;font-size:13px}
+  .titlebar .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .titlebar .t b{font-weight:600}.titlebar .t i{font-style:normal;color:#b4d9ee}
+  .titlebar .wb{color:#cfe6f3;font-size:13px}
+
+  /* ---- vitals ---- */
+  .vitals{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .vital{display:inline-flex;align-items:baseline;gap:6px;padding:3px 9px;border:1px solid #3d3d3d;border-radius:3px;background:#212121;white-space:nowrap}
+  .vital small{color:var(--faint);font-size:10px;letter-spacing:.04em}
+  .vital b{font-weight:500;color:#e6e6e6}
+  .vital.state{background:#17301f;border-color:#2f6a45}.vital.state b{color:var(--green)}
+  .vital.attn{background:#33280f;border-color:#6a5220}.vital.attn b{color:var(--yellow)}
+  .vital.bad{background:#331b1b;border-color:#7a3f3f}.vital.bad b{color:var(--red)}
+  .live{margin-left:auto;color:var(--green);font-size:11px;white-space:nowrap}
+
+  /* ---- tabs + actions ---- */
+  .tabrow{display:flex;align-items:center;gap:4px;padding:6px 11px;border-bottom:1px solid var(--line)}
+  .tab{padding:3px 10px;border:1px solid transparent;border-radius:3px;color:#adadad}
+  .tab.active{background:var(--bluebg);border-color:#2879a0;color:#e7f6fd}
+  .tab .n{color:var(--yellow)}
+  .btn{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid #4a4a4a;border-radius:3px;background:#2e2e2e;color:#cfcfcf;white-space:nowrap}
+  .btn.danger{color:#f08a8a;border-color:#7d4141;background:#301c1c}
+  .btn.ghost{background:transparent;border-color:#3d3d3d;color:#9c9c9c}
+  .spacer{flex:1}
+
+  /* ---- body ---- */
+  .body{display:grid;grid-template-columns:1.4fr 1fr;gap:0}
+  .col{padding:11px 12px 13px}
+  .col+.col{border-left:1px solid #2c2c2c;background:#161616}
+  .sec{margin-bottom:14px}
+  .sec:last-child{margin-bottom:0}
+  .sec-h{display:flex;align-items:center;gap:8px;color:#9d9d9d;font-size:10.5px;letter-spacing:.13em;padding-bottom:5px;margin-bottom:7px;border-bottom:1px solid #2e2e2e}
+  .sec-h .more{margin-left:auto;color:#6fa9c6;letter-spacing:0;font-size:11px}
+  .sec-h .cnt{color:var(--faint);letter-spacing:0}
+
+  table{width:100%;border-collapse:collapse;font-size:11.5px}
+  th{color:#7f7f7f;font-weight:400;text-align:left;padding:4px 7px;border-bottom:1px solid #333;font-size:10px;letter-spacing:.06em}
+  td{padding:5px 7px;border-bottom:1px solid #262626;white-space:nowrap}
+  tr:last-child td{border-bottom:0}
+  tr:hover td{background:#1f1f1f}
+  .ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.muted{color:var(--muted)}.faint{color:var(--faint)}
+
+  /* aligned key/value grid — no ragged per-item highlights */
+  .kv{display:grid;grid-template-columns:118px 1fr;font-size:11.5px}
+  .kv>span{padding:3.5px 7px}
+  .kv>span:nth-child(odd){color:#7f7f7f}
+  .kv>span:nth-child(even){color:#d5d5d5;overflow:hidden;text-overflow:ellipsis}
+  .kv .row-hi{background:#1f1f1f}
+
+  .chips{display:flex;flex-wrap:wrap;gap:4px}
+  .chip{display:inline-flex;align-items:center;border:1px solid #3b3b3b;border-radius:11px;background:#232323;color:#b6b6b6;padding:1px 8px;font-size:10.5px}
+  .chip i{font-style:normal;color:#7c7c7c;margin-right:4px}
+  .chip.more{background:transparent;border-style:dashed;color:#7fa9bf}
+
+  .chain{display:flex;flex-direction:column;gap:3px;font-size:11.5px}
+  .chain a{color:#7fbde0;text-decoration:none;border-bottom:1px dotted #4d7d94}
+  .chain .lvl2{padding-left:12px}.chain .lvl3{padding-left:24px;color:#d5d5d5}
+  .chain .lvl3 b{font-weight:500}
+
+  .ev{display:grid;grid-template-columns:16px 1fr auto;gap:7px;padding:4px 0;border-bottom:1px solid #262626;font-size:11px}
+  .ev:last-child{border-bottom:0}
+  .ev small{color:var(--faint);font-size:10px}
+
+  .foot{display:flex;gap:14px;padding:7px 11px;border-top:1px solid var(--line);color:var(--faint);font-size:10.5px;background:#141414;flex-wrap:wrap}
+  .foot b{color:#9dbecd;font-weight:500}
+
+  .narrow .body{grid-template-columns:1fr}
+  .narrow .col+.col{border-left:0;border-top:1px solid #2c2c2c}
+
+  /* comparison table */
+  .cmp{width:100%;border-collapse:collapse;font-size:12.5px;font-family:system-ui,sans-serif;border:1px solid #333;border-radius:6px;overflow:hidden}
+  .cmp th{background:#1e1e1e;color:#bfbfbf;font-size:12px;letter-spacing:0;padding:8px 10px;border-bottom:1px solid #3a3a3a}
+  .cmp td{white-space:normal;color:#a5a5a5;padding:8px 10px;vertical-align:top;border-bottom:1px solid #2a2a2a}
+  .cmp td:first-child{color:#dcdcdc;width:250px}
+  .cmp code{font-family:ui-monospace,monospace;font-size:11.5px;color:#c9c9c9}
+  .note{max-width:1180px;margin:0 auto;color:#8c8c8c;font-size:12px}
+  @media(max-width:900px){.body{grid-template-columns:1fr}.col+.col{border-left:0;border-top:1px solid #2c2c2c}}
+</style>
+</head><body>
+
+<div class="wrap">
+  <h2>Detail 面板重新规划</h2>
+  <p class="subtitle">同样的 Pod，同样的窗口高度。现版本用 20 行讲了 Kind / Name / Namespace / Created 各两遍，而 Pod 最该看的东西（容器状态、重启原因、调度节点、最近事件）一个都没有。</p>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>A · Pod Detail — Overview（宽窗）</h3><span>一条生命体征带 + 两栏：左侧「现在怎么样」，右侧「它是什么」</span></div>
+  <div class="why">头部三行压成两块：<b>标题栏承担身份</b>，<b>生命体征带承担状态</b>。Overview 区块不再重复 Kind/Name/Namespace——那些已经在标题栏和右栏里了。</div>
+
+  <div class="win">
+    <div class="titlebar"><span>▼</span><span class="t"><i>⬡ Pod</i>&nbsp; agentconnect-test / <b>test-agentconnect-admin-server-9984c4f89-skc2d</b></span><span class="wb">⧉</span><span class="wb">⛶</span><span class="wb">✕</span></div>
+
+    <div class="vitals">
+      <span class="vital state"><small>STATUS</small><b>● Running</b></span>
+      <span class="vital"><small>READY</small><b>1 / 1</b></span>
+      <span class="vital"><small>RESTARTS</small><b>0</b></span>
+      <span class="vital"><small>AGE</small><b>4d 2h</b></span>
+      <span class="vital"><small>NODE</small><b>ip-10-0-24-17</b></span>
+      <span class="vital"><small>IP</small><b>10.12.9.22</b></span>
+      <span class="live">⟳ live · 2s ago</span>
+    </div>
+
+    <div class="tabrow">
+      <span class="tab active">Overview</span><span class="tab">YAML</span><span class="tab">Logs</span><span class="tab">Shell</span><span class="tab">Events&nbsp;<span class="n">2</span></span>
+      <span class="spacer"></span>
+      <span class="btn ghost">⧉ Copy ▾</span><span class="btn">⋯ Actions ▾</span><span class="btn danger">Delete…</span>
+    </div>
+
+    <div class="body">
+      <div class="col">
+        <div class="sec">
+          <div class="sec-h">CONTAINERS <span class="cnt">2</span></div>
+          <table>
+            <thead><tr><th>NAME</th><th>IMAGE</th><th>STATE</th><th>READY</th><th>RESTARTS</th><th>CPU / MEM</th></tr></thead>
+            <tbody>
+              <tr><td>admin-server</td><td class="muted">ghcr.io/sentio/agentconnect:0.1.0</td><td class="ok">● Running</td><td>✓</td><td>0</td><td class="muted">120m / 380Mi</td></tr>
+              <tr><td>envoy</td><td class="muted">envoyproxy/envoy:v1.31.0</td><td class="ok">● Running</td><td>✓</td><td>0</td><td class="muted">18m / 64Mi</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">CONDITIONS</div>
+          <table><tbody>
+            <tr><td class="ok">● Ready</td><td class="muted">—</td><td class="faint">4d 2h</td></tr>
+            <tr><td class="ok">● ContainersReady</td><td class="muted">—</td><td class="faint">4d 2h</td></tr>
+            <tr><td class="ok">● PodScheduled</td><td class="muted">—</td><td class="faint">4d 2h</td></tr>
+            <tr><td class="ok">● Initialized</td><td class="muted">—</td><td class="faint">4d 2h</td></tr>
+          </tbody></table>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">RECENT EVENTS <span class="more">View all 12 →</span></div>
+          <div class="ev"><span class="warn">▲</span><span>Readiness probe failed: HTTP 503<br><small>Warning · Unhealthy · kubelet · ×3</small></span><span class="faint">6h</span></div>
+          <div class="ev"><span class="ok">●</span><span>Started container envoy<br><small>Normal · Started · kubelet</small></span><span class="faint">4d</span></div>
+          <div class="ev"><span class="ok">●</span><span>Successfully assigned to ip-10-0-24-17<br><small>Normal · Scheduled · default-scheduler</small></span><span class="faint">4d</span></div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="sec">
+          <div class="sec-h">OWNER CHAIN</div>
+          <div class="chain">
+            <span><a>▦ Deployment/test-agentconnect-admin-server</a></span>
+            <span class="lvl2">└ <a>◫ ReplicaSet/…-9984c4f89</a> <span class="faint">controller</span></span>
+            <span class="lvl3">└ <b>⬡ this Pod</b></span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">PLACEMENT</div>
+          <div class="kv">
+            <span>Node</span><span>ip-10-0-24-17 <span class="faint">us-east-1c</span></span>
+            <span>QoS class</span><span>Burstable</span>
+            <span>Priority</span><span>0 <span class="faint">default</span></span>
+            <span>Service account</span><span>agentconnect-admin</span>
+            <span>Restart policy</span><span>Always</span>
+            <span>Tolerations</span><span class="faint">2 · default only</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">NETWORK</div>
+          <div class="kv">
+            <span>Pod IP</span><span>10.12.9.22</span>
+            <span>Host IP</span><span>10.0.24.17</span>
+            <span>Ports</span><span>8080/TCP http · 9901/TCP admin</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">LABELS <span class="cnt">7</span><span class="more">⧉ as selector</span></div>
+          <div class="chips">
+            <span class="chip"><i>app.kubernetes.io/name</i>agentconnect-private</span>
+            <span class="chip"><i>component</i>admin-server</span>
+            <span class="chip"><i>instance</i>test-agentconnect-private</span>
+            <span class="chip"><i>part-of</i>agentconnect</span>
+            <span class="chip more">+3 ▾</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">ANNOTATIONS <span class="cnt">4</span><span class="more">▸ show</span></div>
+          <div class="faint" style="font-size:11px">Collapsed by default — annotations are usually machine-written and long.</div>
+        </div>
+
+        <div class="sec">
+          <div class="sec-h">IDENTITY</div>
+          <div class="kv">
+            <span>Created</span><span>2026-08-27 11:19:26Z <span class="faint">4d 2h ago</span></span>
+            <span>UID</span><span class="faint">0f86419f…2820a <span style="color:#6fa9c6">⧉</span></span>
+            <span>Context</span><span>sentio-sea</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot"><span><b>l</b> logs</span><span><b>s</b> shell</span><span><b>y</b> yaml</span><span><b>e</b> events</span><span><b>o</b> owner</span><span><b>⧉</b> copy name</span><span><b>Ctrl+D</b> delete</span><span><b>Esc</b> restore/close</span></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>B · 窄窗 / 集成分栏（&lt; 760px）</h3><span>右栏下沉为单栏；生命体征带永不折行，超出部分溢出到「⋯ more」</span></div>
+  <div class="why">同一套区块，只换排布顺序：<b>状态 → 容器 → 事件 → 元数据</b>。元数据区块在窄栏里默认折叠，因为它回答的是「它是什么」，而不是「它现在怎么了」。</div>
+
+  <div class="win narrow" style="max-width:560px">
+    <div class="titlebar"><span>▼</span><span class="t"><i>⬡ Pod</i>&nbsp; …/test-agentconnect-admin-server-9984c4f89-skc2d</span><span class="wb">⧉</span><span class="wb">✕</span></div>
+    <div class="vitals">
+      <span class="vital bad"><small>STATUS</small><b>▲ CrashLoopBackOff</b></span>
+      <span class="vital"><small>READY</small><b>1 / 2</b></span>
+      <span class="vital attn"><small>RESTARTS</small><b>7</b></span>
+      <span class="vital"><small>AGE</small><b>18m</b></span>
+      <span class="btn ghost" style="font-size:10.5px">⋯ more</span>
+      <span class="live">⟳ live</span>
+    </div>
+    <div class="tabrow"><span class="tab active">Overview</span><span class="tab">YAML</span><span class="tab">Logs</span><span class="tab">Shell</span><span class="tab">Events&nbsp;<span class="n">5</span></span><span class="spacer"></span><span class="btn">⋯</span></div>
+    <div class="body">
+      <div class="col">
+        <div class="sec">
+          <div class="sec-h">WHY IT'S FAILING</div>
+          <div class="ev"><span class="bad">✕</span><span>Container <b>worker</b> exited with code 1 · 42s ago<br><small>fatal: no reachable postgres endpoint</small></span><span class="btn ghost" style="font-size:10px">⟲ prev logs</span></div>
+        </div>
+        <div class="sec">
+          <div class="sec-h">CONTAINERS <span class="cnt">2</span></div>
+          <table><thead><tr><th>NAME</th><th>STATE</th><th>RESTARTS</th><th>LAST EXIT</th></tr></thead><tbody>
+            <tr><td>worker</td><td class="bad">▲ Waiting</td><td>7</td><td class="bad">1 · Error</td></tr>
+            <tr><td>envoy</td><td class="ok">● Running</td><td>0</td><td class="muted">—</td></tr>
+          </tbody></table>
+        </div>
+      </div>
+      <div class="col">
+        <div class="sec"><div class="sec-h">▸ PLACEMENT · NETWORK · LABELS · IDENTITY <span class="more">expand</span></div></div>
+      </div>
+    </div>
+    <div class="foot"><span><b>p</b> previous logs</span><span><b>l</b> logs</span><span><b>e</b> events</span><span><b>Esc</b> back</span></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>C · 同一模板套 Deployment</h3><span>只换生命体征字段与左栏区块，骨架不变</span></div>
+  <div class="win">
+    <div class="titlebar"><span>▼</span><span class="t"><i>▦ Deployment</i>&nbsp; agentconnect-test / <b>test-agentconnect-admin-server</b></span><span class="wb">⧉</span><span class="wb">⛶</span><span class="wb">✕</span></div>
+    <div class="vitals">
+      <span class="vital state"><small>ROLLOUT</small><b>● Complete</b></span>
+      <span class="vital"><small>READY</small><b>3 / 3</b></span>
+      <span class="vital"><small>UP-TO-DATE</small><b>3</b></span>
+      <span class="vital"><small>AVAILABLE</small><b>3</b></span>
+      <span class="vital"><small>STRATEGY</small><b>RollingUpdate</b></span>
+      <span class="vital"><small>AGE</small><b>31d</b></span>
+      <span class="live">⟳ live · 1s ago</span>
+    </div>
+    <div class="tabrow"><span class="tab active">Overview</span><span class="tab">Pods&nbsp;<span class="n">3</span></span><span class="tab">YAML</span><span class="tab">Events</span><span class="spacer"></span>
+      <span class="btn">Scale…</span><span class="btn">Restart…</span><span class="btn">⋯ Actions ▾</span><span class="btn danger">Delete…</span></div>
+    <div class="body">
+      <div class="col">
+        <div class="sec">
+          <div class="sec-h">PODS <span class="cnt">3</span><span class="more">Open Pods tab →</span></div>
+          <table><thead><tr><th>NAME</th><th>READY</th><th>STATUS</th><th>RESTARTS</th><th>NODE</th><th>AGE</th></tr></thead><tbody>
+            <tr><td>…-9984c4f89-skc2d</td><td>1/1</td><td class="ok">● Running</td><td>0</td><td class="muted">ip-10-0-24-17</td><td class="faint">4d</td></tr>
+            <tr><td>…-9984c4f89-lm4tq</td><td>1/1</td><td class="ok">● Running</td><td>0</td><td class="muted">ip-10-0-18-93</td><td class="faint">4d</td></tr>
+            <tr><td>…-9984c4f89-p2xn8</td><td>1/1</td><td class="ok">● Running</td><td>1</td><td class="muted">ip-10-0-12-41</td><td class="faint">4d</td></tr>
+          </tbody></table>
+        </div>
+        <div class="sec">
+          <div class="sec-h">ROLLOUT HISTORY</div>
+          <table><thead><tr><th>REVISION</th><th>IMAGE</th><th>WHEN</th><th></th></tr></thead><tbody>
+            <tr><td>4 <span class="faint">current</span></td><td class="muted">agentconnect:0.1.0</td><td class="faint">4d ago</td><td></td></tr>
+            <tr><td>3</td><td class="muted">agentconnect:0.0.9</td><td class="faint">12d ago</td><td><span class="btn ghost" style="font-size:10px">Roll back…</span></td></tr>
+          </tbody></table>
+        </div>
+      </div>
+      <div class="col">
+        <div class="sec"><div class="sec-h">TEMPLATE</div><div class="kv">
+          <span>Image</span><span>ghcr.io/sentio/agentconnect:0.1.0</span>
+          <span>Replicas</span><span>3 desired · 3 available</span>
+          <span>Max surge</span><span>25%</span>
+          <span>Max unavailable</span><span>25%</span>
+          <span>Selector</span><span>app=agentconnect-private, component=admin-server</span>
+        </div></div>
+        <div class="sec"><div class="sec-h">MANAGED BY</div><div class="kv">
+          <span>Helm release</span><span>test-agentconnect-private</span>
+          <span>Chart</span><span>agentconnect-private-0.1.0</span>
+        </div><div class="faint" style="font-size:10.5px;padding:4px 7px">Direct edits here will be reverted by the next <code>helm upgrade</code>.</div></div>
+        <div class="sec"><div class="sec-h">LABELS <span class="cnt">6</span><span class="more">⧉ as selector</span></div>
+          <div class="chips"><span class="chip"><i>part-of</i>agentconnect</span><span class="chip"><i>managed-by</i>Helm</span><span class="chip more">+4 ▾</span></div></div>
+      </div>
+    </div>
+    <div class="foot"><span><b>p</b> pods</span><span><b>y</b> yaml</span><span><b>e</b> events</span><span><b>Ctrl+D</b> delete</span><span><b>Esc</b> restore/close</span></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <h3 style="margin-bottom:10px">改了什么，为什么</h3>
+  <table class="cmp">
+    <thead><tr><th>现版本</th><th>改法</th></tr></thead>
+    <tbody>
+      <tr><td>标题栏只写 <code>Detail</code></td><td>标题栏承担身份：<code>⬡ Pod · ns / name</code>。多开 Detail 时靠标题栏和任务栏区分，否则三个窗口都叫 Detail。</td></tr>
+      <tr><td>头部三行 + Overview 区块把 Kind / Name / Namespace / Created 各写两遍</td><td>身份进标题栏，状态进生命体征带，Created / UID / Context 沉到右栏底部的 IDENTITY。同一事实只出现一次。</td></tr>
+      <tr><td>UID 全长 36 字符占据头部第三行</td><td>截断为 <code>0f86419f…2820a</code> 加复制按钮。UID 只在确认删除和排查孤儿资源时需要精确值。</td></tr>
+      <tr><td>Tab 行之外还有一行 <code>Delete / View logs / Exec shell / Edit YAML</code></td><td>后三个和 Tab 完全重复，删掉。只留一行 Tab，右侧放 <code>⋯ Actions ▾</code> 和 <code>Delete…</code>。省一整行，也消除「点哪个」的歧义。</td></tr>
+      <tr><td><code>Status Running</code> 是普通文本，混在 KV 列表里</td><td>提升为生命体征带首位，带颜色和形状（<code>●</code> / <code>▲</code> / <code>✕</code>）。状态是打开 Detail 的第一目的。</td></tr>
+      <tr><td>Pod 没有容器、重启次数、就绪数、节点、IP、QoS、conditions、events</td><td>补齐。CONTAINERS 表是 Pod Detail 的主体——镜像、状态、重启、上次退出码全在这里。</td></tr>
+      <tr><td>单栏，右侧 60% 宽度空着</td><td>宽度 ≥ 760px 时两栏：左「现在怎么样」（容器 / conditions / 事件），右「它是什么」（owner / 调度 / 网络 / labels / 身份）。窄于此自动落回单栏。</td></tr>
+      <tr><td>7 条 label 各占一整行</td><td>chip 换行排布，默认显示 4 条 + <code>+3 ▾</code>，附「复制为 selector」。annotations 默认折叠。</td></tr>
+      <tr><td>Owner References 是一行死文本</td><td>改成可点的 owner chain：Deployment → ReplicaSet → 本 Pod，<code>o</code> 键上跳。这是 Pod Detail 里最高频的跳转。</td></tr>
+      <tr><td>SelectableLabel 让每个 KV 带自己宽度的高亮块，视觉参差</td><td>改用 <code>egui::Grid</code>：标签列定宽右对齐留白，hover 高亮整行。文本仍可选中复制，但不再产生锯齿状色块。</td></tr>
+      <tr><td>失败时无从下手</td><td>非健康状态下左栏顶部插入 <b>WHY IT'S FAILING</b>：退出码、原因、以及一键进「上一次容器日志」。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="wrap">
+  <h3 style="margin-bottom:10px">区块顺序规则</h3>
+  <table class="cmp">
+    <thead><tr><th>规则</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>状态优先于身份</td><td>先回答「它现在怎么了」，再回答「它是什么」。身份信息不会变，状态每秒都在变。</td></tr>
+      <tr><td>异常上浮</td><td>资源不健康时，失败原因区块插到左栏最顶部；健康时该区块不存在，不留空占位。</td></tr>
+      <tr><td>机器写的内容默认折叠</td><td>annotations、tolerations、finalizers、managedFields——需要时展开，不消耗默认视野。</td></tr>
+      <tr><td>每个字段只出现一次</td><td>如果它已经在标题栏或生命体征带里，正文就不再重复。</td></tr>
+      <tr><td>生命体征带字段按 kind 定义</td><td>Pod：status / ready / restarts / age / node / ip。Deployment：rollout / ready / up-to-date / available / strategy / age。Node：status / roles / version / cpu / mem / pods。骨架不变，字段表随 kind 切换。</td></tr>
+      <tr><td>宽度断点 760px</td><td>之上两栏，之下单栏且元数据折叠。集成分栏模式下 Detail 面板通常在断点以下。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="note">实现侧全部是 egui 原生件：生命体征带 = <code>Frame</code> + 横向 <code>Grid</code>；KV 区 = <code>egui::Grid</code>（<code>striped(false)</code>，hover 整行高亮）；labels = <code>ui.horizontal_wrapped</code> 里的圆角 <code>Frame</code>；折叠区 = <code>CollapsingHeader</code>；两栏 = <code>ui.columns(2, …)</code> 并在 <code>available_width() &lt; 760.0</code> 时退化为单栏。</p>
+
+</body></html>

@@ -13,10 +13,13 @@
 use serde::de::DeserializeOwned;
 
 use crate::port::{
-    Gvk, OwnerRef, ResourceProjection, ResourceRef, ServicePort, ServiceProjection, TargetPort,
-    TransportProtocol,
+    ContainerStateProjection, ContainerTerminationProjection, Gvk, OwnerRef, PodContainerPort,
+    PodContainerProjection, PodProjection, ResourceConditionProjection, ResourceProjection,
+    ResourceRef, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
 use crate::runtime::supervisor::WatchRow;
+
+use super::deployment_projection::{deployment_projection, replica_set_projection};
 
 /// Normalize one cluster object into its list view-model row.
 ///
@@ -77,11 +80,220 @@ pub(crate) fn normalize_row(
 /// Per-kind structured projection, derived from typed fields only.
 fn project(gvk: &Gvk, object: &kube::core::DynamicObject) -> Option<ResourceProjection> {
     match (gvk.group.as_str(), gvk.version.as_str(), gvk.kind.as_str()) {
+        ("", "v1", "Pod") => typed_object(object, |pod: &k8s_openapi::api::core::v1::Pod| {
+            pod_projection(pod)
+        }),
         ("", "v1", "Service") => typed_object(object, |s: &k8s_openapi::api::core::v1::Service| {
             service_projection(s)
         }),
+        ("apps", "v1", "Deployment") => typed_object(
+            object,
+            |deployment: &k8s_openapi::api::apps::v1::Deployment| deployment_projection(deployment),
+        ),
+        ("apps", "v1", "ReplicaSet") => typed_object(
+            object,
+            |replica_set: &k8s_openapi::api::apps::v1::ReplicaSet| {
+                replica_set_projection(replica_set)
+            },
+        )
+        .flatten(),
         _ => None,
     }
+}
+
+/// Build the normalized Pod projection from Kubernetes metadata, spec, and
+/// status fields only. Container statuses join declared containers by exact
+/// name; summaries and manifest text never participate in this projection.
+fn pod_projection(pod: &k8s_openapi::api::core::v1::Pod) -> ResourceProjection {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let spec = pod.spec.as_ref();
+    let status = pod.status.as_ref();
+    let declared = spec.map(|spec| spec.containers.as_slice());
+    let statuses = status
+        .and_then(|status| status.container_statuses.as_deref())
+        .unwrap_or_default();
+    let mut status_by_name: BTreeMap<_, _> = statuses
+        .iter()
+        .map(|container| (container.name.as_str(), container))
+        .collect();
+    let status_names_unique = status_by_name.len() == statuses.len();
+    let declared_names_unique = declared.is_none_or(|containers| {
+        containers
+            .iter()
+            .map(|container| container.name.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == containers.len()
+    });
+    let can_join_statuses = status_names_unique && declared_names_unique;
+    if !can_join_statuses {
+        // Duplicate names make an exact status join ambiguous. Withhold
+        // per-container status rather than retaining an arbitrary duplicate.
+        status_by_name.clear();
+    }
+    let containers = declared
+        .unwrap_or_default()
+        .iter()
+        .map(|container| {
+            let status = status_by_name.get(container.name.as_str()).copied();
+            PodContainerProjection {
+                name: container.name.clone(),
+                image: container.image.clone(),
+                state: status
+                    .and_then(|status| status.state.as_ref())
+                    .and_then(container_state),
+                ready: status.map(|status| status.ready),
+                restart_count: status.and_then(|status| u32::try_from(status.restart_count).ok()),
+                last_termination: status
+                    .and_then(|status| status.last_state.as_ref())
+                    .and_then(|state| state.terminated.as_ref())
+                    .map(termination),
+            }
+        })
+        .collect();
+    let statuses_complete = can_join_statuses
+        && declared.is_some_and(|declared| {
+            declared
+                .iter()
+                .all(|container| status_by_name.contains_key(container.name.as_str()))
+        });
+    let ready_containers = statuses_complete
+        .then(|| {
+            declared
+                .unwrap_or_default()
+                .iter()
+                .filter(|container| {
+                    status_by_name
+                        .get(container.name.as_str())
+                        .is_some_and(|status| status.ready)
+                })
+                .count()
+        })
+        .and_then(|count| u32::try_from(count).ok());
+    let restart_count = statuses_complete
+        .then(|| {
+            declared
+                .unwrap_or_default()
+                .iter()
+                .try_fold(0u32, |total, container| {
+                    let status = status_by_name.get(container.name.as_str())?;
+                    total.checked_add(u32::try_from(status.restart_count).ok()?)
+                })
+        })
+        .flatten();
+    let mut conditions: Vec<_> = status
+        .and_then(|status| status.conditions.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .map(|condition| ResourceConditionProjection {
+            condition_type: condition.type_.clone(),
+            status: condition.status.clone(),
+            reason: condition.reason.clone(),
+            message: condition.message.clone(),
+            last_transition_time: condition
+                .last_transition_time
+                .as_ref()
+                .map(|time| time.0.to_string()),
+        })
+        .collect();
+    conditions.sort_by(|left, right| {
+        (
+            &left.condition_type,
+            &left.status,
+            &left.reason,
+            &left.message,
+            &left.last_transition_time,
+        )
+            .cmp(&(
+                &right.condition_type,
+                &right.status,
+                &right.reason,
+                &right.message,
+                &right.last_transition_time,
+            ))
+    });
+
+    ResourceProjection::Pod(PodProjection {
+        phase: status.and_then(|status| status.phase.clone()),
+        ready_containers,
+        total_containers: declared.and_then(|containers| u32::try_from(containers.len()).ok()),
+        restart_count,
+        containers,
+        conditions,
+        node_name: spec.and_then(|spec| spec.node_name.clone()),
+        pod_ip: status.and_then(|status| status.pod_ip.clone()),
+        host_ip: status.and_then(|status| status.host_ip.clone()),
+        qos_class: status.and_then(|status| status.qos_class.clone()),
+        priority: spec.and_then(|spec| spec.priority),
+        service_account: spec.and_then(|spec| spec.service_account_name.clone()),
+        restart_policy: spec.and_then(|spec| spec.restart_policy.clone()),
+        ports: declared
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|container| {
+                container
+                    .ports
+                    .iter()
+                    .flatten()
+                    .filter_map(move |port| pod_container_port(&container.name, port))
+            })
+            .collect(),
+        labels: pod.metadata.labels.clone().unwrap_or_default(),
+        annotations: pod.metadata.annotations.clone().unwrap_or_default(),
+        created_at: pod
+            .metadata
+            .creation_timestamp
+            .as_ref()
+            .map(|time| time.0.to_string()),
+    })
+}
+
+/// Normalize one current container lifecycle state.
+fn container_state(
+    state: &k8s_openapi::api::core::v1::ContainerState,
+) -> Option<ContainerStateProjection> {
+    if state.running.is_some() {
+        Some(ContainerStateProjection::Running)
+    } else if let Some(waiting) = state.waiting.as_ref() {
+        Some(ContainerStateProjection::Waiting {
+            reason: waiting.reason.clone(),
+        })
+    } else {
+        state
+            .terminated
+            .as_ref()
+            .map(termination)
+            .map(ContainerStateProjection::Terminated)
+    }
+}
+
+/// Normalize a Kubernetes container termination without interpreting it.
+fn termination(
+    terminated: &k8s_openapi::api::core::v1::ContainerStateTerminated,
+) -> ContainerTerminationProjection {
+    ContainerTerminationProjection {
+        exit_code: terminated.exit_code,
+        reason: terminated.reason.clone(),
+    }
+}
+
+/// Normalize a declared port only when Kubernetes supplied a valid container
+/// port. Host port `0` remains explicit when the API supplied it.
+fn pod_container_port(
+    container_name: &str,
+    port: &k8s_openapi::api::core::v1::ContainerPort,
+) -> Option<PodContainerPort> {
+    let container_port = u16::try_from(port.container_port)
+        .ok()
+        .filter(|port| *port > 0)?;
+    Some(PodContainerPort {
+        container_name: container_name.to_owned(),
+        name: port.name.clone(),
+        container_port,
+        host_port: port.host_port.and_then(|port| u16::try_from(port).ok()),
+        protocol: transport_protocol(port.protocol.as_deref()),
+    })
 }
 
 /// Per-kind status summary, derived from typed fields only.

@@ -10,6 +10,7 @@ mod auth;
 mod auth_observer;
 mod config;
 mod create;
+mod deployment_projection;
 mod discovery;
 mod events;
 mod exec;

@@ -18,11 +18,13 @@ use tokio::sync::broadcast;
 
 use crate::catalog::{CatalogMetricsScenario, CatalogSnapshot};
 use crate::port::{
-    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo, Gvk,
-    KubernetesAccess, MetricsSample, OperationId, OwnerRef, Query, QueryResult, RecordEvent,
-    RelatedData, RelatedRecordGroup, ResourceListData, ResourceProjection, ResourceRecord,
-    ResourceRef, ResourceTypesData, ServicePort, ServiceProjection, StreamInput, Subscribe,
-    SubscriptionHandle, TargetPort, TransportProtocol,
+    ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContainerImageProjection,
+    ContainerMetricsSample, ContainerStateProjection, ContainerTerminationProjection, ContextInfo,
+    DeploymentProjection, Gvk, KubernetesAccess, MetricsSample, OperationId, OwnerRef,
+    PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
+    RelatedRecordGroup, ReplicaSetProjection, ResourceConditionProjection, ResourceListData,
+    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
+    ServiceProjection, StreamInput, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -301,6 +303,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(220),
                     memory_bytes: Some(134_217_728),
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(220),
+                        memory_bytes: Some(134_217_728),
+                    }],
                 },
             ),
             (
@@ -309,6 +316,11 @@ impl FakeKubernetes {
                     cpu_millicores: Some(90),
                     memory_bytes: None,
                     collected_at: Some(rfc3339(FAKE_EPOCH_SECS + 3_600)),
+                    containers: vec![ContainerMetricsSample {
+                        name: "app".into(),
+                        cpu_millicores: Some(90),
+                        memory_bytes: None,
+                    }],
                 },
             ),
         ]);
@@ -913,9 +925,16 @@ impl FakeKubernetes {
         let revision = state.advance_revision();
         state.records[index].revision = revision;
         // The desired count becomes observable backend state wherever the
-        // summary carries one (e.g. `20/20 ready` → `3/20 ready`).
+        // summary carries one (e.g. `20/20 ready` → `20/3 ready`).
         if let Some(next) = scaled_summary(&state.records[index].summary, replicas) {
             state.records[index].summary = next;
+        }
+        if let Some(ResourceProjection::Deployment(projection)) =
+            &mut state.records[index].projection
+        {
+            // Scaling changes the desired count. Readiness and the other
+            // status-derived counts remain the last observed fake state.
+            projection.desired_replicas = Some(replicas);
         }
         let changed = state.records[index].clone();
         let reference = changed.reference.clone();
@@ -1982,6 +2001,60 @@ fn replicaset_gvk() -> Gvk {
     Gvk::new("apps", "v1", "ReplicaSet")
 }
 
+/// Deterministic Deployment data for the fake adapter's structured rows.
+fn fake_deployment_projection(
+    desired_replicas: u32,
+    ready_replicas: u32,
+    container_name: &str,
+    image: &str,
+    labels: BTreeMap<String, String>,
+    created_at: String,
+) -> ResourceProjection {
+    ResourceProjection::Deployment(DeploymentProjection {
+        desired_replicas: Some(desired_replicas),
+        ready_replicas: Some(ready_replicas),
+        updated_replicas: Some(ready_replicas),
+        available_replicas: Some(ready_replicas),
+        strategy: Some("RollingUpdate".into()),
+        selector: labels.clone(),
+        max_surge: Some("25%".into()),
+        max_unavailable: Some("25%".into()),
+        conditions: vec![ResourceConditionProjection {
+            condition_type: "Available".into(),
+            status: "True".into(),
+            reason: Some("MinimumReplicasAvailable".into()),
+            message: Some("Deployment has minimum availability.".into()),
+            last_transition_time: Some(created_at.clone()),
+        }],
+        template_containers: vec![ContainerImageProjection {
+            name: container_name.into(),
+            image: Some(image.into()),
+        }],
+        template_labels: labels.clone(),
+        template_annotations: BTreeMap::new(),
+        labels,
+        annotations: BTreeMap::new(),
+        created_at: Some(created_at),
+    })
+}
+
+/// Deterministic ReplicaSet rollout-history data for the fake adapter.
+fn fake_replica_set_projection(
+    revision: u64,
+    replicas: u32,
+    ready_replicas: u32,
+    created_at: String,
+    images: Vec<ContainerImageProjection>,
+) -> ResourceProjection {
+    ResourceProjection::ReplicaSet(ReplicaSetProjection {
+        revision,
+        replicas: Some(replicas),
+        ready_replicas: Some(ready_replicas),
+        created_at: Some(created_at),
+        images,
+    })
+}
+
 fn build_dev_local_records() -> Vec<ResourceRecord> {
     fn seed<'a>(
         offset_secs: u64,
@@ -1991,6 +2064,57 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         name: &'a str,
         labels: &'a [(&'a str, &'a str)],
     ) -> RecordSeed<'a> {
+        let projection = (gvk.kind == "Pod").then(|| {
+            let running = summary == "Running";
+            let crashloop = summary.contains("CrashLoopBackOff");
+            let restart_count = if crashloop { 7 } else { 0 };
+            let last_termination = crashloop.then(|| ContainerTerminationProjection {
+                exit_code: 1,
+                reason: Some("Error".into()),
+            });
+            ResourceProjection::Pod(PodProjection {
+                phase: Some(
+                    if running || crashloop {
+                        "Running"
+                    } else {
+                        "Pending"
+                    }
+                    .into(),
+                ),
+                ready_containers: Some(u32::from(running)),
+                total_containers: Some(1),
+                restart_count: Some(restart_count),
+                containers: vec![PodContainerProjection {
+                    name: "app".into(),
+                    image: Some("example/fake-app:v1".into()),
+                    state: Some(if summary.contains("CrashLoopBackOff") {
+                        ContainerStateProjection::Waiting {
+                            reason: Some("CrashLoopBackOff".into()),
+                        }
+                    } else {
+                        ContainerStateProjection::Running
+                    }),
+                    ready: Some(running),
+                    restart_count: Some(restart_count),
+                    last_termination,
+                }],
+                conditions: Vec::new(),
+                node_name: Some("fake-node".into()),
+                pod_ip: None,
+                host_ip: None,
+                qos_class: Some("Burstable".into()),
+                priority: None,
+                service_account: Some("default".into()),
+                restart_policy: Some("Always".into()),
+                ports: Vec::new(),
+                labels: labels
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                annotations: BTreeMap::new(),
+                created_at: Some(rfc3339(FAKE_EPOCH_SECS + offset_secs)),
+            })
+        });
         RecordSeed {
             offset_secs,
             summary,
@@ -2000,27 +2124,50 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             name,
             labels,
             owner_references: Vec::new(),
-            projection: None,
+            projection,
         }
     }
 
     let mut records = vec![
-        record(seed(
-            0,
-            "2/2 ready",
-            deployment_gvk(),
-            Some("default"),
-            "api-server",
-            &[("app", "api")],
-        )),
-        record(seed(
-            300,
-            "20/20 ready",
-            deployment_gvk(),
-            Some("default"),
-            "web-frontend",
-            &[("app", "web"), ("tier", "frontend")],
-        )),
+        record(RecordSeed {
+            projection: Some(fake_deployment_projection(
+                2,
+                2,
+                "api",
+                "example/api-server:v1",
+                BTreeMap::from([("app".into(), "api".into())]),
+                rfc3339(FAKE_EPOCH_SECS),
+            )),
+            ..seed(
+                0,
+                "2/2 ready",
+                deployment_gvk(),
+                Some("default"),
+                "api-server",
+                &[("app", "api")],
+            )
+        }),
+        record(RecordSeed {
+            projection: Some(fake_deployment_projection(
+                20,
+                20,
+                "web",
+                "example/web-frontend:v1",
+                BTreeMap::from([
+                    ("app".into(), "web".into()),
+                    ("tier".into(), "frontend".into()),
+                ]),
+                rfc3339(FAKE_EPOCH_SECS + 300),
+            )),
+            ..seed(
+                300,
+                "20/20 ready",
+                deployment_gvk(),
+                Some("default"),
+                "web-frontend",
+                &[("app", "web"), ("tier", "frontend")],
+            )
+        }),
         record(RecordSeed {
             owner_references: vec![OwnerRef {
                 gvk: deployment_gvk(),
@@ -2028,6 +2175,16 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 uid: uid("dev-local", "Deployment", Some("default"), "web-frontend"),
                 controller: true,
             }],
+            projection: Some(fake_replica_set_projection(
+                7,
+                20,
+                20,
+                rfc3339(FAKE_EPOCH_SECS + 600),
+                vec![ContainerImageProjection {
+                    name: "web".into(),
+                    image: Some("example/web-frontend:v1".into()),
+                }],
+            )),
             ..seed(
                 600,
                 "20 desired",
@@ -2364,15 +2521,24 @@ fn build_prod_records() -> Vec<ResourceRecord> {
         name: "edge-gateway",
         labels: &[("app", "edge")],
         owner_references: Vec::new(),
-        projection: None,
+        projection: Some(fake_deployment_projection(
+            3,
+            3,
+            "edge",
+            "example/edge-gateway:v1",
+            BTreeMap::from([("app".into(), "edge".into())]),
+            rfc3339(FAKE_EPOCH_SECS + 6_000),
+        )),
     })]
 }
 
-/// Replace the desired count of a `N/M ...` style status summary.
+/// Replace the desired count of a `ready/desired ...` status summary.
 fn scaled_summary(summary: &str, replicas: u32) -> Option<String> {
-    let (desired, rest) = summary.split_once('/')?;
+    let (ready, desired_and_suffix) = summary.split_once('/')?;
+    ready.parse::<u32>().ok()?;
+    let (desired, suffix) = desired_and_suffix.split_once(' ')?;
     desired.parse::<u32>().ok()?;
-    Some(format!("{replicas}/{rest}"))
+    Some(format!("{ready}/{replicas} {suffix}"))
 }
 
 /// Format unix seconds as an RFC 3339 UTC timestamp without external crates.
@@ -2420,6 +2586,39 @@ mod tests {
             .expect("the fake fixture exposes previous-log behavior");
         assert_eq!(crashloop.reference.gvk, Gvk::core("v1", "Pod"));
         assert_eq!(crashloop.reference.name, "web-frontend-7d9f8-00020");
+        let Some(ResourceProjection::Pod(crashloop_projection)) = crashloop.projection.as_ref()
+        else {
+            panic!("CrashLoop fixture carries typed runtime state");
+        };
+        assert_eq!(crashloop_projection.phase.as_deref(), Some("Running"));
+        assert_eq!(crashloop_projection.restart_count, Some(7));
+        assert!(matches!(
+            crashloop_projection.containers[0].state,
+            Some(ContainerStateProjection::Waiting {
+                reason: Some(ref reason)
+            }) if reason == "CrashLoopBackOff"
+        ));
+        assert_eq!(
+            crashloop_projection.containers[0]
+                .last_termination
+                .as_ref()
+                .map(|termination| termination.exit_code),
+            Some(1)
+        );
+        let pods = state
+            .records
+            .iter()
+            .filter(|record| record.reference.gvk == Gvk::core("v1", "Pod"));
+        for pod in pods {
+            let Some(ResourceProjection::Pod(projection)) = pod.projection.as_ref() else {
+                panic!(
+                    "fake Pod {} must carry a typed projection",
+                    pod.reference.name
+                );
+            };
+            assert_eq!(projection.containers.len(), 1);
+            assert_eq!(projection.containers[0].name, "app");
+        }
     }
 
     #[tokio::test]

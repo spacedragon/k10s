@@ -155,7 +155,14 @@ where
         WindowContent::Detail(detail) => (None, None, Some(detail.clone())),
     };
 
-    let mut window = egui::Window::new(state.title.as_str())
+    let title = match &state.content {
+        WindowContent::Detail(detail) => detail
+            .identity
+            .as_row_identity()
+            .map_or_else(|| state.title.clone(), super::detail::frame::title),
+        WindowContent::Resource(_) | WindowContent::Services(_) => state.title.clone(),
+    };
+    let mut window = egui::Window::new(title)
         .id(id)
         .open(&mut open)
         .movable(true)
@@ -166,7 +173,13 @@ where
         .default_size(state.geometry.size)
         .frame(super::theme::window_frame(focused));
     window = if free_window_resizing {
-        window.min_size(Vec2::ZERO).scroll(true)
+        // Detail owns its finite body scroll region. Let it resize freely
+        // without enabling egui's outer-window scroll container.
+        if state.kind == WindowKind::Detail {
+            window.min_size(Vec2::ZERO)
+        } else {
+            window.min_size(Vec2::ZERO).scroll(true)
+        }
     } else {
         window.min_size(min_size)
     };
@@ -192,6 +205,7 @@ where
                 ui,
                 resources,
                 state.id,
+                focused,
                 kind,
                 resource,
                 yaml,
@@ -233,6 +247,7 @@ where
                             ui,
                             resources,
                             state.id,
+                            focused,
                             service,
                             feed,
                             context_namespace,
@@ -255,22 +270,42 @@ where
                     // identity; they never read the integrated
                     // selection of any list window.
                     if let Some(detail) = detail_state.as_ref() {
-                        super::detail::show(
-                            ui,
-                            state.id,
-                            detail,
-                            false,
-                            false,
-                            false,
-                            yaml,
-                            streams,
-                            dialogs,
-                            feed,
-                            None,
-                            true,
-                            resource_actions,
-                            queued,
-                        );
+                        let authority = detail
+                            .identity
+                            .as_row_identity()
+                            .and_then(|identity| feed.detail_authority.get(identity));
+                        let freshness = authority
+                            .filter(|authority| {
+                                authority.lifecycle == resource_window::DetailLifecycle::Present
+                            })
+                            .map(|authority| &authority.freshness);
+                        if let Some(presentation) =
+                            super::detail::presentation::DetailPresentationInput::from_feed(
+                                detail,
+                                feed,
+                                dedicated_detail_gone(detail, feed),
+                                freshness,
+                                authority.is_some_and(
+                                    resource_window::DetailAuthority::mutations_allowed,
+                                ),
+                            )
+                        {
+                            super::detail::show(
+                                ui,
+                                state.id,
+                                detail,
+                                &presentation,
+                                focused,
+                                false,
+                                false,
+                                yaml,
+                                streams,
+                                dialogs,
+                                None,
+                                resource_actions,
+                                queued,
+                            );
+                        }
                     }
                     false
                 }
@@ -326,4 +361,15 @@ where
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)
+}
+
+fn dedicated_detail_gone<I: resource_window::RowIdentity>(
+    detail: &crate::workspace::DetailState<I>,
+    feed: &resource_window::ResourceFeed,
+) -> bool {
+    detail
+        .identity
+        .as_row_identity()
+        .and_then(|identity| feed.detail_authority.get(identity))
+        .is_some_and(|authority| authority.lifecycle == resource_window::DetailLifecycle::Gone)
 }

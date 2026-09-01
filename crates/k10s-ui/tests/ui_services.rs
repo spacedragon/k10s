@@ -4,10 +4,7 @@
 //! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
-use egui_kittest::{
-    Harness,
-    kittest::{NodeT as _, Queryable as _},
-};
+use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
@@ -322,8 +319,14 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
     let integrated = harness.get_by_role_and_label(Role::Window, "Services");
     integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
     integrated.get_by_role_and_label(Role::Button, "Maximize");
-    integrated.get_by_label(
-        "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
+    integrated.get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close");
+    assert_eq!(integrated.query_all_by_role(Role::ScrollView).count(), 1);
+    assert!(
+        integrated.rect().contains_rect(
+            integrated
+                .get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close",)
+                .rect()
+        )
     );
 
     harness
@@ -331,7 +334,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
         .shell
         .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(service));
     harness.run_steps(4);
-    let dedicated = harness.get_by_role_and_label(Role::Window, "Detail");
+    let dedicated = harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
     assert!(
         dedicated
             .query_by_role_and_label(Role::Button, "Pop out ↗")
@@ -431,7 +434,7 @@ fn stale_connection_shows_the_banner() {
 }
 
 #[test]
-fn stale_service_window_disables_its_yaml_launcher() {
+fn service_uses_yaml_tab_without_a_duplicate_edit_yaml_action() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
     let window = services_window_id(harness.state());
@@ -452,12 +455,12 @@ fn stale_service_window_disables_its_yaml_launcher() {
     );
     harness.run_steps(4);
 
+    let detail = harness.get_by_role_and_label(Role::Window, "Services");
+    detail.get_by_role_and_label(Role::Button, "Tab YAML");
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Services")
-            .get_by_role_and_label(Role::Button, "Edit YAML")
-            .accesskit_node()
-            .is_disabled()
+        detail
+            .query_by_role_and_label(Role::Button, "Edit YAML")
+            .is_none()
     );
 }
 
@@ -518,8 +521,7 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     harness.run_steps(8);
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
-    window.get_by_label("Details");
-    window.get_by_label("Kind Service");
+    window.get_by_label("Service · default / web-frontend");
     for tab in ["Tab Overview", "Tab Ports", "Tab Events", "Tab YAML"] {
         window.get_by_role_and_label(Role::Button, tab);
     }

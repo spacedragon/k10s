@@ -7,14 +7,18 @@
 //! object's kind; the active tab lives in the workspace's [`DetailState`],
 //! so two views of any resource stay independent.
 
+mod deployment;
 mod events;
+pub(super) mod frame;
 mod overview;
+mod pod;
+pub(super) mod presentation;
 mod related;
 mod service;
 
-use egui::{RichText, Spinner};
+pub(crate) use pod::PodRuntimeProjection;
+
 use k10s_protocol::{GroupVersionKind, ResourceDetailResponse, WorkloadKind};
-use serde::Deserialize;
 
 use crate::ui::dialogs;
 use crate::ui::tools;
@@ -83,6 +87,66 @@ fn shortcut_tab(key: egui::Key) -> Option<DetailTab> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailShortcut {
+    Tab(DetailTab),
+    CopyName,
+    OpenOwner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DetailRuntimeAction {
+    PreviousLogs { window: WindowId, container: String },
+}
+
+fn shortcut_for_key(
+    key: egui::Key,
+    tabs: &[DetailTab],
+    has_verified_owner: bool,
+) -> Option<DetailShortcut> {
+    match key {
+        egui::Key::C => Some(DetailShortcut::CopyName),
+        egui::Key::O if has_verified_owner => Some(DetailShortcut::OpenOwner),
+        _ => shortcut_tab(key)
+            .filter(|tab| tabs.contains(tab))
+            .map(DetailShortcut::Tab),
+    }
+}
+
+fn shortcut_labels_for(
+    gvk: &GroupVersionKind,
+    has_verified_owner: bool,
+) -> &'static [&'static str] {
+    const POD: &[&str] = &["l logs", "s shell", "y yaml", "e events", "c copy name"];
+    const POD_OWNER: &[&str] = &[
+        "l logs",
+        "s shell",
+        "y yaml",
+        "e events",
+        "c copy name",
+        "o owner",
+    ];
+    const CONTROLLER: &[&str] = &["p pods", "y yaml", "e events", "c copy name"];
+    const CONTROLLER_OWNER: &[&str] = &["p pods", "y yaml", "e events", "c copy name", "o owner"];
+    const GENERIC: &[&str] = &["y yaml", "e events", "c copy name"];
+    const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
+
+    let tabs = tabs_for_kind(gvk);
+    if tabs.contains(&DetailTab::Logs) && tabs.contains(&DetailTab::Shell) {
+        if has_verified_owner { POD_OWNER } else { POD }
+    } else if tabs.contains(&DetailTab::Pods) {
+        if has_verified_owner {
+            CONTROLLER_OWNER
+        } else {
+            CONTROLLER
+        }
+    } else if has_verified_owner {
+        GENERIC_OWNER
+    } else {
+        GENERIC
+    }
+}
+
 /// Whether this GVK is exactly core/v1 `Service`.
 pub(super) fn is_service_gvk(gvk: &GroupVersionKind) -> bool {
     gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Service"
@@ -99,75 +163,25 @@ pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     detail: &DetailState<I>,
-    gone: bool,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    shortcut_owner: bool,
     integrated: bool,
     detail_maximized: bool,
     yaml: &mut tools::YamlEditors,
     streams: &mut tools::StreamStores,
     dialogs: &mut dialogs::OperationDialogs,
-    feed: &crate::ui::ResourceFeed,
     service_port_drafts: Option<&std::collections::BTreeMap<String, String>>,
-    mutations_allowed: bool,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: RowIdentity,
 {
-    let Some(identity) = detail.identity.as_row_identity() else {
+    if detail.identity.as_row_identity().is_none() {
         return;
-    };
-    // Resolve the detail projection here, at the shared rendering boundary.
-    // Integrated panes and dedicated windows must not maintain parallel
-    // lookup/fallback logic for the same pinned identity.
-    let primary_state = feed.primary_details.get(identity);
-    let view = feed.details.get(identity);
-    ui.horizontal(|ui| {
-        show_header(ui, identity, if gone { None } else { view });
-        if integrated && !gone {
-            if ui.button("Pop out ↗").clicked() {
-                queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                    detail.identity.clone(),
-                ));
-            }
-            let maximize_label = if detail_maximized {
-                "Restore split"
-            } else {
-                "Maximize"
-            };
-            if ui.button(maximize_label).clicked() {
-                queued.push(if detail_maximized {
-                    WorkspaceCommand::RestoreDetailPane(window_id)
-                } else {
-                    WorkspaceCommand::MaximizeDetailPane(window_id)
-                });
-            }
-        }
-    });
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        for tab in tabs_for_kind(&detail_identity_gvk(detail)) {
-            let active = *tab == detail.active_tab;
-            let label = if active {
-                RichText::new(tab_label(*tab)).strong()
-            } else {
-                RichText::new(tab_label(*tab))
-            };
-            let button = ui.button(label);
-            button.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    format!("Tab {}", tab_label(*tab)),
-                )
-            });
-            if button.clicked() && !active {
-                queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
-            }
-        }
-    });
-    ui.separator();
-
-    if !ui.ctx().memory(|memory| memory.focused().is_some()) {
+    }
+    if shortcut_owner && !ui.ctx().memory(|memory| memory.focused().is_some()) {
+        let tabs = tabs_for_kind(&detail_identity_gvk(detail));
+        let verified_owner = presentation.verified_owner();
         let shortcut = ui.input(|input| {
             [
                 egui::Key::L,
@@ -175,140 +189,217 @@ pub(super) fn show<I>(
                 egui::Key::S,
                 egui::Key::Y,
                 egui::Key::E,
+                egui::Key::C,
+                egui::Key::O,
             ]
             .into_iter()
             .find(|key| input.key_pressed(*key))
-            .and_then(shortcut_tab)
+            .and_then(|key| shortcut_for_key(key, tabs, verified_owner.is_some()))
         });
-        if let Some(tab) =
-            shortcut.filter(|tab| tabs_for_kind(&detail_identity_gvk(detail)).contains(tab))
-        {
-            queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
-        }
-    }
-
-    // A gone resource retains the common chrome but never resurrects stale
-    // body actions from a cached response.
-    if gone {
-        ui.label(RichText::new("This resource no longer exists").color(crate::ui::theme::WARNING));
-        show_shortcut_footer(ui);
-        return;
-    }
-
-    // Services share the header, tabs, shortcuts, and pane actions above,
-    // then render their specialized read-only body.
-    if is_service_gvk(&detail_identity_gvk(detail)) {
-        service::show(
-            ui,
-            window_id,
-            detail,
-            primary_state,
-            view,
-            yaml,
-            feed,
-            service_port_drafts,
-            mutations_allowed,
-            resource_actions,
-            queued,
-        );
-        show_shortcut_footer(ui);
-        return;
-    }
-
-    let view = match primary_state {
-        Some(crate::ui::PrimaryDetailState::Loaded(view)) => Some(view),
-        Some(crate::ui::PrimaryDetailState::Failed(error)) => {
-            ui.label(format!("Details unavailable: {}", error.message()));
-            if ui.button("Retry details").clicked() {
-                resource_actions.push(crate::ui::ResourceAction::RetryPrimary(identity.clone()));
+        match shortcut {
+            Some(DetailShortcut::Tab(tab)) => {
+                queued.push(WorkspaceCommand::SetActiveTab(window_id, tab));
             }
-            None
+            Some(DetailShortcut::CopyName) => {
+                ui.ctx().copy_text(presentation.identity.name.clone());
+            }
+            Some(DetailShortcut::OpenOwner) => {
+                if let Some(owner) = verified_owner {
+                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                        &presentation::owner_identity(presentation.identity, owner),
+                    )));
+                }
+            }
+            None => {}
         }
-        Some(crate::ui::PrimaryDetailState::Loading) => None,
-        None => view,
-    };
-    let Some(view) = view else {
-        if !matches!(
-            primary_state,
-            Some(crate::ui::PrimaryDetailState::Failed(_))
-        ) {
-            ui.horizontal(|ui| {
-                ui.add(Spinner::new());
-                ui.label("Loading details");
-            });
-        }
-        return;
-    };
+    }
 
-    ui.horizontal_wrapped(|ui| {
-        let capabilities = view.capabilities;
-        let identity = detail.identity.as_row_identity();
-        if capabilities.can_scale {
-            let scale = ui.add_enabled(mutations_allowed, egui::Button::new("Scale"));
-            scale.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    "Scale workload".to_owned(),
-                )
-            });
-            if scale.clicked()
-                && let Some(identity) = identity
-            {
-                dialogs.open_scale(
+    let mut body_queued = Vec::new();
+    let mut runtime_actions = Vec::new();
+    frame::show(
+        ui,
+        window_id,
+        detail,
+        presentation,
+        integrated,
+        detail_maximized,
+        tabs_for_kind(&detail_identity_gvk(detail)),
+        queued,
+        |frame| {
+            let gvk = detail_identity_gvk(detail);
+            if gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Pod" {
+                pod::configure_frame(presentation, frame);
+            } else if gvk.group == "apps" && gvk.version == "v1" && gvk.kind == "Deployment" {
+                deployment::configure_frame(presentation, frame);
+            }
+        },
+        |ui, primary, actions, frame| {
+            let view = match primary {
+                presentation::DetailPrimary::Loading => {
+                    if !actions {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new());
+                            ui.label("Loading details");
+                        });
+                    }
+                    return;
+                }
+                presentation::DetailPrimary::Failed(error) => {
+                    if !actions {
+                        ui.label(format!("Details unavailable: {}", error.message()));
+                    }
+                    if !actions && ui.button("Retry details").clicked() {
+                        resource_actions.push(crate::ui::ResourceAction::RetryPrimary(
+                            presentation.identity.clone(),
+                        ));
+                    }
+                    return;
+                }
+                presentation::DetailPrimary::Loaded(view) => view,
+            };
+            if actions {
+                if presentation.gone {
+                    return;
+                }
+                if !is_service_gvk(&detail_identity_gvk(detail)) {
+                    show_generic_actions(
+                        ui,
+                        window_id,
+                        presentation,
+                        frame,
+                        view,
+                        dialogs,
+                        resource_actions,
+                    );
+                }
+                return;
+            }
+            if is_service_gvk(&detail_identity_gvk(detail)) {
+                service::show(
+                    ui,
                     window_id,
-                    identity.clone(),
-                    status_summary(view).and_then(summary_replicas),
+                    detail,
+                    view,
+                    presentation,
+                    yaml,
+                    service_port_drafts,
+                    resource_actions,
+                    &mut body_queued,
+                );
+            } else if matches!(detail_identity_gvk(detail).kind.as_str(), "Pod")
+                && detail_identity_gvk(detail).group.is_empty()
+                && detail_identity_gvk(detail).version == "v1"
+            {
+                if detail.active_tab == DetailTab::Overview {
+                    pod::show(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        frame,
+                        &mut runtime_actions,
+                        &mut body_queued,
+                    );
+                } else {
+                    show_generic_body(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        view,
+                        yaml,
+                        streams,
+                        dialogs,
+                        resource_actions,
+                        &mut body_queued,
+                    );
+                }
+            } else if matches!(detail_identity_gvk(detail).kind.as_str(), "Deployment")
+                && detail_identity_gvk(detail).group == "apps"
+                && detail_identity_gvk(detail).version == "v1"
+            {
+                if detail.active_tab == DetailTab::Overview {
+                    deployment::show(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        frame,
+                        resource_actions,
+                        &mut body_queued,
+                    );
+                } else {
+                    show_generic_body(
+                        ui,
+                        window_id,
+                        detail,
+                        presentation,
+                        view,
+                        yaml,
+                        streams,
+                        dialogs,
+                        resource_actions,
+                        &mut body_queued,
+                    );
+                }
+            } else {
+                show_generic_body(
+                    ui,
+                    window_id,
+                    detail,
+                    presentation,
+                    view,
+                    yaml,
+                    streams,
+                    dialogs,
+                    resource_actions,
+                    &mut body_queued,
                 );
             }
-        }
-        if capabilities.can_delete && identity.is_some() {
-            let delete = ui.add_enabled(mutations_allowed, egui::Button::new("Delete"));
-            delete.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    "Delete resource".to_owned(),
-                )
-            });
-            if delete.clicked()
-                && let Some(identity) = identity
-            {
-                dialogs.open_delete(window_id, identity.clone());
+        },
+    );
+    for action in runtime_actions {
+        match action {
+            DetailRuntimeAction::PreviousLogs { window, container } => {
+                if let presentation::DetailPrimary::Loaded(view) = presentation.primary
+                    && let Some(runtime) =
+                        pod::PodRuntimeProjection::from_view(presentation.identity, view)
+                    && runtime.contains(&container)
+                    && let Some(target) = stream_target(detail, &container)
+                {
+                    let logs = streams.logs.ensure(window, target);
+                    logs.select_container(&container);
+                    logs.set_previous(true);
+                }
             }
         }
-        if capabilities.can_view_logs {
-            action_button(ui, "View logs", "View logs");
-        }
-        if capabilities.can_exec {
-            action_button(ui, "Exec shell", "Exec shell");
-        }
-        if capabilities.can_edit_yaml
-            && ui
-                .add_enabled(mutations_allowed, egui::Button::new("Edit YAML"))
-                .clicked()
-        {
-            queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Yaml));
-        }
-    });
-    if !mutations_allowed {
-        ui.label("Scale, delete, and YAML edits are disabled until this window is live");
     }
-    ui.separator();
+    queued.extend(body_queued);
+}
 
+#[allow(clippy::too_many_arguments)]
+fn show_generic_body<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    detail: &DetailState<I>,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    view: &ResourceDetailResponse,
+    yaml: &mut tools::YamlEditors,
+    streams: &mut tools::StreamStores,
+    _dialogs: &mut dialogs::OperationDialogs,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
     match detail.active_tab {
         DetailTab::Overview => overview::show(ui, window_id, &view.sections),
         DetailTab::Pods => related::show(
             ui,
-            window_id,
-            identity,
-            feed.relations.get(identity),
+            presentation.identity,
+            presentation.relations,
             resource_actions,
             queued,
         ),
-        DetailTab::Events => events::show(ui, window_id, view.events_condition, &view.events),
-        // Only Service details expose Ports; the generic body renders
-        // nothing for it rather than falling back to another tab.
+        DetailTab::Events => events::show(ui, view.events_condition, &view.events),
         DetailTab::Ports => {}
         DetailTab::Yaml => {
             if !view.capabilities.can_edit_yaml {
@@ -318,48 +409,86 @@ pub(super) fn show<I>(
                     ui,
                     window_id,
                     yaml,
-                    detail.identity.as_row_identity(),
+                    Some(presentation.identity),
                     Some(view.manifest.as_str()),
-                    mutations_allowed,
+                    presentation.mutations_allowed,
                     queued,
                 );
             }
         }
         DetailTab::Logs => {
-            let containers = pod_containers(&view.manifest);
+            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
+            else {
+                ui.label("Pod runtime details unavailable");
+                return;
+            };
             tools::logs::show(
                 ui,
                 window_id,
                 &mut streams.logs,
-                stream_target(detail, view),
-                &containers,
-                status_summary(view).is_some_and(|status| status.contains("CrashLoopBackOff")),
+                stream_target(detail, runtime.default_container()),
+                runtime.containers(),
+                runtime.default_previous(),
             );
         }
         DetailTab::Shell => {
+            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
+            else {
+                ui.label("Pod runtime details unavailable");
+                return;
+            };
             tools::shell::show(
                 ui,
                 window_id,
                 &mut streams.shells,
-                stream_target(detail, view),
+                stream_target(detail, runtime.default_container()),
             );
         }
     }
-    show_shortcut_footer(ui);
 }
 
-fn show_shortcut_footer(ui: &mut egui::Ui) {
-    ui.separator();
-    ui.label(
-        RichText::new(
-            "Shortcuts: l Logs · p Pods · s Shell · y YAML · e Events · Esc restore/close",
-        )
-        .weak(),
-    );
+fn show_generic_actions(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    frame: &presentation::DetailFrameProjection<'_>,
+    view: &ResourceDetailResponse,
+    dialogs: &mut dialogs::OperationDialogs,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
+) {
+    if frame.actions.can_scale {
+        let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
+        scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));
+        if scale.clicked() {
+            dialogs.open_scale(
+                window_id,
+                presentation.identity.clone(),
+                status_summary(view).and_then(summary_replicas),
+            );
+        }
+    }
+    if frame.actions.can_restart {
+        let restart = ui.add_enabled(
+            presentation.mutations_allowed,
+            egui::Button::new("Restart…"),
+        );
+        restart
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restart…"));
+        if restart.clicked() {
+            resource_actions.push(crate::ui::ResourceAction::Restart {
+                window: window_id,
+                target: presentation.identity.clone(),
+            });
+        }
+    }
+    if frame.actions.can_delete {
+        let delete = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Delete…"));
+        delete.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Delete…"));
+        if delete.clicked() {
+            dialogs.open_delete(window_id, presentation.identity.clone());
+        }
+    }
 }
-
-/// The default pod container streamed by the connected tools.
-const DEFAULT_CONTAINER: &str = "app";
 
 /// Best-effort current desired replica count from a status summary such as
 /// `20/20 ready`, used as the pre-filled value of the scale dialog.
@@ -384,14 +513,18 @@ fn status_summary(view: &ResourceDetailResponse) -> Option<&str> {
 
 /// Resolve a pod/container stream target from the pinned identity. Only pod
 /// identities can stream; anything else yields no target.
-fn stream_target<I>(
-    detail: &DetailState<I>,
-    view: &ResourceDetailResponse,
-) -> Option<k10s_protocol::StreamTarget>
+fn stream_target<I>(detail: &DetailState<I>, container: &str) -> Option<k10s_protocol::StreamTarget>
 where
     I: RowIdentity,
 {
     let identity = detail.identity.as_row_identity()?;
+    if !identity.gvk.group.is_empty()
+        || identity.gvk.version != "v1"
+        || identity.gvk.kind != "Pod"
+        || container.is_empty()
+    {
+        return None;
+    }
     Some(k10s_protocol::StreamTarget {
         context: identity.context.clone(),
         namespace: identity
@@ -400,44 +533,8 @@ where
             .unwrap_or_else(|| "default".to_owned()),
         pod: identity.name.clone(),
         uid: identity.uid.clone(),
-        container: pod_container(&view.manifest).unwrap_or_else(|| DEFAULT_CONTAINER.to_owned()),
+        container: container.to_owned(),
     })
-}
-
-/// Resolve the default exec/logs container from the authoritative Pod
-/// manifest. Kubernetes does not prescribe an `app` container name, so the
-/// first regular container is the only generally valid implicit selection.
-pub(crate) fn pod_container(manifest: &str) -> Option<String> {
-    pod_containers(manifest).into_iter().next()
-}
-
-pub(crate) fn pod_containers(manifest: &str) -> Vec<String> {
-    #[derive(Deserialize)]
-    struct Manifest {
-        spec: Spec,
-    }
-
-    #[derive(Deserialize)]
-    struct Spec {
-        containers: Vec<Container>,
-    }
-
-    #[derive(Deserialize)]
-    struct Container {
-        name: String,
-    }
-
-    serde_yaml::from_str::<Manifest>(manifest)
-        .map(|manifest| {
-            manifest
-                .spec
-                .containers
-                .into_iter()
-                .map(|container| container.name)
-                .filter(|name| !name.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn detail_identity_gvk<I>(detail: &DetailState<I>) -> GroupVersionKind
@@ -454,53 +551,9 @@ where
     )
 }
 
-/// Identity header: the pinned identity exactly as the backend asserts it.
-pub(super) fn show_header(
-    ui: &mut egui::Ui,
-    identity: &k10s_protocol::ResourceIdentity,
-    view: Option<&ResourceDetailResponse>,
-) {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.strong("Details");
-            ui.label(
-                RichText::new(identity.gvk.kind.to_uppercase())
-                    .small()
-                    .strong()
-                    .color(crate::ui::theme::ACCENT),
-            );
-            ui.heading(RichText::new(&identity.name).strong());
-        });
-        ui.horizontal(|ui| {
-            ui.label(format!("Kind {}", identity.gvk.kind));
-            match identity.namespace.as_deref() {
-                Some(namespace) => ui.label(format!("Namespace {namespace}")),
-                None => ui.label("Scope Cluster-scoped"),
-            };
-            ui.label(format!("Context {}", identity.context));
-        });
-        ui.horizontal(|ui| {
-            ui.monospace(format!("UID {}", identity.uid));
-            if let Some(view) = view {
-                ui.monospace(format!("Created {}", view.created_at));
-                ui.label(RichText::new("Fresh · live").color(crate::ui::theme::HEALTHY));
-            } else {
-                ui.label(RichText::new("Refreshing…").weak());
-            }
-        });
-    });
-}
-
-fn action_button(ui: &mut egui::Ui, label: &str, accessible: &str) {
-    let button = ui.button(label);
-    button.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessible.to_owned())
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{pod_container, shortcut_tab};
+    use super::{DetailShortcut, shortcut_for_key, shortcut_tab};
     use crate::workspace::DetailTab;
 
     #[test]
@@ -511,28 +564,23 @@ mod tests {
         assert_eq!(shortcut_tab(egui::Key::Y), Some(DetailTab::Yaml));
         assert_eq!(shortcut_tab(egui::Key::E), Some(DetailTab::Events));
         assert_eq!(shortcut_tab(egui::Key::Enter), None);
-    }
 
-    #[test]
-    fn pod_container_reads_first_regular_container_from_yaml_manifest() {
-        let manifest = r#"
-spec:
-  initContainers:
-    - name: setup
-  containers:
-    - name: postgres
-    - name: metrics
-"#;
-
-        assert_eq!(pod_container(manifest).as_deref(), Some("postgres"));
-    }
-
-    #[test]
-    fn pod_container_rejects_missing_or_empty_container_names() {
-        assert_eq!(pod_container("spec:\n  containers: []\n"), None);
+        let pod_tabs = [
+            DetailTab::Overview,
+            DetailTab::Events,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+            DetailTab::Shell,
+        ];
         assert_eq!(
-            pod_container("spec:\n  containers:\n    - name: ''\n"),
-            None
+            shortcut_for_key(egui::Key::C, &pod_tabs, false),
+            Some(DetailShortcut::CopyName)
+        );
+        assert_eq!(shortcut_for_key(egui::Key::P, &pod_tabs, false), None);
+        assert_eq!(shortcut_for_key(egui::Key::O, &pod_tabs, false), None);
+        assert_eq!(
+            shortcut_for_key(egui::Key::O, &pod_tabs, true),
+            Some(DetailShortcut::OpenOwner)
         );
     }
 }
