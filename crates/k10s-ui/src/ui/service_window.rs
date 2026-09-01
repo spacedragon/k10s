@@ -418,9 +418,10 @@ fn show_table<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
 ) -> TableActions<I>
 where
-    I: Clone,
+    I: Clone + std::fmt::Debug + std::hash::Hash,
 {
     let mut actions = TableActions::default();
+    let gesture_table_id = egui::Id::new(("k10s.service.table-gesture", window_id.0));
     if rows.is_empty() {
         // Distinguish "the context has no services at all" from "the
         // active filters removed everything".
@@ -454,7 +455,14 @@ where
 
                     for index in range.start.max(header_rows)..range.end {
                         let row = &rows[index - header_rows];
-                        service_row(ui, row, &is_selected, &identity_of, &mut actions);
+                        service_row(
+                            ui,
+                            row,
+                            gesture_table_id,
+                            &is_selected,
+                            &identity_of,
+                            &mut actions,
+                        );
                         ui.end_row();
                     }
                 });
@@ -465,11 +473,12 @@ where
 fn service_row<I>(
     ui: &mut egui::Ui,
     row: &ResourceListRow,
+    gesture_table_id: egui::Id,
     is_selected: impl Fn(&ResourceListRow) -> bool,
     identity_of: impl Fn(&ResourceListRow) -> I,
     actions: &mut TableActions<I>,
 ) where
-    I: Clone,
+    I: Clone + std::fmt::Debug + std::hash::Hash,
 {
     let selected = is_selected(row);
     let name_button = if selected {
@@ -481,8 +490,15 @@ fn service_row<I>(
         super::responsive_table::row_action_label("service", &row.identity.name, selected);
     name_button
         .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    let (row_action, popped_out) =
-        super::responsive_table::row_interaction(&name_button, identity_of(row), selected);
+    let identity = identity_of(row);
+    let row_id = gesture_table_id.with(&identity);
+    let (row_action, popped_out) = super::responsive_table::row_interaction(
+        &name_button,
+        gesture_table_id,
+        row_id,
+        identity,
+        selected,
+    );
     if row_action.is_some() {
         actions.row_action = row_action;
     }

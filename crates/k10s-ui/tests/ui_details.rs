@@ -1368,6 +1368,7 @@ fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
+        .with_step_dt(0.3)
         .build_ui_state(render, Fixture::default())
 }
 

@@ -315,7 +315,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Select service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let integrated = harness.get_by_role_and_label(Role::Window, "Services");
     integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
@@ -375,6 +375,103 @@ fn selected_service_single_click_eventually_clears_selection_once() {
     assert!(service.selection.is_none());
     assert!(service.detail.is_none());
     assert!(harness.state().shell.workspace().pending().is_none());
+}
+
+#[test]
+fn clicking_another_service_replaces_the_pending_row_action() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.run_steps(10);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert_eq!(
+        service
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("api-server")
+    );
+    assert_eq!(service.detail.as_ref().unwrap().identity.name, "api-server");
+}
+
+#[test]
+fn cross_row_service_double_click_does_not_change_integrated_selection() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.step();
+    harness.run_steps(10);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert_eq!(
+        service
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend")
+    );
+    assert_eq!(
+        service.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Service · default / api-server");
 }
 
 #[test]
@@ -503,7 +600,7 @@ fn service_selection_derives_detail_visibility() {
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Select service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let services = harness.get_by_role_and_label(Role::Window, "Services");
     services.get_by_label("Service · default / web-frontend");
@@ -731,7 +828,7 @@ fn failed_service_detail_is_safe_and_retries_the_exact_identity_once() {
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Select service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Details unavailable: service detail denied");

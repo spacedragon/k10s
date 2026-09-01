@@ -102,9 +102,10 @@ pub(super) fn show<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
 ) -> TableActions<I>
 where
-    I: Clone,
+    I: Clone + std::fmt::Debug + std::hash::Hash,
 {
     let mut actions = TableActions::default();
+    let gesture_table_id = egui::Id::new(("k10s.resource.table-gesture", window_id.0));
 
     if rows.is_empty() {
         if search.is_empty() {
@@ -178,9 +179,13 @@ where
                         name_button.widget_info(move || {
                             WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
                         });
+                        let identity = identity_of(row);
+                        let row_id = gesture_table_id.with(&identity);
                         let (row_action, popped_out) = super::responsive_table::row_interaction(
                             &name_button,
-                            identity_of(row),
+                            gesture_table_id,
+                            row_id,
+                            identity,
                             selected,
                         );
                         if row_action.is_some() {

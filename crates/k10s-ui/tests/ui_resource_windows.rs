@@ -1079,7 +1079,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("Pod · default / db-postgres-0");
@@ -1156,6 +1156,112 @@ fn selected_row_single_click_eventually_clears_selection_once() {
     assert!(resource.selection.is_none());
     assert!(resource.detail.is_none());
     assert!(harness.state().shell.workspace().pending().is_none());
+}
+
+#[test]
+fn clicking_another_resource_replaces_the_pending_row_action() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(10);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert_eq!(
+        resource
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend-7d9f8-00001")
+    );
+    assert_eq!(
+        resource.detail.as_ref().unwrap().identity.name,
+        "web-frontend-7d9f8-00001"
+    );
+}
+
+#[test]
+fn cross_row_resource_double_click_does_not_change_integrated_selection() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.step();
+    harness.run_steps(10);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert_eq!(
+        resource
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("db-postgres-0")
+    );
+    assert_eq!(
+        resource.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001");
 }
 
 #[test]
@@ -1286,7 +1392,7 @@ fn detail_close_is_in_identity_row() {
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     let identity_row = window.get_by_label("Detail identity row");
