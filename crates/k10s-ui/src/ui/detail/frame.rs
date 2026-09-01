@@ -21,6 +21,27 @@ pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
     }
 }
 
+fn expansion_id(
+    window_id: WindowId,
+    identity: &k10s_protocol::ResourceIdentity,
+    tab: DetailTab,
+) -> egui::Id {
+    let identity_key = if identity.uid.is_empty() {
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            identity.context,
+            identity.gvk.group,
+            identity.gvk.version,
+            identity.gvk.kind,
+            identity.namespace.as_deref().unwrap_or_default(),
+            identity.name,
+        )
+    } else {
+        identity.uid.clone()
+    };
+    egui::Id::new(("k10s.detail.expansion", window_id.0, identity_key, tab))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I: RowIdentity>(
     ui: &mut egui::Ui,
@@ -34,7 +55,7 @@ pub(super) fn show<I: RowIdentity>(
     configure: impl FnOnce(&mut DetailFrameProjection<'_>),
     mut content: impl FnMut(&mut egui::Ui, DetailPrimary<'_>, bool, &mut DetailFrameProjection<'_>),
 ) {
-    let expansion_id = egui::Id::new(("k10s.detail.expansion", window_id.0));
+    let expansion_id = expansion_id(window_id, input.identity, detail.active_tab);
     let expansion = ui
         .ctx()
         .data_mut(|data| data.get_temp::<DetailExpansionState>(expansion_id))
@@ -106,7 +127,11 @@ pub(super) fn show<I: RowIdentity>(
             .max_rect(vitals_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    if wide {
+    let mut popup_rects = None;
+    let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
+    let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
+        + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
+    if wide && wide_minimum <= vitals_width {
         show_vital_strip(&mut vitals_ui, &mut projection, true);
     } else {
         ScrollArea::horizontal()
@@ -115,9 +140,22 @@ pub(super) fn show<I: RowIdentity>(
             .stick_to_right(true)
             .show(&mut vitals_ui, |ui| {
                 ui.horizontal(|ui| {
-                    show_vital_strip(ui, &mut projection, false);
+                    popup_rects = show_vital_strip(ui, &mut projection, wide);
                 });
             });
+    }
+    if let Some((button_rect, popup_rect)) = popup_rects {
+        let escape =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let outside_click = ui.input(|input| {
+            input.pointer.any_click()
+                && input.pointer.interact_pos().is_some_and(|position| {
+                    !button_rect.contains(position) && !popup_rect.contains(position)
+                })
+        });
+        if escape || outside_click {
+            projection.expansion.more_vitals = false;
+        }
     }
     if !input.mutations_allowed
         && (projection.actions.can_scale
@@ -139,9 +177,32 @@ pub(super) fn show<I: RowIdentity>(
     let usable_width = (tab_row.width() - gap).max(0.0);
     let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
     let tab_width = usable_width - action_width;
-    let tabs_rect = egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
+    let tabs_region =
+        egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
+    let freshness_width = if integrated {
+        0.0
+    } else {
+        tabs_region.width().min(152.0)
+    };
+    let tabs_rect = egui::Rect::from_min_max(
+        tabs_region.min,
+        egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
+    );
+    if !integrated {
+        let freshness_rect = egui::Rect::from_min_max(
+            egui::pos2(tabs_rect.right(), tabs_region.top()),
+            tabs_region.max,
+        );
+        let mut freshness_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(freshness_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
+        freshness_ui.label(freshness_text(projection.freshness));
+    }
     let actions_rect = egui::Rect::from_min_max(
-        egui::pos2(tabs_rect.right() + gap, tab_row.top()),
+        egui::pos2(tabs_region.right() + gap, tab_row.top()),
         tab_row.max,
     );
     let mut tabs_ui = ui.new_child(
@@ -169,9 +230,6 @@ pub(super) fn show<I: RowIdentity>(
                     if response.clicked() && !active {
                         queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
                     }
-                }
-                if !integrated {
-                    ui.label(freshness_text(projection.freshness));
                 }
             });
         });
@@ -290,6 +348,7 @@ pub(super) fn show<I: RowIdentity>(
 
 const VITAL_VALUE_MAX_CHARS: usize = 24;
 const VITAL_CHIP_MAX_WIDTH: f32 = 184.0;
+const VITAL_CHIP_SANE_MIN_WIDTH: f32 = 64.0;
 
 struct VitalDisplay {
     visible: String,
@@ -311,7 +370,7 @@ fn vital_display(vital: &DetailVital) -> VitalDisplay {
     }
 }
 
-fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
+fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
     let display = vital_display(vital);
     let visible = match vital.shape {
         Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), display.visible),
@@ -324,9 +383,9 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
         f32::INFINITY,
         egui::TextStyle::Body,
     );
-    let chip_width = (natural.size().x + 12.0).min(VITAL_CHIP_MAX_WIDTH);
+    let chip_width = (natural.size().x + 12.0).min(max_width.min(VITAL_CHIP_MAX_WIDTH));
     let chip_height = ui.spacing().interact_size.y;
-    let (chip_rect, chip_response) =
+    let (chip_rect, _) =
         ui.allocate_exact_size(egui::vec2(chip_width, chip_height), Sense::hover());
     let mut chip_ui = ui.new_child(
         UiBuilder::new()
@@ -345,27 +404,36 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
             response.widget_info(|| {
                 WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
             });
-            if display.elided || natural.size().x + 12.0 > VITAL_CHIP_MAX_WIDTH {
+            if display.elided || natural.size().x + 12.0 > chip_width {
                 response.on_hover_text(display.accessible.clone());
             }
         });
-    chip_response.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Other,
-            true,
-            format!("Vital chip {}", display.accessible),
-        )
-    });
 }
 
-fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
+fn show_vital_strip(
+    ui: &mut egui::Ui,
+    projection: &mut DetailFrameProjection<'_>,
+    wide: bool,
+) -> Option<(egui::Rect, egui::Rect)> {
     normalize_vital_expansion(wide, &mut projection.expansion);
+    let count = projection.visible_vitals.len()
+        + if wide {
+            projection.overflow_vitals.len()
+        } else {
+            0
+        };
+    let gaps = ui.spacing().item_spacing.x * count.saturating_sub(1) as f32;
+    let max_width = if wide && count > 0 {
+        ((ui.available_width() - gaps) / count as f32).min(VITAL_CHIP_MAX_WIDTH)
+    } else {
+        VITAL_CHIP_MAX_WIDTH
+    };
     for metric in &projection.visible_vitals {
-        vital(ui, metric);
+        vital(ui, metric, max_width);
     }
     if wide {
         for metric in &projection.overflow_vitals {
-            vital(ui, metric);
+            vital(ui, metric, max_width);
         }
     } else if let Some(kind) = projection.vital_expansion_label
         && !projection.overflow_vitals.is_empty()
@@ -382,7 +450,7 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.vertical(|ui| {
                             for metric in &projection.overflow_vitals {
-                                vital(ui, metric);
+                                vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
                             }
                             if ui.button("Dismiss vital overflow").clicked() {
                                 projection.expansion.more_vitals = false;
@@ -402,8 +470,10 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
                     format!("{kind} vital overflow popover"),
                 )
             });
+            return Some((response.rect, popup.response.rect));
         }
     }
+    None
 }
 
 fn normalize_vital_expansion(wide: bool, expansion: &mut DetailExpansionState) {
@@ -513,6 +583,29 @@ mod tests {
         assert!(
             !expansion.more_vitals,
             "returning narrow must not reopen stale popup"
+        );
+    }
+
+    #[test]
+    fn vital_popup_state_is_scoped_to_pinned_identity_and_tab() {
+        let mut first = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web-0".into(),
+            uid: "uid-web-0".into(),
+        };
+        let window = WindowId(9);
+        let first_overview = super::expansion_id(window, &first, DetailTab::Overview);
+        first.uid = "uid-web-1".into();
+        first.name = "web-1".into();
+        assert_ne!(
+            first_overview,
+            super::expansion_id(window, &first, DetailTab::Overview)
+        );
+        assert_ne!(
+            super::expansion_id(window, &first, DetailTab::Overview),
+            super::expansion_id(window, &first, DetailTab::Events)
         );
     }
 
@@ -715,10 +808,10 @@ mod tests {
                 ready_label,
                 "Up-to-date · 3".to_owned(),
                 "Available · 3".to_owned(),
+                "Strategy · RollingUpdate".to_owned(),
+                "Age · 2h".to_owned(),
             ] {
-                let chip = harness
-                    .get_by_label(&format!("Vital chip {accessible}"))
-                    .rect();
+                let chip = harness.get_by_label(&accessible).rect();
                 assert!(chip.width() <= super::VITAL_CHIP_MAX_WIDTH + 0.1);
                 assert!(
                     strip.contains_rect(chip),
@@ -802,6 +895,32 @@ mod tests {
             harness.get_by_label("Detail vital strip").rect().height(),
             strip_height
         );
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
+        harness
+            .get_by_label(
+                "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
+            )
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Dismiss vital overflow")
             .click();

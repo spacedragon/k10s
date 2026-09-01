@@ -256,23 +256,22 @@ Window
                         GenericContainer
                           Label value="Status ● —"
                             TextRun value="Status ● —"
-                      Unknown label="Vital chip Status ● —"
                       GenericContainer
                         GenericContainer
                           Label value="Ready · —"
                             TextRun value="Ready · —"
-                      Unknown label="Vital chip Ready · —"
                       GenericContainer
                         GenericContainer
                           Label value="Restarts · —"
                             TextRun value="Restarts · —"
-                      Unknown label="Vital chip Restarts · —"
                       GenericContainer
                         GenericContainer
                           Label value="Age · —"
                             TextRun value="Age · —"
-                      Unknown label="Vital chip Age · —"
                       Button label="Show more Pod vitals"
+              GenericContainer
+                Label value="Freshness · loading"
+                  TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -282,8 +281,6 @@ Window
                       Button label="Tab YAML"
                       Button label="Tab Logs"
                       Button label="Tab Shell"
-                      Label value="Freshness · loading"
-                        TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer
