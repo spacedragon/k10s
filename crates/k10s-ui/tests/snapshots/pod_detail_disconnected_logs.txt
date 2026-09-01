@@ -193,22 +193,26 @@ Window
                     Button label="Clear selection"
                     Button label="Restore split"
                     Button label="Pop out ↗"
+                    Label value="Freshness · unavailable"
+                      TextRun value="Freshness · unavailable"
                 GenericContainer label="Detail identity row"
                 GenericContainer
                   GenericContainer
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                          TextRun value="Status ● —"
-                        Label value="Ready · —"
-                          TextRun value="Ready · —"
-                        Label value="Restarts · —"
-                          TextRun value="Restarts · —"
-                        Label value="Age · —"
-                          TextRun value="Age · —"
+                        GenericContainer
+                          Label value="Status ● —"
+                            TextRun value="Status ● —"
+                        GenericContainer
+                          Label value="Ready · —"
+                            TextRun value="Ready · —"
+                        GenericContainer
+                          Label value="Restarts · —"
+                            TextRun value="Restarts · —"
+                        GenericContainer
+                          Label value="Age · —"
+                            TextRun value="Age · —"
                         Button label="Show more Pod vitals"
-                        Label value="Freshness · unavailable"
-                          TextRun value="Freshness · unavailable"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
@@ -227,32 +231,30 @@ Window
                         Button label="Delete…"
                         Button label="Actions"
                         Button label="Copy name"
-                ScrollView label="Detail body"
+                GenericContainer
+                  Label value="LOG SOURCE"
+                    TextRun value="LOG SOURCE"
                   GenericContainer
                     GenericContainer
-                      Label value="LOG SOURCE"
-                        TextRun value="LOG SOURCE"
                       GenericContainer
-                        GenericContainer
-                          GenericContainer
-                            ComboBox value="Container: app"
-                        CheckBox label="Previous"
-                        GenericContainer
-                          GenericContainer
-                            ComboBox value="Since: 5m"
-                        Button label="Connect logs"
-                        Label value="Disconnected"
-                          TextRun value="Disconnected"
-                      Label value="VIEW"
-                        TextRun value="VIEW"
+                        ComboBox value="Container: app"
+                    CheckBox label="Previous"
+                    GenericContainer
                       GenericContainer
-                        TextInput label="Find in logs" value=""
-                          TextRun value=""
-                        CheckBox label="Wrap"
-                        Button label="Export"
-                      GenericContainer
-                        Label value="kubelet started pod"
-                          TextRun value="kubelet started pod"
+                        ComboBox value="Since: 5m"
+                    Button label="Connect logs"
+                    Label value="Disconnected"
+                      TextRun value="Disconnected"
+                  Label value="VIEW"
+                    TextRun value="VIEW"
+                  GenericContainer
+                    TextInput label="Find in logs" value=""
+                      TextRun value=""
+                    CheckBox label="Wrap"
+                    Button label="Export"
+                  GenericContainer
+                    Label value="kubelet started pod"
+                      TextRun value="kubelet started pod"
                 GenericContainer
                   Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
                     TextRun value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"

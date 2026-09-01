@@ -76,6 +76,7 @@ pub(super) fn show<I: RowIdentity>(
                         ));
                     }
                 }
+                ui.label(freshness_text(projection.freshness));
             });
         });
         let identity_semantics = ui.interact(
@@ -167,6 +168,9 @@ pub(super) fn show<I: RowIdentity>(
                         queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
                     }
                 }
+                if !integrated {
+                    ui.label(freshness_text(projection.freshness));
+                }
             });
         });
     let owner = projection.actions.verified_owner;
@@ -239,28 +243,36 @@ pub(super) fn show<I: RowIdentity>(
             .max_rect(body_rect)
             .layout(Layout::top_down(Align::Min)),
     );
-    body_ui
-        .ctx()
-        .accesskit_node_builder(body_ui.unique_id(), |node| {
-            node.set_role(egui::accesskit::Role::ScrollView);
-            node.set_label("Detail body");
-            node.set_bounds(egui::accesskit::Rect {
-                x0: body_rect.left().into(),
-                y0: body_rect.top().into(),
-                x1: body_rect.right().into(),
-                y1: body_rect.bottom().into(),
+    if uses_shared_body_scroll(detail.active_tab) {
+        body_ui
+            .ctx()
+            .accesskit_node_builder(body_ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::ScrollView);
+                node.set_label("Detail body");
+                node.set_bounds(egui::accesskit::Rect {
+                    x0: body_rect.left().into(),
+                    y0: body_rect.top().into(),
+                    x1: body_rect.right().into(),
+                    y1: body_rect.bottom().into(),
+                });
             });
-        });
-    ScrollArea::vertical()
-        .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
-        .max_height(body_rect.height())
-        .show(&mut body_ui, |ui| {
-            if input.gone {
-                ui.label("This resource no longer exists");
-            } else {
-                content(ui, input.primary, false, &mut projection);
-            }
-        });
+    }
+    let mut show_body = |ui: &mut egui::Ui| {
+        if input.gone {
+            ui.label("This resource no longer exists");
+        } else {
+            content(ui, input.primary, false, &mut projection);
+        }
+    };
+    if uses_shared_body_scroll(detail.active_tab) {
+        ScrollArea::vertical()
+            .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
+            .max_height(body_rect.height())
+            .show(&mut body_ui, &mut show_body);
+    } else {
+        body_ui.set_clip_rect(body_ui.clip_rect().intersect(body_rect));
+        show_body(&mut body_ui);
+    }
     let mut footer_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.footer", window_id.0))
@@ -279,31 +291,53 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
         Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), vital.value),
         None => format!("{} · {}", vital.label, vital.value),
     };
-    ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)))
+                    .wrap_mode(egui::TextWrapMode::Extend),
+            );
+        });
 }
 
 fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
     for metric in &projection.visible_vitals {
         vital(ui, metric);
     }
-    if wide || projection.expansion.more_vitals {
+    if wide {
         for metric in &projection.overflow_vitals {
             vital(ui, metric);
         }
     } else if let Some(kind) = projection.vital_expansion_label
         && !projection.overflow_vitals.is_empty()
-        && ui.button(format!("Show more {kind} vitals")).clicked()
     {
-        projection.expansion.more_vitals = true;
+        let response = ui.button(format!("Show more {kind} vitals"));
+        if response.clicked() {
+            projection.expansion.more_vitals = !projection.expansion.more_vitals;
+        }
+        if projection.expansion.more_vitals {
+            egui::Area::new(ui.id().with("vital overflow popover"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(response.rect.left_bottom())
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            for metric in &projection.overflow_vitals {
+                                vital(ui, metric);
+                            }
+                        });
+                    });
+                });
+        }
     }
-    if !wide
-        && projection.expansion.more_vitals
-        && let Some(kind) = projection.vital_expansion_label
-        && ui.button(format!("Hide more {kind} vitals")).clicked()
-    {
-        projection.expansion.more_vitals = false;
-    }
-    let freshness = match projection.freshness {
+}
+
+fn freshness_text(freshness: DetailFreshness<'_>) -> String {
+    match freshness {
         DetailFreshness::Loading => "Freshness · loading".into(),
         DetailFreshness::Unavailable => "Freshness · unavailable".into(),
         DetailFreshness::Gone => "Freshness · gone".into(),
@@ -325,8 +359,11 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
         DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => {
             "Freshness · ready".into()
         }
-    };
-    ui.label(freshness);
+    }
+}
+
+const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
+    matches!(tab, DetailTab::Overview | DetailTab::Events)
 }
 
 fn vital_color(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {
@@ -355,6 +392,54 @@ mod tests {
     use crate::ui::detail::presentation::{
         DetailMetrics, DetailVital, DetailVitalShape, DetailVitalTone,
     };
+
+    #[test]
+    fn only_overview_and_events_use_the_shared_body_scroll_owner() {
+        for tab in [DetailTab::Overview, DetailTab::Events] {
+            assert!(super::uses_shared_body_scroll(tab));
+        }
+        for tab in [
+            DetailTab::Ports,
+            DetailTab::Pods,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+            DetailTab::Shell,
+        ] {
+            assert!(!super::uses_shared_body_scroll(tab));
+        }
+    }
+
+    #[test]
+    fn every_freshness_state_has_one_stable_identity_label() {
+        use crate::ui::WindowFreshness;
+
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Loading),
+            "Freshness · loading"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Unavailable),
+            "Freshness · unavailable"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Gone),
+            "Freshness · gone"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Source(&WindowFreshness::Live {
+                last_sync_age: "2s".into(),
+            })),
+            "Freshness · live (2s)"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Source(&WindowFreshness::StaleRetrying {
+                last_sync_age: "8s".into(),
+                attempt: 2,
+                retry_in: "1s".into(),
+            },)),
+            "Freshness · stale"
+        );
+    }
 
     #[test]
     fn semantic_vital_shapes_are_visible_and_tones_use_theme_palette() {

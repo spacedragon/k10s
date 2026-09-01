@@ -9,20 +9,24 @@ Window label="Deployment · payments / checkout"
         GenericContainer
           GenericContainer
             GenericContainer
-              Label value="Rollout ● NewReplicaSetAvailable"
-                TextRun value="Rollout ● NewReplicaSetAvailable"
-              Label value="Ready · 3/3"
-                TextRun value="Ready · 3/3"
-              Label value="Up-to-date · 3"
-                TextRun value="Up-to-date · 3"
-              Label value="Available · 3"
-                TextRun value="Available · 3"
-              Label value="Strategy · RollingUpdate"
-                TextRun value="Strategy · RollingUpdate"
-              Label value="Age · 30d"
-                TextRun value="Age · 30d"
-              Label value="Freshness · live (just now)"
-                TextRun value="Freshness · live (just now)"
+              GenericContainer
+                Label value="Rollout ● NewReplicaSetAvailable"
+                  TextRun value="Rollout ● NewReplicaSetAvailable"
+              GenericContainer
+                Label value="Ready · 3/3"
+                  TextRun value="Ready · 3/3"
+              GenericContainer
+                Label value="Up-to-date · 3"
+                  TextRun value="Up-to-date · 3"
+              GenericContainer
+                Label value="Available · 3"
+                  TextRun value="Available · 3"
+              GenericContainer
+                Label value="Strategy · RollingUpdate"
+                  TextRun value="Strategy · RollingUpdate"
+              GenericContainer
+                Label value="Age · 30d"
+                  TextRun value="Age · 30d"
             GenericContainer
               GenericContainer
                 GenericContainer
@@ -31,6 +35,8 @@ Window label="Deployment · payments / checkout"
                     Button label="Tab Pods"
                     Button label="Tab Events"
                     Button label="Tab YAML"
+                    Label value="Freshness · live (just now)"
+                      TextRun value="Freshness · live (just now)"
             GenericContainer
               GenericContainer
                 GenericContainer

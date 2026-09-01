@@ -12,16 +12,19 @@ Window label="Deployment · payments / checkout"
               GenericContainer
                 GenericContainer
                   GenericContainer
-                    Label value="Rollout ▲ ReplicaSetUpdated"
-                    Label value="Ready · 3/3"
-                      TextRun value="Ready · 3/3"
-                    Label value="Up-to-date · 3"
-                      TextRun value="Up-to-date · 3"
-                    Label value="Available · 3"
-                      TextRun value="Available · 3"
+                    GenericContainer
+                      Label value="Rollout ▲ ReplicaSetUpdated"
+                        TextRun value="Rollout ▲ ReplicaSetUpdated"
+                    GenericContainer
+                      Label value="Ready · 3/3"
+                        TextRun value="Ready · 3/3"
+                    GenericContainer
+                      Label value="Up-to-date · 3"
+                        TextRun value="Up-to-date · 3"
+                    GenericContainer
+                      Label value="Available · 3"
+                        TextRun value="Available · 3"
                     Button label="Show more Deployment vitals"
-                    Label value="Freshness · live (just now)"
-                      TextRun value="Freshness · live (just now)"
             GenericContainer
               GenericContainer
                 GenericContainer
@@ -30,6 +33,8 @@ Window label="Deployment · payments / checkout"
                     Button label="Tab Pods"
                     Button label="Tab Events"
                     Button label="Tab YAML"
+                    Label value="Freshness · live (just now)"
+                      TextRun value="Freshness · live (just now)"
             GenericContainer
               GenericContainer
                 GenericContainer

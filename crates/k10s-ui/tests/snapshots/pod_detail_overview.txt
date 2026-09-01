@@ -245,22 +245,26 @@ Window
                     Button label="Clear selection"
                     Button label="Maximize"
                     Button label="Pop out ↗"
+                    Label value="Freshness · unavailable"
+                      TextRun value="Freshness · unavailable"
                 GenericContainer label="Detail identity row"
                 GenericContainer
                   GenericContainer
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                          TextRun value="Status ● —"
-                        Label value="Ready · —"
-                          TextRun value="Ready · —"
-                        Label value="Restarts · —"
-                          TextRun value="Restarts · —"
-                        Label value="Age · —"
-                          TextRun value="Age · —"
+                        GenericContainer
+                          Label value="Status ● —"
+                            TextRun value="Status ● —"
+                        GenericContainer
+                          Label value="Ready · —"
+                            TextRun value="Ready · —"
+                        GenericContainer
+                          Label value="Restarts · —"
+                            TextRun value="Restarts · —"
+                        GenericContainer
+                          Label value="Age · —"
+                            TextRun value="Age · —"
                         Button label="Show more Pod vitals"
-                        Label value="Freshness · unavailable"
-                          TextRun value="Freshness · unavailable"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer

@@ -251,16 +251,19 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      Label value="Status ● —"
-                        TextRun value="Status ● —"
-                      Label value="Ready · —"
-                        TextRun value="Ready · —"
-                      Label value="Restarts · —"
-                        TextRun value="Restarts · —"
-                      Label value="Age · —"
-                        TextRun value="Age · —"
+                      GenericContainer
+                        Label value="Status ● —"
+                          TextRun value="Status ● —"
+                      GenericContainer
+                        Label value="Ready · —"
+                          TextRun value="Ready · —"
+                      GenericContainer
+                        Label value="Restarts · —"
+                          TextRun value="Restarts · —"
+                      GenericContainer
+                        Label value="Age · —"
+                          TextRun value="Age · —"
                       Button label="Show more Pod vitals"
-                      Label value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -270,6 +273,8 @@ Window
                       Button label="Tab YAML"
                       Button label="Tab Logs"
                       Button label="Tab Shell"
+                      Label value="Freshness · loading"
+                        TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer
