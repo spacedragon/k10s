@@ -167,7 +167,7 @@ Resource adapters provide:
   flows.
 - Service: status/age vitals, ports and port-forward workflows, selectors,
   metadata, and existing actions.
-- Generic resources: compact status/age/freshness vitals and the current
+- Generic resources: compact status/age vitals and the current
   specialized or generic Overview body without inventing unsupported fields.
 
 ## Loading, Failure, and Authority
