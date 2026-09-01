@@ -956,6 +956,32 @@ fn blocked_toggle_preserves_selection() {
     let shell_identity = TestIdentity::pod("shell-toggle");
     select(&mut state, shelled, shell_identity.clone());
     events(&mut state, WorkspaceCommand::ConnectShell(shelled));
+
+    let replacement = TestIdentity::pod("deferred-replacement");
+    let out = select(&mut state, shelled, replacement);
+    assert_eq!(
+        blocked(&out).blockers[0].reason,
+        BlockReason::ConnectedShell
+    );
+    let out = events(&mut state, WorkspaceCommand::ClearSelection(shelled));
+    assert!(
+        out.is_empty(),
+        "commands are deferred while a guard is pending"
+    );
+    let deferred_state = state.resource_state(shelled).unwrap();
+    assert_eq!(deferred_state.selection.as_ref(), Some(&shell_identity));
+    assert_eq!(
+        deferred_state
+            .detail
+            .as_ref()
+            .map(|detail| &detail.identity),
+        Some(&shell_identity)
+    );
+    events(
+        &mut state,
+        WorkspaceCommand::ResolveBlock(BlockResolution::Cancel),
+    );
+
     let out = events(&mut state, WorkspaceCommand::ClearSelection(shelled));
     assert_eq!(
         blocked(&out).blockers[0].reason,

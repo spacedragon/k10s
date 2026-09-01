@@ -1159,10 +1159,10 @@ fn detail_close_is_in_identity_row() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    let identity = window.get_by_label("Pod · default / db-postgres-0");
+    let identity_row = window.get_by_label("Detail identity row");
     let close = window.get_by_role_and_label(Role::Button, "Clear selection");
     assert!(
-        close.rect().intersects(identity.rect()),
+        identity_row.rect().contains_rect(close.rect()),
         "Clear selection must be a compact control inside the Detail identity-row layout area"
     );
 }
