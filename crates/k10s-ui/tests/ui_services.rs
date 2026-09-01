@@ -348,7 +348,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
 }
 
 #[test]
-fn service_selected_row_click_queues_guarded_clear() {
+fn service_selected_row_second_click_clears_selection_and_detail() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
     let row_label = "Select service web-frontend";

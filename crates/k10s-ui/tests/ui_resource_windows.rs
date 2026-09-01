@@ -1108,7 +1108,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
 }
 
 #[test]
-fn selected_row_click_queues_guarded_clear() {
+fn selected_row_second_click_clears_selection_and_detail() {
     let mut harness = harness();
     open(
         &mut harness,

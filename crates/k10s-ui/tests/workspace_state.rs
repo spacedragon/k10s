@@ -932,66 +932,20 @@ fn dirty_yaml_blocks_row_selection_until_resolved() {
 }
 
 #[test]
-fn blocked_toggle_preserves_selection() {
+fn dirty_yaml_blocks_clear_selection_preserving_detail() {
     let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    let identity = TestIdentity::pod("dirty-clear");
+    select(&mut state, window, identity.clone());
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
 
-    let dirty = open_pods(&mut state);
-    let dirty_identity = TestIdentity::pod("dirty-toggle");
-    select(&mut state, dirty, dirty_identity.clone());
-    events(&mut state, WorkspaceCommand::BeginYamlEdit(dirty));
-    let out = events(&mut state, WorkspaceCommand::ClearSelection(dirty));
+    let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
     assert_eq!(blocked(&out).blockers[0].reason, BlockReason::DirtyYaml);
-    let dirty_state = state.resource_state(dirty).unwrap();
-    assert_eq!(dirty_state.selection.as_ref(), Some(&dirty_identity));
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
     assert_eq!(
-        dirty_state.detail.as_ref().map(|detail| &detail.identity),
-        Some(&dirty_identity)
-    );
-    events(
-        &mut state,
-        WorkspaceCommand::ResolveBlock(BlockResolution::Cancel),
-    );
-
-    let shelled = open_pods(&mut state);
-    let shell_identity = TestIdentity::pod("shell-toggle");
-    select(&mut state, shelled, shell_identity.clone());
-    events(&mut state, WorkspaceCommand::ConnectShell(shelled));
-
-    let replacement = TestIdentity::pod("deferred-replacement");
-    let out = select(&mut state, shelled, replacement);
-    assert_eq!(
-        blocked(&out).blockers[0].reason,
-        BlockReason::ConnectedShell
-    );
-    let out = events(&mut state, WorkspaceCommand::ClearSelection(shelled));
-    assert!(
-        out.is_empty(),
-        "commands are deferred while a guard is pending"
-    );
-    let deferred_state = state.resource_state(shelled).unwrap();
-    assert_eq!(deferred_state.selection.as_ref(), Some(&shell_identity));
-    assert_eq!(
-        deferred_state
-            .detail
-            .as_ref()
-            .map(|detail| &detail.identity),
-        Some(&shell_identity)
-    );
-    events(
-        &mut state,
-        WorkspaceCommand::ResolveBlock(BlockResolution::Cancel),
-    );
-
-    let out = events(&mut state, WorkspaceCommand::ClearSelection(shelled));
-    assert_eq!(
-        blocked(&out).blockers[0].reason,
-        BlockReason::ConnectedShell
-    );
-    let shell_state = state.resource_state(shelled).unwrap();
-    assert_eq!(shell_state.selection.as_ref(), Some(&shell_identity));
-    assert_eq!(
-        shell_state.detail.as_ref().map(|detail| &detail.identity),
-        Some(&shell_identity)
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
     );
 }
 
@@ -1048,7 +1002,8 @@ fn cancel_preserves_selection_window_and_context() {
 fn connected_shell_blocks_navigation_until_disconnected() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);
-    select(&mut state, window, TestIdentity::pod("original"));
+    let identity = TestIdentity::pod("original");
+    select(&mut state, window, identity.clone());
 
     events(&mut state, WorkspaceCommand::ConnectShell(window));
 
@@ -1060,6 +1015,12 @@ fn connected_shell_blocks_navigation_until_disconnected() {
     let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
     assert!(out.is_empty());
     assert!(state.pending().is_some());
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
+    assert_eq!(
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
+    );
 
     // Cancel preserves the selection and the connected session.
     let out = events(
@@ -1080,6 +1041,12 @@ fn connected_shell_blocks_navigation_until_disconnected() {
     assert_eq!(
         blocked(&out).blockers[0].reason,
         BlockReason::ConnectedShell
+    );
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
+    assert_eq!(
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
     );
     let out = events(
         &mut state,
