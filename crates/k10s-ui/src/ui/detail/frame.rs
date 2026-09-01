@@ -14,6 +14,18 @@ use super::presentation::{
 };
 use crate::ui::resource_window::RowIdentity;
 
+/// One segment of the reference action row. The frame owns the layout and
+/// renders `Delete` (rightmost), the `Actions` overflow menu, and the
+/// primary segment (`Restart`, `Scale`) in between; kind modules only supply
+/// the individual buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailActionSegment {
+    /// The destructive `Delete…` button, rightmost and danger-styled.
+    Delete,
+    /// `Restart…` and `Scale…`, left of the overflow menu.
+    Primary,
+}
+
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
     match identity.namespace.as_deref() {
         Some(namespace) => format!("{} · {namespace} / {}", identity.gvk.kind, identity.name),
@@ -53,7 +65,12 @@ pub(super) fn show<I: RowIdentity>(
     tabs: &[DetailTab],
     queued: &mut Vec<WorkspaceCommand<I>>,
     configure: impl FnOnce(&mut DetailFrameProjection<'_>),
-    mut content: impl FnMut(&mut egui::Ui, DetailPrimary<'_>, bool, &mut DetailFrameProjection<'_>),
+    mut content: impl FnMut(
+        &mut egui::Ui,
+        DetailPrimary<'_>,
+        Option<DetailActionSegment>,
+        &mut DetailFrameProjection<'_>,
+    ),
 ) {
     let expansion_id = expansion_id(window_id, input.identity, detail.active_tab);
     let expansion = ui
@@ -63,13 +80,28 @@ pub(super) fn show<I: RowIdentity>(
     let mut projection = input.frame_projection(expansion);
     configure(&mut projection);
     if integrated {
+        let identity = projection.identity;
+        let full_title = title(identity);
         let identity_row = ui.horizontal(|ui| {
-            let title = title(projection.identity);
-            let heading = ui.label(RichText::new(&title).strong().heading());
-            ui.ctx().accesskit_node_builder(heading.id, |node| {
+            // Reference identity hierarchy: kind in the secondary accent
+            // blue, namespace muted, name emphasized. The kind label carries
+            // the full-title heading semantics for the tree and screen
+            // readers; the styled segments are its visual decomposition.
+            let kind_label =
+                ui.label(RichText::new(identity.gvk.kind.clone()).color(crate::ui::theme::ACCENT));
+            ui.ctx().accesskit_node_builder(kind_label.id, |node| {
                 node.set_role(egui::accesskit::Role::Heading);
-                node.set_label(title);
+                node.set_label(full_title.clone());
             });
+            if let Some(namespace) = identity.namespace.as_deref() {
+                ui.label(
+                    RichText::new(format!(" {namespace} / ")).color(crate::ui::theme::MUTED_TEXT),
+                );
+            }
+            ui.label(RichText::new(&identity.name).strong());
+            // Freshness stays adjacent to the identity instead of owning the
+            // far right of the row.
+            ui.label(RichText::new(freshness_text(projection.freshness)).weak());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let clear = ui.button("×").on_hover_text("Clear selection");
                 clear.widget_info(|| {
@@ -97,7 +129,6 @@ pub(super) fn show<I: RowIdentity>(
                         ));
                     }
                 }
-                ui.label(freshness_text(projection.freshness));
             });
         });
         let identity_semantics = ui.interact(
@@ -248,33 +279,48 @@ pub(super) fn show<I: RowIdentity>(
         .show(&mut actions_ui, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                content(ui, input.primary, true, &mut projection);
+                // Reference order (left to right): Scale, Restart, Actions,
+                // Delete. Right-to-left rendering therefore paints Delete
+                // first (rightmost), the overflow menu, then the primary
+                // segment.
+                content(
+                    ui,
+                    input.primary,
+                    Some(DetailActionSegment::Delete),
+                    &mut projection,
+                );
                 let namespace = projection.identity.namespace.as_deref();
                 let uid = (!projection.identity.uid.is_empty())
                     .then_some(projection.identity.uid.as_str());
-                if owner.is_some() || namespace.is_some() || uid.is_some() {
-                    ui.menu_button("Actions", |ui| {
-                        if let Some(owner) = owner {
-                            let label = format!("Open owner {}", owner.name);
-                            if ui.button(&label).clicked() {
-                                queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                                    I::from_row_identity(&super::presentation::owner_identity(
-                                        projection.identity,
-                                        owner,
-                                    )),
-                                ));
-                                ui.close();
-                            }
+                ui.menu_button("Actions", |ui| {
+                    // Copy name moved out of the action row into the
+                    // overflow menu per the reference design.
+                    copy(ui, "Copy name", &projection.identity.name);
+                    if let Some(owner) = owner {
+                        let label = format!("Open owner {}", owner.name);
+                        if ui.button(&label).clicked() {
+                            queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                                I::from_row_identity(&super::presentation::owner_identity(
+                                    projection.identity,
+                                    owner,
+                                )),
+                            ));
+                            ui.close();
                         }
-                        if let Some(namespace) = namespace {
-                            copy(ui, "Copy namespace", namespace);
-                        }
-                        if let Some(uid) = uid {
-                            copy(ui, "Copy UID", uid);
-                        }
-                    });
-                }
-                copy(ui, "Copy name", &projection.identity.name);
+                    }
+                    if let Some(namespace) = namespace {
+                        copy(ui, "Copy namespace", namespace);
+                    }
+                    if let Some(uid) = uid {
+                        copy(ui, "Copy UID", uid);
+                    }
+                });
+                content(
+                    ui,
+                    input.primary,
+                    Some(DetailActionSegment::Primary),
+                    &mut projection,
+                );
             });
         });
     ui.separator();
@@ -321,7 +367,7 @@ pub(super) fn show<I: RowIdentity>(
         if input.gone {
             ui.label("This resource no longer exists");
         } else {
-            content(ui, input.primary, false, &mut projection);
+            content(ui, input.primary, None, &mut projection);
         }
     };
     if uses_shared_body_scroll(detail.active_tab) {
@@ -370,23 +416,70 @@ fn vital_display(vital: &DetailVital) -> VitalDisplay {
     }
 }
 
+/// The prominent value text of one vital chip, with its semantic shape
+/// glyph when present.
+fn vital_value_text(vital: &DetailVital, visible: &str) -> String {
+    match vital.shape {
+        Some(shape) => format!("{} {}", shape.glyph(), visible),
+        None => visible.to_owned(),
+    }
+}
+
+/// Tone-tinted chip fill: dark and neutral for plain values, subtly tinted
+/// toward the semantic color for healthy/warning/danger vitals.
+fn chip_fill(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {
+    chip_tint(visuals.faint_bg_color, vital_color(visuals, tone), 0.22)
+}
+
+fn chip_stroke(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Stroke {
+    egui::Stroke::new(
+        1.0,
+        chip_tint(
+            visuals.widgets.noninteractive.bg_stroke.color,
+            vital_color(visuals, tone),
+            0.4,
+        ),
+    )
+}
+
+fn chip_tint(background: egui::Color32, tint: egui::Color32, amount: f32) -> egui::Color32 {
+    let mix = |channel: u8, foreground: u8| {
+        (f32::from(channel) * (1.0 - amount) + f32::from(foreground) * amount).round() as u8
+    };
+    egui::Color32::from_rgb(
+        mix(background.r(), tint.r()),
+        mix(background.g(), tint.g()),
+        mix(background.b(), tint.b()),
+    )
+}
+
 fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
     let display = vital_display(vital);
-    let visible = match vital.shape {
-        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), display.visible),
-        None => format!("{} · {}", vital.label, display.visible),
-    };
-    let text = RichText::new(visible).color(vital_color(ui.visuals(), vital.tone));
-    let natural = WidgetText::from(text.clone()).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        egui::TextStyle::Body,
+    // Reference chip anatomy: a small uppercase label plus a prominent
+    // value inside a bounded chip, instead of one `Label · value` string.
+    let painter = ui.ctx().layer_painter(ui.layer_id());
+    let label_font = egui::FontId::new(9.5, egui::FontFamily::Monospace);
+    let value_font = egui::FontId::new(12.0, egui::FontFamily::Monospace);
+    let label_color = crate::ui::theme::MUTED_TEXT;
+    let value_color = vital_color(ui.visuals(), vital.tone);
+    let label_galley = painter.layout_no_wrap(vital.label.to_uppercase(), label_font, label_color);
+    let value_galley = painter.layout_no_wrap(
+        vital_value_text(vital, &display.visible),
+        value_font,
+        value_color,
     );
-    let chip_width = (natural.size().x + 12.0).min(max_width.min(VITAL_CHIP_MAX_WIDTH));
+    let inner_gap = 6.0;
+    let padding_x = 8.0;
+    let natural_width = padding_x * 2.0 + label_galley.size().x + inner_gap + value_galley.size().x;
+    let chip_width = natural_width.min(max_width.min(VITAL_CHIP_MAX_WIDTH));
     let chip_height = ui.spacing().interact_size.y;
-    let (chip_rect, _) =
+    let (chip_rect, chip_response) =
         ui.allocate_exact_size(egui::vec2(chip_width, chip_height), Sense::hover());
+    chip_response
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone()));
+    if display.elided || natural_width > chip_width + 0.1 {
+        chip_response.on_hover_text(display.accessible.clone());
+    }
     let mut chip_ui = ui.new_child(
         UiBuilder::new()
             .max_rect(chip_rect)
@@ -394,19 +487,22 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
     );
     chip_ui.set_clip_rect(chip_ui.clip_rect().intersect(chip_rect));
     egui::Frame::new()
-        .fill(chip_ui.visuals().faint_bg_color)
-        .stroke(chip_ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(4.0)
-        .inner_margin(egui::Margin::symmetric(6, 1))
+        .fill(chip_fill(chip_ui.visuals(), vital.tone))
+        .stroke(chip_stroke(chip_ui.visuals(), vital.tone))
+        .corner_radius(3.0)
         .show(&mut chip_ui, |ui| {
-            ui.set_width((chip_width - 12.0).max(0.0));
-            let response = ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate));
-            response.widget_info(|| {
-                WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
-            });
-            if display.elided || natural.size().x + 12.0 > chip_width {
-                response.on_hover_text(display.accessible.clone());
-            }
+            let rect = ui.max_rect();
+            let label_pos = egui::pos2(
+                rect.left() + padding_x,
+                rect.center().y - label_galley.size().y / 2.0,
+            );
+            let value_pos = egui::pos2(
+                rect.left() + padding_x + label_galley.size().x + inner_gap,
+                rect.center().y - value_galley.size().y / 2.0,
+            );
+            let painter = ui.ctx().layer_painter(ui.layer_id());
+            painter.galley(label_pos, label_galley.clone(), label_color);
+            painter.galley(value_pos, value_galley.clone(), value_color);
         });
 }
 
@@ -718,7 +814,7 @@ mod tests {
                         }];
                     },
                     |ui, _, actions, projection| {
-                        if !actions {
+                        if actions.is_none() {
                             ui.label(format!(
                                 "Body observed {}",
                                 projection.visible_vitals[0].value

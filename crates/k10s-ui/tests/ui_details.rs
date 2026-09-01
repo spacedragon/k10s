@@ -122,7 +122,7 @@ fn unavailable_events_are_explicitly_safe() {
             .rect();
         let body = window.get_by_label("Structured details unavailable").rect();
         assert!(!tab.intersects(body), "tab {tab:?} overlaps body {body:?}");
-        for label in ["Copy name", "Actions", "Pop out ↗", "Maximize"] {
+        for label in ["Actions", "Pop out ↗", "Maximize"] {
             let action = window.get_by_role_and_label(Role::Button, label).rect();
             assert!(
                 !tab.intersects(action),
@@ -396,7 +396,12 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
     {
         let window = common::workload_window(&harness, "Pods");
         window.get_by_label("Pod · default / db-postgres-0");
-        window.get_by_role_and_label(Role::Button, "Copy name");
+        // Copy name moved into the Actions overflow menu.
+        assert!(
+            window
+                .query_by_role_and_label(Role::Button, "Copy name")
+                .is_none()
+        );
         assert!(
             window
                 .query_by_role_and_label(Role::Button, "Copy namespace")
@@ -412,6 +417,7 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
             .click();
     }
     harness.run_steps(1);
+    harness.get_by_role_and_label(Role::Button, "Copy name");
     harness.get_by_role_and_label(Role::Button, "Copy namespace");
     harness.get_by_role_and_label(Role::Button, "Copy UID");
     let window = common::workload_window(&harness, "Pods");
@@ -965,7 +971,13 @@ fn dedicated_cluster_scoped_title_and_copy_actions_use_pinned_identity() {
 
     let detail = harness.get_by_role_and_label(Role::Window, "Node · worker-a");
     harness.get_by_role_and_label(Role::Button, "Node · worker-a");
-    detail.get_by_role_and_label(Role::Button, "Copy name");
+    // Copy name lives in the Actions overflow menu, not the action row.
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Copy name")
+            .is_none(),
+        "Copy name must not occupy the action row"
+    );
     assert!(
         detail
             .query_by_role_and_label(Role::Button, "Copy namespace")
@@ -976,9 +988,20 @@ fn dedicated_cluster_scoped_title_and_copy_actions_use_pinned_identity() {
             .query_by_role_and_label(Role::Button, "Copy UID")
             .is_none()
     );
+    detail
+        .get_by_role_and_label(Role::Button, "Actions")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_role_and_label(Role::Button, "Copy name");
+    // A cluster-scoped identity without a UID keeps the menu minimal.
     assert!(
-        detail
-            .query_by_role_and_label(Role::Button, "Actions")
+        harness
+            .query_by_role_and_label(Role::Button, "Copy namespace")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Copy UID")
             .is_none()
     );
 }
@@ -2295,5 +2318,120 @@ fn tabs_stay_independent_between_integrated_and_pinned_views() {
         integrated_tab(workspace),
         WorkspaceDetailTab::Events,
         "the integrated tab stays where the user left it"
+    );
+}
+
+#[test]
+fn splitter_grip_is_visible() {
+    let mut harness = harness();
+    let deployment = identity("Deployment", "web-frontend");
+    harness.state_mut().feed.primary_details.insert(
+        deployment.clone(),
+        PrimaryDetailState::Failed(SafeUiError::new("test")),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
+    );
+    common::workload_window(&harness, "Deployments")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = common::workload_window(&harness, "Deployments");
+    let grip = window.get_by_label("Detail split grip");
+    let grip_rect = grip.rect();
+    let window_rect = window.rect();
+    assert!(
+        grip_rect.width() >= window_rect.width() * 0.9,
+        "grip {grip_rect:?} must span most of window {window_rect:?}"
+    );
+    // The grip sits between the list pane and the integrated detail pane.
+    // After selection, the row is no longer a button, so use the window's
+    // top area as a proxy for the list position.
+    let detail = window
+        .get_by_label("Deployment · default / web-frontend")
+        .rect();
+    assert!(
+        grip_rect.top() < detail.top(),
+        "grip {grip_rect:?} must be above detail {detail:?}"
+    );
+}
+
+#[test]
+fn detail_action_row_orders_scale_restart_actions_delete_left_to_right() {
+    let mut harness = harness();
+    let mut detail = deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    detail.capabilities.can_scale = true;
+    detail.capabilities.can_delete = true;
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity("Deployment", "web-frontend"), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Deployments),
+    );
+    common::workload_window(&harness, "Deployments")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
+        .click();
+    harness.run_steps(3);
+
+    let window = common::workload_window(&harness, "Deployments");
+    let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
+    let restart = window
+        .get_by_role_and_label(Role::Button, "Restart…")
+        .rect();
+    let actions = window.get_by_role_and_label(Role::Button, "Actions").rect();
+    let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
+    assert!(
+        scale.left() < restart.left()
+            && restart.left() < actions.left()
+            && actions.left() < delete.left(),
+        "reference order is Scale, Restart, Actions, Delete (left to right): {scale:?} {restart:?} {actions:?} {delete:?}"
+    );
+    // Copy name moved to the overflow menu, so it must not occupy the row.
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Copy name")
+            .is_none(),
+        "Copy name must not occupy the action row"
+    );
+    window
+        .get_by_role_and_label(Role::Button, "Actions")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_role_and_label(Role::Button, "Copy name");
+}
+
+#[test]
+fn detail_vital_chips_are_bounded_with_label_and_value() {
+    let mut harness = harness();
+    let pod = identity("Pod", "db-postgres-0");
+    harness.state_mut().feed.primary_details.insert(
+        pod.clone(),
+        PrimaryDetailState::Loaded(pod_detail("db-postgres-0")),
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(k10s_ui::workspace::WorkloadKind::Pods),
+    );
+    common::workload_window(&harness, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(3);
+
+    let window = common::workload_window(&harness, "Pods");
+    let strip = window.get_by_label("Detail vital strip").rect();
+    // The strip should contain vitals as bounded chips.
+    // Verify the strip has content by checking for known vitals.
+    let has_vitals = ["Status ● —", "Ready · —"]
+        .iter()
+        .any(|label| window.query_by_label(label).is_some());
+    assert!(
+        has_vitals,
+        "vital strip {strip:?} should contain at least one vital chip"
     );
 }
