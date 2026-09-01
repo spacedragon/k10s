@@ -134,7 +134,8 @@ pub struct K10sApp {
     window_last_sync_ms: BTreeMap<WindowId, u64>,
     rejected_subscription_keys: std::collections::BTreeSet<SubscriptionKey>,
     /// One cluster-scoped core/v1 Namespace watch shared by all namespaced
-    /// list windows. It is deliberately not represented as a fake window.
+    /// list windows and kept warm for the connected context after first use.
+    /// It is deliberately not represented as a fake window.
     namespace_subscription: Option<(String, LiveSubscription)>,
     namespace_catalog: NamespaceCatalogState,
     namespace_rejected_context: Option<String>,
@@ -2190,6 +2191,14 @@ impl K10sApp {
     fn reconcile_resource_streams(&mut self, context: &str) -> Result<(), ClientError> {
         use crate::workspace::{WindowContent, WindowKind};
 
+        let namespace_context_changed = self
+            .namespace_subscription
+            .as_ref()
+            .is_some_and(|(subscribed_context, _)| subscribed_context != context)
+            || self
+                .namespace_rejected_context
+                .as_deref()
+                .is_some_and(|rejected| rejected != context);
         if self
             .namespace_rejected_context
             .as_deref()
@@ -2313,9 +2322,11 @@ impl K10sApp {
                     && !self.rejected_subscription_keys.contains(*key)
             })
             .count();
-        let namespace_removed = usize::from(self.namespace_subscription.as_ref().is_some_and(
-            |(subscribed_context, _)| !namespace_demanded || subscribed_context != context,
-        ));
+        let namespace_removed = usize::from(
+            self.namespace_subscription
+                .as_ref()
+                .is_some_and(|(subscribed_context, _)| subscribed_context != context),
+        );
         let namespace_added = usize::from(
             namespace_demanded
                 && self.namespace_rejected_context.as_deref() != Some(context)
@@ -2362,7 +2373,7 @@ impl K10sApp {
                 .subscribe_resource(context, "", "v1", "Namespace", None)?;
             self.namespace_subscription = Some((context.to_owned(), live));
             self.namespace_catalog = NamespaceCatalogState::Loading;
-        } else if !namespace_demanded {
+        } else if namespace_context_changed && !namespace_demanded {
             self.namespace_catalog = NamespaceCatalogState::NotDemanded;
             self.namespace_rejected_context = None;
         }
@@ -2644,6 +2655,21 @@ impl K10sApp {
         self.refresh_details_at(now_ms);
     }
 
+    fn restart_namespace_catalog_after_preflight(&mut self) -> Result<(), ClientError> {
+        if let Some((_, subscription)) = &self.namespace_subscription
+            && self.client.unsubscribe(subscription)?
+        {
+            let (_, subscription) = self
+                .namespace_subscription
+                .take()
+                .expect("the unsubscribed Namespace handle was present");
+            self.retire_detail_lifecycle_source(subscription.id());
+        }
+        self.namespace_rejected_context = None;
+        self.namespace_catalog = NamespaceCatalogState::Loading;
+        Ok(())
+    }
+
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
             ResourceAction::Restart { window, target } => {
@@ -2695,11 +2721,19 @@ impl K10sApp {
             // Task 6 owns namespace-catalog lifecycle and consumes this
             // already-stable shell action variant there.
             ResourceAction::RetryNamespaceCatalog => {
-                self.namespace_rejected_context = None;
-                self.namespace_catalog = NamespaceCatalogState::Loading;
+                let removals = usize::from(self.namespace_subscription.is_some());
+                if let Err(error) = self
+                    .client
+                    .preflight_subscription_changes(removals, 1)
+                    .and_then(|()| self.restart_namespace_catalog_after_preflight())
+                {
+                    self.terminal_failure(error.to_string());
+                    return;
+                }
                 self.reconcile_selected_resource_streams();
             }
-            ResourceAction::RetryWindow(window) | ResourceAction::FullResyncWindow(window) => {
+            action @ (ResourceAction::RetryWindow(window)
+            | ResourceAction::FullResyncWindow(window)) => {
                 // A stale window may be the projection of a dead control
                 // transport rather than a watch-local failure. Route its
                 // retry through transport recovery and keep the cached rows
@@ -2718,6 +2752,21 @@ impl K10sApp {
                 let Some(key) = self.window_subscriptions.get(&window).cloned() else {
                     return;
                 };
+                if matches!(action, ResourceAction::FullResyncWindow(_))
+                    && matches!(key.scope, SubscriptionScope::Namespaced(_))
+                {
+                    let namespace_removals = usize::from(self.namespace_subscription.is_some());
+                    let window_removals =
+                        usize::from(self.resource_subscriptions.contains_key(&key));
+                    if let Err(error) = self
+                        .client
+                        .preflight_subscription_changes(namespace_removals + window_removals, 2)
+                        .and_then(|()| self.restart_namespace_catalog_after_preflight())
+                    {
+                        self.terminal_failure(error.to_string());
+                        return;
+                    }
+                }
                 self.rejected_subscription_keys.remove(&key);
                 let affected: Vec<_> = self
                     .window_subscriptions
@@ -7296,7 +7345,7 @@ mod tests {
     }
 
     #[test]
-    fn namespaced_windows_share_one_dedicated_namespace_catalog_watch() {
+    fn namespace_catalog_stays_warm_after_all_namespaced_windows_close() {
         let (mut app, state) = ready_app();
         let pod = app.web_activate_workload(WorkloadKind::Pods).unwrap();
         app.web_activate_services();
@@ -7308,6 +7357,13 @@ mod tests {
         assert_eq!(namespaces.len(), 1);
         assert_eq!(app.window_subscriptions.len(), 2);
         assert!(!app.window_subscriptions.contains_key(&WindowId(0)));
+        let namespace_subscription = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(
+            &mut app,
+            &namespace_subscription,
+            1,
+            vec![namespace_row("warm", 1)],
+        );
 
         app.shell
             .apply_workspace_command(WorkspaceCommand::CloseWindow(pod));
@@ -7323,7 +7379,36 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::CloseWindow(service));
         app.reconcile_selected_resource_streams();
-        assert!(app.namespace_subscription.is_none());
+        assert_eq!(
+            app.namespace_subscription
+                .as_ref()
+                .map(|(_, live)| live.id()),
+            Some(&namespace_subscription)
+        );
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["warm".into()])
+        );
+
+        app.web_activate_workload(WorkloadKind::Deployments);
+
+        assert_eq!(
+            app.namespace_subscription
+                .as_ref()
+                .map(|(_, live)| live.id()),
+            Some(&namespace_subscription)
+        );
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["warm".into()])
+        );
+        assert_eq!(
+            all_resource_watches(&state)
+                .iter()
+                .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -7357,7 +7442,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_custom_scope_switches_add_and_remove_namespace_catalog_demand() {
+    fn selected_custom_scope_starts_namespace_catalog_and_then_keeps_it_warm() {
         let (mut app, state) = ready_app();
         app.types_context = Some("dev-local".to_owned());
         app.resource_types = vec![
@@ -7381,10 +7466,10 @@ mod tests {
         let window = app
             .web_activate_workload(WorkloadKind::CustomResources)
             .unwrap();
-        for (selected, demanded) in [
+        for (selected, catalog_started) in [
             ("example.io/v1/ClusterThing", false),
             ("example.io/v1/Widget", true),
-            ("example.io/v1/ClusterThing", false),
+            ("example.io/v1/ClusterThing", true),
         ] {
             app.shell
                 .apply_workspace_command(WorkspaceCommand::SetCustomKind(
@@ -7392,7 +7477,7 @@ mod tests {
                     Some(selected.to_owned()),
                 ));
             app.reconcile_selected_resource_streams();
-            assert_eq!(app.namespace_subscription.is_some(), demanded);
+            assert_eq!(app.namespace_subscription.is_some(), catalog_started);
         }
         assert_eq!(
             all_resource_watches(&state)
@@ -7513,6 +7598,36 @@ mod tests {
         assert_eq!(
             app.build_resource_feed().namespace_catalog,
             NamespaceCatalogState::Loading
+        );
+    }
+
+    #[test]
+    fn explicit_full_resync_rebuilds_namespace_catalog_before_reusing_it() {
+        let (mut app, state) = ready_app();
+        let window = app.web_activate_services().unwrap();
+        let original = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        complete_namespace_snapshot(&mut app, &original, 1, vec![namespace_row("old", 1)]);
+
+        app.handle_resource_action(ResourceAction::FullResyncWindow(window));
+
+        let replacement = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        assert_ne!(replacement, original);
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Loading
+        );
+        assert_eq!(
+            all_resource_watches(&state)
+                .iter()
+                .filter(|watch| watch.gvk == GroupVersionKind::core("v1", "Namespace"))
+                .count(),
+            2
+        );
+
+        complete_namespace_snapshot(&mut app, &replacement, 4, vec![namespace_row("new", 4)]);
+        assert_eq!(
+            app.build_resource_feed().namespace_catalog,
+            NamespaceCatalogState::Ready(vec!["new".into()])
         );
     }
 
@@ -7863,7 +7978,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_window_keys_share_and_last_close_unsubscribes() {
+    fn equal_window_keys_share_and_last_close_unsubscribes_only_the_window_watch() {
         let (mut app, state) = ready_app();
         let first = app
             .shell
@@ -7908,8 +8023,9 @@ mod tests {
                 .iter()
                 .filter(|frame| frame.kind == ClientKind::Unsubscribe)
                 .count(),
-            2
+            1
         );
+        assert!(app.namespace_subscription.is_some());
     }
 
     #[test]
@@ -7940,6 +8056,40 @@ mod tests {
         assert_eq!(app.window_subscriptions.get(&window), Some(&key));
         assert_eq!(app.client.live_subscription_count(), desired_before);
         assert_eq!(app.client.phase(), ClientPhase::Ready);
+    }
+
+    #[test]
+    fn saturated_full_resync_retains_namespace_and_window_subscription_ownership() {
+        let (mut app, _state) = ready_app();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let key = app.window_subscriptions.get(&window).cloned().unwrap();
+        let namespace = app.namespace_subscription.as_ref().unwrap().1.id().clone();
+        let _extra = app
+            .client
+            .subscribe_resource(
+                "dev-local",
+                "",
+                "v1",
+                "ConfigMap",
+                Some("default".to_owned()),
+            )
+            .unwrap();
+        for _ in 0..255 {
+            app.client.begin(Query::Bootstrap).unwrap();
+        }
+        let desired_before = app.client.live_subscription_count();
+
+        app.handle_resource_action(ResourceAction::FullResyncWindow(window));
+
+        assert_eq!(
+            app.namespace_subscription
+                .as_ref()
+                .map(|(_, live)| live.id()),
+            Some(&namespace)
+        );
+        assert!(app.resource_subscriptions.contains_key(&key));
+        assert_eq!(app.window_subscriptions.get(&window), Some(&key));
+        assert_eq!(app.client.live_subscription_count(), desired_before);
     }
 
     #[test]
