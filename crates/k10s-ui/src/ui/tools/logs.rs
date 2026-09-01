@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use egui::RichText;
+use egui::{RichText, ScrollArea};
 use k10s_protocol::StreamTarget;
 
 use crate::workspace::WindowId;
@@ -38,8 +38,12 @@ pub struct LogsTool {
     tail_capacity: usize,
     lines: VecDeque<String>,
     phase: LogsPhase,
+    /// Whether this source still owns its single automatic connection claim.
+    auto_connect_available: bool,
     paused: bool,
     follow: bool,
+    /// One-shot request for the renderer to discard persisted scroll state.
+    scroll_reset: bool,
     previous: bool,
     source_defaults_applied: bool,
     since_seconds: Option<i64>,
@@ -66,8 +70,10 @@ impl LogsTool {
             tail_capacity: tail_capacity.max(1),
             lines: VecDeque::new(),
             phase: LogsPhase::Disconnected,
+            auto_connect_available: true,
             paused: false,
             follow: true,
+            scroll_reset: true,
             previous: false,
             source_defaults_applied: false,
             since_seconds: Some(300),
@@ -91,6 +97,36 @@ impl LogsTool {
     #[must_use]
     pub fn phase(&self) -> LogsPhase {
         self.phase
+    }
+
+    /// Atomically claim this source's one automatic connection attempt.
+    pub fn begin_auto_connect(&mut self) -> bool {
+        if self.phase != LogsPhase::Disconnected || !self.auto_connect_available {
+            return false;
+        }
+        self.auto_connect_available = false;
+        self.phase = LogsPhase::Connecting;
+        self.last_error = None;
+        self.follow = true;
+        true
+    }
+
+    /// Whether a consumed or failed attempt can be retried explicitly.
+    #[must_use]
+    pub fn can_retry(&self) -> bool {
+        self.phase == LogsPhase::Disconnected && !self.auto_connect_available
+    }
+
+    /// Start one user-requested retry for the current source.
+    pub fn retry(&mut self) -> bool {
+        if !self.can_retry() {
+            return false;
+        }
+        self.phase = LogsPhase::Connecting;
+        self.last_error = None;
+        self.follow = true;
+        self.scroll_reset = true;
+        true
     }
 
     /// Whether incoming chunks are currently being dropped.
@@ -153,14 +189,12 @@ impl LogsTool {
     }
 
     fn reset_source_history(&mut self) {
-        self.phase = LogsPhase::Disconnected;
         self.lines.clear();
-        self.paused = false;
         self.truncated_lines = 0;
         self.dropped_while_paused = 0;
         self.total_received = 0;
         self.since_received = None;
-        self.last_error = None;
+        self.reset_source_attempt();
     }
 
     #[must_use]
@@ -217,6 +251,7 @@ impl LogsTool {
         if self.phase != LogsPhase::Disconnected {
             self.phase = LogsPhase::Disconnected;
         }
+        self.auto_connect_available = false;
         self.last_error = Some(reason.to_owned());
     }
 
@@ -229,8 +264,10 @@ impl LogsTool {
     /// Begin attaching: the application opens the dedicated socket next.
     pub fn connect(&mut self) {
         if self.phase == LogsPhase::Disconnected {
+            self.auto_connect_available = false;
             self.phase = LogsPhase::Connecting;
             self.last_error = None;
+            self.follow = true;
         }
     }
 
@@ -280,6 +317,11 @@ impl LogsTool {
         self.follow = follow;
     }
 
+    /// Consume a fresh-connection/source-change request to align at bottom.
+    pub fn take_scroll_reset(&mut self) -> bool {
+        std::mem::take(&mut self.scroll_reset)
+    }
+
     /// Set or clear the case-insensitive find filter.
     pub fn set_find(&mut self, query: Option<&str>) {
         self.find = match query {
@@ -310,7 +352,18 @@ impl LogsTool {
     /// user can still read what streamed before the drop.
     pub fn connection_lost(&mut self) {
         self.phase = LogsPhase::Disconnected;
+        self.auto_connect_available = false;
         self.paused = false;
+        self.last_error = Some("log stream disconnected".to_owned());
+    }
+
+    fn reset_source_attempt(&mut self) {
+        self.phase = LogsPhase::Disconnected;
+        self.auto_connect_available = true;
+        self.follow = true;
+        self.scroll_reset = true;
+        self.paused = false;
+        self.last_error = None;
     }
 }
 
@@ -410,6 +463,32 @@ pub(crate) fn same_workload(left: &StreamTarget, right: &StreamTarget) -> bool {
 /// Tail capacity used by detail-view log panes.
 pub const DEFAULT_TAIL_CAPACITY: usize = 512;
 
+const BOTTOM_TOLERANCE: f32 = 2.0;
+
+fn is_at_bottom(actual_offset: f32, max_offset: f32) -> bool {
+    actual_offset >= max_offset.max(0.0) - BOTTOM_TOLERANCE
+}
+
+fn normalize_bottom_state(
+    ctx: &egui::Context,
+    id: egui::Id,
+    state: egui::scroll_area::State,
+    max_offset: f32,
+) -> bool {
+    if !is_at_bottom(state.offset.y, max_offset) {
+        return false;
+    }
+    let max_offset = max_offset.max(0.0);
+    if state.offset.y == max_offset {
+        return true;
+    }
+
+    let mut normalized = egui::scroll_area::State::default();
+    normalized.offset = egui::vec2(state.offset.x, max_offset);
+    normalized.store(ctx, id);
+    true
+}
+
 /// Render the connected Logs tab content for one detail view.
 pub(crate) fn show(
     ui: &mut egui::Ui,
@@ -423,7 +502,7 @@ pub(crate) fn show(
         ui.label("Select a pod to stream logs");
         return;
     };
-    let mut connect_requested = false;
+    let mut open_requested = false;
     {
         let view = views.ensure(window_id, target.clone());
         if !containers.is_empty()
@@ -484,17 +563,12 @@ pub(crate) fn show(
                         }
                     }
                 });
+            open_requested |= view.begin_auto_connect();
             match view.phase() {
                 LogsPhase::Disconnected => {
-                    let button = ui.button("Connect logs");
-                    button.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            "Connect logs".to_owned(),
-                        )
-                    });
-                    connect_requested = button.clicked();
+                    if view.can_retry() && ui.button("Retry logs").clicked() {
+                        open_requested = view.retry();
+                    }
                     ui.label(RichText::new("Disconnected").weak());
                 }
                 LogsPhase::Connecting => {
@@ -511,10 +585,6 @@ pub(crate) fn show(
                     }
                     if view.is_paused() {
                         ui.label(RichText::new("Paused").weak());
-                    }
-                    let follow = view.follows();
-                    if ui.checkbox(&mut { follow }, "Follow").changed() {
-                        view.set_follow(!follow);
                     }
                     let since_label = if view.since_active() {
                         "Show all"
@@ -567,48 +637,59 @@ pub(crate) fn show(
                 .color(crate::ui::theme::WARNING),
             );
         }
-        ui.vertical(|ui| {
-            // An active Find filters the retained buffer; otherwise the
-            // since/tail-filtered view is shown.
-            if view.find().is_some() {
-                for line in view.find_matches() {
-                    ui.add(
-                        egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
-                            if view.wraps() {
-                                egui::TextWrapMode::Wrap
-                            } else {
-                                egui::TextWrapMode::Extend
-                            },
-                        ),
+        let was_following = view.follows();
+        let scroll_id = ui.make_persistent_id(("logs.stream", window_id.0));
+        if view.take_scroll_reset() {
+            egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
+        }
+        let scroll_output = ScrollArea::vertical()
+            .id_salt(("logs.stream", window_id.0))
+            .stick_to_bottom(was_following)
+            .show(ui, |ui| {
+                // An active Find filters the retained buffer; otherwise the
+                // since/tail-filtered view is shown.
+                if view.find().is_some() {
+                    for line in view.find_matches() {
+                        ui.add(
+                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                                if view.wraps() {
+                                    egui::TextWrapMode::Wrap
+                                } else {
+                                    egui::TextWrapMode::Extend
+                                },
+                            ),
+                        );
+                    }
+                } else {
+                    for line in view.visible_lines() {
+                        ui.add(
+                            egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
+                                if view.wraps() {
+                                    egui::TextWrapMode::Wrap
+                                } else {
+                                    egui::TextWrapMode::Extend
+                                },
+                            ),
+                        );
+                    }
+                }
+                if view.truncated_lines() > 0 {
+                    ui.label(
+                        RichText::new(format!("{} older lines truncated", view.truncated_lines()))
+                            .weak(),
                     );
                 }
-            } else {
-                for line in view.visible_lines() {
-                    ui.add(
-                        egui::Label::new(RichText::new(line.as_str()).monospace()).wrap_mode(
-                            if view.wraps() {
-                                egui::TextWrapMode::Wrap
-                            } else {
-                                egui::TextWrapMode::Extend
-                            },
-                        ),
-                    );
-                }
-            }
-            if view.truncated_lines() > 0 {
-                ui.label(
-                    RichText::new(format!("{} older lines truncated", view.truncated_lines()))
-                        .weak(),
-                );
-            }
-            // Follow autoscrolls to the newest line; a disengaged
-            // follow leaves the scroll position to the user.
-            if view.follows() && !view.is_paused() {
-                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-            }
-        });
+            });
+        let max_offset =
+            (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
+        view.set_follow(normalize_bottom_state(
+            ui.ctx(),
+            scroll_output.id,
+            scroll_output.state,
+            max_offset,
+        ));
     }
-    if connect_requested {
+    if open_requested {
         let selected_target = views
             .target_of(window_id)
             .expect("a rendered logs view has a target");
@@ -621,5 +702,132 @@ pub(crate) fn show(
                 previous: views.get(window_id).is_some_and(LogsTool::previous),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogsTool, is_at_bottom, normalize_bottom_state};
+    use egui::{Context, Id, RawInput, Rect, ScrollArea, Vec2, pos2, vec2};
+    use k10s_protocol::StreamTarget;
+
+    fn target() -> StreamTarget {
+        StreamTarget {
+            context: "test".to_owned(),
+            namespace: "default".to_owned(),
+            pod: "pod".to_owned(),
+            container: "container".to_owned(),
+            uid: "uid".to_owned(),
+        }
+    }
+
+    #[test]
+    fn bottom_detection_accepts_exact_bottom() {
+        assert!(is_at_bottom(80.0, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_accepts_offset_within_two_logical_pixels() {
+        assert!(is_at_bottom(78.0, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_rejects_offset_beyond_two_logical_pixels() {
+        assert!(!is_at_bottom(77.9, 80.0));
+    }
+
+    #[test]
+    fn bottom_detection_clamps_negative_max_offset_for_short_content() {
+        assert!(is_at_bottom(0.0, -20.0));
+    }
+
+    #[test]
+    fn scroll_position_disengages_and_restores_follow() {
+        let mut logs = LogsTool::new(target(), 10);
+
+        logs.set_follow(is_at_bottom(40.0, 100.0));
+        assert!(!logs.follows());
+
+        logs.set_follow(is_at_bottom(100.0, 100.0));
+        assert!(logs.follows());
+    }
+
+    fn render_scroll(
+        ctx: &Context,
+        id: Id,
+        rows: usize,
+        stick_to_bottom: bool,
+    ) -> (egui::scroll_area::State, f32, Id) {
+        let mut rendered = None;
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(240.0, 160.0))),
+            ..RawInput::default()
+        };
+        let mut frame_output = ctx.run_ui(input, |ui| {
+            let output = ScrollArea::vertical()
+                .id_salt(id)
+                .max_height(100.0)
+                .stick_to_bottom(stick_to_bottom)
+                .show(ui, |ui| {
+                    for row in 0..rows {
+                        ui.label(format!("log line {row}"));
+                    }
+                });
+            let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+            rendered = Some((output.state, max_offset, output.id));
+        });
+        frame_output.textures_delta.clear();
+        rendered.expect("scroll area rendered")
+    }
+
+    #[test]
+    fn near_bottom_state_sticks_to_new_content_after_normalization() {
+        let ctx = Context::default();
+        let id = Id::new("logs-scroll-regression");
+        let (initial, initial_max, scroll_id) = render_scroll(&ctx, id, 20, false);
+
+        let mut near_bottom = initial;
+        near_bottom.offset = Vec2::new(0.0, initial_max - 1.0);
+        near_bottom.store(&ctx, scroll_id);
+
+        assert!(normalize_bottom_state(
+            &ctx,
+            scroll_id,
+            near_bottom,
+            initial_max
+        ));
+        let (appended, appended_max, _) = render_scroll(&ctx, id, 24, true);
+
+        assert!(
+            appended.offset.y > initial_max,
+            "appended offset {} did not advance beyond initial max {initial_max}; appended max {appended_max}",
+            appended.offset.y
+        );
+        assert_eq!(appended.offset.y, appended_max);
+    }
+
+    #[test]
+    fn retry_resets_scrolled_up_frame_to_exact_bottom_and_keeps_following_append() {
+        let ctx = Context::default();
+        let id = Id::new("logs-retry-scroll-reset");
+        let (initial, initial_max, scroll_id) = render_scroll(&ctx, id, 20, false);
+        let mut scrolled_up = initial;
+        scrolled_up.offset.y = initial_max - 12.0;
+        scrolled_up.store(&ctx, scroll_id);
+
+        let mut logs = LogsTool::new(target(), 10);
+        assert!(logs.begin_auto_connect());
+        assert!(logs.take_scroll_reset());
+        logs.fail("disconnected");
+        assert!(logs.retry());
+        assert!(logs.take_scroll_reset());
+        egui::scroll_area::State::default().store(&ctx, scroll_id);
+
+        let (reset, reset_max, _) = render_scroll(&ctx, id, 20, logs.follows());
+        assert_eq!(reset.offset.y, reset_max);
+        logs.set_follow(normalize_bottom_state(&ctx, scroll_id, reset, reset_max));
+        let (appended, appended_max, _) = render_scroll(&ctx, id, 24, logs.follows());
+        assert_eq!(appended.offset.y, appended_max);
+        assert!(logs.follows());
     }
 }

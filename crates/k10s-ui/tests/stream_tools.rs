@@ -24,6 +24,103 @@ fn logs_tool() -> LogsTool {
 }
 
 #[test]
+fn fresh_logs_claim_exactly_one_automatic_connection_attempt() {
+    let mut tool = logs_tool();
+
+    tool.set_follow(false);
+    assert!(tool.begin_auto_connect());
+    assert_eq!(tool.phase(), LogsPhase::Connecting);
+    assert!(tool.follows());
+    assert!(
+        !tool.begin_auto_connect(),
+        "the automatic claim is one-shot"
+    );
+
+    tool.attach();
+    assert_eq!(tool.phase(), LogsPhase::Streaming);
+    assert!(
+        !tool.begin_auto_connect(),
+        "a live stream cannot claim again"
+    );
+}
+
+#[test]
+fn failed_automatic_connection_requires_one_explicit_retry() {
+    let mut tool = logs_tool();
+    assert!(tool.begin_auto_connect());
+    tool.fail("ticket rejected");
+
+    assert_eq!(tool.phase(), LogsPhase::Disconnected);
+    assert_eq!(tool.last_error(), Some("ticket rejected"));
+    assert!(!tool.begin_auto_connect());
+    assert!(tool.can_retry());
+
+    tool.set_follow(false);
+    assert!(tool.retry());
+    assert_eq!(tool.phase(), LogsPhase::Connecting);
+    assert!(tool.follows());
+    assert_eq!(tool.last_error(), None);
+    assert!(!tool.retry(), "explicit retry also starts only once");
+    assert!(
+        tool.take_scroll_reset(),
+        "retry must request one renderer-side bottom reset"
+    );
+    assert!(!tool.take_scroll_reset(), "the reset is consumed once");
+}
+
+#[test]
+fn connection_loss_preserves_history_and_exposes_retry() {
+    let mut tool = logs_tool();
+    assert!(tool.begin_auto_connect());
+    tool.attach();
+    tool.append("before disconnect");
+    tool.connection_lost();
+
+    assert_eq!(tool.phase(), LogsPhase::Disconnected);
+    assert_eq!(tool.last_error(), Some("log stream disconnected"));
+    assert!(!tool.begin_auto_connect());
+    assert!(tool.can_retry());
+    assert_eq!(tool.export_text(), "before disconnect");
+}
+
+#[test]
+fn changing_each_log_source_restores_auto_connect_and_follow() {
+    let mut container = logs_tool();
+    assert!(container.begin_auto_connect());
+    container.fail("no stream");
+    container.set_follow(false);
+    container.select_container("metrics");
+    assert!(container.follows());
+    assert!(container.take_scroll_reset());
+    assert!(!container.take_scroll_reset());
+    assert!(container.begin_auto_connect());
+
+    let mut previous = logs_tool();
+    previous.connect();
+    previous.attach();
+    previous.append("retained across previous change");
+    previous.connection_lost();
+    previous.set_follow(false);
+    previous.set_previous(true);
+    assert!(previous.follows());
+    assert!(previous.take_scroll_reset());
+    assert!(previous.begin_auto_connect());
+    assert_eq!(previous.export_text(), "");
+
+    let mut since = logs_tool();
+    since.connect();
+    since.attach();
+    since.append("retained across since change");
+    since.connection_lost();
+    since.set_follow(false);
+    since.set_since_seconds(Some(900));
+    assert!(since.follows());
+    assert!(since.take_scroll_reset());
+    assert!(since.begin_auto_connect());
+    assert_eq!(since.export_text(), "");
+}
+
+#[test]
 fn logs_tail_truncation_keeps_the_newest_lines_and_counts_dropped() {
     let mut tool = logs_tool();
     assert_eq!(tool.phase(), LogsPhase::Disconnected);
