@@ -153,6 +153,89 @@ fn unavailable_events_are_explicitly_safe() {
 }
 
 #[test]
+fn generic_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
+    let mut harness = harness();
+    for (name, width, x) in [
+        ("generic-wide", 1_024.0, 10.0),
+        ("generic-narrow", 664.0, 760.0),
+    ] {
+        let identity = ResourceIdentity {
+            context: CONTEXT.into(),
+            gvk: GroupVersionKind::core("v1", "ConfigMap"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        };
+        harness.state_mut().feed.details.insert(
+            identity.clone(),
+            ResourceDetailResponse {
+                identity: identity.clone(),
+                revision: BackendRevision::new(1),
+                created_at: "2026-08-21T00:00:00Z".into(),
+                owner_references: vec![],
+                sections: vec![
+                    DetailSection {
+                        title: "CONFIGURATION".into(),
+                        rows: vec![DetailRow {
+                            label: "Mode".into(),
+                            value: "active".into(),
+                        }],
+                    },
+                    DetailSection {
+                        title: "EMPTY SENTINEL".into(),
+                        rows: vec![],
+                    },
+                ],
+                events_condition: k10s_protocol::EventsCondition::Available,
+                events: vec![],
+                related: vec![],
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+                projection: None,
+            },
+        );
+        let id = harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 20.0],
+                    size: [width, 700.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    harness.run_steps(5);
+    let wide = harness.get_by_role_and_label(Role::Window, "ConfigMap · default / generic-wide");
+    let op = wide.get_by_label("Operational detail column").rect();
+    let config = wide.get_by_label("Configuration detail column").rect();
+    assert!((op.width() / config.width() - 1.35).abs() < 0.02);
+    let narrow =
+        harness.get_by_role_and_label(Role::Window, "ConfigMap · default / generic-narrow");
+    assert!(
+        narrow.get_by_label("STATUS").rect().top()
+            < narrow.get_by_label("CONFIGURATION").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("CONFIGURATION").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    assert!(narrow.query_by_label("EMPTY SENTINEL").is_none());
+    narrow.get_by_role_and_label(Role::Button, "Tab Overview");
+}
+
+#[test]
 fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height() {
     let mut harness = harness();
     let mut response = deployment_detail("database");

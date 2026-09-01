@@ -1102,6 +1102,54 @@ fn empty_service_configuration_sections_collapse_completely() {
 }
 
 #[test]
+fn service_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
+    let mut fixture = Fixture::default();
+    for (name, width, x) in [("wide", 1_024.0, 10.0), ("narrow", 664.0, 1_050.0)] {
+        let identity = service_identity(name);
+        fixture
+            .feed
+            .details
+            .insert(identity.clone(), service_detail(name, true));
+        let id = fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 20.0],
+                    size: [width, 700.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_800.0, 800.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(5);
+    let wide = harness.get_by_role_and_label(Role::Window, "Service · default / wide");
+    let op = wide.get_by_label("Operational detail column").rect();
+    let config = wide.get_by_label("Configuration detail column").rect();
+    assert!((op.width() / config.width() - 1.35).abs() < 0.02);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Service · default / narrow");
+    assert!(
+        narrow.get_by_label("PORTS").rect().top() < narrow.get_by_label("SELECTORS").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("SELECTORS").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_role_and_label(Role::Button, "Tab Overview");
+}
+
+#[test]
 fn gone_selection_renders_no_longer_exists() {
     let mut harness = harness();
     harness.state_mut().feed.details.insert(
