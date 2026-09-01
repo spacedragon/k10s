@@ -162,6 +162,8 @@ impl<'a> DetailPresentationInput<'a> {
             status: view.and_then(status_summary),
             age: view.map(|view| view.created_at.as_str()),
         };
+        let mutations_allowed =
+            mutations_allowed && !gone && matches!(primary, DetailPrimary::Loaded(_));
         Some(Self {
             identity,
             primary,
@@ -174,10 +176,12 @@ impl<'a> DetailPresentationInput<'a> {
             freshness,
             now: SystemTime::now(),
             gone,
-            mutations_allowed: mutations_allowed
-                && !gone
-                && matches!(primary, DetailPrimary::Loaded(_)),
-            port_forward_available: feed.port_forward_available,
+            mutations_allowed,
+            // Starting a forward creates new backend state and therefore
+            // shares exact mutation authority. Existing sessions remain
+            // visible so Stop can still perform safe cleanup when authority
+            // to create new sessions has been revoked.
+            port_forward_available: feed.port_forward_available && mutations_allowed,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })

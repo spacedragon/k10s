@@ -6,7 +6,8 @@
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+    BackendRevision, GroupVersionKind, PortForwardPodTarget, PortForwardSession,
+    PortForwardSessionId, PortForwardSessionState, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
     TargetPort, TransportProtocol,
 };
@@ -1012,6 +1013,13 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
         service_identity("web-frontend"),
         service_detail("web-frontend", false),
     );
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Button, "Tab Ports")
@@ -1028,6 +1036,96 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
             ..
         }] if name == "http"
     ));
+}
+
+#[test]
+fn port_forward_start_requires_live_loaded_service_authority() {
+    let states = [
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+        WindowFreshness::Reconnecting {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+        WindowFreshness::Failed {
+            message: "watch failed".into(),
+        },
+        WindowFreshness::Forbidden {
+            user: "alice".into(),
+            verb: "list".into(),
+            resource: "services".into(),
+            scope: "default".into(),
+        },
+    ];
+    for freshness in states {
+        let mut harness = harness();
+        harness.state_mut().feed.port_forward_available = true;
+        open_via_launcher(&mut harness);
+        let window_id = services_window_id(harness.state());
+        harness
+            .get_by_role_and_label(Role::Window, "Services")
+            .get_by_role_and_label(Role::Button, "Select service web-frontend")
+            .click();
+        harness.run_steps(4);
+        harness.state_mut().feed.details.insert(
+            service_identity("web-frontend"),
+            service_detail("web-frontend", false),
+        );
+        harness.state_mut().feed.port_forward_sessions = vec![PortForwardSession {
+            id: PortForwardSessionId::try_new("existing").unwrap(),
+            service: service_identity("web-frontend"),
+            service_port: 80,
+            pod: PortForwardPodTarget {
+                namespace: "default".into(),
+                name: "web-0".into(),
+                uid: "pod-uid".into(),
+            },
+            pod_port: 8080,
+            local_addr: "127.0.0.1:18080".into(),
+            state: PortForwardSessionState::Active,
+            failure: None,
+            revision: 1,
+        }];
+        harness
+            .state_mut()
+            .feed
+            .window_freshness
+            .insert(window_id, freshness);
+        harness.run_steps(4);
+        harness
+            .get_by_role_and_label(Role::Button, "Tab Ports")
+            .click();
+        harness.run_steps(3);
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, "Start")
+                .is_none()
+        );
+        harness.get_by_role_and_label(Role::Button, "Stop");
+    }
+
+    let mut loading = harness();
+    loading.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut loading);
+    loading
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    loading.run_steps(4);
+    loading.state_mut().feed.primary_details.insert(
+        service_identity("web-frontend"),
+        PrimaryDetailState::Loading,
+    );
+    loading.run_steps(3);
+    assert!(
+        loading
+            .query_by_role_and_label(Role::Button, "Start")
+            .is_none()
+    );
 }
 
 #[test]
