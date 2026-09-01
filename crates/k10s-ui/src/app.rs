@@ -253,6 +253,8 @@ struct SubscriptionKey {
     /// Effective namespace selector sent on the wire and included in the
     /// canonical identity used to share equivalent subscriptions.
     protocol_namespace: Option<String>,
+    /// Exact pinned identity for a dedicated Detail watch; absent for Lists.
+    identity: Option<ResourceIdentity>,
 }
 
 #[derive(Debug)]
@@ -1966,6 +1968,18 @@ impl K10sApp {
     /// applied per-kind list views, Service rows, selectable types, and
     /// resolved details.
     fn build_resource_feed(&self) -> ResourceFeed {
+        let dedicated_identities: std::collections::BTreeSet<_> = self
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter_map(|window| match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => {
+                    detail.identity.as_row_identity().cloned()
+                }
+                _ => None,
+            })
+            .collect();
         let mut window_lists = std::collections::HashMap::new();
         let mut window_services = std::collections::HashMap::new();
         let mut lists = std::collections::HashMap::new();
@@ -2070,9 +2084,10 @@ impl K10sApp {
                 k10s_protocol::BackendRevision,
                 DetailLifecycle,
                 WindowFreshness,
+                bool,
             )>,
         > = BTreeMap::new();
-        for subscription in self.resource_subscriptions.values() {
+        for (key, subscription) in &self.resource_subscriptions {
             let source_freshness = aggregate_freshness(
                 subscription
                     .windows
@@ -2089,15 +2104,42 @@ impl K10sApp {
                     lifecycle_candidates
                         .entry(row.identity.clone())
                         .or_default()
-                        .push((revision, DetailLifecycle::Present, source_freshness.clone()));
+                        .push((
+                            revision,
+                            DetailLifecycle::Present,
+                            source_freshness.clone(),
+                            key.identity.is_some(),
+                        ));
                 }
+            }
+            if let Some(identity) = &key.identity
+                && let Some(revision) = source_state.and_then(|source| source.snapshot_revision)
+                && self
+                    .client
+                    .resource_list(subscription.live.id())
+                    .is_some_and(|state| state.rows().all(|row| &row.identity != identity))
+            {
+                lifecycle_candidates
+                    .entry(identity.clone())
+                    .or_default()
+                    .push((
+                        revision,
+                        DetailLifecycle::Gone,
+                        source_freshness.clone(),
+                        true,
+                    ));
             }
             if let Some(source) = source_state {
                 for (identity, event) in &source.entries {
                     lifecycle_candidates
                         .entry(identity.clone())
                         .or_default()
-                        .push((event.revision, event.lifecycle, source_freshness.clone()));
+                        .push((
+                            event.revision,
+                            event.lifecycle,
+                            source_freshness.clone(),
+                            key.identity.is_some(),
+                        ));
                 }
             }
         }
@@ -2121,18 +2163,29 @@ impl K10sApp {
                 lifecycle_candidates
                     .entry(row.identity.clone())
                     .or_default()
-                    .push((row.revision, DetailLifecycle::Present, freshness.clone()));
+                    .push((
+                        row.revision,
+                        DetailLifecycle::Present,
+                        freshness.clone(),
+                        false,
+                    ));
             }
         }
         let detail_authority = lifecycle_candidates
             .into_iter()
-            .map(|(identity, candidates)| {
+            .filter_map(|(identity, mut candidates)| {
+                if dedicated_identities.contains(&identity) {
+                    candidates.retain(|(_, _, _, exact)| *exact);
+                }
+                if candidates.is_empty() {
+                    return None;
+                }
                 let newest = candidates
                     .iter()
-                    .map(|(revision, _, _)| *revision)
+                    .map(|(revision, _, _, _)| *revision)
                     .max()
                     .expect("candidate groups are never empty");
-                let lifecycle = if candidates.iter().any(|(revision, lifecycle, _)| {
+                let lifecycle = if candidates.iter().any(|(revision, lifecycle, _, _)| {
                     *revision == newest && *lifecycle == DetailLifecycle::Gone
                 }) {
                     DetailLifecycle::Gone
@@ -2145,19 +2198,19 @@ impl K10sApp {
                     aggregate_freshness(
                         candidates
                             .into_iter()
-                            .filter_map(|(_, lifecycle, freshness)| {
+                            .filter_map(|(_, lifecycle, freshness, _)| {
                                 (lifecycle == DetailLifecycle::Present).then_some(freshness)
                             })
                             .collect(),
                     )
                 };
-                (
+                Some((
                     identity,
                     DetailAuthority {
                         freshness,
                         lifecycle,
                     },
-                )
+                ))
             })
             .collect();
         ResourceFeed {
@@ -2225,16 +2278,18 @@ impl K10sApp {
                         },
                         protocol_namespace: None,
                         scope: SubscriptionScope::Namespaced(NamespaceScope::AllNamespaces),
+                        identity: None,
                     })
                     .or_default();
             }
             namespace_demanded = true;
         }
         for window in self.shell.workspace().windows() {
-            let (gvk, scope) = match (&window.kind, &window.content) {
+            let (gvk, scope, identity) = match (&window.kind, &window.content) {
                 (WindowKind::Services, WindowContent::Services(state)) => (
                     k10s_protocol::GroupVersionKind::core("v1", "Service"),
                     SubscriptionScope::Namespaced(state.namespace_scope.clone()),
+                    None,
                 ),
                 (WindowKind::Workload(kind), WindowContent::Resource(state)) => {
                     if *kind == WorkloadKind::CustomResources {
@@ -2260,7 +2315,7 @@ impl K10sApp {
                         } else {
                             SubscriptionScope::ClusterScoped
                         };
-                        (descriptor.gvk.clone(), scope)
+                        (descriptor.gvk.clone(), scope, None)
                     } else {
                         let resource_kind = *kind;
                         let Some((group, version, wire_kind)) = builtin_kind_gvk(resource_kind)
@@ -2279,8 +2334,36 @@ impl K10sApp {
                                 kind: wire_kind.to_owned(),
                             },
                             scope,
+                            None,
                         )
                     }
+                }
+                (WindowKind::Detail, WindowContent::Detail(detail)) => {
+                    if !self.client.exact_resource_watches_available() {
+                        continue;
+                    }
+                    let identity = detail.identity.as_row_identity();
+                    let Some(identity) = identity.filter(|identity| {
+                        (identity.gvk.group.is_empty()
+                            && identity.gvk.version == "v1"
+                            && identity.gvk.kind == "Pod")
+                            || (identity.gvk.group == "apps"
+                                && identity.gvk.version == "v1"
+                                && identity.gvk.kind == "Deployment")
+                    }) else {
+                        continue;
+                    };
+                    let Some(namespace) = identity.namespace.clone() else {
+                        continue;
+                    };
+                    if identity.context != context {
+                        continue;
+                    }
+                    (
+                        identity.gvk.clone(),
+                        SubscriptionScope::Namespaced(NamespaceScope::Namespace(namespace)),
+                        Some(identity.clone()),
+                    )
                 }
                 _ => continue,
             };
@@ -2294,8 +2377,10 @@ impl K10sApp {
                     SubscriptionScope::ClusterScoped => None,
                 },
                 scope,
+                identity,
             };
-            namespace_demanded |= matches!(key.scope, SubscriptionScope::Namespaced(_));
+            namespace_demanded |=
+                key.identity.is_none() && matches!(key.scope, SubscriptionScope::Namespaced(_));
             desired.entry(key.clone()).or_default().insert(window.id);
             window_subscriptions.insert(window.id, key);
         }
@@ -2374,12 +2459,13 @@ impl K10sApp {
                 entry.windows = windows;
                 continue;
             }
-            let live = match self.client.subscribe_resource(
+            let live = match self.client.subscribe_resource_exact(
                 key.context.clone(),
                 key.gvk.group.clone(),
                 key.gvk.version.clone(),
                 key.gvk.kind.clone(),
                 key.protocol_namespace.clone(),
+                key.identity.clone(),
             ) {
                 Ok(live) => live,
                 Err(error) => {
@@ -4649,13 +4735,17 @@ mod tests {
     }
 
     fn welcome() -> ServerFrame {
+        welcome_with_minor(k10s_protocol::PROTOCOL_MINOR)
+    }
+
+    fn welcome_with_minor(minor: u16) -> ServerFrame {
         ServerFrame {
             kind: ServerKind::Welcome,
             request_id: None,
             subscription_id: None,
             sequence: None,
             payload: serde_json::to_value(Welcome {
-                protocol: ProtocolVersion { major: 1, minor: 1 },
+                protocol: ProtocolVersion { major: 1, minor },
                 capabilities: vec![],
                 session_id: SessionId::new("reconnected-session"),
                 server_instance_id: "reconnected-server".to_owned(),
@@ -5441,12 +5531,16 @@ mod tests {
     }
 
     pub(super) fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+        ready_app_with_minor(k10s_protocol::PROTOCOL_MINOR)
+    }
+
+    fn ready_app_with_minor(minor: u16) -> (K10sApp, Rc<RefCell<FactoryState>>) {
         let bootstrap =
             ServerFrame::response(RequestId::from_u128(1), BootstrapResponse::fixture());
         let (mut app, state) = test_app(vec![ConnectionScript {
             events: VecDeque::from([
                 WsEvent::Opened,
-                server_message(&welcome()),
+                server_message(&welcome_with_minor(minor)),
                 server_message(&bootstrap),
             ]),
             overflowed: false,
@@ -6408,14 +6502,14 @@ mod tests {
             .web_activate_workload(WorkloadKind::Deployments)
             .unwrap();
         let key = app.window_subscriptions.get(&window).unwrap();
-        let subscription = app
+        let broad_subscription = app
             .resource_subscriptions
             .get(key)
             .unwrap()
             .live
             .id()
             .clone();
-        complete_resource_snapshot(&mut app, &subscription, 1, Vec::new(), true);
+        complete_resource_snapshot(&mut app, &broad_subscription, 1, Vec::new(), true);
         let pinned = deployment_identity("pinned-target");
         for event in app
             .shell
@@ -6423,12 +6517,19 @@ mod tests {
         {
             app.handle_workspace_event(event);
         }
-        apply_resource_gone(&mut app, &subscription, pinned.clone(), 2);
+        app.reconcile_resource_streams("dev-local").unwrap();
+        let exact_subscription = app
+            .resource_subscriptions
+            .iter()
+            .find(|(key, _)| key.identity.as_ref() == Some(&pinned))
+            .map(|(_, subscription)| subscription.live.id().clone())
+            .expect("dedicated detail retains its exact watch");
+        complete_resource_snapshot(&mut app, &exact_subscription, 2, Vec::new(), false);
         for index in 0..(EXPECTED_TOMBSTONE_CAP + 64) {
             let churn = deployment_identity(&format!("churn-{index}"));
             apply_resource_gone(
                 &mut app,
-                &subscription,
+                &broad_subscription,
                 churn,
                 u64::try_from(index).unwrap() + 3,
             );
@@ -6861,6 +6962,193 @@ mod tests {
         app.refresh_details_at(5);
         assert!(app.relation_requests.is_empty());
         assert!(app.relations.is_empty());
+    }
+
+    #[test]
+    fn dedicated_pod_and_deployment_details_retain_exact_live_authority_without_lists() {
+        for (kind, identity) in [
+            (WorkloadKind::Pods, pod_identity("api-7f9d")),
+            (WorkloadKind::Deployments, deployment_identity("api")),
+        ] {
+            let (mut app, state) = ready_app();
+            let list = app.web_activate_workload(kind).unwrap();
+            let dedicated = app
+                .shell
+                .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()))
+                .into_iter()
+                .find_map(|event| match event {
+                    WorkspaceEvent::Opened(window) => Some(window),
+                    _ => None,
+                })
+                .unwrap();
+            app.reconcile_resource_streams("dev-local").unwrap();
+            app.flush_outbound().unwrap();
+
+            let watches = resource_watches(&state);
+            let is_exact = |watch: &k10s_protocol::ResourceWatchSpec| {
+                watch.context == identity.context
+                    && watch.gvk == identity.gvk
+                    && watch.namespace == identity.namespace
+                    && watch.identity.as_ref().is_some_and(|pinned| {
+                        pinned.name == identity.name && pinned.uid == identity.uid
+                    })
+            };
+            let exact = watches
+                .iter()
+                .find(|watch| is_exact(watch))
+                .expect("dedicated detail owns an exact-identity watch");
+            assert_eq!(exact.context, identity.context);
+            assert_eq!(exact.gvk, identity.gvk);
+            assert_eq!(exact.namespace, identity.namespace);
+            let exact_subscription = app
+                .resource_subscriptions
+                .iter()
+                .find_map(|(key, retained)| {
+                    (key.identity.as_ref() == Some(&identity)).then(|| retained.live.id().clone())
+                })
+                .unwrap();
+            let list_subscription = app
+                .window_subscriptions
+                .get(&list)
+                .and_then(|key| app.resource_subscriptions.get(key))
+                .map(|retained| retained.live.id().clone())
+                .unwrap();
+
+            complete_resource_snapshot(
+                &mut app,
+                &list_subscription,
+                9,
+                vec![deployment_row(identity.clone(), 9)],
+                true,
+            );
+            let detail = deployment_detail_fixture(&identity);
+            app.details.insert(identity.clone(), detail.clone());
+            app.primary_details
+                .insert(identity.clone(), PrimaryDetailState::Loaded(detail));
+            assert!(
+                !app.mutation_authority_allows(&identity),
+                "the broad List cannot grant authority before the exact snapshot"
+            );
+            complete_resource_snapshot(
+                &mut app,
+                &exact_subscription,
+                10,
+                vec![deployment_row(identity.clone(), 10)],
+                true,
+            );
+            app.window_freshness_overrides.insert(
+                list,
+                WindowFreshness::StaleRetrying {
+                    last_sync_age: "1m".into(),
+                    retry_in: "1s".into(),
+                    attempt: 2,
+                },
+            );
+            assert!(
+                app.mutation_authority_allows(&identity),
+                "stale List authority must not poison the dedicated exact source"
+            );
+
+            app.shell
+                .apply_workspace_command(WorkspaceCommand::CloseWindow(list));
+            app.reconcile_resource_streams("dev-local").unwrap();
+            app.flush_outbound().unwrap();
+            assert!(
+                resource_watches(&state).iter().any(is_exact),
+                "closing the List must not retire dedicated Detail authority"
+            );
+            assert!(app.shell.workspace().window(dedicated).is_some());
+            assert!(
+                app.mutation_authority_allows(&identity),
+                "the dedicated exact snapshot independently grants live authority"
+            );
+
+            complete_resource_snapshot(&mut app, &exact_subscription, 11, Vec::new(), false);
+            assert_eq!(
+                projected_detail_lifecycle(&app, &identity),
+                Some(super::DetailLifecycle::Gone)
+            );
+            assert!(
+                !app.mutation_authority_allows(&identity),
+                "an empty exact relist revokes authority fail-closed"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_peer_keeps_dedicated_detail_authority_fail_closed() {
+        let (mut app, state) = ready_app_with_minor(3);
+        let list = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let identity = pod_identity("legacy-api");
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()));
+        app.reconcile_resource_streams("dev-local").unwrap();
+        app.flush_outbound().unwrap();
+
+        assert!(
+            resource_watches(&state)
+                .iter()
+                .all(|watch| watch.identity.is_none()),
+            "a peer below protocol v1.4 must never receive an exact selector"
+        );
+        let list_subscription = app
+            .window_subscriptions
+            .get(&list)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|retained| retained.live.id().clone())
+            .unwrap();
+        complete_resource_snapshot(
+            &mut app,
+            &list_subscription,
+            1,
+            vec![deployment_row(identity.clone(), 1)],
+            true,
+        );
+        let detail = deployment_detail_fixture(&identity);
+        app.details.insert(identity.clone(), detail.clone());
+        app.primary_details
+            .insert(identity.clone(), PrimaryDetailState::Loaded(detail));
+        assert!(
+            !app.mutation_authority_allows(&identity),
+            "broad legacy List data must not substitute for exact authority"
+        );
+    }
+
+    #[test]
+    fn mismatched_pinned_context_never_opens_or_grants_exact_authority() {
+        let (mut app, state) = ready_app();
+        let identity = ResourceIdentity {
+            context: "other-cluster".into(),
+            ..pod_identity("foreign-api")
+        };
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()));
+        app.reconcile_resource_streams("dev-local").unwrap();
+        app.flush_outbound().unwrap();
+
+        assert!(resource_watches(&state).iter().all(|watch| {
+            watch
+                .identity
+                .as_ref()
+                .is_none_or(|pinned| pinned.name != identity.name || pinned.uid != identity.uid)
+        }));
+        assert!(matches!(
+            app.client.subscribe_resource_exact(
+                "dev-local",
+                "",
+                "v1",
+                "Pod",
+                identity.namespace.clone(),
+                Some(identity.clone()),
+            ),
+            Err(super::ClientError::InvalidState(
+                "exact resource identity does not match watch selector"
+            ))
+        ));
+        assert!(
+            !app.mutation_authority_allows(&identity),
+            "a restored Detail from another context stays fail-closed"
+        );
     }
 
     #[test]

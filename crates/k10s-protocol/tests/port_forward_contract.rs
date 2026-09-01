@@ -39,7 +39,7 @@ fn service_identity() -> ResourceIdentity {
 #[test]
 fn protocol_minor_bumps_without_changing_major() {
     assert_eq!(k10s_protocol::PROTOCOL_MAJOR, 1);
-    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 3);
+    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 4);
 }
 
 #[test]

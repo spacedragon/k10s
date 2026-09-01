@@ -921,6 +921,7 @@ async fn fake_and_kube_adapters_agree_on_resource_watch_shape() {
                 context: context.into(),
                 gvk: pods_gvk(),
                 namespace: Some("default".into()),
+                identity: None,
             })
             .await
             .expect("resource watch subscribes");

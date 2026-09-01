@@ -6,8 +6,8 @@ token is carried only in the first `hello` frame.
 
 ## Compatibility
 
-The current protocol is major `1`, minor `2`. Supported negotiation is major
-`1` with peer minor `0..=2`; the negotiated minor is the lower value. A major
+The current protocol is major `1`, minor `4`. Supported negotiation is major
+`1` with peer minor `0..=4`; the negotiated minor is the lower value. A major
 mismatch is rejected. Unknown message kinds return a structured
 `unsupportedMessage` error instead of being ignored or crashing a peer.
 
@@ -56,3 +56,8 @@ identity including UID, a port selector by name or number, and a local port of
 Servers advertise `service.portForward` only when the feature is enabled;
 disabled servers reject every port-forward request regardless of advertised
 capabilities.
+
+Added in minor `4`: resource-watch selectors may carry an exact `name` and
+`uid` alongside their context, GVK, and namespace. Dedicated Pod and Deployment
+Detail windows use this selector as their independent lifecycle and mutation
+authority; peers negotiated below minor `4` must keep that authority unavailable.

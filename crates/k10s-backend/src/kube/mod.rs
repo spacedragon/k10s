@@ -39,7 +39,8 @@ pub use self::discovery::{DISCOVERY_TTL, MAX_CACHED_CONTEXTS};
 use crate::port::{
     AdapterError, ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo,
     ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query,
-    QueryResult, ResourceListData, ResourceTypesData, StreamInput, Subscribe, SubscriptionHandle,
+    QueryResult, ResourceListData, ResourceRef, ResourceTypesData, ResourceWatchIdentity,
+    StreamInput, Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
@@ -425,7 +426,8 @@ impl KubernetesAccess for KubeAdapter {
                     context,
                     gvk,
                     namespace,
-                } => self.resource_watch(context, gvk, namespace).await,
+                    identity,
+                } => self.resource_watch(context, gvk, namespace, identity).await,
                 Subscribe::Infrastructure { context } => {
                     self.infrastructure_subscription(context).await
                 }
@@ -570,6 +572,7 @@ impl KubeAdapter {
         context: String,
         gvk: Gvk,
         namespace: Option<String>,
+        identity: Option<ResourceWatchIdentity>,
     ) -> Result<SubscriptionHandle, BackendError> {
         if !self.knows_context(&context) {
             return Err(BackendError::NotFound);
@@ -617,11 +620,19 @@ impl KubeAdapter {
                 .await?,
         );
 
+        let identity = identity.map(|identity| ResourceRef {
+            context: context.clone(),
+            gvk: gvk.clone(),
+            namespace: namespace.clone(),
+            name: identity.name,
+            uid: identity.uid,
+        });
         let receiver = self.watches.subscribe(
             WatchSelector {
                 context,
                 gvk,
                 namespace,
+                identity,
             },
             source,
         );
