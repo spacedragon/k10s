@@ -210,8 +210,8 @@ Window label="Deployment · payments / checkout"
                           Label value="Context · deployment-test"
               ScrollBar
             GenericContainer
-              Label value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"
-                TextRun value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"
+              Label value="p pods · y yaml · e events · c copy name · Esc clear selection"
+                TextRun value="p pods · y yaml · e events · c copy name · Esc clear selection"
   Splitter
   Splitter
   Splitter

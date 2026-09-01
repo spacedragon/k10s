@@ -284,7 +284,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
             harness.get_by_role_and_label(Role::Window, "StatefulSet · default / database");
         assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
         let footer = detail
-            .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close")
+            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
             .rect();
         assert!(detail.rect().contains_rect(footer));
         assert!(
@@ -311,9 +311,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
     assert_eq!(
         footer_before,
         detail
-            .get_by_label(
-                "Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close",
-            )
+            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection",)
             .rect()
     );
 }
@@ -375,7 +373,7 @@ fn compact_frame_chrome_has_disjoint_contained_hitboxes_and_reserved_footer() {
         "compact tab hitbox {tab:?} overlaps action hitbox {action:?}"
     );
     let footer = detail
-        .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close")
+        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
         .rect();
     let body = detail
         .get_by_role_and_label(Role::ScrollView, "Detail body")
@@ -666,9 +664,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     pod_harness.run_steps(3);
     let pod = common::workload_window(&pod_harness, "Pods");
-    pod.get_by_label(
-        "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
-    );
+    pod.get_by_label("l logs · s shell · y yaml · e events · c copy name · Esc clear selection");
 
     let mut deployment_harness = harness();
     deployment_harness.state_mut().feed.details.insert(
@@ -684,7 +680,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     deployment_harness.run_steps(3);
     common::workload_window(&deployment_harness, "Deployments")
-        .get_by_label("Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close");
+        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection");
 
     let mut generic_harness = harness();
     let node = ResourceIdentity {
@@ -701,7 +697,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
     generic_harness.run_steps(3);
     generic_harness
         .get_by_role_and_label(Role::Window, "Node · worker-a")
-        .get_by_label("Shortcuts: y yaml · e events · c copy name · Esc restore/close");
+        .get_by_label("y yaml · e events · c copy name · Esc clear selection");
 }
 
 #[test]
@@ -731,7 +727,7 @@ fn detail_footer_exposes_owner_shortcut_only_for_verified_owner() {
     harness
         .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
         .get_by_label(
-            "Shortcuts: l logs · s shell · y yaml · e events · c copy name · o owner · Esc restore/close",
+            "l logs · s shell · y yaml · e events · c copy name · o owner · Esc clear selection",
         );
 }
 

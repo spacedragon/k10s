@@ -308,8 +308,8 @@ Window
                       Label value="Structured details unavailable"
                         TextRun value="Structured details unavailable"
                 GenericContainer
-                  Label value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
-                    TextRun value="Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close"
+                  Label value="l logs · s shell · y yaml · e events · c copy name · Esc clear selection"
+                    TextRun value="l logs · s shell · y yaml · e events · c copy name · Esc clear selection"
     Splitter
     Splitter
     Splitter

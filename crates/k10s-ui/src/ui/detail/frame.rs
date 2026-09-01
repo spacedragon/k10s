@@ -326,7 +326,7 @@ pub(super) fn show<I: RowIdentity>(
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
     let footer_text = RichText::new(format!(
-        "Shortcuts: {} · Esc restore/close",
+        "{} · Esc clear selection",
         projection.shortcut_labels.join(" · ")
     ))
     .weak();
@@ -1015,7 +1015,7 @@ mod tests {
         harness.run_steps(2);
         harness
             .get_by_label(
-                "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
+                "l logs · s shell · y yaml · e events · c copy name · Esc clear selection",
             )
             .click();
         harness.run_steps(2);
