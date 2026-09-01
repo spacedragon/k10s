@@ -20,7 +20,7 @@ mod window;
 
 pub use detail::{DetailState, DetailTab, ShellState, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
-pub use resource::{NamespaceScope, ResourceWindowState, SortSpec};
+pub use resource::{AgeMode, NamespaceScope, ResourceWindowState, SortSpec};
 pub use snapshot::{
     COUNTER_LIMIT, LoadedWorkspaceSnapshot, PersistedListView, PersistedWindow,
     PersistedWindowKind, SNAPSHOT_VERSION, WorkspaceSnapshot,
@@ -73,6 +73,12 @@ pub enum WorkspaceCommand<I> {
     /// Focus the next window in registry MRU order.
     CycleWindow,
     SetNamespaceScope(WindowId, NamespaceScope),
+    /// Set or clear the toolbar status filter for one list window.
+    SetStatusFilter(WindowId, Option<String>),
+    /// Toggle a user-hidden column through the toolbar Columns menu.
+    ToggleColumnVisibility(WindowId, String),
+    /// Switch the Age column between relative and absolute rendering.
+    SetAgeMode(WindowId, AgeMode),
     SetSearch(WindowId, String),
     SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
@@ -372,6 +378,22 @@ where
             }
             WorkspaceCommand::CycleWindow => self.cycle_window(),
             WorkspaceCommand::SetNamespaceScope(id, scope) => self.set_namespace_scope(id, scope),
+            WorkspaceCommand::SetStatusFilter(id, filter) => {
+                self.with_resource_mut(id, |resource| resource.status_filter = filter);
+                Vec::new()
+            }
+            WorkspaceCommand::ToggleColumnVisibility(id, column) => {
+                self.with_resource_mut(id, |resource| {
+                    if !resource.hidden_columns.remove(&column) {
+                        resource.hidden_columns.insert(column);
+                    }
+                });
+                Vec::new()
+            }
+            WorkspaceCommand::SetAgeMode(id, mode) => {
+                self.with_resource_mut(id, |resource| resource.age_mode = mode);
+                Vec::new()
+            }
             WorkspaceCommand::SetSearch(id, search) => {
                 self.with_resource_mut(id, |resource| resource.search = search.clone());
                 self.with_service_mut(id, |service| service.search = search);
@@ -1050,6 +1072,20 @@ where
                 }
                 WindowContent::Detail(detail) => mutate(detail),
             }
+        }
+    }
+}
+
+/// Window-title text for a list window: its base title plus the active
+/// namespace scope, matching the reference design (`Deployments · all
+/// namespaces`). Shared by the window chrome and the taskbar so both never
+/// drift apart.
+#[must_use]
+pub fn scoped_window_title(title: &str, scope: &NamespaceScope) -> String {
+    match scope {
+        NamespaceScope::Namespace(namespace) => format!("{title} · {namespace}"),
+        NamespaceScope::ContextDefault | NamespaceScope::AllNamespaces => {
+            format!("{title} · all namespaces")
         }
     }
 }

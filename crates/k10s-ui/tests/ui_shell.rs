@@ -12,6 +12,8 @@ use k10s_ui::{
     },
 };
 
+mod common;
+
 const PRIMARY_CONTEXT: &str = "dev-admin@singapore-development";
 const SECONDARY_CONTEXT: &str = "prod-admin@singapore-production";
 
@@ -100,8 +102,26 @@ fn window_layer(id: WindowId) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, egui::Id::new(("k10s.window", id.0)))
 }
 
+/// Workload windows carry their scope in the rendered title
+/// (`Pods · all namespaces`), so match the workspace title as a prefix;
+/// the taskbar repeats scoped titles on buttons, hence the role + exact
+/// prefix checks.
 fn rendered_window(harness: &Harness<'_, ShellFixture>, title: &str) -> egui::Rect {
-    harness.get_by_role_and_label(Role::Window, title).rect()
+    use egui_kittest::kittest::NodeT as _;
+    let needle: &'static str = Box::leak(title.to_string().into_boxed_str());
+    let scoped: &'static str = Box::leak(format!("{needle} ·").into_boxed_str());
+    harness
+        .query_all_by_label(needle)
+        .chain(harness.query_all_by_label_contains(scoped))
+        .find(|node| {
+            let accesskit_node = node.accesskit_node();
+            accesskit_node.role() == Role::Window
+                && accesskit_node
+                    .label()
+                    .is_some_and(|label| label == needle || label.starts_with(scoped))
+        })
+        .expect("a rendered window for the workspace title")
+        .rect()
 }
 
 fn assert_rect_matches_geometry(
@@ -655,7 +675,7 @@ fn full_taxonomy_entries_open_named_windows_and_track_instances() {
     ] {
         harness.get_by_role_and_label(Role::Button, label).click();
         harness.run_steps(2);
-        harness.get_by_role_and_label(Role::Window, label);
+        common::workload_window(&harness, label);
         harness.get_by_label(&format!("1 open {label} window"));
     }
 }
@@ -697,16 +717,10 @@ fn workload_highlight_count_plus_and_close_track_workspace_instances() {
         2
     );
     harness.get_by_label("2 open Pods windows");
-    assert_eq!(
-        harness
-            .get_all_by_role_and_label(Role::Window, "Pods")
-            .count(),
-        2
-    );
+    assert_eq!(common::workload_window_all(&harness, "Pods").count(), 2);
 
     for _ in 0..2 {
-        let pods_window = harness
-            .get_all_by_role_and_label(Role::Window, "Pods")
+        let pods_window = common::workload_window_all(&harness, "Pods")
             .next()
             .expect("a Pods window remains open");
         pods_window
@@ -857,8 +871,7 @@ fn highlighted_workload_item_focuses_the_most_recent_instance() {
         .min_by_key(|window| window.z)
         .map(|window| window.id)
         .expect("an older Pods window is open");
-    let older_title = harness
-        .get_all_by_role_and_label(Role::Window, "Pods")
+    let older_title = common::workload_window_all(&harness, "Pods")
         .min_by(|left, right| left.rect().top().total_cmp(&right.rect().top()))
         .expect("the older staggered Pods window is visible")
         .rect()

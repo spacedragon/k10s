@@ -159,7 +159,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Deployments"
+  Window label="Deployments · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -169,20 +169,35 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              Label value="✕ Failed · watch ended unexpectedly"
-                TextRun value="✕ Failed · watch ended unexpectedly"
-              GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
               GenericContainer
                 TextInput label="Search deployments" value=""
                   TextRun value=""
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
+                      ComboBox value="Namespace: not requested"
+                GenericContainer
+                  GenericContainer
+                    ComboBox value="Status: all"
+                GenericContainer
+                  Button label="Columns ▾"
+                Button label="↻"
+                GenericContainer
+              GenericContainer
+                Label value="1 deployments"
+                  TextRun value="1 deployments"
+                GenericContainer
+                  GenericContainer
+                    Label value="Age shown as relative ("
+                      TextRun value="Age shown as relative ("
+                    Button label="switch to absolute"
+                    Label value=")"
+                      TextRun value=")"
+              Label value="✕ Failed · watch ended unexpectedly"
+                TextRun value="✕ Failed · watch ended unexpectedly"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 GenericContainer
                   GenericContainer

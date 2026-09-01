@@ -166,7 +166,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Pods"
+  Window label="Pods · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -182,9 +182,24 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
+                      ComboBox value="Namespace: not requested"
+                GenericContainer
+                  GenericContainer
+                    ComboBox value="Status: all"
+                GenericContainer
+                  Button label="Columns ▾"
+                Button label="↻"
+                GenericContainer
+              GenericContainer
+                Label value="1 pods · 1 selected"
+                  TextRun value="1 pods · 1 selected"
+                GenericContainer
+                  GenericContainer
+                    Label value="Age shown as relative ("
+                      TextRun value="Age shown as relative ("
+                    Button label="switch to absolute"
+                    Label value=")"
+                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"

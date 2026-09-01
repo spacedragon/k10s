@@ -160,7 +160,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Pods"
+  Window label="Pods · payments"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -177,16 +177,6 @@ Window
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
-              GenericContainer
-                TextInput label="Search pods" value=""
-                  TextRun value=""
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
-                Button label="Clear"
               GenericContainer
                 ProgressIndicator
                 Label value="Loading pods"
@@ -199,7 +189,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Pods"
+  Window label="Pods · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -216,15 +206,6 @@ Window
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
-              GenericContainer
-                TextInput label="Search pods" value=""
-                  TextRun value=""
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
               GenericContainer
                 ProgressIndicator
                 Label value="Loading pods"

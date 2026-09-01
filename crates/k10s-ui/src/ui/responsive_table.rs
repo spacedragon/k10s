@@ -22,6 +22,18 @@ impl ColumnSpec {
         }
     }
 
+    /// Whether the user may hide this column from the toolbar Columns menu.
+    #[must_use]
+    pub const fn is_hideable(&self) -> bool {
+        self.hide_priority.is_some()
+    }
+
+    /// Return a copy of this spec with a different minimum width.
+    #[must_use]
+    pub fn with_min_width(self, min_width: f32) -> Self {
+        Self { min_width, ..self }
+    }
+
     pub const fn elastic(key: &'static str, min_width: f32) -> Self {
         Self {
             key,
@@ -71,12 +83,19 @@ impl ResolvedColumns {
     }
 }
 
+/// Columns whose keys appear in `hidden` stay hidden regardless of the
+/// available width (the user toggled them off in the Columns menu); the
+/// priority-based auto-hide then runs over whatever remains.
 pub(super) fn resolve_columns(
     specs: &[ColumnSpec],
     available_width: f32,
     column_spacing: f32,
+    hidden: &std::collections::BTreeSet<String>,
 ) -> ResolvedColumns {
-    let mut visible = vec![true; specs.len()];
+    let mut visible: Vec<bool> = specs
+        .iter()
+        .map(|spec| !hidden.contains(spec.key))
+        .collect();
     let occupied = |visible: &[bool]| {
         let count = visible.iter().filter(|shown| **shown).count();
         specs
@@ -288,6 +307,10 @@ where
 mod tests {
     use super::*;
 
+    fn none_hidden() -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
+
     const SERVICE: [ColumnSpec; 6] = [
         ColumnSpec::required("namespace", 112.0),
         ColumnSpec::elastic("name", 180.0),
@@ -299,19 +322,31 @@ mod tests {
 
     #[test]
     fn resolver_hides_in_priority_order_and_restores_deterministically() {
-        let wide = resolve_columns(&SERVICE, 1_000.0, 8.0);
+        let wide = resolve_columns(&SERVICE, 1_000.0, 8.0, &none_hidden());
         assert_eq!(
             wide.visible_keys(),
             vec!["namespace", "name", "type", "cluster_ip", "ports", "age"]
         );
         assert!(!wide.horizontal_scroll);
 
-        let compact = resolve_columns(&SERVICE, 640.0, 8.0);
+        let compact = resolve_columns(&SERVICE, 640.0, 8.0, &none_hidden());
         assert!(!compact.contains("cluster_ip"));
         assert!(!compact.contains("type"));
 
-        let restored = resolve_columns(&SERVICE, 1_000.0, 8.0);
+        let restored = resolve_columns(&SERVICE, 1_000.0, 8.0, &none_hidden());
         assert_eq!(restored.visible_keys(), wide.visible_keys());
+    }
+
+    #[test]
+    fn user_hidden_columns_stay_hidden_even_when_space_is_available() {
+        let mut hidden = std::collections::BTreeSet::new();
+        hidden.insert("cluster_ip".to_owned());
+        hidden.insert("ports".to_owned());
+        let resolved = resolve_columns(&SERVICE, 1_000.0, 8.0, &hidden);
+        assert!(!resolved.contains("cluster_ip"));
+        assert!(!resolved.contains("ports"));
+        assert!(resolved.contains("name"));
+        assert!(resolved.contains("age"));
     }
 
     #[test]
@@ -320,7 +355,7 @@ mod tests {
             ColumnSpec::required("namespace", 400.0),
             ColumnSpec::elastic("name", 300.0),
         ];
-        let resolved = resolve_columns(&required, 640.0, 8.0);
+        let resolved = resolve_columns(&required, 640.0, 8.0, &none_hidden());
         assert!(resolved.horizontal_scroll);
         assert_eq!(resolved.width("namespace"), Some(400.0));
         assert_eq!(resolved.width("name"), Some(300.0));
@@ -347,16 +382,18 @@ mod tests {
         ];
         for fixture in [&deployment[..], &pod[..], &SERVICE[..]] {
             assert_eq!(
-                resolve_columns(fixture, 1_000.0, 8.0).visible.len(),
+                resolve_columns(fixture, 1_000.0, 8.0, &none_hidden())
+                    .visible
+                    .len(),
                 fixture.len()
             );
         }
-        assert!(!resolve_columns(&deployment, 640.0, 8.0).contains("image"));
-        assert!(resolve_columns(&deployment, 640.0, 8.0).contains("status"));
-        assert!(!resolve_columns(&pod, 640.0, 8.0).contains("node"));
-        assert!(resolve_columns(&pod, 640.0, 8.0).contains("restarts"));
+        assert!(!resolve_columns(&deployment, 640.0, 8.0, &none_hidden()).contains("image"));
+        assert!(resolve_columns(&deployment, 640.0, 8.0, &none_hidden()).contains("status"));
+        assert!(!resolve_columns(&pod, 640.0, 8.0, &none_hidden()).contains("node"));
+        assert!(resolve_columns(&pod, 640.0, 8.0, &none_hidden()).contains("restarts"));
         for fixture in [&deployment[..], &pod[..], &SERVICE[..]] {
-            let resolved = resolve_columns(fixture, 1_000.0, 8.0);
+            let resolved = resolve_columns(fixture, 1_000.0, 8.0, &none_hidden());
             let painted = resolved
                 .visible
                 .iter()

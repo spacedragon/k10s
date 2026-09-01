@@ -166,7 +166,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Custom Resources"
+  Window label="Custom Resources · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer

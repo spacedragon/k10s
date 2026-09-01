@@ -1,7 +1,7 @@
 //! Per-list-window resource state: filters, sort, selection, and the
 //! integrated detail pane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,17 @@ pub struct SortSpec {
     pub ascending: bool,
 }
 
+/// How one list window renders the Age column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgeMode {
+    /// Compact relative age (`47d`); the full timestamp is available on
+    /// hover. This is the reference-design default.
+    #[default]
+    Relative,
+    /// The full absolute timestamp in the cell.
+    Absolute,
+}
+
 /// State owned by one resource list window (Overview, Nodes, Storage, and
 /// every workload instance). Two windows of the same kind keep fully
 /// independent namespace, search, filters, sort, split, and selection state.
@@ -58,6 +69,14 @@ pub struct ResourceWindowState<I> {
     pub search: String,
     /// Key/value list filters (for example `phase` → `Running`).
     pub filters: BTreeMap<String, String>,
+    /// Active toolbar status filter (`None` shows every status).
+    /// Transient interaction state, intentionally omitted from snapshots.
+    pub status_filter: Option<String>,
+    /// Columns the user hid through the toolbar Columns menu. Transient
+    /// interaction state, intentionally omitted from snapshots.
+    pub hidden_columns: BTreeSet<String>,
+    /// Age column rendering for this window's list.
+    pub age_mode: AgeMode,
     pub sort: Option<SortSpec>,
     /// Selected row identity; owns the integrated detail below.
     pub selection: Option<I>,
@@ -83,6 +102,9 @@ impl<I> Default for ResourceWindowState<I> {
             namespace_scope: NamespaceScope::AllNamespaces,
             search: String::new(),
             filters: BTreeMap::new(),
+            status_filter: None,
+            hidden_columns: BTreeSet::new(),
+            age_mode: AgeMode::Relative,
             sort: None,
             selection: None,
             split_ratio: 0.5,

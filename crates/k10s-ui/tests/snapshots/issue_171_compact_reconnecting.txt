@@ -159,7 +159,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Deployments"
+  Window label="Deployments · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -169,6 +169,30 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              GenericContainer
+                TextInput label="Search deployments" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox value="Namespace: not requested"
+                GenericContainer
+                  GenericContainer
+                    ComboBox value="Status: all"
+                GenericContainer
+                  Button label="Columns ▾"
+                Button label="↻"
+                GenericContainer
+              GenericContainer
+                Label value="1 deployments"
+                  TextRun value="1 deployments"
+                GenericContainer
+                  GenericContainer
+                    Label value="Age shown as relative ("
+                      TextRun value="Age shown as relative ("
+                    Button label="switch to absolute"
+                    Label value=")"
+                      TextRun value=")"
               Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
                 TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."
@@ -176,15 +200,6 @@ Window
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
-              GenericContainer
-                TextInput label="Search deployments" value=""
-                  TextRun value=""
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
               GenericContainer
                 GenericContainer
                   GenericContainer

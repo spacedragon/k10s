@@ -9286,6 +9286,222 @@ mod tests {
         );
         assert_eq!(app.failed_switch, None, "the failure record cleared");
     }
+
+    /// One Deployment list window with two rows, rendered through the
+    /// reference-design toolbar.
+    fn toolbar_test_harness(app: K10sApp) -> Harness<'static, K10sApp> {
+        fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
+            app.render_ui(ui);
+        }
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_280.0, 800.0))
+            .build_ui_state(render, app);
+        for _ in 0..4 {
+            harness.step();
+        }
+        harness
+    }
+
+    fn deployment_list_app() -> (K10sApp, WindowId) {
+        let (mut app, _) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let subscription = {
+            let key = app.window_subscriptions.get(&window).unwrap();
+            app.resource_subscriptions
+                .get(key)
+                .unwrap()
+                .live
+                .id()
+                .clone()
+        };
+        complete_resource_snapshot(
+            &mut app,
+            &subscription,
+            1,
+            vec![
+                deployment_row(deployment_identity("alpha"), 1),
+                deployment_row(deployment_identity("beta"), 1),
+            ],
+            true,
+        );
+        (app, window)
+    }
+
+    #[test]
+    fn deployment_toolbar_matches_reference_layout_and_title() {
+        let (app, _) = deployment_list_app();
+        let harness = toolbar_test_harness(app);
+        let window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+
+        // One compact toolbar row: search, namespace, status, columns,
+        // refresh, and the live/freshness chip.
+        window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
+        assert_eq!(
+            harness
+                .get_by_value("Namespace: All namespaces")
+                .accesskit_node()
+                .role(),
+            egui::accesskit::Role::ComboBox,
+            "the namespace selector carries its label inside the control"
+        );
+        assert_eq!(
+            harness.get_by_value("Status: all").accesskit_node().role(),
+            egui::accesskit::Role::ComboBox,
+            "the status filter carries its label inside the control"
+        );
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾");
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
+        window.get_by_label("● Live · just now");
+
+        // The match line reports the result count and the age affordance.
+        // With no filters active, the Reset control stays hidden.
+        window.get_by_label("2 deployments");
+        window.get_by_label("Age shown as relative (");
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to absolute");
+        assert!(
+            window.query_by_label("Reset").is_none(),
+            "Reset only appears while filters are active"
+        );
+        // The standalone Live row from the old layout is gone: every "Live"
+        // label belongs to the toolbar chip.
+        assert!(
+            window.query_all_by_label_contains("Live").all(|node| {
+                let accesskit_node = node.accesskit_node();
+                let text = if accesskit_node.role() == egui::accesskit::Role::Label {
+                    accesskit_node.value()
+                } else {
+                    accesskit_node.label()
+                };
+                text.is_some_and(|text| text.starts_with("● Live ·"))
+            }),
+            "live status belongs only in the toolbar chip"
+        );
+    }
+
+    #[test]
+    fn deployment_window_title_tracks_namespace_scope() {
+        let (app, window) = deployment_list_app();
+        let harness = toolbar_test_harness(app);
+        harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+
+        let mut app = harness.into_state();
+        app.web_set_namespace_scope(
+            window,
+            crate::workspace::NamespaceScope::Namespace("payments".into()),
+        );
+
+        let harness = toolbar_test_harness(app);
+        harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · payments");
+    }
+
+    #[test]
+    fn deployment_matchline_reflects_selection_sort_and_age_mode() {
+        let (mut app, window) = deployment_list_app();
+        let alpha = deployment_identity("alpha");
+        app.web_select_resource(window, alpha.clone());
+        app.shell.apply_workspace_command(WorkspaceCommand::SetSort(
+            window,
+            Some(crate::workspace::SortSpec {
+                column: "namespace".into(),
+                ascending: true,
+            }),
+        ));
+
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+        list_window.get_by_label("2 deployments · 1 selected");
+        list_window.get_by_label("sorted by Namespace ▲ · ");
+
+        // Absolute mode renders raw timestamps in the Age column and flips
+        // the match-line affordance.
+        let mut app = harness.into_state();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetAgeMode(
+                window,
+                crate::workspace::AgeMode::Absolute,
+            ));
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+        list_window.get_by_label("Age shown as absolute (");
+        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to relative");
+    }
+
+    #[test]
+    fn deployment_status_filter_narrows_rows_and_reset_restores_them() {
+        let (mut app, _) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .unwrap();
+        let subscription = {
+            let key = app.window_subscriptions.get(&window).unwrap();
+            app.resource_subscriptions
+                .get(key)
+                .unwrap()
+                .live
+                .id()
+                .clone()
+        };
+        // Distinct statuses so the filter has something to exclude.
+        let alpha = deployment_row(deployment_identity("alpha"), 1);
+        let mut beta = deployment_row(deployment_identity("beta"), 1);
+        beta.summary = "Degraded".into();
+        complete_resource_snapshot(&mut app, &subscription, 1, vec![alpha, beta], true);
+
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetStatusFilter(
+                window,
+                Some("Ready".into()),
+            ));
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+        list_window.get_by_label("Select resource alpha");
+        assert!(
+            list_window.query_by_label("Select resource beta").is_none(),
+            "the status filter must exclude non-matching rows"
+        );
+        list_window.get_by_label("1 deployments");
+        // An active filter exposes the Reset affordance.
+        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "Reset");
+        let selector = harness
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .find(|node| {
+                node.value()
+                    .is_some_and(|value| value.starts_with("Status: "))
+            })
+            .expect("the toolbar Status combobox");
+        assert_eq!(selector.value().as_deref(), Some("Status: Ready"));
+
+        // Reset clears the filter and restores every row.
+        let mut app = harness.into_state();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SetStatusFilter(window, None));
+        let harness = toolbar_test_harness(app);
+        let list_window = harness.get_by_role_and_label(
+            egui::accesskit::Role::Window,
+            "Deployments · all namespaces",
+        );
+        list_window.get_by_label("Select resource alpha");
+        list_window.get_by_label("Select resource beta");
+        list_window.get_by_label("2 deployments");
+    }
 }
 
 #[cfg(test)]
