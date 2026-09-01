@@ -32,8 +32,8 @@ Window label="Deployment · payments / checkout"
                     TextRun value="Strategy · RollingU…"
               GenericContainer
                 GenericContainer
-                  Label value="Age · 30d"
-                    TextRun value="Age · 30d"
+                  Label value="Age · 31d"
+                    TextRun value="Age · 31d"
             GenericContainer
               Label value="Freshness · live (just now)"
                 TextRun value="Freshness · live (just now)"
