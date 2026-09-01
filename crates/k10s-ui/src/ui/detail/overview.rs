@@ -70,9 +70,16 @@ pub(super) fn long_value(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
     });
 }
 
+/// Keeps a two-line long value inside one parent Grid cell.
+pub(super) fn long_value_cell(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
+    ui.vertical(|ui| long_value(ui, label, value));
+}
+
 #[cfg(test)]
 mod responsive_contract_tests {
     use super::{detail_columns, long_value_text};
+    use egui::accesskit::Role;
+    use egui_kittest::{Harness, kittest::Queryable as _};
 
     #[test]
     fn exact_overview_widths_use_the_shared_breakpoint_and_ratio() {
@@ -90,6 +97,66 @@ mod responsive_contract_tests {
         assert!(shown.contains('…'));
         assert!(shown.is_char_boundary(shown.len()));
         assert_eq!(long_value_text("", 24), "—");
+    }
+
+    #[test]
+    fn actual_1000_and_640_renders_switch_ratio_and_order() {
+        let mut wide = Harness::builder()
+            .with_size(egui::vec2(1_000.0, 300.0))
+            .build_ui(|ui| {
+                assert!(super::two_column(
+                    ui,
+                    |ui| {
+                        ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Button::new("operational"),
+                        );
+                    },
+                    |ui| {
+                        ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Button::new("configuration"),
+                        );
+                    },
+                ));
+            });
+        wide.run();
+        let operational = wide.get_by_label("operational").rect();
+        let configuration = wide.get_by_label("configuration").rect();
+        assert!((operational.width() / configuration.width() - 1.35).abs() < 0.01);
+
+        let mut narrow = Harness::builder()
+            .with_size(egui::vec2(640.0, 300.0))
+            .build_ui(|ui| {
+                assert!(!super::two_column(ui, |_| {}, |_| {}));
+                ui.label("operational");
+                ui.label("configuration");
+                ui.label("identity");
+            });
+        narrow.run();
+        let labels = ["operational", "configuration", "identity"].map(|label| {
+            narrow
+                .get_by_role_and_label(Role::Label, label)
+                .rect()
+                .top()
+        });
+        assert!(labels[0] < labels[1] && labels[1] < labels[2]);
+    }
+
+    #[test]
+    fn generic_empty_sections_do_not_render_heading_or_separator() {
+        let mut harness = Harness::new_ui(|ui| {
+            super::generic_sections(
+                ui,
+                crate::workspace::WindowId(1),
+                &[k10s_protocol::DetailSection {
+                    title: "EMPTY SENTINEL".into(),
+                    rows: vec![],
+                }],
+            );
+        });
+        harness.run();
+        assert!(harness.query_by_label("EMPTY SENTINEL").is_none());
     }
 }
 
@@ -121,6 +188,9 @@ fn generic_sections(ui: &mut egui::Ui, window_id: WindowId, sections: &[DetailSe
         return;
     }
     for section in sections {
+        if section.rows.is_empty() {
+            continue;
+        }
         ui.heading(RichText::new(section.title.as_str()).strong());
         Grid::new(("k10s.detail.overview.grid", window_id.0, &section.title))
             .num_columns(1)

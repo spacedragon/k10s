@@ -469,7 +469,7 @@ fn show_generic_actions(
             dialogs.open_scale(
                 window_id,
                 presentation.identity.clone(),
-                status_summary(view).and_then(summary_replicas),
+                suggested_replicas(view),
             );
         }
     }
@@ -493,6 +493,16 @@ fn show_generic_actions(
         if delete.clicked() {
             dialogs.open_delete(window_id, presentation.identity.clone());
         }
+    }
+}
+
+fn suggested_replicas(view: &ResourceDetailResponse) -> Option<u32> {
+    match view.projection.as_ref() {
+        Some(k10s_protocol::ResourceProjection::Deployment(deployment)) => {
+            deployment.desired_replicas
+        }
+        Some(_) => None,
+        None => status_summary(view).and_then(summary_replicas),
     }
 }
 

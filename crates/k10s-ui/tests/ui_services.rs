@@ -1050,14 +1050,13 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     window.get_by_label("Type ClusterIP");
     window.get_by_label("Cluster IPs 10.96.0.10");
     window.get_by_label("Selector: app=web");
-    window.get_by_label("Session affinity —");
+    assert!(window.query_by_label("TRAFFIC & SESSION").is_none());
     assert!(
         window
             .query_by_label("External traffic policy Local")
             .is_none(),
         "absent traffic policies must not render"
     );
-    window.get_by_label("Internal policy —");
 
     // With policies present they render verbatim.
     harness
@@ -1074,6 +1073,32 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     window.get_by_label("Session affinity ClientIP");
     window.get_by_label("External policy Local");
     window.get_by_label("Internal policy Cluster");
+}
+
+#[test]
+fn empty_service_configuration_sections_collapse_completely() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(8);
+    let mut detail = service_detail("web-frontend", false);
+    let Some(ResourceProjection::Service(service)) = detail.projection.as_mut() else {
+        panic!("typed service fixture");
+    };
+    service.selector.clear();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(service_identity("web-frontend"), detail);
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(window.query_by_label("SELECTORS").is_none());
+    assert!(window.query_by_label("TRAFFIC & SESSION").is_none());
+    window.get_by_label("IDENTITY");
 }
 
 #[test]

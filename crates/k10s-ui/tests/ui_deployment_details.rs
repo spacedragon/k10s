@@ -11,8 +11,8 @@ use egui_kittest::{
 };
 use k10s_protocol::{
     BackendRevision, ContainerImageProjection, ContainerStateProjection,
-    ContainerTerminationProjection, DeploymentProjection, EventRow, GroupVersionKind,
-    PodContainerProjection, PodProjection, RelatedGroup, ReplicaSetProjection,
+    ContainerTerminationProjection, DeploymentProjection, DetailRow, DetailSection, EventRow,
+    GroupVersionKind, PodContainerProjection, PodProjection, RelatedGroup, ReplicaSetProjection,
     ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity,
     ResourceListRow, ResourceProjection, ResourceRelationsResponse,
 };
@@ -845,6 +845,36 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
                 .is_disabled()
         );
     }
+}
+
+#[test]
+fn deployment_scale_prefill_uses_typed_desired_replicas_over_summary() {
+    let mut harness = harness(egui::vec2(1_050.0, 700.0));
+    let mut detail = detail_with(Some(projection(Vec::new())));
+    detail.sections = vec![DetailSection {
+        title: "Overview".into(),
+        rows: vec![DetailRow {
+            label: "Status".into(),
+            value: "99/99 ready".into(),
+        }],
+    }];
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [900.0, 560.0],
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Scale…")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Desired replicas")
+            .value(),
+        Some("3".into())
+    );
 }
 
 #[test]

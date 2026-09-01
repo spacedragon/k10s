@@ -14,23 +14,6 @@ use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 
 use crate::ui::resource_window::RowIdentity;
 
-#[cfg(test)]
-mod responsive_contract_tests {
-    use super::overview_order;
-
-    #[test]
-    fn service_overview_orders_exact_1000_and_640_widths() {
-        assert_eq!(
-            overview_order(1_000.0),
-            ["operational", "configuration", "identity"]
-        );
-        assert_eq!(
-            overview_order(640.0),
-            ["operational", "configuration", "identity"]
-        );
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
@@ -88,11 +71,6 @@ fn projection_of(view: &ResourceDetailResponse) -> Option<&ServiceProjection> {
 }
 
 /// Overview tab: every field comes from the projection only when present.
-#[cfg(test)]
-fn overview_order(_width: f32) -> [&'static str; 3] {
-    ["operational", "configuration", "identity"]
-}
-
 fn overview_tab(
     ui: &mut egui::Ui,
     window_id: WindowId,
@@ -152,32 +130,38 @@ fn service_operational(ui: &mut egui::Ui, window_id: WindowId, projection: &Serv
 }
 
 fn service_configuration(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
-    ui.heading("SELECTORS");
     let selector = projection
         .selector
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(", ");
-    super::overview::long_value(ui, "Selector", Some(&selector));
+    if !selector.is_empty() {
+        ui.heading("SELECTORS");
+        super::overview::long_value(ui, "Selector", Some(&selector));
+    }
+    if projection.session_affinity.is_none()
+        && projection.external_traffic_policy.is_none()
+        && projection.internal_traffic_policy.is_none()
+    {
+        return;
+    }
     ui.heading("TRAFFIC & SESSION");
     Grid::new(("k10s.detail.service.traffic", window_id.0)).show(ui, |ui| {
-        overview_row(
-            ui,
-            "Session affinity",
-            projection.session_affinity.as_deref().unwrap_or("—"),
-        );
-        overview_row(
-            ui,
-            "External policy",
-            projection.external_traffic_policy.as_deref().unwrap_or("—"),
-        );
-        overview_row(
-            ui,
-            "Internal policy",
-            projection.internal_traffic_policy.as_deref().unwrap_or("—"),
-        );
+        if let Some(value) = projection.session_affinity.as_deref() {
+            overview_row(ui, "Session affinity", nonempty(value));
+        }
+        if let Some(value) = projection.external_traffic_policy.as_deref() {
+            overview_row(ui, "External policy", nonempty(value));
+        }
+        if let Some(value) = projection.internal_traffic_policy.as_deref() {
+            overview_row(ui, "Internal policy", nonempty(value));
+        }
     });
+}
+
+fn nonempty(value: &str) -> &str {
+    if value.is_empty() { "—" } else { value }
 }
 
 fn service_identity(

@@ -602,6 +602,22 @@ fn pod_interaction_expands_labels_and_annotations_accessibly() {
 }
 
 #[test]
+fn pod_multi_container_images_stay_in_one_aligned_grid_cell() {
+    let harness = harness(1_100.0, healthy_detail());
+    let detail = pod_window(&harness);
+    let image_header = detail.get_by_label("IMAGE").rect();
+    let state_header = detail.get_by_label("STATE").rect();
+    let web = detail
+        .get_by_label("Image: ghcr.io/example/web:1.2.3")
+        .rect();
+    let sidecar = detail.get_by_label("Image: —").rect();
+    assert!((web.left() - sidecar.left()).abs() < 0.1);
+    assert!(web.left() >= image_header.left());
+    assert!(web.right() <= state_header.left());
+    assert!(sidecar.right() <= state_header.left());
+}
+
+#[test]
 fn pod_interaction_owner_navigation_uses_only_the_verified_exact_identity() {
     let mut response = healthy_detail();
     response.owner_references = vec![OwnerReference {
