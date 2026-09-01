@@ -91,4 +91,3 @@ Implementation follows red-green TDD and covers:
    parameters.
 8. Existing tail truncation, pause, find, export, and stream ticket tests remain
    green.
-

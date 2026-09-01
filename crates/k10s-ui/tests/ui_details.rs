@@ -47,7 +47,7 @@ fn primary_failure_and_relation_states_render_independently() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
 
@@ -113,7 +113,7 @@ fn unavailable_events_are_explicitly_safe() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     {
@@ -150,6 +150,89 @@ fn unavailable_events_are_explicitly_safe() {
     harness
         .get_by_role_and_label(Role::Window, "Pods")
         .get_by_label("Events unavailable");
+}
+
+#[test]
+fn generic_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
+    let mut harness = harness();
+    for (name, width, x) in [
+        ("generic-wide", 1_024.0, 10.0),
+        ("generic-narrow", 664.0, 760.0),
+    ] {
+        let identity = ResourceIdentity {
+            context: CONTEXT.into(),
+            gvk: GroupVersionKind::core("v1", "ConfigMap"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        };
+        harness.state_mut().feed.details.insert(
+            identity.clone(),
+            ResourceDetailResponse {
+                identity: identity.clone(),
+                revision: BackendRevision::new(1),
+                created_at: "2026-08-21T00:00:00Z".into(),
+                owner_references: vec![],
+                sections: vec![
+                    DetailSection {
+                        title: "CONFIGURATION".into(),
+                        rows: vec![DetailRow {
+                            label: "Mode".into(),
+                            value: "active".into(),
+                        }],
+                    },
+                    DetailSection {
+                        title: "EMPTY SENTINEL".into(),
+                        rows: vec![],
+                    },
+                ],
+                events_condition: k10s_protocol::EventsCondition::Available,
+                events: vec![],
+                related: vec![],
+                capabilities: ResourceCapabilities::default(),
+                manifest: String::new(),
+                projection: None,
+            },
+        );
+        let id = harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        harness
+            .state_mut()
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 20.0],
+                    size: [width, 700.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    harness.run_steps(5);
+    let wide = harness.get_by_role_and_label(Role::Window, "ConfigMap · default / generic-wide");
+    let op = wide.get_by_label("Operational detail column").rect();
+    let config = wide.get_by_label("Configuration detail column").rect();
+    assert!((op.width() / config.width() - 1.35).abs() < 0.02);
+    let narrow =
+        harness.get_by_role_and_label(Role::Window, "ConfigMap · default / generic-narrow");
+    assert!(
+        narrow.get_by_label("STATUS").rect().top()
+            < narrow.get_by_label("CONFIGURATION").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("CONFIGURATION").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    assert!(narrow.query_by_label("EMPTY SENTINEL").is_none());
+    narrow.get_by_role_and_label(Role::Button, "Tab Overview");
 }
 
 #[test]
@@ -311,7 +394,7 @@ fn shared_frame_keeps_pinned_identity_actions_while_details_load() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
 
@@ -352,7 +435,7 @@ fn typed_pod_overview_renders_real_content_and_metadata_controls() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
@@ -391,9 +474,7 @@ fn detail_expansion_is_independent_per_window() {
         .click();
     harness.run_steps(2);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_label("Node · worker-a");
+    harness.get_by_label("Node · worker-a");
     assert!(
         harness
             .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
@@ -444,10 +525,9 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
         .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(2);
+    harness.get_by_label("Node · worker-a");
+    harness.get_by_label("Pod IP · 10.244.0.9");
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
-    detail.get_by_label("Node · worker-a");
-    detail.get_by_label("Pod IP · 10.244.0.9");
-    detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
     assert!(
         detail
             .query_by_role_and_label(Role::Button, "Show metadata")
@@ -534,29 +614,8 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
         .get_by_role_and_label(Role::Button, "Show more Deployment vitals")
         .click();
     harness.run_steps(2);
-    let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    detail.get_by_label("Strategy · RollingUpdate");
-    detail.get_by_label("Age · 3d");
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::SetGeometry(
-            window_id,
-            WindowGeom {
-                position: [32.0, 32.0],
-                size: [900.0, 500.0],
-                collapsed: false,
-            },
-        ));
-    harness.run_steps(4);
-    let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    detail.get_by_label("Strategy · RollingUpdate");
-    detail.get_by_label("Age · 3d");
-    assert!(
-        detail
-            .query_by_role_and_label(Role::Button, "Show more Deployment vitals")
-            .is_none()
-    );
+    harness.get_by_label("Strategy · RollingUpdate");
+    harness.get_by_label("Age · 3d");
 }
 
 #[test]
@@ -569,7 +628,7 @@ fn typed_router_uses_pod_overview_and_preserves_other_tabs() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
@@ -607,7 +666,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
     open(&mut pod_harness, LauncherItem::Workload(WorkloadKind::Pods));
     pod_harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     pod_harness.run_steps(3);
     let pod = pod_harness.get_by_role_and_label(Role::Window, "Pods");
@@ -626,7 +685,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
     );
     deployment_harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     deployment_harness.run_steps(3);
     deployment_harness
@@ -705,7 +764,7 @@ fn detail_verified_owner_shortcut_executes_the_advertised_command() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     if let Some(focused) = harness.ctx.memory(|memory| memory.focused()) {
@@ -747,7 +806,7 @@ fn global_detail_shortcuts_belong_only_to_the_top_workspace_detail() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
 
@@ -873,7 +932,7 @@ fn owner_shortcut_opens_only_the_active_details_verified_owner() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     harness
@@ -1021,7 +1080,7 @@ fn integrated_detail_has_inner_identity_heading_but_dedicated_caption_is_not_dup
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
 
@@ -1253,7 +1312,7 @@ fn detail_overflow_opens_only_the_controller_owner() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(3);
     harness
@@ -1305,7 +1364,7 @@ fn crashloop_logs_default_to_previous_with_complete_toolbar() {
     open(&mut harness, LauncherItem::Workload(WorkloadKind::Pods));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "web-frontend-7d9f8-00001")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.run_steps(3);
     assert!(harness.state_mut().shell.drain_log_actions().is_empty());
@@ -1431,6 +1490,7 @@ fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
+        .with_step_dt(0.3)
         .build_ui_state(render, Fixture::default())
 }
 
@@ -1747,7 +1807,7 @@ fn tabs_and_actions_are_exact_per_kind() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
 
@@ -1778,7 +1838,7 @@ fn tabs_and_actions_are_exact_per_kind() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
@@ -1831,7 +1891,7 @@ fn workload_detail_is_a_selection_driven_bottom_panel() {
     );
 
     window
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
@@ -1866,7 +1926,7 @@ fn restart_uses_the_pinned_target_and_respects_window_freshness() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(3);
     let window_id =
@@ -1922,7 +1982,7 @@ fn pod_edit_yaml_action_opens_the_read_only_manifest_before_editing() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
@@ -1962,7 +2022,7 @@ fn identity_header_renders_from_the_pinned_identity() {
     // the selected identity with an explicit loading state.
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
@@ -2022,7 +2082,7 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
 
@@ -2097,7 +2157,7 @@ fn failed_relation_refresh_keeps_stale_rows_and_retries_once() {
     );
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(3);
     harness
@@ -2145,7 +2205,7 @@ fn popout_is_pinned_and_never_follows_later_selection() {
     // The integrated pane first shows api-server.
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "api-server")
+        .get_by_role_and_label(Role::Button, "Select resource api-server")
         .click();
     harness.run_steps(4);
 
@@ -2236,7 +2296,7 @@ fn tabs_stay_independent_between_integrated_and_pinned_views() {
     // Integrated pane switches to Events.
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
     harness

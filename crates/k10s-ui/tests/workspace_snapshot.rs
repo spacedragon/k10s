@@ -310,8 +310,9 @@ fn snapshot_captures_open_windows_geometry_and_view_settings() {
     );
     assert_eq!(&*view.search, "web");
     assert!(view.sort.is_some());
-    // ToggleDetailPane flipped the default.
-    assert!(!view.detail_visible);
+    // Compatibility field remains serialized, but integrated Detail cannot
+    // be hidden independently of selection.
+    assert!(view.detail_visible);
 }
 
 #[test]

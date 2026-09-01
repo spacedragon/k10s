@@ -11,8 +11,8 @@ use egui_kittest::{
 };
 use k10s_protocol::{
     BackendRevision, ContainerImageProjection, ContainerStateProjection,
-    ContainerTerminationProjection, DeploymentProjection, EventRow, GroupVersionKind,
-    PodContainerProjection, PodProjection, RelatedGroup, ReplicaSetProjection,
+    ContainerTerminationProjection, DeploymentProjection, DetailRow, DetailSection, EventRow,
+    GroupVersionKind, PodContainerProjection, PodProjection, RelatedGroup, ReplicaSetProjection,
     ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity,
     ResourceListRow, ResourceProjection, ResourceRelationsResponse,
 };
@@ -407,8 +407,8 @@ fn deployment_projection_complete_uses_typed_fields_only() {
         "Images · api=ghcr.io/acme/checkout:v4",
         "Replicas · 2/3 ready",
         "TEMPLATE",
-        "Image (api) · ghcr.io/acme/checkout:v4",
-        "Selector · app=checkout",
+        "Image (api): ghcr.io/acme/checkout:v4",
+        "Selector: app=checkout",
         "MANAGED BY",
         "Manager · Helm",
         "Helm release · checkout-prod",
@@ -418,6 +418,16 @@ fn deployment_projection_complete_uses_typed_fields_only() {
     ] {
         window.get_by_label(label);
     }
+    let painted = window
+        .query_all_by_role(Role::TextRun)
+        .filter_map(|node| node.value())
+        .collect::<Vec<_>>();
+    assert!(
+        painted
+            .iter()
+            .any(|value| value == "ghcr.io/acme/checkout:v4")
+    );
+    assert!(painted.iter().any(|value| value == "app=checkout"));
     assert!(window.query_by_label("checkout-without-revision").is_none());
     assert!(
         window
@@ -504,8 +514,8 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
         "Available · —",
         "Strategy · —",
         "Age · —",
-        "Image (api) · —",
-        "Selector · —",
+        "Image (api): —",
+        "Selector: —",
         "Manager · —",
         "Created · —",
     ] {
@@ -675,6 +685,85 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
 }
 
 #[test]
+fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
+    let mut harness = harness(egui::vec2(1_300.0, 760.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [1_024.0, 620.0],
+    );
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let operational = window.get_by_label("Operational detail column").rect();
+    let configuration = window.get_by_label("Configuration detail column").rect();
+    assert!(
+        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
+        "{operational:?} {configuration:?}"
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
+        .rect();
+    let target = rect.min + egui::vec2(664.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    narrow
+        .get_by_role_and_label(Role::Button, "Show Deployment metadata")
+        .click();
+    harness.run_steps(3);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    assert!(
+        narrow.get_by_label("PODS · 1").rect().top() < narrow.get_by_label("TEMPLATE").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("TEMPLATE").rect().top() < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_label("UID · uid-deployment-checkout");
+
+    let rect = narrow.rect();
+    let target = rect.min + egui::vec2(1_024.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let restored = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    restored.get_by_label("Operational detail column");
+    restored.get_by_label("UID · uid-deployment-checkout");
+    let rect = restored.rect();
+    let target = rect.min + egui::vec2(664.0, 620.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let final_narrow =
+        harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    final_narrow.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
+    final_narrow.get_by_label("TEMPLATE");
+    final_narrow.get_by_label("UID · uid-deployment-checkout");
+}
+
+#[test]
 fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner() {
     // Window chrome consumes 24 points, so these exercise a 760-point wide
     // body and a deliberately narrow 420-point body.
@@ -800,7 +889,7 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("team · payments");
-    window.get_by_label("meta.helm.sh/release-name · checkout-prod");
+    window.get_by_label("meta.helm.sh/release-name: checkout-prod");
     window.get_by_role_and_label(Role::Button, "Hide 2 labels");
     window.get_by_role_and_label(Role::Button, "Hide annotations");
     assert!(window.query_by_label("Roll back…").is_none());
@@ -845,6 +934,36 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
                 .is_disabled()
         );
     }
+}
+
+#[test]
+fn deployment_scale_prefill_uses_typed_desired_replicas_over_summary() {
+    let mut harness = harness(egui::vec2(1_050.0, 700.0));
+    let mut detail = detail_with(Some(projection(Vec::new())));
+    detail.sections = vec![DetailSection {
+        title: "Overview".into(),
+        rows: vec![DetailRow {
+            label: "Status".into(),
+            value: "99/99 ready".into(),
+        }],
+    }];
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [900.0, 560.0],
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Scale…")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, "Desired replicas")
+            .value(),
+        Some("3".into())
+    );
 }
 
 #[test]

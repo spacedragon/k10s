@@ -2,12 +2,14 @@
 
 mod command_palette;
 mod detail;
+pub(crate) use detail::presentation::system_time_from_rfc3339;
 pub mod dialogs;
 mod infrastructure;
 mod launcher;
 mod overview;
 mod resource_table;
 mod resource_window;
+mod responsive_table;
 mod service_window;
 mod split;
 mod taskbar;

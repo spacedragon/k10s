@@ -57,11 +57,24 @@ pub(super) fn show<I: RowIdentity>(
         return;
     };
 
-    if ui.available_width() >= 760.0 {
-        ui.columns(2, |columns| {
-            show_operational(&mut columns[0], window_id, &pod, runtime_actions, queued);
-            show_metadata(&mut columns[1], window_id, &pod, frame, queued);
-        });
+    let mut operational_queued = Vec::new();
+    let mut metadata_queued = Vec::new();
+    if super::overview::two_column(
+        ui,
+        |column| {
+            show_operational(
+                column,
+                window_id,
+                &pod,
+                runtime_actions,
+                &mut operational_queued,
+            )
+        },
+        |column| show_metadata(column, window_id, &pod, frame, &mut metadata_queued),
+    ) {
+        queued.extend(operational_queued);
+        queued.extend(metadata_queued);
+        // Both responsive columns were painted by the shared 1.35:1 layout.
     } else {
         show_operational(ui, window_id, &pod, runtime_actions, queued);
         let label = if frame.expansion.metadata {
@@ -464,7 +477,7 @@ fn show_operational<I: RowIdentity>(
                 ui.end_row();
                 for container in &pod.containers {
                     ui.label(&container.name);
-                    ui.label(&container.image);
+                    super::overview::long_value_cell(ui, 220.0, "Image", Some(&container.image));
                     ui.label(&container.state);
                     ui.label(&container.ready);
                     ui.label(&container.restarts);
@@ -626,12 +639,9 @@ fn show_metadata<I: RowIdentity>(
             if pod.annotations.is_empty() {
                 ui.label("No annotations");
             } else {
-                let rows = pod
-                    .annotations
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value))
-                    .collect::<Vec<_>>();
-                metadata_grid(ui, ("k10s.detail.pod.annotation-rows", window_id.0), &rows);
+                for (key, value) in &pod.annotations {
+                    super::overview::long_value(ui, ui.available_width(), key, Some(value));
+                }
             }
         });
 

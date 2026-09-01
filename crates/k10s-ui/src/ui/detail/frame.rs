@@ -21,6 +21,27 @@ pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
     }
 }
 
+fn expansion_id(
+    window_id: WindowId,
+    identity: &k10s_protocol::ResourceIdentity,
+    tab: DetailTab,
+) -> egui::Id {
+    let identity_key = if identity.uid.is_empty() {
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            identity.context,
+            identity.gvk.group,
+            identity.gvk.version,
+            identity.gvk.kind,
+            identity.namespace.as_deref().unwrap_or_default(),
+            identity.name,
+        )
+    } else {
+        identity.uid.clone()
+    };
+    egui::Id::new(("k10s.detail.expansion", window_id.0, identity_key, tab))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn show<I: RowIdentity>(
     ui: &mut egui::Ui,
@@ -34,57 +55,83 @@ pub(super) fn show<I: RowIdentity>(
     configure: impl FnOnce(&mut DetailFrameProjection<'_>),
     mut content: impl FnMut(&mut egui::Ui, DetailPrimary<'_>, bool, &mut DetailFrameProjection<'_>),
 ) {
-    let expansion_id = egui::Id::new(("k10s.detail.expansion", window_id.0));
+    let expansion_id = expansion_id(window_id, input.identity, detail.active_tab);
     let expansion = ui
         .ctx()
         .data_mut(|data| data.get_temp::<DetailExpansionState>(expansion_id))
         .unwrap_or_default();
     let mut projection = input.frame_projection(expansion);
     configure(&mut projection);
-    ui.horizontal(|ui| {
-        if integrated {
+    if integrated {
+        let identity_row = ui.horizontal(|ui| {
             let title = title(projection.identity);
             let heading = ui.label(RichText::new(&title).strong().heading());
             ui.ctx().accesskit_node_builder(heading.id, |node| {
                 node.set_role(egui::accesskit::Role::Heading);
                 node.set_label(title);
             });
-        }
-        if integrated && !input.gone {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let maximize = ui.button(if detail_maximized {
-                    "Restore split"
-                } else {
-                    "Maximize"
+                let clear = ui.button("×").on_hover_text("Clear selection");
+                clear.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, true, "Clear selection")
                 });
-                if maximize.clicked() {
-                    queued.push(if detail_maximized {
-                        WorkspaceCommand::RestoreDetailPane(window_id)
+                if clear.clicked() {
+                    queued.push(WorkspaceCommand::ClearSelection(window_id));
+                }
+                if !input.gone {
+                    let maximize = ui.button(if detail_maximized {
+                        "Restore split"
                     } else {
-                        WorkspaceCommand::MaximizeDetailPane(window_id)
+                        "Maximize"
                     });
+                    if maximize.clicked() {
+                        queued.push(if detail_maximized {
+                            WorkspaceCommand::RestoreDetailPane(window_id)
+                        } else {
+                            WorkspaceCommand::MaximizeDetailPane(window_id)
+                        });
+                    }
+                    if ui.button("Pop out ↗").clicked() {
+                        queued.push(WorkspaceCommand::OpenDedicatedDetail(
+                            detail.identity.clone(),
+                        ));
+                    }
                 }
-                if ui.button("Pop out ↗").clicked() {
-                    queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                        detail.identity.clone(),
-                    ));
-                }
+                ui.label(freshness_text(projection.freshness));
             });
-        }
-    });
+        });
+        let identity_semantics = ui.interact(
+            identity_row.response.rect,
+            ui.id().with(("k10s.detail.identity", window_id.0)),
+            Sense::hover(),
+        );
+        identity_semantics
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail identity row"));
+        ui.ctx()
+            .accesskit_node_builder(identity_semantics.id, |node| {
+                node.set_role(egui::accesskit::Role::GenericContainer);
+                node.set_label("Detail identity row");
+            });
+    }
     let vitals_width = ui.available_width();
     let wide = vitals_width >= 760.0;
-    let (vitals_rect, _) = ui.allocate_exact_size(
+    let (vitals_rect, vitals_response) = ui.allocate_exact_size(
         egui::vec2(vitals_width, ui.spacing().interact_size.y),
         Sense::hover(),
     );
+    vitals_response
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail vital strip"));
     let mut vitals_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.vitals", window_id.0))
             .max_rect(vitals_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    if wide {
+    let mut popup_rects = None;
+    let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
+    let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
+        + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
+    if wide && wide_minimum <= vitals_width {
         show_vital_strip(&mut vitals_ui, &mut projection, true);
     } else {
         ScrollArea::horizontal()
@@ -93,9 +140,22 @@ pub(super) fn show<I: RowIdentity>(
             .stick_to_right(true)
             .show(&mut vitals_ui, |ui| {
                 ui.horizontal(|ui| {
-                    show_vital_strip(ui, &mut projection, false);
+                    popup_rects = show_vital_strip(ui, &mut projection, wide);
                 });
             });
+    }
+    if let Some((button_rect, popup_rect)) = popup_rects {
+        let escape =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let outside_click = ui.input(|input| {
+            input.pointer.any_click()
+                && input.pointer.interact_pos().is_some_and(|position| {
+                    !button_rect.contains(position) && !popup_rect.contains(position)
+                })
+        });
+        if escape || outside_click {
+            projection.expansion.more_vitals = false;
+        }
     }
     if !input.mutations_allowed
         && (projection.actions.can_scale
@@ -117,9 +177,32 @@ pub(super) fn show<I: RowIdentity>(
     let usable_width = (tab_row.width() - gap).max(0.0);
     let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
     let tab_width = usable_width - action_width;
-    let tabs_rect = egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
+    let tabs_region =
+        egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
+    let freshness_width = if integrated {
+        0.0
+    } else {
+        tabs_region.width().min(152.0)
+    };
+    let tabs_rect = egui::Rect::from_min_max(
+        tabs_region.min,
+        egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
+    );
+    if !integrated {
+        let freshness_rect = egui::Rect::from_min_max(
+            egui::pos2(tabs_rect.right(), tabs_region.top()),
+            tabs_region.max,
+        );
+        let mut freshness_ui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(freshness_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
+        freshness_ui.label(freshness_text(projection.freshness));
+    }
     let actions_rect = egui::Rect::from_min_max(
-        egui::pos2(tabs_rect.right() + gap, tab_row.top()),
+        egui::pos2(tabs_region.right() + gap, tab_row.top()),
         tab_row.max,
     );
     let mut tabs_ui = ui.new_child(
@@ -220,28 +303,36 @@ pub(super) fn show<I: RowIdentity>(
             .max_rect(body_rect)
             .layout(Layout::top_down(Align::Min)),
     );
-    body_ui
-        .ctx()
-        .accesskit_node_builder(body_ui.unique_id(), |node| {
-            node.set_role(egui::accesskit::Role::ScrollView);
-            node.set_label("Detail body");
-            node.set_bounds(egui::accesskit::Rect {
-                x0: body_rect.left().into(),
-                y0: body_rect.top().into(),
-                x1: body_rect.right().into(),
-                y1: body_rect.bottom().into(),
+    if uses_shared_body_scroll(detail.active_tab) {
+        body_ui
+            .ctx()
+            .accesskit_node_builder(body_ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::ScrollView);
+                node.set_label("Detail body");
+                node.set_bounds(egui::accesskit::Rect {
+                    x0: body_rect.left().into(),
+                    y0: body_rect.top().into(),
+                    x1: body_rect.right().into(),
+                    y1: body_rect.bottom().into(),
+                });
             });
-        });
-    ScrollArea::vertical()
-        .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
-        .max_height(body_rect.height())
-        .show(&mut body_ui, |ui| {
-            if input.gone {
-                ui.label("This resource no longer exists");
-            } else {
-                content(ui, input.primary, false, &mut projection);
-            }
-        });
+    }
+    let mut show_body = |ui: &mut egui::Ui| {
+        if input.gone {
+            ui.label("This resource no longer exists");
+        } else {
+            content(ui, input.primary, false, &mut projection);
+        }
+    };
+    if uses_shared_body_scroll(detail.active_tab) {
+        ScrollArea::vertical()
+            .id_salt(("k10s.detail.body.scroll", window_id.0, detail.active_tab))
+            .max_height(body_rect.height())
+            .show(&mut body_ui, &mut show_body);
+    } else {
+        body_ui.set_clip_rect(body_ui.clip_rect().intersect(body_rect));
+        show_body(&mut body_ui);
+    }
     let mut footer_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.footer", window_id.0))
@@ -255,36 +346,148 @@ pub(super) fn show<I: RowIdentity>(
     });
 }
 
-fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
-    let text = match vital.shape {
-        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), vital.value),
-        None => format!("{} · {}", vital.label, vital.value),
-    };
-    ui.label(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)));
+const VITAL_VALUE_MAX_CHARS: usize = 24;
+const VITAL_CHIP_MAX_WIDTH: f32 = 184.0;
+const VITAL_CHIP_SANE_MIN_WIDTH: f32 = 64.0;
+
+struct VitalDisplay {
+    visible: String,
+    accessible: String,
+    elided: bool,
 }
 
-fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
-    for metric in &projection.visible_vitals {
-        vital(ui, metric);
+fn vital_display(vital: &DetailVital) -> VitalDisplay {
+    let compact = crate::ui::responsive_table::middle_elide(&vital.value, VITAL_VALUE_MAX_CHARS);
+    let elided = compact != vital.value;
+    let compose = |value: &str| match vital.shape {
+        Some(shape) => format!("{} {} {value}", vital.label, shape.glyph()),
+        None => format!("{} · {value}", vital.label),
+    };
+    VitalDisplay {
+        visible: compact,
+        accessible: compose(&vital.value),
+        elided,
     }
-    if wide || projection.expansion.more_vitals {
+}
+
+fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
+    let display = vital_display(vital);
+    let visible = match vital.shape {
+        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), display.visible),
+        None => format!("{} · {}", vital.label, display.visible),
+    };
+    let text = RichText::new(visible).color(vital_color(ui.visuals(), vital.tone));
+    let natural = WidgetText::from(text.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let chip_width = (natural.size().x + 12.0).min(max_width.min(VITAL_CHIP_MAX_WIDTH));
+    let chip_height = ui.spacing().interact_size.y;
+    let (chip_rect, _) =
+        ui.allocate_exact_size(egui::vec2(chip_width, chip_height), Sense::hover());
+    let mut chip_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(chip_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    chip_ui.set_clip_rect(chip_ui.clip_rect().intersect(chip_rect));
+    egui::Frame::new()
+        .fill(chip_ui.visuals().faint_bg_color)
+        .stroke(chip_ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(&mut chip_ui, |ui| {
+            ui.set_width((chip_width - 12.0).max(0.0));
+            let response = ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate));
+            response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
+            });
+            if display.elided || natural.size().x + 12.0 > chip_width {
+                response.on_hover_text(display.accessible.clone());
+            }
+        });
+}
+
+fn show_vital_strip(
+    ui: &mut egui::Ui,
+    projection: &mut DetailFrameProjection<'_>,
+    wide: bool,
+) -> Option<(egui::Rect, egui::Rect)> {
+    normalize_vital_expansion(wide, &mut projection.expansion);
+    let count = projection.visible_vitals.len()
+        + if wide {
+            projection.overflow_vitals.len()
+        } else {
+            0
+        };
+    let gaps = ui.spacing().item_spacing.x * count.saturating_sub(1) as f32;
+    let max_width = if wide && count > 0 {
+        ((ui.available_width() - gaps) / count as f32).min(VITAL_CHIP_MAX_WIDTH)
+    } else {
+        VITAL_CHIP_MAX_WIDTH
+    };
+    for metric in &projection.visible_vitals {
+        vital(ui, metric, max_width);
+    }
+    if wide {
         for metric in &projection.overflow_vitals {
-            vital(ui, metric);
+            vital(ui, metric, max_width);
         }
     } else if let Some(kind) = projection.vital_expansion_label
         && !projection.overflow_vitals.is_empty()
-        && ui.button(format!("Show more {kind} vitals")).clicked()
     {
-        projection.expansion.more_vitals = true;
+        let response = ui.button(if projection.expansion.more_vitals {
+            format!("Hide more {kind} vitals")
+        } else {
+            format!("Show more {kind} vitals")
+        });
+        if response.clicked() {
+            projection.expansion.more_vitals = !projection.expansion.more_vitals;
+        }
+        if projection.expansion.more_vitals {
+            let popup = egui::Area::new(ui.id().with("vital overflow popover"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(response.rect.left_bottom())
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            for metric in &projection.overflow_vitals {
+                                vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
+                            }
+                            if ui.button("Dismiss vital overflow").clicked() {
+                                projection.expansion.more_vitals = false;
+                            }
+                        });
+                    });
+                });
+            let semantics = ui.interact(
+                popup.response.rect,
+                ui.id().with(("vital overflow semantics", kind)),
+                Sense::hover(),
+            );
+            semantics.widget_info(|| {
+                WidgetInfo::labeled(
+                    WidgetType::Other,
+                    true,
+                    format!("{kind} vital overflow popover"),
+                )
+            });
+            return Some((response.rect, popup.response.rect));
+        }
     }
-    if !wide
-        && projection.expansion.more_vitals
-        && let Some(kind) = projection.vital_expansion_label
-        && ui.button(format!("Hide more {kind} vitals")).clicked()
-    {
-        projection.expansion.more_vitals = false;
+    None
+}
+
+fn normalize_vital_expansion(wide: bool, expansion: &mut DetailExpansionState) {
+    if wide {
+        expansion.more_vitals = false;
     }
-    let freshness = match projection.freshness {
+}
+
+fn freshness_text(freshness: DetailFreshness<'_>) -> String {
+    match freshness {
         DetailFreshness::Loading => "Freshness · loading".into(),
         DetailFreshness::Unavailable => "Freshness · unavailable".into(),
         DetailFreshness::Gone => "Freshness · gone".into(),
@@ -306,8 +509,11 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
         DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => {
             "Freshness · ready".into()
         }
-    };
-    ui.label(freshness);
+    }
+}
+
+const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
+    matches!(tab, DetailTab::Overview | DetailTab::Events)
 }
 
 fn vital_color(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {
@@ -336,6 +542,108 @@ mod tests {
     use crate::ui::detail::presentation::{
         DetailMetrics, DetailVital, DetailVitalShape, DetailVitalTone,
     };
+
+    #[test]
+    fn only_overview_and_events_use_the_shared_body_scroll_owner() {
+        for tab in [DetailTab::Overview, DetailTab::Events] {
+            assert!(super::uses_shared_body_scroll(tab));
+        }
+        for tab in [
+            DetailTab::Ports,
+            DetailTab::Pods,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+            DetailTab::Shell,
+        ] {
+            assert!(!super::uses_shared_body_scroll(tab));
+        }
+    }
+
+    #[test]
+    fn vital_display_elides_long_unicode_values_without_losing_full_accessible_text() {
+        let vital = DetailVital::new(
+            "Rollout",
+            "正在部署一个非常非常长的版本名称-with-an-equally-long-suffix",
+        );
+        let display = super::vital_display(&vital);
+        assert!(display.visible.chars().count() <= super::VITAL_VALUE_MAX_CHARS);
+        assert!(display.visible.contains('…'));
+        assert_eq!(
+            display.accessible,
+            "Rollout · 正在部署一个非常非常长的版本名称-with-an-equally-long-suffix"
+        );
+        assert!(display.elided);
+    }
+
+    #[test]
+    fn crossing_wide_breakpoint_clears_transient_vital_popup_state() {
+        let mut expansion = DetailExpansionState {
+            more_vitals: true,
+            ..DetailExpansionState::default()
+        };
+        super::normalize_vital_expansion(true, &mut expansion);
+        assert!(!expansion.more_vitals);
+        super::normalize_vital_expansion(false, &mut expansion);
+        assert!(
+            !expansion.more_vitals,
+            "returning narrow must not reopen stale popup"
+        );
+    }
+
+    #[test]
+    fn vital_popup_state_is_scoped_to_pinned_identity_and_tab() {
+        let mut first = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web-0".into(),
+            uid: "uid-web-0".into(),
+        };
+        let window = WindowId(9);
+        let first_overview = super::expansion_id(window, &first, DetailTab::Overview);
+        first.uid = "uid-web-1".into();
+        first.name = "web-1".into();
+        assert_ne!(
+            first_overview,
+            super::expansion_id(window, &first, DetailTab::Overview)
+        );
+        assert_ne!(
+            super::expansion_id(window, &first, DetailTab::Overview),
+            super::expansion_id(window, &first, DetailTab::Events)
+        );
+    }
+
+    #[test]
+    fn every_freshness_state_has_one_stable_identity_label() {
+        use crate::ui::WindowFreshness;
+
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Loading),
+            "Freshness · loading"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Unavailable),
+            "Freshness · unavailable"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Gone),
+            "Freshness · gone"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Source(&WindowFreshness::Live {
+                last_sync_age: "2s".into(),
+            })),
+            "Freshness · live (2s)"
+        );
+        assert_eq!(
+            super::freshness_text(DetailFreshness::Source(&WindowFreshness::StaleRetrying {
+                last_sync_age: "8s".into(),
+                attempt: 2,
+                retry_in: "1s".into(),
+            },)),
+            "Freshness · stale"
+        );
+    }
 
     #[test]
     fn semantic_vital_shapes_are_visible_and_tones_use_theme_palette() {
@@ -397,7 +705,7 @@ mod tests {
                     WindowId(77),
                     &detail,
                     &input,
-                    false,
+                    true,
                     false,
                     &[],
                     &mut Vec::new(),
@@ -424,5 +732,215 @@ mod tests {
         harness.get_by_label("Status ✕ Configured");
         harness.get_by_label("Body observed Configured");
         assert!(harness.query_by_label("Status · Pending").is_none());
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Clear selection")
+            .hover();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Clear selection");
+    }
+
+    #[test]
+    fn deployment_vitals_are_bounded_at_exact_breakpoints_and_popup_is_owned() {
+        const LONG: &str = "正在部署一个非常非常长的版本名称-with-an-equally-long-suffix";
+        const LONG_ASCII: &str =
+            "ThisIsAnExtremelyLongReadyValueThatMustNeverEscapeTheVitalChipBoundary";
+        for width in [760.0, 1000.0] {
+            let identity = ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind {
+                    group: "apps".into(),
+                    version: "v1".into(),
+                    kind: "Deployment".into(),
+                },
+                namespace: Some("default".into()),
+                name: "web".into(),
+                uid: "uid-web".into(),
+            };
+            let detail = DetailState::new(identity.clone());
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width + 16.0, 360.0))
+                .build_ui(move |ui| {
+                    let input = DetailPresentationInput {
+                        identity: &identity,
+                        primary: DetailPrimary::Loading,
+                        metrics: DetailMetrics {
+                            status: None,
+                            age: None,
+                        },
+                        resource_metrics: None,
+                        relations: None,
+                        freshness: None,
+                        now: web_time::UNIX_EPOCH,
+                        gone: false,
+                        mutations_allowed: false,
+                        port_forward_available: false,
+                        port_forward_sessions: &[],
+                        port_forward_error: None,
+                    };
+                    show(
+                        ui,
+                        WindowId(width as u64),
+                        &detail,
+                        &input,
+                        false,
+                        false,
+                        &[],
+                        &mut Vec::new(),
+                        |projection| {
+                            projection.visible_vitals = vec![
+                                DetailVital::new("Rollout", LONG),
+                                DetailVital::new("Ready", LONG_ASCII),
+                                DetailVital::new("Up-to-date", "3"),
+                                DetailVital::new("Available", "3"),
+                            ];
+                            projection.overflow_vitals = vec![
+                                DetailVital::new("Strategy", "RollingUpdate"),
+                                DetailVital::new("Age", "2h"),
+                            ];
+                            projection.vital_expansion_label = Some("Deployment");
+                        },
+                        |_, _, _, _| {},
+                    );
+                });
+            harness.run_steps(2);
+            assert!(
+                (harness.get_by_label("Detail vital strip").rect().width() - width).abs() < 0.1
+            );
+            let rollout_label = format!("Rollout · {LONG}");
+            harness.get_by_label(&rollout_label);
+            let ready_label = format!("Ready · {LONG_ASCII}");
+            harness.get_by_label(&ready_label);
+            harness.get_by_label("Strategy · RollingUpdate");
+            let strip = harness.get_by_label("Detail vital strip").rect();
+            for accessible in [
+                rollout_label,
+                ready_label,
+                "Up-to-date · 3".to_owned(),
+                "Available · 3".to_owned(),
+                "Strategy · RollingUpdate".to_owned(),
+                "Age · 2h".to_owned(),
+            ] {
+                let chip = harness.get_by_label(&accessible).rect();
+                assert!(chip.width() <= super::VITAL_CHIP_MAX_WIDTH + 0.1);
+                assert!(
+                    strip.contains_rect(chip),
+                    "required chip escaped 760pt strip"
+                );
+            }
+            assert!(
+                harness
+                    .query_by_role_and_label(
+                        egui::accesskit::Role::Button,
+                        "Show more Deployment vitals",
+                    )
+                    .is_none()
+            );
+        }
+
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        };
+        let detail = DetailState::new(identity.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(656.0, 360.0))
+            .build_ui(move |ui| {
+                let input = DetailPresentationInput {
+                    identity: &identity,
+                    primary: DetailPrimary::Loading,
+                    metrics: DetailMetrics {
+                        status: None,
+                        age: None,
+                    },
+                    resource_metrics: None,
+                    relations: None,
+                    freshness: None,
+                    now: web_time::UNIX_EPOCH,
+                    gone: false,
+                    mutations_allowed: false,
+                    port_forward_available: false,
+                    port_forward_sessions: &[],
+                    port_forward_error: None,
+                };
+                show(
+                    ui,
+                    WindowId(640),
+                    &detail,
+                    &input,
+                    false,
+                    false,
+                    &[],
+                    &mut Vec::new(),
+                    |projection| {
+                        projection.visible_vitals = vec![
+                            DetailVital::new("Status", LONG),
+                            DetailVital::new("Ready", "1/1"),
+                            DetailVital::new("Restarts", "0"),
+                            DetailVital::new("Age", "2h"),
+                        ];
+                        projection.overflow_vitals = vec![
+                            DetailVital::new("Node", "worker-a"),
+                            DetailVital::new("Pod IP", "10.0.0.2"),
+                        ];
+                        projection.vital_expansion_label = Some("Pod");
+                    },
+                    |_, _, _, _| {},
+                );
+            });
+        harness.run_steps(2);
+        let strip_height = harness.get_by_label("Detail vital strip").rect().height();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
+        harness.get_by_label("Pod vital overflow popover");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Hide more Pod vitals");
+        let node = harness.get_by_label("Node · worker-a").rect();
+        let ip = harness.get_by_label("Pod IP · 10.0.0.2").rect();
+        assert!(node.top() < ip.top(), "overflow declaration order changed");
+        assert_eq!(
+            harness.get_by_label("Detail vital strip").rect().height(),
+            strip_height
+        );
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals");
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
+        harness
+            .get_by_label(
+                "Shortcuts: l logs · s shell · y yaml · e events · c copy name · Esc restore/close",
+            )
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals");
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Dismiss vital overflow")
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
     }
 }

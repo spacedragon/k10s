@@ -6,7 +6,8 @@
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, ResourceCapabilities, ResourceDetailResponse,
+    BackendRevision, GroupVersionKind, PortForwardPodTarget, PortForwardSession,
+    PortForwardSessionId, PortForwardSessionState, ResourceCapabilities, ResourceDetailResponse,
     ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
     TargetPort, TransportProtocol,
 };
@@ -15,7 +16,7 @@ use k10s_ui::{
         ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
         WindowFreshness,
     },
-    workspace::{WindowId, WorkspaceCommand},
+    workspace::{WindowGeom, WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
 
@@ -36,6 +37,8 @@ impl Default for Fixture {
             connection: ConnectionState::Connected,
             context_namespace: None,
         };
+        fixture.feed.render_time =
+            Some(web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800));
         fixture.feed.services = Some(vec![
             service_row(
                 "web-frontend",
@@ -223,6 +226,7 @@ fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
+        .with_step_dt(0.05)
         .build_ui_state(render, Fixture::default())
 }
 
@@ -264,6 +268,95 @@ fn open_via_launcher(harness: &mut Harness<'static, Fixture>) {
         .get_by_role_and_label(Role::Button, "Services")
         .click();
     harness.run_steps(8);
+}
+
+#[test]
+fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            k10s_ui::workspace::LauncherItem::Services,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    for header in ["Name", "Type", "Cluster IP", "Ports", "Age"] {
+        wide.get_by_label(header);
+    }
+    for key in ["namespace", "name", "type", "cluster_ip", "ports", "age"] {
+        wide.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
+    }
+    let compact_port = wide.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
+    compact_port.hover();
+    harness.run_steps(15);
+    assert!(
+        harness
+            .get_all_by_label("https 443→https/TCP, metrics 9100→9100/UDP")
+            .count()
+            >= 2
+    );
+    harness.get_by_label("http 80→8080/TCP").hover();
+    harness.run_steps(15);
+    assert_eq!(
+        harness.get_all_by_label("http 80→8080/TCP").count(),
+        1,
+        "short Ports values have no redundant tooltip"
+    );
+
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .rect();
+    let target = rect.min + egui::vec2(640.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let compact = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(compact.query_by_label("Cluster IP").is_none());
+    assert!(compact.query_by_label("Type").is_none());
+    for key in ["namespace", "name", "ports", "age"] {
+        compact.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
+    }
+    let rect = compact.rect();
+    let target = rect.min + egui::vec2(1_000.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let restored = harness.get_by_role_and_label(Role::Window, "Services");
+    restored.get_by_label("Cluster IP");
+    restored.get_by_label("Type");
 }
 
 #[test]
@@ -314,7 +407,7 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Select service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let integrated = harness.get_by_role_and_label(Role::Window, "Services");
     integrated.get_by_role_and_label(Role::Button, "Pop out ↗");
@@ -348,6 +441,328 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
 }
 
 #[test]
+fn selected_service_single_click_eventually_clears_selection_once() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    let row_label = "Select service web-frontend";
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(10);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.run_steps(10);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .expect("Services window has service state");
+    assert!(service.selection.is_none());
+    assert!(service.detail.is_none());
+    assert!(harness.state().shell.workspace().pending().is_none());
+}
+
+#[test]
+fn clicking_another_service_replaces_the_pending_row_action() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.run_steps(10);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert_eq!(
+        service
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("api-server")
+    );
+    assert_eq!(service.detail.as_ref().unwrap().identity.name, "api-server");
+}
+
+#[test]
+fn hidden_service_row_action_expires_once_at_table_scope() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, "api-server".into()));
+    harness.run_steps(10);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .is_none(),
+        "the pending clear must execute while its row is filtered out"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, String::new()));
+    harness.run_steps(10);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("api-server"),
+        "restoring the old row must not replay its consumed clear"
+    );
+}
+
+#[test]
+fn cross_row_service_double_click_does_not_change_integrated_selection() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service api-server")
+        .click();
+    harness.step();
+    harness.run_steps(10);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert_eq!(
+        service
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend")
+    );
+    assert_eq!(
+        service.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Service · default / api-server");
+}
+
+#[test]
+fn service_double_click_opens_dedicated_without_selecting_or_guarding() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend");
+    row.click();
+    row.click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .is_none()
+    );
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
+}
+
+#[test]
+fn selected_clean_service_double_click_across_frames_preserves_detail() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .unwrap();
+    assert!(service.selection.is_some());
+    assert_eq!(
+        service.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
+}
+
+#[test]
+fn selected_dirty_service_double_click_preserves_selection_and_skips_guard() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Clear selection for service web-frontend")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .service_state(window)
+            .unwrap()
+            .selection
+            .is_some()
+    );
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Service · default / web-frontend");
+}
+
+#[test]
+fn service_selection_derives_detail_visibility() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleDetailPane(window));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(10);
+
+    let services = harness.get_by_role_and_label(Role::Window, "Services");
+    services.get_by_label("Service · default / web-frontend");
+    assert!(
+        services
+            .query_by_role_and_label(Role::Button, "Hide details")
+            .is_none(),
+        "selection-derived Detail visibility removes the legacy toggle"
+    );
+}
+
+#[test]
 fn list_columns_render_strictly_from_projections() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
@@ -371,10 +786,12 @@ fn list_columns_render_strictly_from_projections() {
     window.get_by_label("http 80→8080/TCP");
     // Multi-port rows join their compact labels.
     window.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
-    assert_eq!(
-        window.get_all_by_label("2026-08-21").count(),
-        2,
-        "the Age column renders the creation-date portion monospaced"
+    assert_eq!(window.get_all_by_label("Service age").count(), 2);
+    assert!(
+        window
+            .get_all_by_label("Service age")
+            .all(|node| node.rect().width() <= 56.0),
+        "Service Age values fit their compact column"
     );
 
     // The summary text is never rendered anywhere in this window.
@@ -563,7 +980,7 @@ fn failed_service_detail_is_safe_and_retries_the_exact_identity_once() {
         .get_by_role_and_label(Role::Window, "Services")
         .get_by_role_and_label(Role::Button, "Select service web-frontend")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Details unavailable: service detail denied");
@@ -600,6 +1017,13 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
         service_identity("web-frontend"),
         service_detail("web-frontend", false),
     );
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Button, "Tab Ports")
@@ -616,6 +1040,96 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
             ..
         }] if name == "http"
     ));
+}
+
+#[test]
+fn port_forward_start_requires_live_loaded_service_authority() {
+    let states = [
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+        WindowFreshness::Reconnecting {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+        WindowFreshness::Failed {
+            message: "watch failed".into(),
+        },
+        WindowFreshness::Forbidden {
+            user: "alice".into(),
+            verb: "list".into(),
+            resource: "services".into(),
+            scope: "default".into(),
+        },
+    ];
+    for freshness in states {
+        let mut harness = harness();
+        harness.state_mut().feed.port_forward_available = true;
+        open_via_launcher(&mut harness);
+        let window_id = services_window_id(harness.state());
+        harness
+            .get_by_role_and_label(Role::Window, "Services")
+            .get_by_role_and_label(Role::Button, "Select service web-frontend")
+            .click();
+        harness.run_steps(4);
+        harness.state_mut().feed.details.insert(
+            service_identity("web-frontend"),
+            service_detail("web-frontend", false),
+        );
+        harness.state_mut().feed.port_forward_sessions = vec![PortForwardSession {
+            id: PortForwardSessionId::try_new("existing").unwrap(),
+            service: service_identity("web-frontend"),
+            service_port: 80,
+            pod: PortForwardPodTarget {
+                namespace: "default".into(),
+                name: "web-0".into(),
+                uid: "pod-uid".into(),
+            },
+            pod_port: 8080,
+            local_addr: "127.0.0.1:18080".into(),
+            state: PortForwardSessionState::Active,
+            failure: None,
+            revision: 1,
+        }];
+        harness
+            .state_mut()
+            .feed
+            .window_freshness
+            .insert(window_id, freshness);
+        harness.run_steps(4);
+        harness
+            .get_by_role_and_label(Role::Button, "Tab Ports")
+            .click();
+        harness.run_steps(3);
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, "Start")
+                .is_none()
+        );
+        harness.get_by_role_and_label(Role::Button, "Stop");
+    }
+
+    let mut loading = harness();
+    loading.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut loading);
+    loading
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    loading.run_steps(4);
+    loading.state_mut().feed.primary_details.insert(
+        service_identity("web-frontend"),
+        PrimaryDetailState::Loading,
+    );
+    loading.run_steps(3);
+    assert!(
+        loading
+            .query_by_role_and_label(Role::Button, "Start")
+            .is_none()
+    );
 }
 
 #[test]
@@ -637,15 +1151,14 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Type ClusterIP");
     window.get_by_label("Cluster IPs 10.96.0.10");
-    window.get_by_label("Selector app=web");
-    assert!(window.query_by_label("Session affinity ClientIP").is_none());
+    window.get_by_label("Selector: app=web");
+    assert!(window.query_by_label("TRAFFIC & SESSION").is_none());
     assert!(
         window
             .query_by_label("External traffic policy Local")
             .is_none(),
         "absent traffic policies must not render"
     );
-    assert!(window.query_by_label("Internal traffic policy").is_none());
 
     // With policies present they render verbatim.
     harness
@@ -660,8 +1173,113 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Session affinity ClientIP");
-    window.get_by_label("External traffic policy Local");
-    window.get_by_label("Internal traffic policy Cluster");
+    window.get_by_label("External policy Local");
+    window.get_by_label("Internal policy Cluster");
+}
+
+#[test]
+fn empty_service_configuration_sections_collapse_completely() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(8);
+    let mut detail = service_detail("web-frontend", false);
+    let Some(ResourceProjection::Service(service)) = detail.projection.as_mut() else {
+        panic!("typed service fixture");
+    };
+    service.selector.clear();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(service_identity("web-frontend"), detail);
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(window.query_by_label("SELECTORS").is_none());
+    assert!(window.query_by_label("TRAFFIC & SESSION").is_none());
+    window.get_by_label("IDENTITY");
+}
+
+#[test]
+fn service_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
+    let mut fixture = Fixture::default();
+    for (name, width, x) in [("wide", 1_024.0, 10.0), ("narrow", 664.0, 1_050.0)] {
+        let identity = service_identity(name);
+        fixture
+            .feed
+            .details
+            .insert(identity.clone(), service_detail(name, true));
+        let id = fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [x, 20.0],
+                    size: [width, 700.0],
+                    collapsed: false,
+                },
+            ));
+    }
+    let identity = service_identity("untyped");
+    let mut untyped = service_detail("untyped", false);
+    untyped.projection = None;
+    fixture.feed.details.insert(identity.clone(), untyped);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [1_050.0, 400.0],
+                size: [664.0, 360.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_800.0, 800.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(5);
+    let wide = harness.get_by_role_and_label(Role::Window, "Service · default / wide");
+    let op = wide.get_by_label("Operational detail column").rect();
+    let config = wide.get_by_label("Configuration detail column").rect();
+    assert!((op.width() / config.width() - 1.35).abs() < 0.02);
+    let narrow = harness.get_by_role_and_label(Role::Window, "Service · default / narrow");
+    assert!(
+        narrow.get_by_label("PORTS").rect().top() < narrow.get_by_label("SELECTORS").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("SELECTORS").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_role_and_label(Role::Button, "Tab Overview");
+    let untyped = harness.get_by_role_and_label(Role::Window, "Service · default / untyped");
+    assert_eq!(
+        untyped
+            .get_all_by_label("Structured details unavailable")
+            .count(),
+        2
+    );
+    untyped.get_by_label("UID uid-dev-local-service-default-untyped");
 }
 
 #[test]

@@ -5,22 +5,48 @@
 //! never duplicates authoritative data into local state.
 
 use egui::{ScrollArea, WidgetInfo, WidgetType};
-use k10s_protocol::ResourceListRow;
+use k10s_protocol::{ResourceListRow, ResourceProjection};
+use std::borrow::Cow;
+use web_time::SystemTime;
 
-use crate::workspace::{SortSpec, WindowId};
+use super::responsive_table::RowAction;
+use crate::workspace::{SortSpec, WindowId, WorkloadKind};
 
-/// Column sort keys in display order.
-const COLUMNS: [(&str, &str); 4] = [
-    ("Namespace", "namespace"),
-    ("Name", "name"),
-    ("Status", "status"),
-    ("Created", "created"),
+use super::responsive_table::ColumnSpec;
+
+const DEPLOYMENT_COLUMNS: [ColumnSpec; 6] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::required("ready", 56.0),
+    ColumnSpec::hideable("status", 112.0, 1),
+    ColumnSpec::hideable("image", 180.0, 0),
+    ColumnSpec::required("created", 56.0),
+];
+const POD_COLUMNS: [ColumnSpec; 7] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::required("ready", 56.0),
+    ColumnSpec::required("status", 112.0),
+    ColumnSpec::hideable("restarts", 64.0, 1),
+    ColumnSpec::hideable("node", 120.0, 0),
+    ColumnSpec::required("created", 56.0),
+];
+const GENERIC_NAMESPACED: [ColumnSpec; 4] = [
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::hideable("status", 120.0, 0),
+    ColumnSpec::hideable("created", 56.0, 1),
+];
+const GENERIC_CLUSTER: [ColumnSpec; 3] = [
+    ColumnSpec::elastic("name", 220.0),
+    ColumnSpec::hideable("status", 120.0, 0),
+    ColumnSpec::hideable("created", 56.0, 1),
 ];
 
 /// Outcome of rendering one table frame.
 pub(super) struct TableActions<I> {
     /// A row was clicked; carries the mapped window identity.
-    pub selected: Option<I>,
+    pub row_action: Option<RowAction<I>>,
     /// A row was double-clicked or popped out via its context menu; the
     /// identity is cloned for a dedicated pinned detail window.
     pub popped_out: Option<I>,
@@ -33,7 +59,7 @@ pub(super) struct TableActions<I> {
 impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
-            selected: None,
+            row_action: None,
             popped_out: None,
             sort: None,
             cleared: false,
@@ -68,9 +94,8 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
                 .namespace
                 .cmp(&right.identity.namespace)
                 .then_with(|| left.identity.name.cmp(&right.identity.name)),
-            "status" => left
-                .summary
-                .cmp(&right.summary)
+            "status" => resource_status(left)
+                .cmp(&resource_status(right))
                 .then_with(|| left.identity.name.cmp(&right.identity.name)),
             "created" => left
                 .created_at
@@ -92,6 +117,8 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
+    render_time: SystemTime,
+    workload_kind: WorkloadKind,
     title: &str,
     namespaced: bool,
     search: &str,
@@ -101,9 +128,11 @@ pub(super) fn show<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
 ) -> TableActions<I>
 where
-    I: Clone,
+    I: Clone + Send + Sync + 'static,
 {
     let mut actions = TableActions::default();
+    let gesture_table_id = egui::Id::new(("k10s.resource.table-gesture", window_id.0));
+    actions.row_action = super::responsive_table::poll_row_action(ui.ctx(), gesture_table_id);
 
     if rows.is_empty() {
         if search.is_empty() {
@@ -118,8 +147,8 @@ where
 
     // Rows are virtualized: only the visible window of rows is laid out
     // per frame, so frame cost stays bounded by the viewport rather than
-    // the snapshot size. Virtual row 0 is the sticky header; data rows
-    // follow at offset 1. Row height matches what a Grid row actually
+    // the snapshot size. Virtual row 0 is the header; data rows follow at
+    // offset 1. Row height matches what a Grid row actually
     // measures: rows contain buttons, so they are at least one interact
     // size tall, not one text line.
     let row_height = ui
@@ -128,70 +157,235 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
+    let specs = match workload_kind {
+        WorkloadKind::Deployments => &DEPLOYMENT_COLUMNS[..],
+        WorkloadKind::Pods => &POD_COLUMNS[..],
+        _ if namespaced => &GENERIC_NAMESPACED[..],
+        _ => &GENERIC_CLUSTER[..],
+    };
+    let column_spacing = ui.spacing().item_spacing.x;
+    let table_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let columns = super::responsive_table::resolve_columns(specs, table_width, column_spacing);
+    debug_assert_eq!(
+        columns.horizontal_scroll,
+        columns
+            .visible
+            .iter()
+            .map(|column| column.width)
+            .sum::<f32>()
+            + column_spacing * columns.visible.len().saturating_sub(1) as f32
+            > table_width
+    );
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
-                .min_col_width(72.0)
+                .min_col_width(0.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
-                        for (visible, key) in COLUMNS {
-                            if visible == "Namespace" && !namespaced {
-                                continue;
-                            }
-                            sort_header(ui, title, visible, key, sort, &mut actions);
+                        for column in &columns.visible {
+                            super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                                let visible = column_title(column.key);
+                                if matches!(column.key, "namespace" | "name" | "status" | "created")
+                                {
+                                    sort_header(ui, title, visible, column.key, sort, &mut actions);
+                                } else {
+                                    ui.label(visible);
+                                }
+                            });
                         }
                         ui.end_row();
                     }
 
                     for index in range.start.max(header_rows)..range.end {
                         let row = &rows[index - header_rows];
-                        if namespaced {
-                            ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
-                        }
                         let selected = is_selected(row);
                         let name = if selected {
                             format!("▶ {}", row.identity.name)
                         } else {
                             format!("  {}", row.identity.name)
                         };
-                        let name_button = ui.add(
-                            egui::Button::new(if selected {
-                                egui::RichText::new(name).strong()
-                            } else {
-                                egui::RichText::new(name)
-                            })
-                            .selected(selected)
-                            .stroke(if selected {
-                                egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
-                            } else {
-                                egui::Stroke::NONE
-                            }),
-                        );
-                        let label = row.identity.name.clone();
-                        name_button.widget_info(move || {
-                            WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
-                        });
-                        if name_button.clicked() {
-                            actions.selected = Some(identity_of(row));
+                        for column in &columns.visible {
+                            let numeric = matches!(column.key, "ready" | "restarts");
+                            super::responsive_table::sized_cell(ui, column.width, numeric, |ui| {
+                                match column.key {
+                                    "namespace" => {
+                                        ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
+                                    }
+                                    "name" => {
+                                        let name_button =
+                                            ui.add(
+                                                egui::Button::new(if selected {
+                                                    egui::RichText::new(&name).strong()
+                                                } else {
+                                                    egui::RichText::new(&name)
+                                                })
+                                                .selected(selected)
+                                                .stroke(if selected {
+                                                    egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
+                                                } else {
+                                                    egui::Stroke::NONE
+                                                }),
+                                            );
+                                        let label = super::responsive_table::row_action_label(
+                                            "resource",
+                                            &row.identity.name,
+                                            selected,
+                                        );
+                                        name_button.widget_info(move || {
+                                            WidgetInfo::selected(
+                                                WidgetType::Button,
+                                                true,
+                                                selected,
+                                                label.clone(),
+                                            )
+                                        });
+                                        let popped_out = super::responsive_table::row_interaction(
+                                            &name_button,
+                                            gesture_table_id,
+                                            identity_of(row),
+                                            selected,
+                                        );
+                                        if popped_out.is_some() {
+                                            actions.popped_out = popped_out;
+                                        }
+                                        name_button.context_menu(|ui| {
+                                            if ui.button("Open dedicated window").clicked() {
+                                                actions.popped_out = Some(identity_of(row));
+                                                ui.close();
+                                            }
+                                        });
+                                    }
+                                    "status" => {
+                                        ui.label(resource_status(row));
+                                    }
+                                    "ready" => {
+                                        right_label(ui, resource_ready(row));
+                                    }
+                                    "image" => {
+                                        super::responsive_table::elided_label(
+                                            ui,
+                                            resource_image(row),
+                                            28,
+                                        );
+                                    }
+                                    "restarts" => {
+                                        right_label(ui, resource_restarts(row));
+                                    }
+                                    "node" => {
+                                        super::responsive_table::elided_label(
+                                            ui,
+                                            resource_node(row),
+                                            20,
+                                        );
+                                    }
+                                    "created" => {
+                                        let age = super::detail::presentation::format_age(
+                                            Some(&row.created_at),
+                                            render_time,
+                                        );
+                                        let response =
+                                            ui.monospace(age).on_hover_text(&row.created_at);
+                                        response.widget_info(|| {
+                                            WidgetInfo::labeled(
+                                                WidgetType::Label,
+                                                true,
+                                                "Resource age",
+                                            )
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            });
                         }
-                        if name_button.double_clicked() {
-                            actions.popped_out = Some(identity_of(row));
-                        }
-                        name_button.context_menu(|ui| {
-                            if ui.button("Open dedicated window").clicked() {
-                                actions.popped_out = Some(identity_of(row));
-                                ui.close();
-                            }
-                        });
-                        ui.label(row.summary.clone());
-                        ui.monospace(row.created_at.clone());
                         ui.end_row();
                     }
                 });
         });
     actions
+}
+
+fn column_title(key: &str) -> &'static str {
+    match key {
+        "namespace" => "Namespace",
+        "name" => "Name",
+        "ready" => "Ready",
+        "status" => "Status",
+        "image" => "Image",
+        "restarts" => "Restarts",
+        "node" => "Node",
+        "created" => "Age",
+        _ => "",
+    }
+}
+fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p
+            .phase
+            .as_deref()
+            .map(Cow::Borrowed)
+            .unwrap_or(Cow::Borrowed("—")),
+        _ => Cow::Borrowed(&row.summary),
+    }
+}
+fn resource_ready(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Deployment(p)) => ready_pair(p.ready_replicas, p.desired_replicas),
+        Some(ResourceProjection::Pod(p)) => ready_pair(p.ready_containers, p.total_containers),
+        _ => "—".into(),
+    }
+}
+fn ready_pair(ready: Option<u32>, desired: Option<u32>) -> String {
+    match (ready, desired) {
+        (Some(ready), Some(desired)) => format!("{ready}/{desired}"),
+        _ => "—".into(),
+    }
+}
+fn resource_image(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Deployment(p)) => p
+            .template_containers
+            .iter()
+            .filter_map(|c| c.image.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "—".into(),
+    }
+}
+fn resource_restarts(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p
+            .restart_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+        _ => "—".into(),
+    }
+}
+fn resource_node(row: &ResourceListRow) -> String {
+    match row.projection.as_ref() {
+        Some(ResourceProjection::Pod(p)) => p.node_name.clone().unwrap_or_else(|| "—".into()),
+        _ => "—".into(),
+    }
+}
+fn right_label(ui: &mut egui::Ui, value: String) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(value);
+    });
+}
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::ready_pair;
+    #[test]
+    fn partial_deployment_and_pod_readiness_never_fabricate_zeroes() {
+        assert_eq!(ready_pair(Some(1), None), "—");
+        assert_eq!(ready_pair(None, Some(2)), "—");
+        assert_eq!(ready_pair(Some(1), Some(2)), "1/2");
+    }
 }
 
 fn sort_header<I>(

@@ -9,6 +9,7 @@ use egui::{ScrollArea, Spinner, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     ResourceListRow, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
+use web_time::SystemTime;
 
 use crate::workspace::{ServiceWindowState, SortSpec, WindowId, WorkspaceCommand};
 
@@ -16,14 +17,13 @@ use super::ConnectionState;
 use super::resource_window::ResourceFeed;
 use super::resource_window::RowIdentity;
 
-/// Column sort keys in display order.
-const COLUMNS: [(&str, &str); 6] = [
-    ("Name", "name"),
-    ("Namespace", "namespace"),
-    ("Type", "type"),
-    ("Cluster IP", "cluster_ip"),
-    ("Ports", "ports"),
-    ("Age", "age"),
+const RESPONSIVE_COLUMNS: [super::responsive_table::ColumnSpec; 6] = [
+    super::responsive_table::ColumnSpec::required("namespace", 112.0),
+    super::responsive_table::ColumnSpec::elastic("name", 180.0),
+    super::responsive_table::ColumnSpec::hideable("type", 88.0, 1),
+    super::responsive_table::ColumnSpec::hideable("cluster_ip", 120.0, 0),
+    super::responsive_table::ColumnSpec::elastic("ports", 180.0),
+    super::responsive_table::ColumnSpec::required("age", 56.0),
 ];
 
 /// Wire protocol of a port as a compact display label.
@@ -171,7 +171,7 @@ fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
 
 /// Outcome of rendering one Services table frame.
 struct TableActions<I> {
-    selected: Option<I>,
+    row_action: Option<super::responsive_table::RowAction<I>>,
     popped_out: Option<I>,
     sort: Option<SortSpec>,
 }
@@ -179,7 +179,7 @@ struct TableActions<I> {
 impl<I> Default for TableActions<I> {
     fn default() -> Self {
         Self {
-            selected: None,
+            row_action: None,
             popped_out: None,
             sort: None,
         }
@@ -262,15 +262,6 @@ where
                 crate::workspace::NamespaceScope::AllNamespaces,
             ));
         }
-
-        let toggle_label = if state.detail_visible {
-            "Hide details"
-        } else {
-            "Show details"
-        };
-        if ui.button(toggle_label).clicked() {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
-        }
     });
     super::resource_window::show_namespace_catalog_status(
         ui,
@@ -327,7 +318,7 @@ where
     // was deleted (or is gone behind the watch); it must never be shown as
     // merely "loading".
     let gone = state.detail.is_some() && detail_row.is_none();
-    let detail_shown = state.detail_visible && state.detail.is_some();
+    let detail_shown = state.detail.is_some();
     let (list_actions, _) = super::split::show_vertical(
         ui,
         &mut ratio,
@@ -337,6 +328,7 @@ where
             show_table(
                 ui,
                 window_id,
+                feed.render_time.unwrap_or_else(SystemTime::now),
                 !state.search.is_empty()
                     || state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces,
                 state.sort.as_ref(),
@@ -349,11 +341,8 @@ where
             )
         },
         |ui| {
-            if let Some(detail) = state.detail.as_ref() {
-                if ui.button("Clear selection").clicked() {
-                    queued.push(WorkspaceCommand::ClearSelection(window_id));
-                }
-                if let Some(presentation) =
+            if let Some(detail) = state.detail.as_ref()
+                && let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
                         feed,
@@ -361,23 +350,22 @@ where
                         effective_freshness,
                         effective_freshness.is_some_and(super::WindowFreshness::mutations_allowed),
                     )
-                {
-                    super::detail::show(
-                        ui,
-                        window_id,
-                        detail,
-                        &presentation,
-                        focused,
-                        true,
-                        state.prior_split_ratio.is_some(),
-                        yaml,
-                        streams,
-                        dialogs,
-                        Some(&state.port_drafts),
-                        resource_actions,
-                        queued,
-                    );
-                }
+            {
+                super::detail::show(
+                    ui,
+                    window_id,
+                    detail,
+                    &presentation,
+                    focused,
+                    true,
+                    state.prior_split_ratio.is_some(),
+                    yaml,
+                    streams,
+                    dialogs,
+                    Some(&state.port_drafts),
+                    resource_actions,
+                    queued,
+                );
             }
         },
     );
@@ -394,8 +382,8 @@ where
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        if let Some(identity) = actions.selected {
-            queued.push(WorkspaceCommand::SelectRow(window_id, identity));
+        if let Some(action) = actions.row_action {
+            queued.push(action.into_command(window_id));
         }
         // Double-click and the row context menu pop a dedicated window out.
         if let Some(identity) = actions.popped_out {
@@ -406,12 +394,10 @@ where
     if let Some(identity) = state.selection.clone()
         && ui.input(|input| input.key_pressed(egui::Key::Enter))
         && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|input| input.modifiers.any())
+        && !gone
     {
-        if ui.input(|input| input.modifiers.any()) && !gone {
-            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
-        } else if !state.detail_visible {
-            queued.push(WorkspaceCommand::ToggleDetailPane(window_id));
-        }
+        queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
     }
 
     if ratio != state.split_ratio {
@@ -425,6 +411,7 @@ where
 fn show_table<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
+    render_time: SystemTime,
     filters_active: bool,
     sort: Option<&SortSpec>,
     rows: &[&ResourceListRow],
@@ -432,9 +419,11 @@ fn show_table<I>(
     identity_of: impl Fn(&ResourceListRow) -> I,
 ) -> TableActions<I>
 where
-    I: Clone,
+    I: Clone + Send + Sync + 'static,
 {
     let mut actions = TableActions::default();
+    let gesture_table_id = egui::Id::new(("k10s.service.table-gesture", window_id.0));
+    actions.row_action = super::responsive_table::poll_row_action(ui.ctx(), gesture_table_id);
     if rows.is_empty() {
         // Distinguish "the context has no services at all" from "the
         // active filters removed everything".
@@ -452,23 +441,57 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
+    let column_spacing = ui.spacing().item_spacing.x;
+    let table_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let columns =
+        super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, table_width, column_spacing);
+    debug_assert_eq!(
+        columns.horizontal_scroll,
+        columns
+            .visible
+            .iter()
+            .map(|column| column.width)
+            .sum::<f32>()
+            + column_spacing * columns.visible.len().saturating_sub(1) as f32
+            > table_width
+    );
     ScrollArea::both()
         .id_salt(("k10s.service.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
             egui::Grid::new(("k10s.service.table", window_id.0))
                 .striped(true)
-                .min_col_width(72.0)
+                .min_col_width(0.0)
                 .show(ui, |ui| {
                     if range.start < header_rows {
-                        for (visible, key) in COLUMNS {
-                            sort_header(ui, visible, key, sort, &mut actions);
+                        for column in &columns.visible {
+                            super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                                sort_header(
+                                    ui,
+                                    service_column_title(column.key),
+                                    column.key,
+                                    sort,
+                                    &mut actions,
+                                );
+                            });
                         }
                         ui.end_row();
                     }
 
                     for index in range.start.max(header_rows)..range.end {
                         let row = &rows[index - header_rows];
-                        service_row(ui, row, &is_selected, &identity_of, &mut actions);
+                        service_row(
+                            ui,
+                            row,
+                            render_time,
+                            gesture_table_id,
+                            &columns,
+                            &is_selected,
+                            &identity_of,
+                            &mut actions,
+                        );
                         ui.end_row();
                     }
                 });
@@ -476,54 +499,96 @@ where
     actions
 }
 
+#[allow(clippy::too_many_arguments)]
 fn service_row<I>(
     ui: &mut egui::Ui,
     row: &ResourceListRow,
+    render_time: SystemTime,
+    gesture_table_id: egui::Id,
+    columns: &super::responsive_table::ResolvedColumns,
     is_selected: impl Fn(&ResourceListRow) -> bool,
     identity_of: impl Fn(&ResourceListRow) -> I,
     actions: &mut TableActions<I>,
 ) where
-    I: Clone,
+    I: Clone + Send + Sync + 'static,
 {
-    let name_button = if is_selected(row) {
-        ui.button(egui::RichText::new(row.identity.name.clone()).strong())
-    } else {
-        ui.button(row.identity.name.clone())
-    };
-    let accessible = format!("Select service {}", row.identity.name);
-    name_button
-        .widget_info(move || WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    if name_button.clicked() {
-        actions.selected = Some(identity_of(row));
+    let selected = is_selected(row);
+    for column in &columns.visible {
+        super::responsive_table::sized_cell(ui, column.width, false, |ui| match column.key {
+            "namespace" => {
+                ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
+            }
+            "name" => {
+                let name_button = if selected {
+                    ui.button(egui::RichText::new(row.identity.name.clone()).strong())
+                } else {
+                    ui.button(row.identity.name.clone())
+                };
+                let accessible = super::responsive_table::row_action_label(
+                    "service",
+                    &row.identity.name,
+                    selected,
+                );
+                name_button.widget_info(move || {
+                    WidgetInfo::labeled(WidgetType::Button, true, accessible.clone())
+                });
+                let popped_out = super::responsive_table::row_interaction(
+                    &name_button,
+                    gesture_table_id,
+                    identity_of(row),
+                    selected,
+                );
+                if popped_out.is_some() {
+                    actions.popped_out = popped_out;
+                }
+                name_button.context_menu(|ui| {
+                    if ui.button("Open dedicated window").clicked() {
+                        actions.popped_out = Some(identity_of(row));
+                        ui.close();
+                    }
+                });
+            }
+            "type" => {
+                ui.label(
+                    service_projection(row)
+                        .map(|p| p.service_type.as_str())
+                        .unwrap_or("—"),
+                );
+            }
+            "cluster_ip" => {
+                let value = service_projection(row)
+                    .map(cluster_ip_column_label)
+                    .unwrap_or_else(|| "—".into());
+                super::responsive_table::elided_label(ui, value, 20);
+            }
+            "ports" => {
+                let value = service_projection(row)
+                    .map(ports_column_label)
+                    .unwrap_or_else(|| "—".into());
+                super::responsive_table::elided_label(ui, value, 28);
+            }
+            "age" => {
+                let age =
+                    super::detail::presentation::format_age(Some(&row.created_at), render_time);
+                let response = ui.monospace(age).on_hover_text(&row.created_at);
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Service age"));
+            }
+            _ => {}
+        });
     }
-    if name_button.double_clicked() {
-        actions.popped_out = Some(identity_of(row));
+}
+
+fn service_column_title(key: &str) -> &'static str {
+    match key {
+        "namespace" => "Namespace",
+        "name" => "Name",
+        "type" => "Type",
+        "cluster_ip" => "Cluster IP",
+        "ports" => "Ports",
+        "age" => "Age",
+        _ => "",
     }
-    name_button.context_menu(|ui| {
-        if ui.button("Open dedicated window").clicked() {
-            actions.popped_out = Some(identity_of(row));
-            ui.close();
-        }
-    });
-
-    ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
-
-    // Every structured column renders strictly from the projection; rows
-    // without one stay blank placeholders and never fall back to summary.
-    match service_projection(row) {
-        Some(projection) => {
-            ui.label(projection.service_type.clone());
-            ui.label(cluster_ip_column_label(projection));
-            ui.label(ports_column_label(projection));
-        }
-        None => {
-            ui.label("—");
-            ui.label("—");
-            ui.label("—");
-        }
-    }
-
-    ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));
 }
 
 fn sort_header<I>(

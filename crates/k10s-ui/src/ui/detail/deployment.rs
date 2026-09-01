@@ -19,7 +19,6 @@ use super::presentation::{
     DetailVitalTone,
 };
 
-const WIDE_BODY_WIDTH: f32 = 760.0;
 const POD_GROUP: (&str, &str, &str) = ("", "v1", "Pod");
 const REPLICA_SET_GROUP: (&str, &str, &str) = ("apps", "v1", "ReplicaSet");
 
@@ -100,10 +99,11 @@ pub(super) fn show_with_actions<I: RowIdentity>(
         return;
     };
 
-    if body_is_wide(ui.available_width()) {
-        ui.columns(2, |columns| {
+    if super::overview::two_column(
+        ui,
+        |column| {
             operational_column(
-                &mut columns[0],
+                column,
                 window_id,
                 input.identity,
                 &projection,
@@ -111,14 +111,10 @@ pub(super) fn show_with_actions<I: RowIdentity>(
                 resource_actions,
                 queued,
             );
-            metadata_column(
-                &mut columns[1],
-                window_id,
-                input.identity,
-                &projection,
-                frame,
-            );
-        });
+        },
+        |column| metadata_column(column, window_id, input.identity, &projection, frame),
+    ) {
+        // Both responsive columns were painted by the shared 1.35:1 layout.
     } else {
         operational_column(
             ui,
@@ -656,11 +652,13 @@ fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProje
                 row(ui, "Images", "—");
             } else {
                 for container in &deployment.template_containers {
-                    row(
+                    super::overview::long_value(
                         ui,
+                        280.0,
                         &format!("Image ({})", container.name),
-                        value(container.image.as_deref()),
+                        container.image.as_deref(),
                     );
+                    ui.end_row();
                 }
             }
             row(
@@ -675,7 +673,9 @@ fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProje
                 "Max unavailable",
                 value(deployment.max_unavailable.as_deref()),
             );
-            row(ui, "Selector", &map_list(&deployment.selector));
+            let selector = map_list(&deployment.selector);
+            super::overview::long_value(ui, 280.0, "Selector", Some(&selector));
+            ui.end_row();
             row(
                 ui,
                 "Template labels",
@@ -753,7 +753,7 @@ fn annotations(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentPr
     ui.heading(format!("ANNOTATIONS · {}", deployment.annotations.len()));
     if expanded {
         for (key, value) in &deployment.annotations {
-            ui.label(format!("{key} · {value}"));
+            super::overview::long_value(ui, ui.available_width(), key, Some(value));
         }
         if ui.button("Hide annotations").clicked() {
             expanded = false;
@@ -857,18 +857,14 @@ fn image_list(images: &[k10s_protocol::ContainerImageProjection]) -> String {
         .join(", ")
 }
 
-fn body_is_wide(width: f32) -> bool {
-    width >= WIDE_BODY_WIDTH
-}
-
 #[cfg(test)]
 mod shared_seam_tests {
-    use super::body_is_wide;
+    use super::super::overview::detail_columns;
 
     #[test]
     fn deployment_body_breakpoint_is_exactly_760_points() {
-        assert!(!body_is_wide(759.0));
-        assert!(body_is_wide(760.0));
+        assert!(detail_columns(759.0, 8.0).is_none());
+        assert!(detail_columns(760.0, 8.0).is_some());
     }
 }
 

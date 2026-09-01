@@ -241,6 +241,9 @@ pub(super) fn show<I>(
                             ui.add(egui::Spinner::new());
                             ui.label("Loading details");
                         });
+                        if is_service_gvk(&detail_identity_gvk(detail)) {
+                            service::show_unavailable(ui, window_id, presentation);
+                        }
                     }
                     return;
                 }
@@ -252,6 +255,9 @@ pub(super) fn show<I>(
                         resource_actions.push(crate::ui::ResourceAction::RetryPrimary(
                             presentation.identity.clone(),
                         ));
+                    }
+                    if !actions && is_service_gvk(&detail_identity_gvk(detail)) {
+                        service::show_unavailable(ui, window_id, presentation);
                     }
                     return;
                 }
@@ -391,7 +397,13 @@ fn show_generic_body<I: RowIdentity>(
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     match detail.active_tab {
-        DetailTab::Overview => overview::show(ui, window_id, &view.sections),
+        DetailTab::Overview => overview::show(
+            ui,
+            window_id,
+            &view.sections,
+            presentation.identity,
+            presentation.metrics,
+        ),
         DetailTab::Pods => related::show(
             ui,
             presentation.identity,
@@ -463,7 +475,7 @@ fn show_generic_actions(
             dialogs.open_scale(
                 window_id,
                 presentation.identity.clone(),
-                status_summary(view).and_then(summary_replicas),
+                suggested_replicas(view),
             );
         }
     }
@@ -487,6 +499,16 @@ fn show_generic_actions(
         if delete.clicked() {
             dialogs.open_delete(window_id, presentation.identity.clone());
         }
+    }
+}
+
+fn suggested_replicas(view: &ResourceDetailResponse) -> Option<u32> {
+    match view.projection.as_ref() {
+        Some(k10s_protocol::ResourceProjection::Deployment(deployment)) => {
+            deployment.desired_replicas
+        }
+        Some(_) => None,
+        None => status_summary(view).and_then(summary_replicas),
     }
 }
 

@@ -46,7 +46,12 @@ impl Default for Fixture {
     fn default() -> Self {
         Self {
             shell: UiShell::new(),
-            feed: ResourceFeed::default(),
+            feed: ResourceFeed {
+                render_time: Some(
+                    web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800),
+                ),
+                ..ResourceFeed::default()
+            },
             response: None,
             selected_context: CONTEXT.to_owned(),
             connection: ConnectionState::Connected,
@@ -434,7 +439,7 @@ fn pod_detail_overview_with_resolved_response() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
     let identity = harness
@@ -474,7 +479,7 @@ fn pod_detail_disconnected_logs() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
     let identity = harness

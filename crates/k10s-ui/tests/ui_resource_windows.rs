@@ -6,7 +6,8 @@
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+    BackendRevision, ContainerImageProjection, DeploymentProjection, GroupVersionKind,
+    ResourceIdentity, ResourceListRow, ResourceProjection, ResourceTypeEntry,
 };
 use k10s_ui::{
     ui::{
@@ -252,11 +253,15 @@ fn harness() -> Harness<'static, Fixture> {
     Harness::builder()
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
+        .with_step_dt(0.05)
         .build_ui_state(render, Fixture::default())
 }
 
 fn default_feed() -> ResourceFeed {
-    let mut feed = ResourceFeed::default();
+    let mut feed = ResourceFeed {
+        render_time: Some(web_time::UNIX_EPOCH + web_time::Duration::from_secs(1_788_220_800)),
+        ..ResourceFeed::default()
+    };
     feed.lists.insert(
         WorkspaceWorkload::Deployments,
         vec![
@@ -390,6 +395,407 @@ fn open(harness: &mut Harness<'static, Fixture>, item: LauncherItem) {
 }
 
 #[test]
+fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
+    let mut fixture = Fixture::default();
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Deployments)
+        .unwrap()[0]
+        .projection = Some(ResourceProjection::Deployment(DeploymentProjection {
+        desired_replicas: Some(2),
+        ready_replicas: Some(2),
+        updated_replicas: Some(2),
+        available_replicas: Some(2),
+        strategy: Some("RollingUpdate".into()),
+        selector: Default::default(),
+        max_surge: None,
+        max_unavailable: None,
+        conditions: vec![],
+        template_containers: vec![ContainerImageProjection {
+            name: "api".into(),
+            image: Some("ghcr.io/containers/kubernetes-mcp:v0.3.1".into()),
+        }],
+        template_labels: Default::default(),
+        template_annotations: Default::default(),
+        labels: Default::default(),
+        annotations: Default::default(),
+        created_at: None,
+    }));
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Deployments).unwrap()[1].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"deployment","desiredReplicas":1,"readyReplicas":1,"templateContainers":[{"name":"web","image":"nginx:v1"}]})).unwrap(),
+    );
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    for header in ["Name", "Ready", "Status", "Image", "Age"] {
+        wide.get_by_label(header);
+    }
+    for key in ["namespace", "name", "status", "created"] {
+        wide.get_by_role_and_label(Role::Button, format!("Sort deployments by {key}").as_str());
+    }
+    for key in ["ready", "image"] {
+        assert!(
+            wide.query_by_role_and_label(
+                Role::Button,
+                format!("Sort deployments by {key}").as_str()
+            )
+            .is_none()
+        );
+    }
+    assert!(wide.get_by_label("2/2").rect().right() > wide.get_by_label("Ready").rect().center().x);
+    wide.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
+        .hover();
+    harness.run_steps(15);
+    assert!(
+        harness
+            .get_all_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
+            .count()
+            >= 2
+    );
+    harness.get_by_label("nginx:v1").hover();
+    harness.run_steps(15);
+    assert_eq!(
+        harness.get_all_by_label("nginx:v1").count(),
+        1,
+        "short images have no redundant tooltip"
+    );
+
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .rect();
+    let target = rect.min + egui::vec2(640.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let compact = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(compact.query_by_label("Image").is_none());
+    compact.get_by_label("Status");
+    let first_age_value_left = compact
+        .get_all_by_label("Resource age")
+        .map(|node| node.rect().left())
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        compact
+            .get_all_by_label("Resource age")
+            .all(|node| node.rect().width() <= 56.0),
+        "compact Age values must fit the resolved 56-point column"
+    );
+    assert!(
+        compact.get_by_label("2/2").rect().right() <= first_age_value_left,
+        "compact Ready values must not overlap the adjacent Age column"
+    );
+    let rect = compact.rect();
+    let target = rect.min + egui::vec2(1_000.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let restored = harness.get_by_role_and_label(Role::Window, "Deployments");
+    restored.get_by_label("Image");
+    restored.get_by_label("Status");
+}
+
+#[test]
+fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
+    let mut harness = harness();
+    harness.state_mut().feed.lists.insert(
+        WorkspaceWorkload::CustomResources,
+        vec![list_row(
+            "apiextensions.k8s.io",
+            "v1",
+            "CustomResourceDefinition",
+            None,
+            "dashboards.monitoring.example.com",
+            "Established",
+            "2026-08-21T00:45:00Z",
+        )],
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::CustomResources),
+    );
+    let id = workload_id(harness.state(), WorkspaceWorkload::CustomResources);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+            id,
+            Some("apiextensions.k8s.io/v1/CustomResourceDefinition".into()),
+        ));
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(window.query_by_label("Namespace").is_none());
+    window.get_by_label("Name");
+    window.get_by_label("Status");
+    window.get_by_label("Age");
+    let rect = window.rect();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    harness.run_steps(2);
+    let target = rect.min + egui::vec2(350.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let medium = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(medium.query_by_label("Status").is_none());
+    medium.get_by_label("Age");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(180.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Custom Resources")
+            .query_by_label("Age")
+            .is_none()
+    );
+}
+
+#[test]
+fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
+    let mut fixture = Fixture::default();
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Pods)
+        .unwrap()[0]
+        .summary = "Zulu summary".into();
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Pods).unwrap()[0].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"AlphaPhase","readyContainers":1,"totalContainers":1,"restartCount":7,"nodeName":"worker-with-a-long-name"})).unwrap(),
+    );
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Pods)
+        .unwrap()[1]
+        .summary = "Alpha summary".into();
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Pods).unwrap()[1].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"ZuluPhase","readyContainers":1,"totalContainers":1,"restartCount":1,"nodeName":"worker-two"})).unwrap(),
+    );
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Pods");
+    for header in [
+        "Namespace",
+        "Name",
+        "Ready",
+        "Status",
+        "Restarts",
+        "Node",
+        "Age",
+    ] {
+        assert!(wide.get_all_by_label(header).count() >= 1);
+    }
+    for key in ["ready", "restarts", "node"] {
+        assert!(
+            wide.query_by_role_and_label(Role::Button, format!("Sort pods by {key}").as_str())
+                .is_none()
+        );
+    }
+    assert!(
+        wide.get_by_label("7").rect().right() > wide.get_by_label("Restarts").rect().center().x
+    );
+    let rect = wide.rect();
+    wide.get_by_role_and_label(Role::Button, "Sort pods by status")
+        .click();
+    harness.run_steps(4);
+    let sorted = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(
+        sorted
+            .get_by_label("Select resource web-frontend-7d9f8-00001")
+            .rect()
+            .top()
+            < sorted
+                .get_by_label("Select resource web-frontend-7d9f8-00002")
+                .rect()
+                .top(),
+        "visible Pod order follows displayed phase, not conflicting summary"
+    );
+    let target = rect.min + egui::vec2(680.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let medium = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(medium.query_by_label("Node").is_none());
+    medium.get_by_label("Restarts");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(520.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .query_by_label("Restarts")
+            .is_none()
+    );
+}
+
+#[test]
+fn responsive_generic_namespaced_hides_status_then_age() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::StatefulSets,
+        vec![list_row(
+            "apps",
+            "v1",
+            "StatefulSet",
+            Some("default"),
+            "database",
+            "Ready",
+            "2026-08-21T00:00:00Z",
+        )],
+    );
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::StatefulSets),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [640.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    for header in ["Namespace", "Name", "Status", "Age"] {
+        assert!(wide.get_all_by_label(header).count() >= 1);
+    }
+    let rect = wide.rect();
+    let target = rect.min + egui::vec2(450.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(8);
+    let medium = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    assert!(medium.query_by_label("Status").is_none());
+    medium.get_by_label("Age");
+    let rect = medium.rect();
+    let target = rect.min + egui::vec2(180.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "StatefulSets")
+            .query_by_label("Age")
+            .is_none()
+    );
+}
+
+#[test]
 fn same_kind_windows_render_their_own_window_keyed_rows() {
     let mut fixture = Fixture::default();
     fixture.feed.lists.remove(&WorkspaceWorkload::Pods);
@@ -444,8 +850,8 @@ fn same_kind_windows_render_their_own_window_keyed_rows() {
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    harness.get_by_label("pod-first");
-    harness.get_by_label("pod-second");
+    harness.get_by_label("Select resource pod-first");
+    harness.get_by_label("Select resource pod-second");
 }
 
 #[test]
@@ -509,10 +915,10 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         "Pods",
     ] {
         let window = harness.get_by_role_and_label(Role::Window, title);
-        for header in ["Name", "Status", "Created"] {
+        for header in ["Name", "Status", "Age"] {
             window.get_by_label(header);
         }
-        window.get_by_label("sample-one");
+        window.get_by_label("Select resource sample-one");
         window.get_by_label("1/1 ready");
     }
 
@@ -538,11 +944,11 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         ));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    for header in ["Name", "Status", "Created"] {
+    for header in ["Name", "Status", "Age"] {
         window.get_by_label(header);
     }
     window.get_by_role_and_label(Role::ComboBox, "Namespace");
-    window.get_by_label("traffic-overview");
+    window.get_by_label("Select resource traffic-overview");
 }
 
 #[test]
@@ -624,7 +1030,7 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
         "ignored cluster scope intent is preserved for a later namespaced GVK"
     );
-    window.get_by_label("dashboards.monitoring.example.com");
+    window.get_by_label("Select resource dashboards.monitoring.example.com");
     window.get_by_label("Established");
 
     window
@@ -975,14 +1381,25 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness.run_steps(4);
     let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
     assert!(
-        deployments.get_by_label("web-frontend").rect().top()
-            < deployments.get_by_label("api-server").rect().top(),
+        deployments
+            .get_by_label("Select resource web-frontend")
+            .rect()
+            .top()
+            < deployments
+                .get_by_label("Select resource api-server")
+                .rect()
+                .top(),
         "descending creation order must put web-frontend first"
     );
     let pods = harness.get_by_role_and_label(Role::Window, "Pods");
     assert!(
-        pods.get_by_label("web-frontend-7d9f8-00001").rect().top()
-            < pods.get_by_label("db-postgres-0").rect().top(),
+        pods.get_by_label("Select resource web-frontend-7d9f8-00001")
+            .rect()
+            .top()
+            < pods
+                .get_by_label("Select resource db-postgres-0")
+                .rect()
+                .top(),
         "the unsorted window must keep its original order"
     );
 
@@ -999,11 +1416,11 @@ fn windows_keep_search_sort_and_namespace_independent() {
     harness.run_steps(4);
 
     let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
-    deployments.get_by_label("api-server");
+    deployments.get_by_label("Select resource api-server");
     assert!(deployments.query_by_label("web-frontend").is_none());
     let pods = harness.get_by_role_and_label(Role::Window, "Pods");
-    pods.get_by_label("web-frontend-7d9f8-00001");
-    pods.get_by_label("db-postgres-0");
+    pods.get_by_label("Select resource web-frontend-7d9f8-00001");
+    pods.get_by_label("Select resource db-postgres-0");
 
     // Two instances of the same kind keep fully independent namespace state.
     harness
@@ -1065,9 +1482,9 @@ fn selection_driven_detail_panel_respects_split_minima() {
 
     harness
         .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
-    harness.run_steps(4);
+    harness.run_steps(10);
 
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
     window.get_by_label("Pod · default / db-postgres-0");
@@ -1082,7 +1499,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 0.0));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("web-frontend-7d9f8-00001");
+    window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
     harness
@@ -1091,7 +1508,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Pods");
-    window.get_by_label("web-frontend-7d9f8-00001");
+    window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
     // Clearing selection removes the contextual bottom panel.
@@ -1104,6 +1521,444 @@ fn selection_driven_detail_panel_respects_split_minima() {
         window
             .query_by_label("Pod · default / db-postgres-0")
             .is_none()
+    );
+}
+
+#[test]
+fn selected_row_single_click_eventually_clears_selection_once() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+
+    let row_label = "Select resource db-postgres-0";
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(10);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .query_by_label("Pod · default / db-postgres-0")
+            .is_some()
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .expect("Pods window has resource state");
+    assert!(resource.selection.is_none());
+    assert!(resource.detail.is_none());
+    assert!(harness.state().shell.workspace().pending().is_none());
+}
+
+#[test]
+fn clicking_another_resource_replaces_the_pending_row_action() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(10);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert_eq!(
+        resource
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend-7d9f8-00001")
+    );
+    assert_eq!(
+        resource.detail.as_ref().unwrap().identity.name,
+        "web-frontend-7d9f8-00001"
+    );
+}
+
+#[test]
+fn hidden_resource_row_action_expires_once_at_table_scope() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, "web-frontend".into()));
+    harness.run_steps(10);
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .is_none(),
+        "the pending clear must execute while its row is filtered out"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSearch(window, String::new()));
+    harness.run_steps(10);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("web-frontend-7d9f8-00001"),
+        "restoring the old row must not replay its consumed clear"
+    );
+}
+
+#[test]
+fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::Pods,
+        (0..500)
+            .map(|index| {
+                list_row(
+                    "",
+                    "v1",
+                    "Pod",
+                    Some("default"),
+                    &format!("pod-{index:03}"),
+                    "Running",
+                    "2026-08-21T00:00:00Z",
+                )
+            })
+            .collect(),
+    );
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_000.0, 600.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let first = harness.get_by_role_and_label(Role::Window, "Pods");
+    first
+        .get_by_role_and_label(Role::Button, "Select resource pod-000")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource pod-000")
+        .scroll_down();
+    harness.step();
+    harness.run_steps(6);
+    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(
+        recycled
+            .query_by_role_and_label(Role::Button, "Select resource pod-000")
+            .is_none()
+    );
+    assert!(
+        (1..500).any(|index| recycled
+            .query_by_role_and_label(Role::Button, &format!("Select resource pod-{index:03}"))
+            .is_some()),
+        "a recycled later row is rendered"
+    );
+    harness.run_steps(10);
+    let selection = &harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(workload_id(harness.state(), WorkspaceWorkload::Pods))
+        .unwrap()
+        .selection;
+    assert_eq!(
+        selection
+            .as_ref()
+            .map(|identity| format!("Select resource {}", identity.name))
+            .as_deref(),
+        Some("Select resource pod-000")
+    );
+    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    let later_index = (1..500)
+        .find(|index| {
+            recycled
+                .query_by_role_and_label(Role::Button, &format!("Select resource pod-{index:03}"))
+                .is_some()
+        })
+        .expect("a later recycled row is visible");
+    let later_label = format!("Select resource pod-{later_index:03}");
+    recycled
+        .get_by_role_and_label(Role::Button, &later_label)
+        .click();
+    harness.run_steps(10);
+    let expected_name = format!("pod-{later_index:03}");
+    let selection = &harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(workload_id(harness.state(), WorkspaceWorkload::Pods))
+        .unwrap()
+        .selection;
+    assert_eq!(
+        selection.as_ref().map(|identity| identity.name.as_str()),
+        Some(expected_name.as_str())
+    );
+}
+
+#[test]
+fn cross_row_resource_double_click_does_not_change_integrated_selection() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
+        .click();
+    harness.step();
+    harness.run_steps(10);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert_eq!(
+        resource
+            .selection
+            .as_ref()
+            .map(|identity| identity.name.as_str()),
+        Some("db-postgres-0")
+    );
+    assert_eq!(
+        resource.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001");
+}
+
+#[test]
+fn resource_double_click_opens_dedicated_without_selecting_or_guarding() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0");
+    row.click();
+    row.click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .resource_state(window)
+            .unwrap()
+            .selection
+            .is_none()
+    );
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
+fn selected_clean_resource_double_click_across_frames_preserves_detail() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window,
+            k10s_ui::workspace::DetailTab::Yaml,
+        ));
+    harness.run_steps(2);
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert!(resource.selection.is_some());
+    assert_eq!(
+        resource.detail.as_ref().unwrap().active_tab,
+        k10s_ui::workspace::DetailTab::Yaml
+    );
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
+fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(4);
+    harness.run_steps(10);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
+    let row = harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
+    row.click();
+    harness.step();
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
+        .click();
+    harness.step();
+    harness.run_steps(4);
+
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .unwrap();
+    assert!(resource.selection.is_some());
+    assert!(harness.state().shell.workspace().pending().is_none());
+    harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
+}
+
+#[test]
+fn detail_close_is_in_identity_row() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    harness.run_steps(10);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let identity_row = window.get_by_label("Detail identity row");
+    let close = window.get_by_role_and_label(Role::Button, "Clear selection");
+    assert!(
+        identity_row.rect().contains_rect(close.rect()),
+        "Clear selection must be a compact control inside the Detail identity-row layout area"
     );
 }
 
@@ -1184,7 +2039,10 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
             }
 
             let split_window = harness.get_by_role_and_label(Role::Window, title);
-            let list_anchor_before = split_window.get_by_label(&rows[0].identity.name).rect();
+            let first_row_label = format!("Select resource {}", rows[0].identity.name);
+            let list_anchor_before = split_window
+                .get_by_role_and_label(Role::Button, &first_row_label)
+                .rect();
             let detail_body_before = split_window
                 .get_by_role_and_label(Role::ScrollView, "Detail body")
                 .rect();
@@ -1201,7 +2059,9 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
             harness.run_steps(4);
             let maximized = harness.get_by_role_and_label(Role::Window, title);
             assert!(
-                maximized.query_by_label(&rows[0].identity.name).is_none(),
+                maximized
+                    .query_by_role_and_label(Role::Button, &first_row_label)
+                    .is_none(),
                 "{title} maximize must reallocate the interior away from the list"
             );
             maximized.get_by_role_and_label(Role::ScrollView, "Detail body");
@@ -1212,7 +2072,9 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
                 .apply_workspace_command(WorkspaceCommand::RestoreDetailPane(id));
             harness.run_steps(4);
             let restored = harness.get_by_role_and_label(Role::Window, title);
-            let list_anchor_after = restored.get_by_label(&rows[0].identity.name).rect();
+            let list_anchor_after = restored
+                .get_by_role_and_label(Role::Button, &first_row_label)
+                .rect();
             let detail_body_after = restored
                 .get_by_role_and_label(Role::ScrollView, "Detail body")
                 .rect();
@@ -1236,7 +2098,7 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
 
     harness
         .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::Button, "web-frontend")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
@@ -1250,8 +2112,12 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         .type_text("web");
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_role_and_label(Role::Button, "web-frontend");
-    assert!(window.query_by_label("api-server").is_none());
+    window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
+    assert!(
+        window
+            .query_by_label("Select resource api-server")
+            .is_none()
+    );
 
     // A fresh snapshot replaces every row; the local filter and selection
     // survive the resync and follow the updated row content.
@@ -1290,12 +2156,14 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_role_and_label(Role::Button, "web-frontend");
+    window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
     assert!(
-        window.query_by_label("api-server").is_none(),
+        window
+            .query_by_label("Select resource api-server")
+            .is_none(),
         "the resynced snapshot must honor the surviving filter"
     );
-    assert!(window.query_by_label("checkout").is_none());
+    assert!(window.query_by_label("Select resource checkout").is_none());
     window.get_by_label("18/18 ready");
 
     // Clearing the filter reveals the rest of the resynced snapshot.
@@ -1304,6 +2172,6 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Deployments");
-    window.get_by_label("api-server");
-    window.get_by_label("checkout");
+    window.get_by_label("Select resource api-server");
+    window.get_by_label("Select resource checkout");
 }

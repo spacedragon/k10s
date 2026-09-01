@@ -247,21 +247,31 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              GenericContainer
+              Unknown label="Detail vital strip"
               GenericContainer
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      Label value="Status ● —"
-                        TextRun value="Status ● —"
-                      Label value="Ready · —"
-                        TextRun value="Ready · —"
-                      Label value="Restarts · —"
-                        TextRun value="Restarts · —"
-                      Label value="Age · —"
-                        TextRun value="Age · —"
+                      GenericContainer
+                        GenericContainer
+                          Label value="Status ● —"
+                            TextRun value="Status ● —"
+                      GenericContainer
+                        GenericContainer
+                          Label value="Ready · —"
+                            TextRun value="Ready · —"
+                      GenericContainer
+                        GenericContainer
+                          Label value="Restarts · —"
+                            TextRun value="Restarts · —"
+                      GenericContainer
+                        GenericContainer
+                          Label value="Age · —"
+                            TextRun value="Age · —"
                       Button label="Show more Pod vitals"
-                      Label value="Freshness · loading"
+              GenericContainer
+                Label value="Freshness · loading"
+                  TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   GenericContainer

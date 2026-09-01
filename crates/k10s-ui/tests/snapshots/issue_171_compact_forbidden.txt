@@ -194,28 +194,35 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            Label value="Namespace"
-                              TextRun value="Namespace"
-                            Button label="Sort deployments by namespace"
+                            GenericContainer
+                              Label value="Namespace"
+                                TextRun value="Namespace"
+                              Button label="Sort deployments by namespace"
                           GenericContainer
-                            Label value="Name"
-                              TextRun value="Name"
-                            Button label="Sort deployments by name"
+                            GenericContainer
+                              Label value="Name"
+                                TextRun value="Name"
+                              Button label="Sort deployments by name"
                           GenericContainer
-                            Label value="Status"
-                              TextRun value="Status"
-                            Button label="Sort deployments by status"
+                            Label value="Ready"
+                              TextRun value="Ready"
                           GenericContainer
-                            Label value="Created"
-                              TextRun value="Created"
-                            Button label="Sort deployments by created"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="api-server"
-                          Label value="2/2 ready"
-                            TextRun value="2/2 ready"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                            GenericContainer
+                              Label value="Age"
+                                TextRun value="Age"
+                              Button label="Sort deployments by created"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Select resource api-server"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
+                            Label value="Resource age"
+                              TextRun value="11d"
     Splitter
     Splitter
     Splitter

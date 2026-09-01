@@ -416,7 +416,7 @@ fn list_window_commands_drive_the_services_window_independently() {
         service.split_ratio, 1.0,
         "ratios clamp to the unit interval"
     );
-    assert!(!service.detail_visible);
+    assert!(service.detail_visible);
 
     // The workload window keeps fully independent state.
     let resource = state.resource_state(pods).unwrap();
@@ -777,7 +777,7 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
 }
 
 #[test]
-fn list_windows_have_independent_split_and_detail_visibility() {
+fn list_windows_have_independent_splits_and_compatibility_toggle_cannot_hide_detail() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let first = open_pods(&mut state);
     let second = open_pods(&mut state);
@@ -797,9 +797,9 @@ fn list_windows_have_independent_split_and_detail_visibility() {
     assert!((first_state.split_ratio - 0.3).abs() < f32::EPSILON);
     assert_eq!(second_state.split_ratio, 0.5);
     assert!(first_state.detail_visible);
-    assert!(!second_state.detail_visible);
+    assert!(second_state.detail_visible);
 
-    // Ratios clamp to the unit interval and survive pane toggling.
+    // Ratios clamp to the unit interval and survive the compatibility command.
     events(&mut state, WorkspaceCommand::SetSplitRatio(first, 1.7));
     let first_state = match &state.window(first).unwrap().content {
         WindowContent::Resource(resource) => resource,
@@ -932,6 +932,24 @@ fn dirty_yaml_blocks_row_selection_until_resolved() {
 }
 
 #[test]
+fn dirty_yaml_blocks_clear_selection_preserving_detail() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    let identity = TestIdentity::pod("dirty-clear");
+    select(&mut state, window, identity.clone());
+    events(&mut state, WorkspaceCommand::BeginYamlEdit(window));
+
+    let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
+    assert_eq!(blocked(&out).blockers[0].reason, BlockReason::DirtyYaml);
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
+    assert_eq!(
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
+    );
+}
+
+#[test]
 fn dirty_yaml_blocks_window_close_until_resolved() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);
@@ -984,7 +1002,8 @@ fn cancel_preserves_selection_window_and_context() {
 fn connected_shell_blocks_navigation_until_disconnected() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);
-    select(&mut state, window, TestIdentity::pod("original"));
+    let identity = TestIdentity::pod("original");
+    select(&mut state, window, identity.clone());
 
     events(&mut state, WorkspaceCommand::ConnectShell(window));
 
@@ -996,6 +1015,12 @@ fn connected_shell_blocks_navigation_until_disconnected() {
     let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
     assert!(out.is_empty());
     assert!(state.pending().is_some());
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
+    assert_eq!(
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
+    );
 
     // Cancel preserves the selection and the connected session.
     let out = events(
@@ -1016,6 +1041,12 @@ fn connected_shell_blocks_navigation_until_disconnected() {
     assert_eq!(
         blocked(&out).blockers[0].reason,
         BlockReason::ConnectedShell
+    );
+    let resource = state.resource_state(window).unwrap();
+    assert_eq!(resource.selection.as_ref(), Some(&identity));
+    assert_eq!(
+        resource.detail.as_ref().map(|detail| &detail.identity),
+        Some(&identity)
     );
     let out = events(
         &mut state,

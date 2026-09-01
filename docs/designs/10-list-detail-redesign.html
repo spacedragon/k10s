@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k10s List + Detail 重新设计</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{color-scheme:dark;--page:#151515;--panel:#181818;--line:#3a3a3a;--soft:#2a2a2a;--text:#d2d2d2;--muted:#8a8a8a;--faint:#6b6b6b;
+        --blue:#55aef5;--bluebg:#17678e;--titlebar:#1f6087;--green:#58b883;--yellow:#d9ac55;--red:#e36b6b}
+  body{background:var(--page);color:#e2e2e2;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55;padding:32px}
+  h2{font-size:24px;margin-bottom:8px}h3{font-size:17px;margin:0}
+  .subtitle{color:#9a9a9a;margin-bottom:24px}
+  .wrap{max-width:1180px;margin:0 auto 30px}
+  .head{display:flex;align-items:baseline;gap:12px;margin-bottom:5px}
+  .head span{color:var(--muted);font-size:13px}
+  .why{color:#8f8f8f;font-size:13px;border-left:2px solid #2f6b88;padding:2px 0 2px 10px;margin-bottom:12px}
+  .why b{color:#bcbcbc;font-weight:500}
+
+  .win{border:1px solid #3f6f8c;border-radius:7px;overflow:hidden;background:var(--panel);color:var(--text);
+       font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;box-shadow:0 14px 34px #0009}
+  .titlebar{display:flex;align-items:center;gap:9px;height:31px;padding:0 10px;background:var(--titlebar);color:#e8f4fb;font-size:13px}
+  .titlebar .t{flex:1;text-align:center}
+  .titlebar .wb{color:#cfe6f3}
+
+  /* filter bar */
+  .filters{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid var(--line)}
+  .ctl{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid #454545;border-radius:3px;background:#262626;color:#cfcfcf;white-space:nowrap}
+  .ctl.field{background:#0e0e0e;color:#8e8e8e;flex:1;min-width:120px}
+  .ctl.on{background:#1d4b62;border-color:#2f7899;color:#dff1fb}
+  .ctl.ghost{background:transparent;border-color:#3a3a3a;color:#9a9a9a}
+  .live{margin-left:auto;color:var(--green);font-size:11px;white-space:nowrap}
+  .matchline{display:flex;align-items:center;gap:8px;padding:3px 10px;color:var(--faint);font-size:10.5px;background:#141414;border-bottom:1px solid #262626}
+  .matchline .r{margin-left:auto}
+
+  /* list */
+  .list{overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
+  th{color:#8a8a8a;font-weight:400;text-align:left;padding:5px 9px;border-bottom:1px solid #3d3d3d;background:#1e1e1e;font-size:11px;white-space:nowrap}
+  th .s{color:#5f8ea6}
+  td{padding:4.5px 9px;border-bottom:1px solid #232323;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  tbody tr:hover td{background:#1f1f1f}
+  tbody tr.sel td{background:#174c66;color:#e6f4fb}
+  tbody tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--blue)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.muted{color:var(--muted)}.faint{color:var(--faint)}
+  tr.sel .muted,tr.sel .faint{color:#a8cfe2}
+
+  /* detail */
+  .detail{border-top:1px solid #4a4a4a;background:#161616}
+  .grip{height:9px;background:#202020;border-bottom:1px solid #2c2c2c;text-align:center;color:#5a5a5a;font-size:9px;line-height:8px}
+  .drow{display:flex;align-items:center;gap:8px;padding:6px 10px}
+  .ident{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ident i{font-style:normal;color:#7fa9bf}.ident b{color:#eaeaea;font-weight:600}
+  .wb{color:#9fbecd;padding:0 2px}
+  .vitals{display:flex;align-items:center;gap:6px;padding:0 10px 7px;flex-wrap:nowrap;overflow:hidden}
+  .vital{display:inline-flex;align-items:baseline;gap:6px;padding:2px 8px;border:1px solid #3d3d3d;border-radius:3px;background:#212121;white-space:nowrap;flex:0 0 auto}
+  .vital small{color:var(--faint);font-size:9.5px;letter-spacing:.04em}
+  .vital b{font-weight:500;color:#e6e6e6}
+  .vital.state{background:#17301f;border-color:#2f6a45}.vital.state b{color:var(--green)}
+  .vital.attn{background:#33280f;border-color:#6a5220}.vital.attn b{color:var(--yellow)}
+  .vital.bad{background:#331b1b;border-color:#7a3f3f}.vital.bad b{color:var(--red)}
+  .tabrow{display:flex;align-items:center;gap:4px;padding:0 10px 7px;border-bottom:1px solid var(--line)}
+  .tab{padding:2px 10px;border:1px solid transparent;border-radius:3px;color:#adadad}
+  .tab.active{background:var(--bluebg);border-color:#2879a0;color:#e7f6fd}
+  .tab .n{color:var(--yellow)}
+  .btn{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border:1px solid #4a4a4a;border-radius:3px;background:#2e2e2e;color:#cfcfcf;white-space:nowrap}
+  .btn.danger{color:#f08a8a;border-color:#7d4141;background:#301c1c}
+  .btn.ghost{background:transparent;border-color:#3a3a3a;color:#9a9a9a}
+  .spacer{flex:1}
+
+  .dbody{display:grid;grid-template-columns:1.35fr 1fr;height:330px;overflow:hidden}
+  .col{padding:9px 11px 11px;overflow:hidden}
+  .col+.col{border-left:1px solid #2a2a2a;background:#141414}
+  .sec{margin-bottom:13px}.sec:last-child{margin-bottom:0}
+  .sec-h{display:flex;align-items:center;gap:8px;color:#9d9d9d;font-size:10px;letter-spacing:.13em;padding-bottom:4px;margin-bottom:6px;border-bottom:1px solid #2c2c2c}
+  .sec-h .cnt{color:var(--faint);letter-spacing:0}
+  .sec-h .more{margin-left:auto;color:#6fa9c6;letter-spacing:0;font-size:11px}
+  .sec table{font-size:11.5px}
+  .sec th{background:transparent;border-bottom:1px solid #2c2c2c;padding:3px 6px;font-size:9.5px;letter-spacing:.06em}
+  .sec td{padding:4px 6px;border-bottom:1px solid #212121}
+  .emptyline{color:var(--faint);font-size:11px;padding:4px 6px}
+
+  .kv{display:grid;grid-template-columns:126px 1fr;font-size:11.5px}
+  .kv>span{padding:3px 6px;min-width:0}
+  .kv>span:nth-child(odd){color:#7f7f7f}
+  .kv>span:nth-child(even){color:#d5d5d5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kv .long{grid-column:1/-1;color:#d5d5d5;padding:0 6px 4px;display:flex;align-items:center;gap:6px}
+  .kv .long code{font-family:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kv .lab{grid-column:1/-1;color:#7f7f7f;padding:3px 6px 0}
+  .cp{color:#6fa9c6;flex:0 0 auto}
+
+  .chips{display:flex;flex-wrap:wrap;gap:4px;padding:2px 6px}
+  .chip{display:inline-flex;border:1px solid #3b3b3b;border-radius:11px;background:#232323;color:#b6b6b6;padding:1px 8px;font-size:10.5px}
+  .chip i{font-style:normal;color:#7c7c7c;margin-right:4px}
+  .chip.more{background:transparent;border-style:dashed;color:#7fa9bf}
+
+  .foot{display:flex;gap:13px;padding:6px 10px;border-top:1px solid var(--line);color:var(--faint);font-size:10.5px;background:#131313;flex-wrap:wrap}
+  .foot b{color:#9dbecd;font-weight:500}
+
+  .cmp{width:100%;border-collapse:collapse;font-size:12.5px;font-family:system-ui,sans-serif;border:1px solid #333;border-radius:6px;overflow:hidden}
+  .cmp th{background:#1e1e1e;color:#bfbfbf;font-size:12px;letter-spacing:0;padding:8px 10px;border-bottom:1px solid #3a3a3a;white-space:normal}
+  .cmp td{white-space:normal;color:#a5a5a5;padding:8px 10px;vertical-align:top;border-bottom:1px solid #2a2a2a;overflow:visible}
+  .cmp td:first-child{color:#dcdcdc;width:270px}
+  .cmp code{font-family:ui-monospace,monospace;font-size:11.5px;color:#c9c9c9}
+  .note{max-width:1180px;margin:0 auto;color:#8c8c8c;font-size:12px}
+</style>
+</head><body>
+
+<div class="wrap">
+  <h2>List + Detail 重新设计</h2>
+  <p class="subtitle">两个诉求：去掉 Clear selection，以及解决拥挤与截断。第二个不是调字号能解决的——是列宽策略和长值处理没有规则。</p>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>重新设计后</h3><span>同样的窗口尺寸，列表少一行、详情少一行，右侧 350px 空白被利用起来</span></div>
+  <div class="why">Clear selection 换成详情头右侧的 <b>✕</b>（Esc 同效，再点一次选中行也取消）。一个低频动作不该占满宽度的一整行。</div>
+
+  <div class="win">
+    <div class="titlebar"><span>▼</span><span class="t">▦ Deployments · all namespaces</span><span class="wb">✕</span></div>
+
+    <div class="filters">
+      <span class="ctl field">⌕ Search deployments…</span>
+      <span class="ctl">Namespace: all ▾</span>
+      <span class="ctl">Status: all ▾</span>
+      <span class="ctl ghost">⌗ Columns ▾</span>
+      <span class="ctl ghost">↻</span>
+      <span class="live">● Live · 1s ago</span>
+    </div>
+    <div class="matchline"><span>16 deployments · 1 selected</span><span class="r">sorted by Namespace ▲ · Age shown as relative <span style="color:#6fa9c6">(switch to absolute)</span></span></div>
+
+    <div class="list">
+      <table>
+        <colgroup><col style="width:168px"><col><col style="width:58px"><col style="width:122px"><col style="width:222px"><col style="width:54px"></colgroup>
+        <thead><tr><th>NAMESPACE <span class="s">▲</span></th><th>NAME</th><th class="num">READY</th><th>STATUS</th><th>IMAGE</th><th class="num">AGE</th></tr></thead>
+        <tbody>
+          <tr><td class="muted">agent-sandbox-system</td><td>agent-sandbox-controller</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/sandbox-controller:1.4.2</td><td class="num faint">20d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>mcp-grafana</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/mcp-grafana:0.6.0</td><td class="num faint">49d</td></tr>
+          <tr class="sel"><td class="muted">agentconnect</td><td>mcp-kubernetes</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/kubernetes-mcp:v0.3.1</td><td class="num faint">47d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-admin-server</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/agentconnect:0.9.4</td><td class="num faint">12d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-aigw</td><td class="num">3/3</td><td class="ok">● Available</td><td class="muted">…/aigw:2.1.0</td><td class="num faint">7d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-aigw-drain</td><td class="num">3/3</td><td class="ok">● Available</td><td class="muted">…/aigw:2.1.0</td><td class="num faint">7d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-aigw-hub</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/aigw-hub:2.1.0</td><td class="num faint">7d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-billing</td><td class="num warn">1/2</td><td class="warn">▲ Progressing</td><td class="muted">…/billing:1.8.0</td><td class="num faint">7d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-control-plane</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/control-plane:3.2.1</td><td class="num faint">66d</td></tr>
+          <tr><td class="muted">agentconnect</td><td>prod-agentconnect-daemon-pool</td><td class="num">3/3</td><td class="ok">● Available</td><td class="muted">…/daemon-pool:0.4.7</td><td class="num faint">7d</td></tr>
+          <tr><td class="muted">agentconnect-oss</td><td>oss-agentconnect-control-plane</td><td class="num">1/1</td><td class="ok">● Available</td><td class="muted">…/control-plane:3.2.1</td><td class="num faint">8d</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="detail">
+      <div class="grip">••• drag · Ctrl+↑ / Ctrl+↓ •••</div>
+      <div class="drow">
+        <span class="ident"><i>▦ Deployment</i>&nbsp; agentconnect / <b>mcp-kubernetes</b></span>
+        <span class="live" style="margin:0">⟳ live</span>
+        <span class="btn ghost">⧉ Pop out</span><span class="btn ghost">⛶</span><span class="wb" title="clear selection (Esc)">✕</span>
+      </div>
+      <div class="vitals">
+        <span class="vital state"><small>ROLLOUT</small><b>● Complete</b></span>
+        <span class="vital"><small>READY</small><b>1 / 1</b></span>
+        <span class="vital"><small>UP-TO-DATE</small><b>1</b></span>
+        <span class="vital"><small>AVAILABLE</small><b>1</b></span>
+        <span class="vital"><small>STRATEGY</small><b>RollingUpdate</b></span>
+        <span class="vital"><small>AGE</small><b>47d</b></span>
+        <span class="btn ghost" style="font-size:10.5px">⋯</span>
+      </div>
+      <div class="tabrow">
+        <span class="tab active">Overview</span><span class="tab">Pods&nbsp;<span class="n">1</span></span><span class="tab">Events</span><span class="tab">YAML</span>
+        <span class="spacer"></span>
+        <span class="btn">Scale…</span><span class="btn">Restart…</span><span class="btn ghost">⋯ Actions ▾</span><span class="btn danger">Delete…</span>
+      </div>
+
+      <div class="dbody">
+        <div class="col">
+          <div class="sec">
+            <div class="sec-h">PODS <span class="cnt">1</span><span class="more">Open Pods tab →</span></div>
+            <table>
+              <colgroup><col><col style="width:52px"><col style="width:92px"><col style="width:60px"><col style="width:120px"><col style="width:42px"></colgroup>
+              <thead><tr><th>NAME</th><th class="num">READY</th><th>STATUS</th><th class="num">RESTARTS</th><th>NODE</th><th class="num">AGE</th></tr></thead>
+              <tbody><tr><td>mcp-kubernetes-59dc944695-8hknl</td><td class="num">1/1</td><td class="ok">● Running</td><td class="num">0</td><td class="muted">ip-10-0-24-17</td><td class="num faint">47d</td></tr></tbody>
+            </table>
+          </div>
+          <div class="sec">
+            <div class="sec-h">ROLLOUT HISTORY <span class="cnt">1 revision</span></div>
+            <table>
+              <colgroup><col style="width:96px"><col><col style="width:86px"><col style="width:70px"></colgroup>
+              <thead><tr><th>REV</th><th>REPLICASET</th><th>IMAGE TAG</th><th class="num">WHEN</th></tr></thead>
+              <tbody><tr><td>1 <span class="faint">current</span></td><td class="muted">mcp-kubernetes-59dc944695</td><td>v0.3.1</td><td class="num faint">47d ago</td></tr></tbody>
+            </table>
+            <div class="emptyline">No rollout events in the last 24h.</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="sec">
+            <div class="sec-h">TEMPLATE</div>
+            <div class="kv">
+              <span class="lab">Image</span>
+              <span class="long"><code title="ghcr.io/containers/kubernetes-mcp:v0.3.1">ghcr.io/containers/…/kubernetes-mcp:<b style="color:#e6e6e6">v0.3.1</b></code><span class="cp">⧉</span></span>
+              <span>Replicas</span><span>1 desired · 1 available</span>
+              <span>Rolling update</span><span>surge 25% · unavailable 25%</span>
+              <span class="lab">Selector</span>
+              <span class="long"><code>app=mcp-kubernetes</code><span class="cp">⧉</span></span>
+            </div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">LABELS <span class="cnt">1</span><span class="more">⧉ as selector</span></div>
+            <div class="chips"><span class="chip"><i>app</i>mcp-kubernetes</span><span class="chip more">Annotations 2 ▾</span></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">IDENTITY</div>
+            <div class="kv">
+              <span>Created</span><span>2026-07-15 21:34 <span class="faint">47d ago</span></span>
+              <span>UID</span><span class="faint">a41c7d3e…8f02 <span class="cp">⧉</span></span>
+              <span>Managed by</span><span class="faint">— <span style="color:#6b6b6b">not Helm/Argo</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span><b>p</b> pods</span><span><b>y</b> yaml</span><span><b>e</b> events</span><span><b>c</b> copy name</span><span><b>Ctrl+D</b> delete</span><span><b>Esc</b> clear selection</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>问题 1 · Clear selection</h3></div>
+  <table class="cmp">
+    <thead><tr><th>现状</th><th>改法</th></tr></thead>
+    <tbody>
+      <tr><td>一个满宽按钮横在列表和详情之间，把两块内容切开，视觉权重远高于它的使用频率</td><td>删掉。取消选中有三条更自然的路径：详情头右侧的 <code>✕</code>、<code>Esc</code>、再次点击已选中的行。空选中态时详情区整体塌陷，只留一条 9px 的拖拽条，列表自动吃掉这块高度。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>问题 2 · 拥挤与截断</h3><span>逐条对应截图里的具体位置</span></div>
+  <table class="cmp">
+    <thead><tr><th>截图里的问题</th><th>改法</th></tr></thead>
+    <tbody>
+      <tr><td><b>生命体征行被裁掉</b>：<code>… Age · 47d Fres</code> 断在窗口边缘，而且 <code>Rollout ● NewReplicaSetAvailable Ready · 1/1 Up-to-date · 1 Available · 1 Strategy · RollingUpdate</code> 全用同一个 <code>·</code> 分隔，读不出哪个是 label 哪个是 value</td><td>拆成独立的 chip，每个 chip 内部是「小号灰标签 + 值」，边界靠边框而不是标点。整行 <b>不换行不裁切</b>，宽度不够时末尾收进 <code>⋯</code> 展开。<code>NewReplicaSetAvailable</code> 这种 reason 属于细节，移到 chip 的 tooltip 里，chip 只显示 <code>● Complete</code>。</td></tr>
+      <tr><td><b>右栏值被裁掉</b>：<code>ghcr.io/containers/kubernetes-m</code>，正好把 tag 裁没了——而 tag 是这一行唯一会变的信息</td><td>长值一律 <b>中间省略</b>，永不裁尾：<code>ghcr.io/containers/…/kubernetes-mcp:v0.3.1</code>，tag 加粗。超长值（image、selector、annotation）改成两行式 KV：标签单独一行，值占满整栏宽度，附 <code>⧉</code> 复制和完整值 tooltip。</td></tr>
+      <tr><td><b>左栏空着，右栏挤爆</b>：左边 45% 只放了 1 个 Pod 和一句「No recent rollout events」，右边 55% 装不下</td><td>比例反过来（1.35 : 1），因为左栏是表格、右栏是 KV。空区块不占位：<code>RECENT ROLLOUT EVENTS</code> 没有内容时不渲染标题，塌缩成 rollout history 底部的一行灰字。</td></tr>
+      <tr><td><b>Pods / Rollout history 被渲染成整行文本块</b>：<code>Pod · agentconnect / mcp-kubernetes-59dc944695-8hknl</code> 占满一行，右边还有个被切一半的 <code>P</code>；rollout history 的 ReplicaSet 列溢出</td><td>用真表格：Pods 表给 name/ready/status/restarts/node/age，rollout history 给 rev/replicaset/tag/when，都设固定列宽 + 单元格省略。namespace 不再重复——详情头已经写了。</td></tr>
+      <tr><td><b>操作区 5 个按钮 + 4 个 Tab 挤一行</b>：<code>Copy name / Actions / Delete… / Restart… / Scale…</code>，其中 Copy name 已经在快捷键里，Actions 又是个菜单</td><td>只留高频的 <code>Scale…</code> <code>Restart…</code>，其余（Copy name、Copy YAML、Rollback、Pause rollout）收进 <code>⋯ Actions ▾</code>，<code>Delete…</code> 单独放最右并保持红色。9 个控件降到 4 个。</td></tr>
+      <tr><td><b>IDENTITY 重复 Name / Namespace</b>，而详情头第一行已经写了 <code>Deployment · agentconnect / mcp-kubernetes</code></td><td>IDENTITY 只留 Created / UID / Managed by。同一事实在一个面板里只出现一次。</td></tr>
+      <tr><td><b>列表列宽失衡</b>：Namespace 和 Name 之间一大片空白，Created 右侧 350px 全空</td><td>固定列宽 + Name 弹性：<code>NAMESPACE 150 · NAME flex · READY 60 · STATUS 104 · IMAGE 230 · AGE 56</code>。空出来的宽度给 <b>IMAGE</b>——这是排查时真正想看的列，也让「哪些服务还在跑旧版本」一眼可见。</td></tr>
+      <tr><td><b>Created 列全是 20 字符时间戳</b>，占宽且不可比</td><td>默认显示相对时间（<code>47d</code>，右对齐等宽数字），hover 出完整时间戳，表头旁一键切绝对时间。</td></tr>
+      <tr><td><b>状态没有颜色和形状</b>，16 行 <code>1/1 ready</code> 长得一模一样，扫不出异常</td><td><code>● Available</code> / <code>▲ Progressing</code> / <code>✕ Failed</code>，形状与颜色同时携带信息；ready 数不足时该数字本身也变黄。</td></tr>
+      <tr><td><b>每个单元格自带高亮块</b>，宽度参差；选中只高亮 Name 一格并加 <code>▶</code></td><td>取消 per-cell 背景，hover 高亮整行，选中高亮整行 + 左侧 3px 蓝条。<code>▶</code> 标记去掉。</td></tr>
+      <tr><td><b>顶部两行只承载一点信息</b>：<code>Live · synced just now</code> 独占一行；<code>All namespaces ▾ Namespace</code> 把标签放在控件后面</td><td>合成一行：搜索框 + <code>Namespace: all ▾</code> + <code>Status: all ▾</code> + 列开关 + 右端 live 指示。标签写进控件内部。下面补一条 10px 的匹配数/排序说明行，比原来的空行有用。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="wrap">
+  <div class="head"><h3>三条通用规则</h3><span>写进规范就不会再出现同类问题</span></div>
+  <table class="cmp">
+    <thead><tr><th>规则</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>长值中间省略，绝不裁尾</td><td>镜像、selector、UID、URL 的区分信息都在尾部。统一实现一个 <code>truncate_middle(text, avail_px)</code>，配 tooltip 与复制按钮。</td></tr>
+      <tr><td>单行控件区不换行、不裁切</td><td>宽度不足时把尾部元素收进 <code>⋯</code> 溢出菜单，而不是让它被窗口边缘切掉。生命体征带、工具栏、操作区都适用。</td></tr>
+      <tr><td>空区块不占位</td><td>没有数据的 section 不渲染标题，塌缩为相邻区块底部的一行灰字，或整块隐藏。当前「RECENT ROLLOUT EVENTS / No recent rollout events」两行换来零信息。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="note">实现侧：列表用 <code>TableBuilder</code> 的 <code>Column::exact</code> / <code>Column::remainder</code> 配 <code>clip(true)</code>；行选中用 <code>Response::clicked</code> + 整行 <code>painter.rect_filled</code>，不要 per-cell <code>SelectableLabel</code>；chip 带 <code>on_hover_text</code>；溢出菜单用 <code>ui.menu_button("⋯", …)</code>；空选中时详情区高度设 0 并保留 <code>Separator</code> 作拖拽把手。</p>
+
+</body></html>

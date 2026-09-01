@@ -192,52 +192,84 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            Label value="Namespace"
-                              TextRun value="Namespace"
-                            Button label="Sort pods by namespace"
+                            GenericContainer
+                              Label value="Namespace"
+                                TextRun value="Namespace"
+                              Button label="Sort pods by namespace"
                           GenericContainer
-                            Label value="Name"
-                              TextRun value="Name"
-                            Button label="Sort pods by name"
+                            GenericContainer
+                              Label value="Name"
+                                TextRun value="Name"
+                              Button label="Sort pods by name"
                           GenericContainer
-                            Label value="Status"
-                              TextRun value="Status"
-                            Button label="Sort pods by status"
+                            Label value="Ready"
+                              TextRun value="Ready"
                           GenericContainer
-                            Label value="Created"
-                              TextRun value="Created"
-                            Button label="Sort pods by created"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="db-postgres-0"
-                          Label value="Running"
-                            TextRun value="Running"
-                          Label value="2026-08-21T00:00:00Z"
-                            TextRun value="2026-08-21T00:00:00Z"
+                            GenericContainer
+                              Label value="Status"
+                                TextRun value="Status"
+                              Button label="Sort pods by status"
+                          GenericContainer
+                            Label value="Restarts"
+                              TextRun value="Restarts"
+                          GenericContainer
+                            GenericContainer
+                              Label value="Age"
+                                TextRun value="Age"
+                              Button label="Sort pods by created"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Clear selection for resource db-postgres-0"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
+                            Label value="Running"
+                              TextRun value="Running"
+                          GenericContainer
+                            GenericContainer
+                              Label value="—"
+                                TextRun value="—"
+                          GenericContainer
+                            Label value="Resource age"
+                              TextRun value="11d"
               Unknown
               GenericContainer
-                Button label="Clear selection"
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod · default / db-postgres-0"
                     TextRun value="Pod · default / db-postgres-0"
                   GenericContainer
+                    Button label="Clear selection"
                     Button label="Maximize"
                     Button label="Pop out ↗"
+                    Label value="Freshness · unavailable"
+                      TextRun value="Freshness · unavailable"
+                GenericContainer label="Detail identity row"
+                Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                          TextRun value="Status ● —"
-                        Label value="Ready · —"
-                          TextRun value="Ready · —"
-                        Label value="Restarts · —"
-                          TextRun value="Restarts · —"
-                        Label value="Age · —"
-                          TextRun value="Age · —"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Status ● —"
+                              TextRun value="Status ● —"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Ready · —"
+                              TextRun value="Ready · —"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Restarts · —"
+                              TextRun value="Restarts · —"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Age · —"
+                              TextRun value="Age · —"
                         Button label="Show more Pod vitals"
-                        Label value="Freshness · unavailable"
-                          TextRun value="Freshness · unavailable"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer

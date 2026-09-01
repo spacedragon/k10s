@@ -24,7 +24,8 @@ pub struct ServiceWindowState<I> {
     pub split_ratio: f32,
     /// Split to restore after a focused, detail-only view.
     pub prior_split_ratio: Option<f32>,
-    /// Whether the detail pane is visible; hiding keeps the detail state.
+    /// Legacy snapshot compatibility only. Runtime visibility is derived
+    /// from `detail`; persisted false values are ignored and normalized true.
     pub detail_visible: bool,
     /// Integrated detail state, present exactly when `selection` is.
     pub detail: Option<DetailState<I>>,

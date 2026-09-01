@@ -13,6 +13,7 @@ use k10s_protocol::{
     GroupVersionKind, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
     ResourceRelationsResponse, ResourceTypeEntry,
 };
+use web_time::SystemTime;
 
 use crate::workspace::{DetailTab, ResourceWindowState, WindowId, WorkloadKind, WorkspaceCommand};
 
@@ -176,6 +177,10 @@ impl DetailAuthority {
 /// lifecycle projections evolve during the crate's pre-1.0 API.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFeed {
+    /// One clock sample shared by every relative-age cell in a rendered frame.
+    /// Production derives it from the backend snapshot timestamp; deterministic
+    /// fixtures pin it explicitly.
+    pub render_time: Option<SystemTime>,
     /// Lifecycle of each open list window. Missing entries retain the legacy
     /// inference from connection and row state for compatibility.
     pub window_freshness: HashMap<WindowId, WindowFreshness>,
@@ -215,7 +220,9 @@ pub struct ResourceFeed {
 ///
 /// Production instantiates the shell with [`ResourceIdentity`] itself;
 /// static prototypes may map every row onto `()`.
-pub trait RowIdentity: Clone + Eq + std::hash::Hash + std::fmt::Debug {
+pub trait RowIdentity:
+    Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static
+{
     /// Convert one protocol identity into this workspace's identity type.
     #[must_use]
     fn from_row_identity(identity: &ResourceIdentity) -> Self;
@@ -691,6 +698,8 @@ pub(super) fn show<I>(
             super::resource_table::show(
                 ui,
                 window_id,
+                feed.render_time.unwrap_or_else(SystemTime::now),
+                kind,
                 title,
                 namespaced,
                 &state.search,
@@ -704,11 +713,8 @@ pub(super) fn show<I>(
             )
         },
         |ui| {
-            if let Some(detail) = state.detail.as_ref() {
-                if ui.button("Clear selection").clicked() {
-                    queued.push(WorkspaceCommand::ClearSelection(window_id));
-                }
-                if let Some(presentation) =
+            if let Some(detail) = state.detail.as_ref()
+                && let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
                         feed,
@@ -716,23 +722,22 @@ pub(super) fn show<I>(
                         effective_freshness,
                         effective_freshness.is_some_and(WindowFreshness::mutations_allowed),
                     )
-                {
-                    super::detail::show(
-                        ui,
-                        window_id,
-                        detail,
-                        &presentation,
-                        focused,
-                        true,
-                        state.prior_split_ratio.is_some(),
-                        yaml,
-                        streams,
-                        dialogs,
-                        None,
-                        resource_actions,
-                        queued,
-                    );
-                }
+            {
+                super::detail::show(
+                    ui,
+                    window_id,
+                    detail,
+                    &presentation,
+                    focused,
+                    true,
+                    state.prior_split_ratio.is_some(),
+                    yaml,
+                    streams,
+                    dialogs,
+                    None,
+                    resource_actions,
+                    queued,
+                );
             }
         },
     );
@@ -781,8 +786,8 @@ pub(super) fn show<I>(
         if let Some(sort) = actions.sort {
             queued.push(WorkspaceCommand::SetSort(window_id, Some(sort)));
         }
-        if let Some(identity) = actions.selected {
-            queued.push(WorkspaceCommand::SelectRow(window_id, identity));
+        if let Some(action) = actions.row_action {
+            queued.push(action.into_command(window_id));
         }
         // Double-click and the row context menu pop a dedicated window out;
         // it clones the stable identity at open time and never follows this

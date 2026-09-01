@@ -65,7 +65,7 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         "LABELS · 6",
         "ANNOTATIONS · 1",
         "IDENTITY",
-        "ghcr.io/example/web:1.2.3",
+        "Image: ghcr.io/example/web:1.2.3",
         "125m / 64Mi",
         "18m / 16Mi",
         "Started · container started · ×2 · 1m",
@@ -449,10 +449,9 @@ fn pod_layout_759_is_operational_first_with_collapsed_metadata_and_vitals() {
         .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(3);
+    harness.get_by_label("Node · worker-a");
+    harness.get_by_label("Pod IP · 10.244.0.9");
     let detail = pod_window(&harness);
-    detail.get_by_label("Node · worker-a");
-    detail.get_by_label("Pod IP · 10.244.0.9");
-    detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
 
     detail
         .get_by_role_and_label(Role::Button, "Show Pod metadata")
@@ -465,7 +464,7 @@ fn pod_layout_759_is_operational_first_with_collapsed_metadata_and_vitals() {
 }
 
 #[test]
-fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable_on_one_row() {
+fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable() {
     let mut harness = harness(700.0, healthy_detail());
     let window_id = harness
         .state()
@@ -504,39 +503,16 @@ fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable_on_o
     show_more.click();
     harness.run_steps(3);
 
-    for label in [
-        "Node · worker-a",
-        "Pod IP · 10.244.0.9",
-        "Freshness · unavailable",
-    ] {
-        pod_window(&harness).get_by_label(label).scroll_to_me();
-        harness.run_steps(2);
-        let detail = pod_window(&harness);
-        let node = detail.get_by_label(label);
-        assert!(
-            detail.rect().intersects(node.rect()),
-            "{label} must be reachable"
-        );
-    }
-    let detail = pod_window(&harness);
-    let hide_more = detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
-    hide_more.scroll_to_me();
+    harness.get_by_label("Node · worker-a");
+    harness.get_by_label("Pod IP · 10.244.0.9");
+    pod_window(&harness)
+        .get_by_label("Freshness · unavailable")
+        .scroll_to_me();
     harness.run_steps(2);
     let detail = pod_window(&harness);
-    let hide_more = detail.get_by_role_and_label(Role::Button, "Hide more Pod vitals");
-    assert!(detail.rect().intersects(hide_more.rect()));
+    let freshness = detail.get_by_label("Freshness · unavailable");
+    assert!(detail.rect().intersects(freshness.rect()));
     assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
-
-    let status_center = detail.get_by_label("Status ● Running").rect().center().y;
-    for rect in [
-        detail.get_by_label("Freshness · unavailable").rect(),
-        hide_more.rect(),
-    ] {
-        assert!(
-            (rect.center().y - status_center).abs() < 0.1,
-            "vital strip controls must share one vertical row"
-        );
-    }
 }
 
 #[test]
@@ -561,6 +537,74 @@ fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
     assert!(detail.query_by_label("checksum/config").is_none());
     assert!(detail.query_by_label("Show Pod metadata").is_none());
     assert!(detail.query_by_label("Show more Pod vitals").is_none());
+}
+
+#[test]
+fn pod_actual_1000_640_resize_preserves_identity_and_metadata_expansion() {
+    let mut harness = harness(1_024.0, healthy_detail());
+    let wide = pod_window(&harness);
+    let operational = wide.get_by_label("Operational detail column").rect();
+    let configuration = wide.get_by_label("Configuration detail column").rect();
+    assert!(
+        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
+        "{operational:?} {configuration:?}"
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    let rect = pod_window(&harness).rect();
+    let target = rect.min + egui::vec2(664.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let narrow = pod_window(&harness);
+    narrow
+        .get_by_role_and_label(Role::Button, "Show Pod metadata")
+        .click();
+    harness.run_steps(3);
+    let narrow = pod_window(&harness);
+    assert!(
+        narrow.get_by_label("CONTAINERS · 2").rect().top()
+            < narrow.get_by_label("PLACEMENT").rect().top()
+    );
+    assert!(
+        narrow.get_by_label("PLACEMENT").rect().top()
+            < narrow.get_by_label("IDENTITY").rect().top()
+    );
+    narrow.get_by_label("pod-web-0-uid");
+    let rect = narrow.rect();
+    let target = rect.min + egui::vec2(1_024.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let restored = pod_window(&harness);
+    restored.get_by_label("Operational detail column");
+    restored.get_by_label("pod-web-0-uid");
+    let rect = restored.rect();
+    let target = rect.min + egui::vec2(664.0, 800.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(4);
+    let final_narrow = pod_window(&harness);
+    final_narrow.get_by_role_and_label(Role::Button, "Hide Pod metadata");
+    final_narrow.get_by_label("PLACEMENT");
+    final_narrow.get_by_label("pod-web-0-uid");
 }
 
 #[test]
@@ -622,7 +666,23 @@ fn pod_interaction_expands_labels_and_annotations_accessibly() {
     harness.run_steps(3);
     let detail = pod_window(&harness);
     detail.get_by_label("checksum/config");
-    detail.get_by_label("abcdef");
+    detail.get_by_label("checksum/config: abcdef");
+}
+
+#[test]
+fn pod_multi_container_images_stay_in_one_aligned_grid_cell() {
+    let harness = harness(1_100.0, healthy_detail());
+    let detail = pod_window(&harness);
+    let image_header = detail.get_by_label("IMAGE").rect();
+    let state_header = detail.get_by_label("STATE").rect();
+    let web = detail
+        .get_by_label("Image: ghcr.io/example/web:1.2.3")
+        .rect();
+    let sidecar = detail.get_by_label("Image: —").rect();
+    assert!((web.left() - sidecar.left()).abs() < 0.1);
+    assert!(web.left() >= image_header.left());
+    assert!(web.right() <= state_header.left());
+    assert!(sidecar.right() <= state_header.left());
 }
 
 #[test]

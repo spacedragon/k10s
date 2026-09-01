@@ -162,6 +162,8 @@ impl<'a> DetailPresentationInput<'a> {
             status: view.and_then(status_summary),
             age: view.map(|view| view.created_at.as_str()),
         };
+        let mutations_allowed =
+            mutations_allowed && !gone && matches!(primary, DetailPrimary::Loaded(_));
         Some(Self {
             identity,
             primary,
@@ -174,10 +176,12 @@ impl<'a> DetailPresentationInput<'a> {
             freshness,
             now: SystemTime::now(),
             gone,
-            mutations_allowed: mutations_allowed
-                && !gone
-                && matches!(primary, DetailPrimary::Loaded(_)),
-            port_forward_available: feed.port_forward_available,
+            mutations_allowed,
+            // Starting a forward creates new backend state and therefore
+            // shares exact mutation authority. Existing sessions remain
+            // visible so Stop can still perform safe cleanup when authority
+            // to create new sessions has been revoked.
+            port_forward_available: feed.port_forward_available && mutations_allowed,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })
@@ -344,7 +348,7 @@ fn age_vital(created_at: Option<&str>, now: SystemTime) -> DetailVital {
     DetailVital::new("Age", format_age(created_at, now))
 }
 
-fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
+pub(crate) fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
@@ -397,6 +401,13 @@ fn format_age(created_at: Option<&str>, now: SystemTime) -> String {
     "<1m".to_owned()
 }
 
+pub(crate) fn system_time_from_rfc3339(value: &str) -> Option<SystemTime> {
+    let timestamp = value.parse::<jiff::Timestamp>().ok()?;
+    let seconds = u64::try_from(timestamp.as_second()).ok()?;
+    let nanos = u32::try_from(timestamp.subsec_nanosecond()).ok()?;
+    UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+}
+
 fn vital_number(label: &'static str, value: Option<u32>) -> DetailVital {
     DetailVital::new(
         label,
@@ -440,6 +451,13 @@ mod tests {
 
     fn fixed_now() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(NOW_SECONDS)
+    }
+
+    #[test]
+    fn backend_timestamp_provides_a_deterministic_render_clock() {
+        let parsed = super::system_time_from_rfc3339("1970-01-02T00:00:00Z").unwrap();
+        assert_eq!(parsed.duration_since(UNIX_EPOCH).unwrap().as_secs(), 86_400);
+        assert!(super::system_time_from_rfc3339("not-rfc3339").is_none());
     }
 
     #[test]
@@ -508,6 +526,11 @@ mod tests {
         }));
         let pod_input = input(&pod);
         let pod_frame = pod_input.frame_projection(DetailExpansionState::default());
+        assert_eq!(
+            labels(&pod_frame.visible_vitals),
+            ["Status", "Ready", "Restarts", "Age"]
+        );
+        assert_eq!(labels(&pod_frame.overflow_vitals), ["Node", "Pod IP"]);
         assert_eq!(vital(&pod_frame.visible_vitals, "Age"), "18m");
 
         let deployment = detail(ResourceProjection::Deployment(DeploymentProjection {
@@ -532,6 +555,14 @@ mod tests {
             more_vitals: true,
             ..DetailExpansionState::default()
         });
+        assert_eq!(
+            labels(&deployment_frame.visible_vitals),
+            ["Rollout", "Ready", "Up-to-date", "Available"]
+        );
+        assert_eq!(
+            labels(&deployment_frame.overflow_vitals),
+            ["Strategy", "Age"]
+        );
         assert_eq!(vital(&deployment_frame.overflow_vitals, "Age"), "4d 2h");
     }
 
@@ -566,6 +597,8 @@ mod tests {
 
         let input = input(&generic);
         let frame = input.frame_projection(DetailExpansionState::default());
+        assert_eq!(labels(&frame.visible_vitals), ["Status", "Age"]);
+        assert!(frame.overflow_vitals.is_empty());
         assert_eq!(vital(&frame.visible_vitals, "Age"), "31d");
     }
 
@@ -627,5 +660,9 @@ mod tests {
             .find(|vital| vital.label == label)
             .map(|vital| vital.value.as_str())
             .expect("vital is projected")
+    }
+
+    fn labels(vitals: &[super::DetailVital]) -> Vec<&'static str> {
+        vitals.iter().map(|vital| vital.label).collect()
     }
 }
