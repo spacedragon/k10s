@@ -57,25 +57,37 @@ Window label="Deployment · payments / checkout"
                           GenericContainer
                             Label value="Name"
                               TextRun value="Name"
+                          GenericContainer
                             Label value="Ready"
                               TextRun value="Ready"
+                          GenericContainer
                             Label value="Status"
                               TextRun value="Status"
+                          GenericContainer
                             Label value="Restarts"
                               TextRun value="Restarts"
+                          GenericContainer
                             Label value="Node"
                               TextRun value="Node"
+                          GenericContainer
                             Label value="Age"
                               TextRun value="Age"
-                            Button label="Pod · payments / checkout-4-x7k9p"
+                        GenericContainer
+                          GenericContainer
+                            Button label="Pod · checkout-4-x7k9p"
+                          GenericContainer
                             Label value="1/1"
                               TextRun value="1/1"
+                          GenericContainer
                             Label value="● Running"
                               TextRun value="● Running"
+                          GenericContainer
                             Label value="2"
                               TextRun value="2"
+                          GenericContainer
                             Label value="worker-a"
                               TextRun value="worker-a"
+                          GenericContainer
                             Label value="—"
                               TextRun value="—"
                   Label value="ROLLOUT HISTORY"
@@ -85,25 +97,30 @@ Window label="Deployment · payments / checkout"
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            Label value="Revision"
-                              TextRun value="Revision"
+                            Label value="Rev"
+                              TextRun value="Rev"
+                          GenericContainer
                             Label value="ReplicaSet"
                               TextRun value="ReplicaSet"
-                            Label value="Images"
-                              TextRun value="Images"
-                            Label value="Replicas"
-                              TextRun value="Replicas"
-                            Label value="Created"
-                            Label value="Revision 4 · checkout-4"
-                              TextRun value="Revision 4 · checkout-4"
+                          GenericContainer
+                            Label value="Image tag"
+                              TextRun value="Image tag"
+                          GenericContainer
+                            Label value="When"
+                              TextRun value="When"
+                        GenericContainer
+                          GenericContainer
+                            Label value="4 current"
+                              TextRun value="4 current"
+                          GenericContainer
                             Label value="checkout-4"
                               TextRun value="checkout-4"
-                            Label value="Images · api=ghcr.io/acme/checkout:v4"
-                              TextRun value="Images · api=ghcr.io/acme/checkout:v4"
-                            Label value="Replicas · 2/3 ready"
-                              TextRun value="Replicas · 2/3 ready"
-                            Label value="Created · 2026-08-30T09:55:00Z"
-                    ScrollBar
+                          GenericContainer
+                            Label value="v4"
+                              TextRun value="v4"
+                          GenericContainer
+                            Label value="1d 22h"
+                              TextRun value="1d 22h"
                   Label value="RECENT ROLLOUT EVENTS"
                     TextRun value="RECENT ROLLOUT EVENTS"
                   Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"

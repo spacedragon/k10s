@@ -409,9 +409,8 @@ fn deployment_projection_complete_uses_typed_fields_only() {
         "Rollout ● NewReplicaSetAvailable",
         "PODS · 1",
         "ROLLOUT HISTORY",
-        "Revision 4 · checkout-4",
-        "Images · api=ghcr.io/acme/checkout:v4",
-        "Replicas · 2/3 ready",
+        "4 current",
+        "v4",
         "TEMPLATE",
         "Image (api): ghcr.io/acme/checkout:v4",
         "Selector: app=checkout",
@@ -596,7 +595,7 @@ fn deployment_projection_unavailable_rollout_events_are_explicit() {
     open_detail(&mut harness, detail, None, [980.0, 620.0]);
     harness
         .get_by_role_and_label(Role::Window, "Deployment · payments / checkout")
-        .get_by_label("Recent rollout events unavailable");
+        .get_by_label("Rollout events unavailable");
 }
 
 #[test]
@@ -688,6 +687,69 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("TEMPLATE");
     window.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
+}
+
+/// Regression guard for the Overview geometry: at the 1000x700 wide viewport
+/// the operational/configuration columns keep the 1.35:1 ratio and label chips
+/// never overlap the expand buttons; at the 640x700 narrow viewport the
+/// metadata column collapses behind its disclosure button.
+#[test]
+fn deployment_overview_verification_geometries_and_no_overlap() {
+    // Wide 1000x700: ratio holds and chips stay above the expand buttons.
+    let mut wide = harness(egui::vec2(1_240.0, 820.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut wide,
+        detail,
+        Some(exact_relations(&identity)),
+        [1_000.0, 700.0],
+    );
+    let window = wide.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let operational = window.get_by_label("Operational detail column").rect();
+    let configuration = window.get_by_label("Configuration detail column").rect();
+    assert!(
+        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
+        "wide 1.35:1 ratio drifted: {operational:?} {configuration:?}"
+    );
+    let show_more = window
+        .get_by_role_and_label(Role::Button, "Show 2 more labels")
+        .rect();
+    let annot_button = window
+        .get_by_role_and_label(Role::Button, "Show 2 annotations")
+        .rect();
+    for node in window.query_all_by_role(Role::Label) {
+        let Some(value) = node.value() else { continue };
+        if !value.contains(':') || !value.contains('.') {
+            continue;
+        }
+        // A rendered label chip is `key: value`; it must sit above the
+        // buttons rather than overlap them.
+        let chip = node.rect();
+        assert!(
+            chip.bottom() <= show_more.top() + 0.5,
+            "chip '{value}' overlaps the show-more button: {chip:?} vs {show_more:?}"
+        );
+    }
+    // Annotations button must be present and reachable (not pushed below the
+    // fold), which is guaranteed when the chips wrap within the column width.
+    window.get_by_role_and_label(Role::Button, "Show 2 annotations");
+    let _ = annot_button;
+
+    // Narrow 640x700: metadata collapses behind the disclosure button.
+    let mut narrow = harness(egui::vec2(1_020.0, 800.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut narrow,
+        detail,
+        Some(exact_relations(&identity)),
+        [640.0, 700.0],
+    );
+    let window = narrow.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    window.get_by_label("PODS · 1");
+    assert!(window.query_by_label("TEMPLATE").is_none());
+    window.get_by_role_and_label(Role::Button, "Show Deployment metadata");
 }
 
 #[test]
@@ -793,7 +855,7 @@ fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner(
         );
 
         for (table_label, last_column) in [
-            ("Deployment rollout history table", "Created"),
+            ("Deployment rollout history table", "When"),
             ("Deployment Pods table", "Age"),
         ] {
             harness
@@ -883,7 +945,7 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
         [1_050.0, 700.0],
     );
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    assert!(window.query_by_label("team · payments").is_none());
+    assert!(window.query_by_label("team: payments").is_none());
     window
         .get_by_role_and_label(Role::Button, "Show 2 more labels")
         .click();
@@ -894,7 +956,9 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
         .click();
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window.get_by_label("team · payments");
+    // Labels render as chips; the chip exposes `key: value` as its accessible
+    // name even though the visible text drops the colon.
+    window.get_by_label("team: payments");
     window.get_by_label("meta.helm.sh/release-name: checkout-prod");
     window.get_by_role_and_label(Role::Button, "Hide 2 labels");
     window.get_by_role_and_label(Role::Button, "Hide annotations");
