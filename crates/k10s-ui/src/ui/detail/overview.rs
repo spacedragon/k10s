@@ -65,21 +65,52 @@ pub(super) fn long_value_text(value: &str, max_chars: usize) -> String {
 
 /// A full-width, two-line value used for images, selectors and annotations.
 pub(super) fn long_value(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
-    let original = value.filter(|value| !value.is_empty()).unwrap_or("—");
+    let available = value.filter(|value| !value.is_empty());
+    let original = available.unwrap_or("—");
     ui.label(RichText::new(label).weak());
     ui.horizontal(|ui| {
-        let shown = long_value_text(original, 64);
-        let response = ui.label(&shown);
+        let copy_width = if available.is_some() { 48.0 } else { 0.0 };
+        let remaining = (ui.max_rect().right() - ui.cursor().left()).max(1.0);
+        let value_width = (remaining - copy_width - ui.spacing().item_spacing.x).max(1.0);
+        let mut limit =
+            unicode_segmentation::UnicodeSegmentation::graphemes(original, true).count();
+        let mut shown = original.to_owned();
+        while limit > 1
+            && ui
+                .painter()
+                .layout_no_wrap(
+                    shown.clone(),
+                    egui::FontId::default(),
+                    ui.visuals().text_color(),
+                )
+                .size()
+                .x
+                > value_width
+        {
+            limit -= 1;
+            shown = long_value_text(original, limit);
+        }
+        let response = ui.add_sized(
+            [value_width, ui.spacing().interact_size.y],
+            egui::Label::new(&shown).truncate(),
+        );
         response.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Label, true, format!("{label}: {original}"))
         });
         if shown != original {
             response.on_hover_text(original);
         }
-        let copy = ui.small_button("Copy");
-        copy.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Copy {label}")));
-        if copy.clicked() {
-            ui.ctx().copy_text(original.to_owned());
+        if available.is_some() {
+            let copy = ui.add_sized(
+                [copy_width, ui.spacing().interact_size.y],
+                egui::Button::new("Copy").small(),
+            );
+            copy.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, true, format!("Copy {label}"))
+            });
+            if copy.clicked() {
+                ui.ctx().copy_text(original.to_owned());
+            }
         }
     });
 }
@@ -172,6 +203,36 @@ mod responsive_contract_tests {
         harness.run();
         assert!(harness.query_by_label("EMPTY SENTINEL").is_none());
     }
+
+    #[test]
+    fn unavailable_long_value_never_exposes_copy() {
+        let mut harness = Harness::new_ui(|ui| super::long_value(ui, "Image", None));
+        harness.run();
+        harness.get_by_label("Image: —");
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, "Copy Image")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn duplicate_section_titles_render_independent_grids() {
+        let sections = ["one", "two"].map(|value| k10s_protocol::DetailSection {
+            title: "DUPLICATE".into(),
+            rows: vec![k10s_protocol::DetailRow {
+                label: "Value".into(),
+                value: value.into(),
+            }],
+        });
+        let mut harness = Harness::new_ui(move |ui| {
+            super::generic_sections(ui, crate::workspace::WindowId(9), &sections)
+        });
+        harness.run();
+        assert_eq!(harness.get_all_by_label("DUPLICATE").count(), 2);
+        harness.get_by_label("Value one");
+        harness.get_by_label("Value two");
+    }
 }
 
 pub(super) fn show(
@@ -201,21 +262,26 @@ fn generic_sections(ui: &mut egui::Ui, window_id: WindowId, sections: &[DetailSe
         ui.label("No additional structured details");
         return;
     }
-    for section in sections {
+    for (section_index, section) in sections.iter().enumerate() {
         if section.rows.is_empty() {
             continue;
         }
         ui.heading(RichText::new(section.title.as_str()).strong());
-        Grid::new(("k10s.detail.overview.grid", window_id.0, &section.title))
-            .num_columns(1)
-            .striped(true)
-            .min_col_width(240.0)
-            .show(ui, |ui| {
-                for row in &section.rows {
-                    ui.label(format!("{} {}", row.label, row.value));
-                    ui.end_row();
-                }
-            });
+        Grid::new((
+            "k10s.detail.overview.grid",
+            window_id.0,
+            section_index,
+            &section.title,
+        ))
+        .num_columns(1)
+        .striped(true)
+        .min_col_width(240.0)
+        .show(ui, |ui| {
+            for row in &section.rows {
+                ui.label(format!("{} {}", row.label, row.value));
+                ui.end_row();
+            }
+        });
         ui.separator();
     }
 }

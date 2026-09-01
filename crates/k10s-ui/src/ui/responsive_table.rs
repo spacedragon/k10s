@@ -129,23 +129,27 @@ pub(super) fn resolve_columns(
 
 /// Unicode-safe compact representation retaining both identifying ends.
 pub(super) fn middle_elide(value: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= max_chars {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let graphemes: Vec<&str> = value.graphemes(true).collect();
+    if graphemes.len() <= max_chars {
         return value.to_owned();
     }
     if max_chars <= 1 {
         return "…".chars().take(max_chars).collect();
     }
-    let tagged_suffix = value.rfind(':').map(|byte| value[byte..].chars().count());
+    let tagged_suffix = value
+        .rfind(':')
+        .map(|byte| value[byte..].graphemes(true).count());
     let suffix = tagged_suffix
         .filter(|count| *count < max_chars - 1)
         .unwrap_or((max_chars - 1) / 2);
     let prefix = max_chars - 1 - suffix;
-    chars[..prefix]
+    graphemes[..prefix]
         .iter()
-        .chain(std::iter::once(&'…'))
-        .chain(chars[chars.len() - suffix..].iter())
-        .collect()
+        .copied()
+        .chain(std::iter::once("…"))
+        .chain(graphemes[graphemes.len() - suffix..].iter().copied())
+        .collect::<String>()
 }
 
 /// Paint a resolved cell at its exact content width; the surrounding Grid
@@ -371,5 +375,10 @@ mod tests {
         assert!(compact.ends_with(":v0.3.1"));
         assert!(compact.chars().count() <= 24);
         assert_eq!(middle_elide("部署镜像:v1", 6), "部署…:v1");
+        let complex = "repo/e\u{301}/👨‍👩‍👧‍👦/版本非常长:v9";
+        let compact = middle_elide(complex, 8);
+        assert!(compact.ends_with(":v9"));
+        assert!(!compact.contains("e…\u{301}"));
+        assert!(!compact.contains("👨‍"));
     }
 }

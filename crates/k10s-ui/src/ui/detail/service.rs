@@ -78,7 +78,7 @@ fn overview_tab(
     presentation: &super::presentation::DetailPresentationInput<'_>,
 ) {
     let Some(projection) = projection else {
-        ui.label("Structured details unavailable");
+        show_unavailable(ui, window_id, presentation);
         return;
     };
     if super::overview::two_column(
@@ -92,9 +92,35 @@ fn overview_tab(
         return;
     }
     service_operational(ui, window_id, projection);
-    ui.separator();
-    service_configuration(ui, window_id, projection);
-    ui.separator();
+    if service_configuration(ui, window_id, projection) {
+        ui.separator();
+    }
+    service_identity(ui, window_id, presentation);
+}
+
+pub(super) fn show_unavailable(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+) {
+    if super::overview::two_column(
+        ui,
+        |column| {
+            column.heading("OPERATIONAL");
+            column.label("Structured details unavailable");
+        },
+        |column| {
+            column.heading("CONFIGURATION");
+            column.label("Structured details unavailable");
+            service_identity(column, window_id, presentation);
+        },
+    ) {
+        return;
+    }
+    ui.heading("OPERATIONAL");
+    ui.label("Structured details unavailable");
+    ui.heading("CONFIGURATION");
+    ui.label("Structured details unavailable");
     service_identity(ui, window_id, presentation);
 }
 
@@ -129,7 +155,12 @@ fn service_operational(ui: &mut egui::Ui, window_id: WindowId, projection: &Serv
         });
 }
 
-fn service_configuration(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
+fn service_configuration(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    projection: &ServiceProjection,
+) -> bool {
+    let mut painted = false;
     let selector = projection
         .selector
         .iter()
@@ -139,14 +170,16 @@ fn service_configuration(ui: &mut egui::Ui, window_id: WindowId, projection: &Se
     if !selector.is_empty() {
         ui.heading("SELECTORS");
         super::overview::long_value(ui, "Selector", Some(&selector));
+        painted = true;
     }
     if projection.session_affinity.is_none()
         && projection.external_traffic_policy.is_none()
         && projection.internal_traffic_policy.is_none()
     {
-        return;
+        return painted;
     }
     ui.heading("TRAFFIC & SESSION");
+    painted = true;
     Grid::new(("k10s.detail.service.traffic", window_id.0)).show(ui, |ui| {
         if let Some(value) = projection.session_affinity.as_deref() {
             overview_row(ui, "Session affinity", nonempty(value));
@@ -158,6 +191,7 @@ fn service_configuration(ui: &mut egui::Ui, window_id: WindowId, projection: &Se
             overview_row(ui, "Internal policy", nonempty(value));
         }
     });
+    painted
 }
 
 fn nonempty(value: &str) -> &str {

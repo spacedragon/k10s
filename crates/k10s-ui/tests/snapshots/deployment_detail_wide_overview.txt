@@ -130,9 +130,11 @@ Window label="Deployment · payments / checkout"
                           Label value="Image (api)"
                             TextRun value="Image (api)"
                           GenericContainer
-                            Label value="Image (api): ghcr.io/acme/checkout:v4"
-                              TextRun value="ghcr.io/acme/checkout:v4"
-                            Button label="Copy Image (api)"
+                            GenericContainer
+                              Label value="Image (api): ghcr.io/acme/checkout:v4"
+                                TextRun value="…"
+                            GenericContainer
+                              Button label="Copy Image (api)"
                           Label value="Replicas · 3/3 available"
                             TextRun value="Replicas · 3/3 available"
                           Label value="Max surge · 25%"
@@ -142,9 +144,11 @@ Window label="Deployment · payments / checkout"
                           Label value="Selector"
                             TextRun value="Selector"
                           GenericContainer
-                            Label value="Selector: app=checkout"
-                              TextRun value="app=checkout"
-                            Button label="Copy Selector"
+                            GenericContainer
+                              Label value="Selector: app=checkout"
+                                TextRun value="…"
+                            GenericContainer
+                              Button label="Copy Selector"
                           Label value="Template labels · app=checkout"
                             TextRun value="Template labels · app=checkout"
                           Label value="Template annotations · checksum/config=abc123"

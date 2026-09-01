@@ -1130,6 +1130,29 @@ fn service_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
                 },
             ));
     }
+    let identity = service_identity("untyped");
+    let mut untyped = service_detail("untyped", false);
+    untyped.projection = None;
+    fixture.feed.details.insert(identity.clone(), untyped);
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [1_050.0, 400.0],
+                size: [664.0, 360.0],
+                collapsed: false,
+            },
+        ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1_800.0, 800.0))
         .build_ui_state(render, fixture);
@@ -1147,6 +1170,14 @@ fn service_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
             < narrow.get_by_label("IDENTITY").rect().top()
     );
     narrow.get_by_role_and_label(Role::Button, "Tab Overview");
+    let untyped = harness.get_by_role_and_label(Role::Window, "Service · default / untyped");
+    assert_eq!(
+        untyped
+            .get_all_by_label("Structured details unavailable")
+            .count(),
+        2
+    );
+    untyped.get_by_label("UID uid-dev-local-service-default-untyped");
 }
 
 #[test]

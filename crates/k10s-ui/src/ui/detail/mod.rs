@@ -241,6 +241,9 @@ pub(super) fn show<I>(
                             ui.add(egui::Spinner::new());
                             ui.label("Loading details");
                         });
+                        if is_service_gvk(&detail_identity_gvk(detail)) {
+                            service::show_unavailable(ui, window_id, presentation);
+                        }
                     }
                     return;
                 }
@@ -252,6 +255,9 @@ pub(super) fn show<I>(
                         resource_actions.push(crate::ui::ResourceAction::RetryPrimary(
                             presentation.identity.clone(),
                         ));
+                    }
+                    if !actions && is_service_gvk(&detail_identity_gvk(detail)) {
+                        service::show_unavailable(ui, window_id, presentation);
                     }
                     return;
                 }
