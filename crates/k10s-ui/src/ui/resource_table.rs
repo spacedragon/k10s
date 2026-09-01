@@ -365,6 +365,7 @@ fn right_label(ui: &mut egui::Ui, value: String) {
     });
 }
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::ready_pair;
     #[test]

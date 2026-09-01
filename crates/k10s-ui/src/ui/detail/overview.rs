@@ -129,6 +129,7 @@ pub(super) fn long_value_cell(ui: &mut egui::Ui, width: f32, label: &str, value:
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod responsive_contract_tests {
     use super::{detail_columns, long_value_text};
     use egui::accesskit::Role;

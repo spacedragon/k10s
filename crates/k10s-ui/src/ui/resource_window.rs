@@ -707,8 +707,8 @@ pub(super) fn show<I>(
             )
         },
         |ui| {
-            if let Some(detail) = state.detail.as_ref() {
-                if let Some(presentation) =
+            if let Some(detail) = state.detail.as_ref()
+                && let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
                         feed,
@@ -716,23 +716,22 @@ pub(super) fn show<I>(
                         effective_freshness,
                         effective_freshness.is_some_and(WindowFreshness::mutations_allowed),
                     )
-                {
-                    super::detail::show(
-                        ui,
-                        window_id,
-                        detail,
-                        &presentation,
-                        focused,
-                        true,
-                        state.prior_split_ratio.is_some(),
-                        yaml,
-                        streams,
-                        dialogs,
-                        None,
-                        resource_actions,
-                        queued,
-                    );
-                }
+            {
+                super::detail::show(
+                    ui,
+                    window_id,
+                    detail,
+                    &presentation,
+                    focused,
+                    true,
+                    state.prior_split_ratio.is_some(),
+                    yaml,
+                    streams,
+                    dialogs,
+                    None,
+                    resource_actions,
+                    queued,
+                );
             }
         },
     );

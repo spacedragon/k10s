@@ -339,8 +339,8 @@ where
             )
         },
         |ui| {
-            if let Some(detail) = state.detail.as_ref() {
-                if let Some(presentation) =
+            if let Some(detail) = state.detail.as_ref()
+                && let Some(presentation) =
                     super::detail::presentation::DetailPresentationInput::from_feed(
                         detail,
                         feed,
@@ -348,23 +348,22 @@ where
                         effective_freshness,
                         effective_freshness.is_some_and(super::WindowFreshness::mutations_allowed),
                     )
-                {
-                    super::detail::show(
-                        ui,
-                        window_id,
-                        detail,
-                        &presentation,
-                        focused,
-                        true,
-                        state.prior_split_ratio.is_some(),
-                        yaml,
-                        streams,
-                        dialogs,
-                        Some(&state.port_drafts),
-                        resource_actions,
-                        queued,
-                    );
-                }
+            {
+                super::detail::show(
+                    ui,
+                    window_id,
+                    detail,
+                    &presentation,
+                    focused,
+                    true,
+                    state.prior_split_ratio.is_some(),
+                    yaml,
+                    streams,
+                    dialogs,
+                    Some(&state.port_drafts),
+                    resource_actions,
+                    queued,
+                );
             }
         },
     );
@@ -393,10 +392,10 @@ where
     if let Some(identity) = state.selection.clone()
         && ui.input(|input| input.key_pressed(egui::Key::Enter))
         && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|input| input.modifiers.any())
+        && !gone
     {
-        if ui.input(|input| input.modifiers.any()) && !gone {
-            queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
-        }
+        queued.push(WorkspaceCommand::OpenDedicatedDetail(identity));
     }
 
     if ratio != state.split_ratio {
