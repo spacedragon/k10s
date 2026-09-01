@@ -11,23 +11,35 @@ Window label="Deployment · payments / checkout"
             Unknown label="Detail vital strip"
             GenericContainer
               GenericContainer
-                Label value="Rollout ● NewReplicaSetAvailable"
-                  TextRun value="Rollout ● NewReplicaSetAvailable"
+                GenericContainer
+                  Label value="Rollout ● NewReplicaSetAvailable"
+                    TextRun value="Rollout ● NewReplicaSe…"
+              Unknown label="Vital chip Rollout ● NewReplicaSetAvailable"
               GenericContainer
-                Label value="Ready · 3/3"
-                  TextRun value="Ready · 3/3"
+                GenericContainer
+                  Label value="Ready · 3/3"
+                    TextRun value="Ready · 3/3"
+              Unknown label="Vital chip Ready · 3/3"
               GenericContainer
-                Label value="Up-to-date · 3"
-                  TextRun value="Up-to-date · 3"
+                GenericContainer
+                  Label value="Up-to-date · 3"
+                    TextRun value="Up-to-date · 3"
+              Unknown label="Vital chip Up-to-date · 3"
               GenericContainer
-                Label value="Available · 3"
-                  TextRun value="Available · 3"
+                GenericContainer
+                  Label value="Available · 3"
+                    TextRun value="Available · 3"
+              Unknown label="Vital chip Available · 3"
               GenericContainer
-                Label value="Strategy · RollingUpdate"
-                  TextRun value="Strategy · RollingUpdate"
+                GenericContainer
+                  Label value="Strategy · RollingUpdate"
+                    TextRun value="Strategy · RollingUpda…"
+              Unknown label="Vital chip Strategy · RollingUpdate"
               GenericContainer
-                Label value="Age · 30d"
-                  TextRun value="Age · 30d"
+                GenericContainer
+                  Label value="Age · 30d"
+                    TextRun value="Age · 30d"
+              Unknown label="Vital chip Age · 30d"
             GenericContainer
               GenericContainer
                 GenericContainer

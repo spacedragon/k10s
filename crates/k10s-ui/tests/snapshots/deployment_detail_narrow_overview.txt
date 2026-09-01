@@ -14,17 +14,25 @@ Window label="Deployment · payments / checkout"
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      Label value="Rollout ▲ ReplicaSetUpdated"
-                        TextRun value="Rollout ▲ ReplicaSetUpdated"
+                      GenericContainer
+                        Label value="Rollout ▲ ReplicaSetUpdated"
+                          TextRun value="Rollout ▲ ReplicaSetUp…"
+                    Unknown label="Vital chip Rollout ▲ ReplicaSetUpdated"
                     GenericContainer
-                      Label value="Ready · 3/3"
-                        TextRun value="Ready · 3/3"
+                      GenericContainer
+                        Label value="Ready · 3/3"
+                          TextRun value="Ready · 3/3"
+                    Unknown label="Vital chip Ready · 3/3"
                     GenericContainer
-                      Label value="Up-to-date · 3"
-                        TextRun value="Up-to-date · 3"
+                      GenericContainer
+                        Label value="Up-to-date · 3"
+                          TextRun value="Up-to-date · 3"
+                    Unknown label="Vital chip Up-to-date · 3"
                     GenericContainer
-                      Label value="Available · 3"
-                        TextRun value="Available · 3"
+                      GenericContainer
+                        Label value="Available · 3"
+                          TextRun value="Available · 3"
+                    Unknown label="Vital chip Available · 3"
                     Button label="Show more Deployment vitals"
             GenericContainer
               GenericContainer

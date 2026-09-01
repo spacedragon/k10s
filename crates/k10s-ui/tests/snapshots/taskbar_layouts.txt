@@ -253,17 +253,25 @@ Window
                   GenericContainer
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                          TextRun value="Status ● —"
+                        GenericContainer
+                          Label value="Status ● —"
+                            TextRun value="Status ● —"
+                      Unknown label="Vital chip Status ● —"
                       GenericContainer
-                        Label value="Ready · —"
-                          TextRun value="Ready · —"
+                        GenericContainer
+                          Label value="Ready · —"
+                            TextRun value="Ready · —"
+                      Unknown label="Vital chip Ready · —"
                       GenericContainer
-                        Label value="Restarts · —"
-                          TextRun value="Restarts · —"
+                        GenericContainer
+                          Label value="Restarts · —"
+                            TextRun value="Restarts · —"
+                      Unknown label="Vital chip Restarts · —"
                       GenericContainer
-                        Label value="Age · —"
-                          TextRun value="Age · —"
+                        GenericContainer
+                          Label value="Age · —"
+                            TextRun value="Age · —"
+                      Unknown label="Vital chip Age · —"
                       Button label="Show more Pod vitals"
               GenericContainer
                 GenericContainer

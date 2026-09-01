@@ -317,26 +317,45 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
         Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), display.visible),
         None => format!("{} · {}", vital.label, display.visible),
     };
+    let text = RichText::new(visible).color(vital_color(ui.visuals(), vital.tone));
+    let natural = WidgetText::from(text.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let chip_width = (natural.size().x + 12.0).min(VITAL_CHIP_MAX_WIDTH);
+    let chip_height = ui.spacing().interact_size.y;
+    let (chip_rect, chip_response) =
+        ui.allocate_exact_size(egui::vec2(chip_width, chip_height), Sense::hover());
+    let mut chip_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(chip_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    chip_ui.set_clip_rect(chip_ui.clip_rect().intersect(chip_rect));
     egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .fill(chip_ui.visuals().faint_bg_color)
+        .stroke(chip_ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(4.0)
-        .inner_margin(egui::Margin::symmetric(6, 2))
-        .show(ui, |ui| {
-            ui.set_max_width(VITAL_CHIP_MAX_WIDTH);
-            let response = ui.add(
-                egui::Label::new(
-                    RichText::new(visible).color(vital_color(ui.visuals(), vital.tone)),
-                )
-                .wrap_mode(egui::TextWrapMode::Extend),
-            );
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(&mut chip_ui, |ui| {
+            ui.set_width((chip_width - 12.0).max(0.0));
+            let response = ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate));
             response.widget_info(|| {
                 WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
             });
-            if display.elided {
-                response.on_hover_text(display.accessible);
+            if display.elided || natural.size().x + 12.0 > VITAL_CHIP_MAX_WIDTH {
+                response.on_hover_text(display.accessible.clone());
             }
         });
+    chip_response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::Other,
+            true,
+            format!("Vital chip {}", display.accessible),
+        )
+    });
 }
 
 fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
@@ -621,6 +640,8 @@ mod tests {
     #[test]
     fn deployment_vitals_are_bounded_at_exact_breakpoints_and_popup_is_owned() {
         const LONG: &str = "正在部署一个非常非常长的版本名称-with-an-equally-long-suffix";
+        const LONG_ASCII: &str =
+            "ThisIsAnExtremelyLongReadyValueThatMustNeverEscapeTheVitalChipBoundary";
         for width in [760.0, 1000.0] {
             let identity = ResourceIdentity {
                 context: "dev-local".into(),
@@ -666,7 +687,7 @@ mod tests {
                         |projection| {
                             projection.visible_vitals = vec![
                                 DetailVital::new("Rollout", LONG),
-                                DetailVital::new("Ready", "3/3"),
+                                DetailVital::new("Ready", LONG_ASCII),
                                 DetailVital::new("Up-to-date", "3"),
                                 DetailVital::new("Available", "3"),
                             ];
@@ -685,7 +706,25 @@ mod tests {
             );
             let rollout_label = format!("Rollout · {LONG}");
             harness.get_by_label(&rollout_label);
+            let ready_label = format!("Ready · {LONG_ASCII}");
+            harness.get_by_label(&ready_label);
             harness.get_by_label("Strategy · RollingUpdate");
+            let strip = harness.get_by_label("Detail vital strip").rect();
+            for accessible in [
+                rollout_label,
+                ready_label,
+                "Up-to-date · 3".to_owned(),
+                "Available · 3".to_owned(),
+            ] {
+                let chip = harness
+                    .get_by_label(&format!("Vital chip {accessible}"))
+                    .rect();
+                assert!(chip.width() <= super::VITAL_CHIP_MAX_WIDTH + 0.1);
+                assert!(
+                    strip.contains_rect(chip),
+                    "required chip escaped 760pt strip"
+                );
+            }
             assert!(
                 harness
                     .query_by_role_and_label(
