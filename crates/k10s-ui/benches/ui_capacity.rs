@@ -244,12 +244,18 @@ fn locate_visible_pods(
         .filter(|node| {
             node.accesskit_node()
                 .label()
-                .is_some_and(|label| label.starts_with("scale-pod-"))
+                .is_some_and(|label| pod_name_from_row_label(&label).is_some())
         })
         .map(|node| node.accesskit_node().locate())
         .collect();
     located.dedup();
     located
+}
+
+fn pod_name_from_row_label(label: &str) -> Option<&str> {
+    label
+        .strip_prefix("Select resource ")
+        .filter(|name| name.starts_with("scale-pod-"))
 }
 
 /// An egui event asking the containing ScrollArea of a row to scroll down.
@@ -268,7 +274,7 @@ fn visible_pod_labels(tree: &kittest::State) -> Vec<String> {
     BenchNode(tree.root())
         .children_recursive()
         .filter_map(|node| node.accesskit_node().label())
-        .filter(|label| label.starts_with("scale-pod-"))
+        .filter_map(|label| pod_name_from_row_label(&label).map(str::to_owned))
         .collect()
 }
 
@@ -428,6 +434,7 @@ fn main() {
     // this fails if virtual offsets ever diverge from the rendered geometry
     // or if the end of the list cannot be reached at all.
     let tail_label = last_pod_name(OBJECTS);
+    let tail_row_label = format!("Select resource {tail_label}");
     let mut reached_tail = false;
     // The full list is ~350k points tall; each visible widget contributes
     // one bounded 100-point step per frame, so crossing the whole list
@@ -448,7 +455,9 @@ fn main() {
         );
         if frame % 100 == 99 {
             let tree = accesskit_tree.as_ref().unwrap();
-            reached_tail = BenchNode(tree.root()).query_by_label(&tail_label).is_some();
+            reached_tail = BenchNode(tree.root())
+                .query_by_label(&tail_row_label)
+                .is_some();
             let last = visible_pod_labels(tree).last().cloned();
             eprintln!("tail frame {frame}: reached={reached_tail} last={last:?}");
             if reached_tail {
@@ -468,7 +477,7 @@ fn main() {
     // not just present in the accessibility tree.
     let tree = accesskit_tree.as_ref().unwrap();
     let tail_rect = BenchNode(tree.root())
-        .query_by_label(&tail_label)
+        .query_by_label(&tail_row_label)
         .and_then(|node| node.accesskit_node().bounding_box())
         .expect("the tail row has a bounding box once reachable");
     let window_rect = BenchNode(tree.root())
