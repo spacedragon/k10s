@@ -51,6 +51,24 @@ gives the Name column the remainder, and then removes lower-priority columns in
 adapter order until Name retains its declared minimum. Columns reappear in the
 reverse order when the window grows, without changing user state.
 
+Initial adapter fixtures, measured in egui points before standard cell padding,
+are:
+
+| Adapter | Columns and minimum widths | Automatic hide order |
+| --- | --- | --- |
+| Deployment | Namespace 112, Name 180 elastic, Ready 56, Status 112, Image 180 elastic, Age 56 | Image, then Status |
+| Pod | Namespace 112, Name 180 elastic, Ready 56, Status 112, Restarts 64, Node 120, Age 56 | Node, then Restarts |
+| Service | Namespace 112, Name 180 elastic, Type 88, Cluster IP 120, Ports 180 elastic, Age 56 | Cluster IP, then Type |
+| Generic namespaced | Namespace 112, Name 180 elastic, Status 120, Age 56 | Status, then Age |
+| Generic cluster-scoped | Name 220 elastic, Status 120, Age 56 | Status, then Age |
+
+At the 1000-point fixture all listed columns render. At 640 points columns hide
+only as needed in the stated order. Namespace and Name are never automatically
+hidden. After all eligible columns are removed, any remaining width deficit
+uses one horizontal table scroller; fixed critical columns and identity widths
+do not compress below their declared minimum. Cluster-scoped rows omit
+Namespace and reclaim its allocation.
+
 Namespace and Name remain discoverable. Numeric values align right. Status uses
 text plus shape/color rather than color alone. Long image and identifier values
 use middle elision so meaningful suffixes, especially image tags, remain
@@ -125,13 +143,14 @@ state, configuration, then identity. Layout tests use 1000-point and 640-point
 content widths; resizing across 760 points must not change selection, scroll
 state, tab, or vital declaration order.
 
-At 1000 points every adapter shows all required vitals inline. At 640 points,
+At 1000 points every adapter shows all resource-specific required vitals inline.
+Freshness remains the separate identity-row marker and is not duplicated as a
+vital chip. At 640 points,
 Deployment preserves Rollout, Ready, Up-to-date, and Available; Pod preserves
 Status, Ready, Restarts, and Age; Service and generic kinds preserve Status,
-Age, and freshness. Remaining values appear in the `Show more` popover in
-declaration order. If even the preserved chips cannot fit, the strip scrolls
-horizontally as a last-resort accessibility fallback rather than clipping or
-wrapping.
+and Age. Remaining values appear in the `Show more` popover in declaration
+order. If even the preserved chips cannot fit, the strip scrolls horizontally
+as a last-resort accessibility fallback rather than clipping or wrapping.
 
 Long KV fields such as image, selector, and annotations use a two-line form:
 the label occupies its own line, while the value receives the full column
@@ -174,11 +193,15 @@ or disabled with the existing explanatory tooltip.
 | Stale or failed with last good data | Yes | Yes | No | View | No | No | No |
 | Forbidden | Yes | Yes | No | No | No | No | No |
 | Gone | Yes | Yes | No | View when cached | No | No | No |
-| Legacy/missing typed projection | Yes | Yes | capability-driven | View | capability-driven | capability-driven | capability-driven |
 
 Maximize/Restore is frame-local and remains enabled whenever integrated Detail
 exists. Tabs with no authoritative or cached content render their current
 unavailable state rather than starting a new request through a disabled action.
+Action availability is always the intersection of the current freshness row,
+the resource capability, and mutation authority. Typed-projection availability
+is orthogonal: a legacy or missing projection changes only the structured
+Overview body and never grants an action disallowed by the current freshness or
+authority state.
 
 ## Accessibility and Keyboard Behavior
 
