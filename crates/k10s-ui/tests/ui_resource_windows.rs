@@ -1108,6 +1108,66 @@ fn selection_driven_detail_panel_respects_split_minima() {
 }
 
 #[test]
+fn selected_row_click_queues_guarded_clear() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+
+    let row_label = "db-postgres-0";
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(4);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .query_by_label("Pod · default / db-postgres-0")
+            .is_some()
+    );
+
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(4);
+
+    let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
+    let resource = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(window)
+        .expect("Pods window has resource state");
+    assert!(resource.selection.is_none());
+    assert!(resource.detail.is_none());
+}
+
+#[test]
+fn detail_close_is_in_identity_row() {
+    let mut harness = harness();
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::Pods),
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Pods")
+        .get_by_role_and_label(Role::Button, "db-postgres-0")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let identity = window.get_by_label("Pod · default / db-postgres-0");
+    let close = window.get_by_role_and_label(Role::Button, "Clear selection");
+    assert!(
+        close.rect().intersects(identity.rect()),
+        "Clear selection must be a compact control inside the Detail identity-row layout area"
+    );
+}
+
+#[test]
 fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     let mut harness = harness();
     open(

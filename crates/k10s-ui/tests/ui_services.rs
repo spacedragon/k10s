@@ -348,6 +348,61 @@ fn service_details_share_integrated_chrome_but_dedicated_windows_hide_pane_actio
 }
 
 #[test]
+fn service_selected_row_click_queues_guarded_clear() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let row_label = "Select service web-frontend";
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, row_label)
+        .click();
+    harness.run_steps(4);
+
+    let window = services_window_id(harness.state());
+    let service = harness
+        .state()
+        .shell
+        .workspace()
+        .service_state(window)
+        .expect("Services window has service state");
+    assert!(service.selection.is_none());
+    assert!(service.detail.is_none());
+}
+
+#[test]
+fn service_selection_derives_detail_visibility() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    let window = services_window_id(harness.state());
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleDetailPane(window));
+    harness.run_steps(2);
+
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let services = harness.get_by_role_and_label(Role::Window, "Services");
+    services.get_by_label("Service · default / web-frontend");
+    assert!(
+        services
+            .query_by_role_and_label(Role::Button, "Hide details")
+            .is_none(),
+        "selection-derived Detail visibility removes the legacy toggle"
+    );
+}
+
+#[test]
 fn list_columns_render_strictly_from_projections() {
     let mut harness = harness();
     open_via_launcher(&mut harness);
