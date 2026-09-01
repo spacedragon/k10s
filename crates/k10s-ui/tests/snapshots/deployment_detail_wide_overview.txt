@@ -8,6 +8,7 @@ Window label="Deployment · payments / checkout"
           Unknown
         GenericContainer
           GenericContainer
+            Unknown label="Detail vital strip"
             GenericContainer
               GenericContainer
                 Label value="Rollout ● NewReplicaSetAvailable"

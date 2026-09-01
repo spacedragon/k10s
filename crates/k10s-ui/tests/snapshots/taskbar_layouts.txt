@@ -247,6 +247,7 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              Unknown label="Detail vital strip"
               GenericContainer
                 GenericContainer
                   GenericContainer

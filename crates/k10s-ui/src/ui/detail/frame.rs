@@ -94,10 +94,12 @@ pub(super) fn show<I: RowIdentity>(
     }
     let vitals_width = ui.available_width();
     let wide = vitals_width >= 760.0;
-    let (vitals_rect, _) = ui.allocate_exact_size(
+    let (vitals_rect, vitals_response) = ui.allocate_exact_size(
         egui::vec2(vitals_width, ui.spacing().interact_size.y),
         Sense::hover(),
     );
+    vitals_response
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail vital strip"));
     let mut vitals_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.vitals", window_id.0))
@@ -286,10 +288,34 @@ pub(super) fn show<I: RowIdentity>(
     });
 }
 
+const VITAL_VALUE_MAX_CHARS: usize = 24;
+const VITAL_CHIP_MAX_WIDTH: f32 = 184.0;
+
+struct VitalDisplay {
+    visible: String,
+    accessible: String,
+    elided: bool,
+}
+
+fn vital_display(vital: &DetailVital) -> VitalDisplay {
+    let compact = crate::ui::responsive_table::middle_elide(&vital.value, VITAL_VALUE_MAX_CHARS);
+    let elided = compact != vital.value;
+    let compose = |value: &str| match vital.shape {
+        Some(shape) => format!("{} {} {value}", vital.label, shape.glyph()),
+        None => format!("{} · {value}", vital.label),
+    };
+    VitalDisplay {
+        visible: compact,
+        accessible: compose(&vital.value),
+        elided,
+    }
+}
+
 fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
-    let text = match vital.shape {
-        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), vital.value),
-        None => format!("{} · {}", vital.label, vital.value),
+    let display = vital_display(vital);
+    let visible = match vital.shape {
+        Some(shape) => format!("{} {} {}", vital.label, shape.glyph(), display.visible),
+        None => format!("{} · {}", vital.label, display.visible),
     };
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
@@ -297,14 +323,24 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital) {
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(text).color(vital_color(ui.visuals(), vital.tone)))
-                    .wrap_mode(egui::TextWrapMode::Extend),
+            ui.set_max_width(VITAL_CHIP_MAX_WIDTH);
+            let response = ui.add(
+                egui::Label::new(
+                    RichText::new(visible).color(vital_color(ui.visuals(), vital.tone)),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend),
             );
+            response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
+            });
+            if display.elided {
+                response.on_hover_text(display.accessible);
+            }
         });
 }
 
 fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_>, wide: bool) {
+    normalize_vital_expansion(wide, &mut projection.expansion);
     for metric in &projection.visible_vitals {
         vital(ui, metric);
     }
@@ -320,7 +356,7 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
             projection.expansion.more_vitals = !projection.expansion.more_vitals;
         }
         if projection.expansion.more_vitals {
-            egui::Area::new(ui.id().with("vital overflow popover"))
+            let popup = egui::Area::new(ui.id().with("vital overflow popover"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(response.rect.left_bottom())
                 .show(ui.ctx(), |ui| {
@@ -329,10 +365,31 @@ fn show_vital_strip(ui: &mut egui::Ui, projection: &mut DetailFrameProjection<'_
                             for metric in &projection.overflow_vitals {
                                 vital(ui, metric);
                             }
+                            if ui.button("Dismiss vital overflow").clicked() {
+                                projection.expansion.more_vitals = false;
+                            }
                         });
                     });
                 });
+            let semantics = ui.interact(
+                popup.response.rect,
+                ui.id().with(("vital overflow semantics", kind)),
+                Sense::hover(),
+            );
+            semantics.widget_info(|| {
+                WidgetInfo::labeled(
+                    WidgetType::Other,
+                    true,
+                    format!("{kind} vital overflow popover"),
+                )
+            });
         }
+    }
+}
+
+fn normalize_vital_expansion(wide: bool, expansion: &mut DetailExpansionState) {
+    if wide {
+        expansion.more_vitals = false;
     }
 }
 
@@ -407,6 +464,37 @@ mod tests {
         ] {
             assert!(!super::uses_shared_body_scroll(tab));
         }
+    }
+
+    #[test]
+    fn vital_display_elides_long_unicode_values_without_losing_full_accessible_text() {
+        let vital = DetailVital::new(
+            "Rollout",
+            "正在部署一个非常非常长的版本名称-with-an-equally-long-suffix",
+        );
+        let display = super::vital_display(&vital);
+        assert!(display.visible.chars().count() <= super::VITAL_VALUE_MAX_CHARS);
+        assert!(display.visible.contains('…'));
+        assert_eq!(
+            display.accessible,
+            "Rollout · 正在部署一个非常非常长的版本名称-with-an-equally-long-suffix"
+        );
+        assert!(display.elided);
+    }
+
+    #[test]
+    fn crossing_wide_breakpoint_clears_transient_vital_popup_state() {
+        let mut expansion = DetailExpansionState {
+            more_vitals: true,
+            ..DetailExpansionState::default()
+        };
+        super::normalize_vital_expansion(true, &mut expansion);
+        assert!(!expansion.more_vitals);
+        super::normalize_vital_expansion(false, &mut expansion);
+        assert!(
+            !expansion.more_vitals,
+            "returning narrow must not reopen stale popup"
+        );
     }
 
     #[test]
@@ -528,5 +616,161 @@ mod tests {
         harness.get_by_label("Status ✕ Configured");
         harness.get_by_label("Body observed Configured");
         assert!(harness.query_by_label("Status · Pending").is_none());
+    }
+
+    #[test]
+    fn deployment_vitals_are_bounded_at_exact_breakpoints_and_popup_is_owned() {
+        const LONG: &str = "正在部署一个非常非常长的版本名称-with-an-equally-long-suffix";
+        for width in [760.0, 1000.0] {
+            let identity = ResourceIdentity {
+                context: "dev-local".into(),
+                gvk: GroupVersionKind {
+                    group: "apps".into(),
+                    version: "v1".into(),
+                    kind: "Deployment".into(),
+                },
+                namespace: Some("default".into()),
+                name: "web".into(),
+                uid: "uid-web".into(),
+            };
+            let detail = DetailState::new(identity.clone());
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width + 16.0, 360.0))
+                .build_ui(move |ui| {
+                    let input = DetailPresentationInput {
+                        identity: &identity,
+                        primary: DetailPrimary::Loading,
+                        metrics: DetailMetrics {
+                            status: None,
+                            age: None,
+                        },
+                        resource_metrics: None,
+                        relations: None,
+                        freshness: None,
+                        now: web_time::UNIX_EPOCH,
+                        gone: false,
+                        mutations_allowed: false,
+                        port_forward_available: false,
+                        port_forward_sessions: &[],
+                        port_forward_error: None,
+                    };
+                    show(
+                        ui,
+                        WindowId(width as u64),
+                        &detail,
+                        &input,
+                        false,
+                        false,
+                        &[],
+                        &mut Vec::new(),
+                        |projection| {
+                            projection.visible_vitals = vec![
+                                DetailVital::new("Rollout", LONG),
+                                DetailVital::new("Ready", "3/3"),
+                                DetailVital::new("Up-to-date", "3"),
+                                DetailVital::new("Available", "3"),
+                            ];
+                            projection.overflow_vitals = vec![
+                                DetailVital::new("Strategy", "RollingUpdate"),
+                                DetailVital::new("Age", "2h"),
+                            ];
+                            projection.vital_expansion_label = Some("Deployment");
+                        },
+                        |_, _, _, _| {},
+                    );
+                });
+            harness.run_steps(2);
+            assert!(
+                (harness.get_by_label("Detail vital strip").rect().width() - width).abs() < 0.1
+            );
+            let rollout_label = format!("Rollout · {LONG}");
+            harness.get_by_label(&rollout_label);
+            harness.get_by_label("Strategy · RollingUpdate");
+            assert!(
+                harness
+                    .query_by_role_and_label(
+                        egui::accesskit::Role::Button,
+                        "Show more Deployment vitals",
+                    )
+                    .is_none()
+            );
+        }
+
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-web".into(),
+        };
+        let detail = DetailState::new(identity.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(656.0, 360.0))
+            .build_ui(move |ui| {
+                let input = DetailPresentationInput {
+                    identity: &identity,
+                    primary: DetailPrimary::Loading,
+                    metrics: DetailMetrics {
+                        status: None,
+                        age: None,
+                    },
+                    resource_metrics: None,
+                    relations: None,
+                    freshness: None,
+                    now: web_time::UNIX_EPOCH,
+                    gone: false,
+                    mutations_allowed: false,
+                    port_forward_available: false,
+                    port_forward_sessions: &[],
+                    port_forward_error: None,
+                };
+                show(
+                    ui,
+                    WindowId(640),
+                    &detail,
+                    &input,
+                    false,
+                    false,
+                    &[],
+                    &mut Vec::new(),
+                    |projection| {
+                        projection.visible_vitals = vec![
+                            DetailVital::new("Status", LONG),
+                            DetailVital::new("Ready", "1/1"),
+                            DetailVital::new("Restarts", "0"),
+                            DetailVital::new("Age", "2h"),
+                        ];
+                        projection.overflow_vitals = vec![
+                            DetailVital::new("Node", "worker-a"),
+                            DetailVital::new("Pod IP", "10.0.0.2"),
+                        ];
+                        projection.vital_expansion_label = Some("Pod");
+                    },
+                    |_, _, _, _| {},
+                );
+            });
+        harness.run_steps(2);
+        let strip_height = harness.get_by_label("Detail vital strip").rect().height();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show more Pod vitals")
+            .click();
+        harness.run_steps(2);
+        harness.get_by_label("Pod vital overflow popover");
+        let node = harness.get_by_label("Node · worker-a").rect();
+        let ip = harness.get_by_label("Pod IP · 10.0.0.2").rect();
+        assert!(node.top() < ip.top(), "overflow declaration order changed");
+        assert_eq!(
+            harness.get_by_label("Detail vital strip").rect().height(),
+            strip_height
+        );
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Dismiss vital overflow")
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Pod vital overflow popover")
+                .is_none()
+        );
     }
 }

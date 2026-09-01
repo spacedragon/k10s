@@ -196,6 +196,7 @@ Window
                     Label value="Freshness · unavailable"
                       TextRun value="Freshness · unavailable"
                 GenericContainer label="Detail identity row"
+                Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
                     GenericContainer

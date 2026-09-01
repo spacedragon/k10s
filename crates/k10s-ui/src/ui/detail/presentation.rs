@@ -508,6 +508,11 @@ mod tests {
         }));
         let pod_input = input(&pod);
         let pod_frame = pod_input.frame_projection(DetailExpansionState::default());
+        assert_eq!(
+            labels(&pod_frame.visible_vitals),
+            ["Status", "Ready", "Restarts", "Age"]
+        );
+        assert_eq!(labels(&pod_frame.overflow_vitals), ["Node", "Pod IP"]);
         assert_eq!(vital(&pod_frame.visible_vitals, "Age"), "18m");
 
         let deployment = detail(ResourceProjection::Deployment(DeploymentProjection {
@@ -532,6 +537,14 @@ mod tests {
             more_vitals: true,
             ..DetailExpansionState::default()
         });
+        assert_eq!(
+            labels(&deployment_frame.visible_vitals),
+            ["Rollout", "Ready", "Up-to-date", "Available"]
+        );
+        assert_eq!(
+            labels(&deployment_frame.overflow_vitals),
+            ["Strategy", "Age"]
+        );
         assert_eq!(vital(&deployment_frame.overflow_vitals, "Age"), "4d 2h");
     }
 
@@ -566,6 +579,8 @@ mod tests {
 
         let input = input(&generic);
         let frame = input.frame_projection(DetailExpansionState::default());
+        assert_eq!(labels(&frame.visible_vitals), ["Status", "Age"]);
+        assert!(frame.overflow_vitals.is_empty());
         assert_eq!(vital(&frame.visible_vitals, "Age"), "31d");
     }
 
@@ -627,5 +642,9 @@ mod tests {
             .find(|vital| vital.label == label)
             .map(|vital| vital.value.as_str())
             .expect("vital is projected")
+    }
+
+    fn labels(vitals: &[super::DetailVital]) -> Vec<&'static str> {
+        vitals.iter().map(|vital| vital.label).collect()
     }
 }
