@@ -6,6 +6,7 @@
 
 use egui::{ScrollArea, WidgetInfo, WidgetType};
 use k10s_protocol::{ResourceListRow, ResourceProjection};
+use std::borrow::Cow;
 
 use super::responsive_table::RowAction;
 use crate::workspace::{SortSpec, WindowId, WorkloadKind};
@@ -92,9 +93,8 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
                 .namespace
                 .cmp(&right.identity.namespace)
                 .then_with(|| left.identity.name.cmp(&right.identity.name)),
-            "status" => left
-                .summary
-                .cmp(&right.summary)
+            "status" => resource_status(left)
+                .cmp(&resource_status(right))
                 .then_with(|| left.identity.name.cmp(&right.identity.name)),
             "created" => left
                 .created_at
@@ -145,8 +145,8 @@ where
 
     // Rows are virtualized: only the visible window of rows is laid out
     // per frame, so frame cost stays bounded by the viewport rather than
-    // the snapshot size. Virtual row 0 is the sticky header; data rows
-    // follow at offset 1. Row height matches what a Grid row actually
+    // the snapshot size. Virtual row 0 is the header; data rows follow at
+    // offset 1. Row height matches what a Grid row actually
     // measures: rows contain buttons, so they are at least one interact
     // size tall, not one text line.
     let row_height = ui
@@ -302,24 +302,26 @@ fn column_title(key: &str) -> &'static str {
         _ => "",
     }
 }
-fn resource_status(row: &ResourceListRow) -> String {
+fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
     match row.projection.as_ref() {
-        Some(ResourceProjection::Pod(p)) => p.phase.clone().unwrap_or_else(|| "—".into()),
-        _ => row.summary.clone(),
+        Some(ResourceProjection::Pod(p)) => p
+            .phase
+            .as_deref()
+            .map(Cow::Borrowed)
+            .unwrap_or(Cow::Borrowed("—")),
+        _ => Cow::Borrowed(&row.summary),
     }
 }
 fn resource_ready(row: &ResourceListRow) -> String {
     match row.projection.as_ref() {
-        Some(ResourceProjection::Deployment(p)) => format!(
-            "{}/{}",
-            p.ready_replicas.unwrap_or(0),
-            p.desired_replicas.unwrap_or(0)
-        ),
-        Some(ResourceProjection::Pod(p)) => format!(
-            "{}/{}",
-            p.ready_containers.unwrap_or(0),
-            p.total_containers.unwrap_or(0)
-        ),
+        Some(ResourceProjection::Deployment(p)) => ready_pair(p.ready_replicas, p.desired_replicas),
+        Some(ResourceProjection::Pod(p)) => ready_pair(p.ready_containers, p.total_containers),
+        _ => "—".into(),
+    }
+}
+fn ready_pair(ready: Option<u32>, desired: Option<u32>) -> String {
+    match (ready, desired) {
+        (Some(ready), Some(desired)) => format!("{ready}/{desired}"),
         _ => "—".into(),
     }
 }
@@ -356,8 +358,25 @@ fn right_label(ui: &mut egui::Ui, value: String) {
 }
 fn elided_label(ui: &mut egui::Ui, value: String, max: usize) {
     let compact = super::responsive_table::middle_elide(&value, max);
-    let response = ui.label(compact).on_hover_text(&value);
+    let changed = compact != value;
+    let response = ui.label(compact);
+    let response = if changed {
+        response.on_hover_text(&value)
+    } else {
+        response
+    };
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ready_pair;
+    #[test]
+    fn partial_deployment_and_pod_readiness_never_fabricate_zeroes() {
+        assert_eq!(ready_pair(Some(1), None), "—");
+        assert_eq!(ready_pair(None, Some(2)), "—");
+        assert_eq!(ready_pair(Some(1), Some(2)), "1/2");
+    }
 }
 
 fn sort_header<I>(

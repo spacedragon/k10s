@@ -315,6 +315,13 @@ fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
             .count()
             >= 2
     );
+    harness.get_by_label("http 80→8080/TCP").hover();
+    harness.run_steps(15);
+    assert_eq!(
+        harness.get_all_by_label("http 80→8080/TCP").count(),
+        1,
+        "short Ports values have no redundant tooltip"
+    );
 
     let rect = harness
         .get_by_role_and_label(Role::Window, "Services")

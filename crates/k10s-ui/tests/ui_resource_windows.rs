@@ -419,6 +419,9 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
         annotations: Default::default(),
         created_at: None,
     }));
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Deployments).unwrap()[1].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"deployment","desiredReplicas":1,"readyReplicas":1,"templateContainers":[{"name":"web","image":"nginx:v1"}]})).unwrap(),
+    );
     let id = fixture
         .shell
         .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
@@ -473,6 +476,13 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
             .get_all_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
             .count()
             >= 2
+    );
+    harness.get_by_label("nginx:v1").hover();
+    harness.run_steps(15);
+    assert_eq!(
+        harness.get_all_by_label("nginx:v1").count(),
+        1,
+        "short images have no redundant tooltip"
     );
 
     let rect = harness
@@ -577,8 +587,23 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
 #[test]
 fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     let mut fixture = Fixture::default();
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Pods)
+        .unwrap()[0]
+        .summary = "Zulu summary".into();
     fixture.feed.lists.get_mut(&WorkspaceWorkload::Pods).unwrap()[0].projection = Some(
-        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"Running","readyContainers":1,"totalContainers":1,"restartCount":7,"nodeName":"worker-with-a-long-name"})).unwrap(),
+        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"AlphaPhase","readyContainers":1,"totalContainers":1,"restartCount":7,"nodeName":"worker-with-a-long-name"})).unwrap(),
+    );
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Pods)
+        .unwrap()[1]
+        .summary = "Alpha summary".into();
+    fixture.feed.lists.get_mut(&WorkspaceWorkload::Pods).unwrap()[1].projection = Some(
+        serde_json::from_value(serde_json::json!({"kind":"pod","phase":"ZuluPhase","readyContainers":1,"totalContainers":1,"restartCount":1,"nodeName":"worker-two"})).unwrap(),
     );
     let id = fixture
         .shell
@@ -630,6 +655,21 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
         wide.get_by_label("7").rect().right() > wide.get_by_label("Restarts").rect().center().x
     );
     let rect = wide.rect();
+    wide.get_by_role_and_label(Role::Button, "Sort pods by status")
+        .click();
+    harness.run_steps(4);
+    let sorted = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(
+        sorted
+            .get_by_label("Select resource web-frontend-7d9f8-00001")
+            .rect()
+            .top()
+            < sorted
+                .get_by_label("Select resource web-frontend-7d9f8-00002")
+                .rect()
+                .top(),
+        "visible Pod order follows displayed phase, not conflicting summary"
+    );
     let target = rect.min + egui::vec2(680.0, 520.0);
     harness.hover_at(rect.max);
     harness.run_steps(1);
@@ -1616,6 +1656,76 @@ fn hidden_resource_row_action_expires_once_at_table_scope() {
             .map(|identity| identity.name.as_str()),
         Some("web-frontend-7d9f8-00001"),
         "restoring the old row must not replay its consumed clear"
+    );
+}
+
+#[test]
+fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
+    let mut fixture = Fixture::default();
+    fixture.feed.lists.insert(
+        WorkspaceWorkload::Pods,
+        (0..500)
+            .map(|index| {
+                list_row(
+                    "",
+                    "v1",
+                    "Pod",
+                    Some("default"),
+                    &format!("pod-{index:03}"),
+                    "Running",
+                    "2026-08-21T00:00:00Z",
+                )
+            })
+            .collect(),
+    );
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Pods),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_000.0, 600.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let first = harness.get_by_role_and_label(Role::Window, "Pods");
+    first
+        .get_by_role_and_label(Role::Button, "Select resource pod-000")
+        .click();
+    harness.step();
+    for _ in 0..1 {
+        harness
+            .get_by_role_and_label(Role::Window, "Pods")
+            .get_by_role_and_label(Role::Button, "Select resource pod-000")
+            .scroll_down();
+        harness.step();
+    }
+    harness.run_steps(6);
+    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    assert!(
+        recycled
+            .query_by_role_and_label(Role::Button, "Select resource pod-000")
+            .is_none()
+    );
+    assert!(
+        (1..500).any(|index| recycled
+            .query_by_role_and_label(Role::Button, &format!("Select resource pod-{index:03}"))
+            .is_some()),
+        "a recycled later row is rendered"
+    );
+    harness.run_steps(10);
+    let selection = &harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(workload_id(harness.state(), WorkspaceWorkload::Pods))
+        .unwrap()
+        .selection;
+    assert_eq!(
+        selection
+            .as_ref()
+            .map(|identity| format!("Select resource {}", identity.name))
+            .as_deref(),
+        Some("Select resource pod-000")
     );
 }
 

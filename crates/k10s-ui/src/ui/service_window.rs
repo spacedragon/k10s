@@ -555,7 +555,13 @@ fn service_row<I>(
                     .map(cluster_ip_column_label)
                     .unwrap_or_else(|| "—".into());
                 let compact = super::responsive_table::middle_elide(&value, 20);
-                let response = ui.label(compact).on_hover_text(&value);
+                let changed = compact != value;
+                let response = ui.label(compact);
+                let response = if changed {
+                    response.on_hover_text(&value)
+                } else {
+                    response
+                };
                 response
                     .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
             }
@@ -564,7 +570,13 @@ fn service_row<I>(
                     .map(ports_column_label)
                     .unwrap_or_else(|| "—".into());
                 let compact = super::responsive_table::middle_elide(&value, 28);
-                let response = ui.label(compact).on_hover_text(&value);
+                let changed = compact != value;
+                let response = ui.label(compact);
+                let response = if changed {
+                    response.on_hover_text(&value)
+                } else {
+                    response
+                };
                 response
                     .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
             }
