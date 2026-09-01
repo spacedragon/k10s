@@ -4,7 +4,7 @@
 //! pane keeps a larger one; extreme split ratios clamp to those minima so
 //! neither pane can ever collapse while both are visible.
 
-use egui::{Align, Layout, Vec2};
+use egui::{Align, Layout, UiBuilder, Vec2};
 
 /// Hard minimum height of the resource list pane.
 pub(super) const LIST_PANE_MIN: f32 = 120.0;
@@ -46,27 +46,20 @@ pub(super) fn show_vertical<R, S>(
     bottom: impl FnOnce(&mut egui::Ui) -> S,
 ) -> (Option<R>, Option<S>) {
     let total = ui.available_size().y;
+    let pane_item_spacing = ui.spacing().item_spacing;
+    // The split owns every point in `total`; parent-layout spacing between
+    // its exact allocations would otherwise be added outside that budget.
+    ui.spacing_mut().item_spacing.y = 0.0;
     if detail_visible && detail_maximized {
         let width = ui.available_size().x;
-        let bottom_result = ui
-            .allocate_ui_with_layout(
-                Vec2::new(width, total),
-                Layout::top_down_justified(Align::Min),
-                bottom,
-            )
-            .inner;
+        let bottom_result = show_fixed_pane(ui, "detail", width, total, pane_item_spacing, bottom);
+        ui.spacing_mut().item_spacing = pane_item_spacing;
         return (None, Some(bottom_result));
     }
     let (list_height, detail_height) = pane_heights(total, *ratio, detail_visible);
     let width = ui.available_size().x;
 
-    let top_result = ui
-        .allocate_ui_with_layout(
-            Vec2::new(width, list_height),
-            Layout::top_down_justified(Align::Min),
-            top,
-        )
-        .inner;
+    let top_result = show_fixed_pane(ui, "list", width, list_height, pane_item_spacing, top);
 
     let mut bottom_result = None;
     if detail_visible && detail_height > 0.0 {
@@ -80,16 +73,43 @@ pub(super) fn show_vertical<R, S>(
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
 
-        bottom_result = Some(
-            ui.allocate_ui_with_layout(
-                Vec2::new(width, detail_height),
-                Layout::top_down_justified(Align::Min),
-                bottom,
-            )
-            .inner,
-        );
+        bottom_result = Some(show_fixed_pane(
+            ui,
+            "detail",
+            width,
+            detail_height,
+            pane_item_spacing,
+            bottom,
+        ));
     }
+    ui.spacing_mut().item_spacing = pane_item_spacing;
     (Some(top_result), bottom_result)
+}
+
+/// Render a pane inside an exact parent allocation.
+///
+/// `Ui::allocate_ui_with_layout` expands its parent allocation when child
+/// content reports a larger minimum. That is useful for flowing layouts, but
+/// a split pane must instead keep the outer window fixed and let its own
+/// scroll regions handle overflow.
+fn show_fixed_pane<R>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    width: f32,
+    height: f32,
+    item_spacing: Vec2,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let mut pane = ui.new_child(
+        UiBuilder::new()
+            .id_salt(("k10s.split.pane", id_salt))
+            .max_rect(rect)
+            .layout(Layout::top_down_justified(Align::Min)),
+    );
+    pane.spacing_mut().item_spacing = item_spacing;
+    pane.set_clip_rect(rect.intersect(ui.clip_rect()));
+    content(&mut pane)
 }
 
 #[cfg(test)]
