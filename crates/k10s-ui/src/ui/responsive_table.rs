@@ -134,6 +134,26 @@ pub(super) fn middle_elide(value: &str, max_chars: usize) -> String {
         .collect()
 }
 
+/// Paint a resolved cell at its exact content width; the surrounding Grid
+/// continues to own the standard inter-column padding.
+pub(super) fn sized_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    right_aligned: bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let layout = if right_aligned {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.spacing().interact_size.y),
+        layout,
+        add_contents,
+    );
+}
+
 impl<I> RowAction<I> {
     pub(super) fn into_command(
         self,

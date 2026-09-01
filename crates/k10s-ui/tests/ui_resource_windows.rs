@@ -6,7 +6,8 @@
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow, ResourceTypeEntry,
+    BackendRevision, ContainerImageProjection, DeploymentProjection, GroupVersionKind,
+    ResourceIdentity, ResourceListRow, ResourceProjection, ResourceTypeEntry,
 };
 use k10s_ui::{
     ui::{
@@ -391,6 +392,137 @@ fn open(harness: &mut Harness<'static, Fixture>, item: LauncherItem) {
 }
 
 #[test]
+fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
+    let mut fixture = Fixture::default();
+    fixture
+        .feed
+        .lists
+        .get_mut(&WorkspaceWorkload::Deployments)
+        .unwrap()[0]
+        .projection = Some(ResourceProjection::Deployment(DeploymentProjection {
+        desired_replicas: Some(2),
+        ready_replicas: Some(2),
+        updated_replicas: Some(2),
+        available_replicas: Some(2),
+        strategy: Some("RollingUpdate".into()),
+        selector: Default::default(),
+        max_surge: None,
+        max_unavailable: None,
+        conditions: vec![],
+        template_containers: vec![ContainerImageProjection {
+            name: "api".into(),
+            image: Some("ghcr.io/containers/kubernetes-mcp:v0.3.1".into()),
+        }],
+        template_labels: Default::default(),
+        template_annotations: Default::default(),
+        labels: Default::default(),
+        annotations: Default::default(),
+        created_at: None,
+    }));
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    for header in ["Name", "Ready", "Status", "Image", "Age"] {
+        wide.get_by_label(header);
+    }
+    for key in ["namespace", "name", "status", "created"] {
+        wide.get_by_role_and_label(Role::Button, format!("Sort deployments by {key}").as_str());
+    }
+    for key in ["ready", "image"] {
+        assert!(
+            wide.query_by_role_and_label(
+                Role::Button,
+                format!("Sort deployments by {key}").as_str()
+            )
+            .is_none()
+        );
+    }
+    assert!(wide.get_by_label("2/2").rect().right() > wide.get_by_label("Ready").rect().center().x);
+    wide.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
+        .hover();
+    harness.run_steps(2);
+    harness.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1");
+
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Deployments")
+        .rect();
+    let target = rect.min + egui::vec2(640.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let compact = harness.get_by_role_and_label(Role::Window, "Deployments");
+    assert!(compact.query_by_label("Image").is_none());
+    compact.get_by_label("Status");
+}
+
+#[test]
+fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
+    let mut harness = harness();
+    harness.state_mut().feed.lists.insert(
+        WorkspaceWorkload::CustomResources,
+        vec![list_row(
+            "apiextensions.k8s.io",
+            "v1",
+            "CustomResourceDefinition",
+            None,
+            "dashboards.monitoring.example.com",
+            "Established",
+            "2026-08-21T00:45:00Z",
+        )],
+    );
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkspaceWorkload::CustomResources),
+    );
+    let id = workload_id(harness.state(), WorkspaceWorkload::CustomResources);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetCustomKind(
+            id,
+            Some("apiextensions.k8s.io/v1/CustomResourceDefinition".into()),
+        ));
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    assert!(window.query_by_label("Namespace").is_none());
+    window.get_by_label("Name");
+    window.get_by_label("Status");
+    window.get_by_label("Age");
+}
+
+#[test]
 fn same_kind_windows_render_their_own_window_keyed_rows() {
     let mut fixture = Fixture::default();
     fixture.feed.lists.remove(&WorkspaceWorkload::Pods);
@@ -510,7 +642,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         "Pods",
     ] {
         let window = harness.get_by_role_and_label(Role::Window, title);
-        for header in ["Name", "Status", "Created"] {
+        for header in ["Name", "Status", "Age"] {
             window.get_by_label(header);
         }
         window.get_by_label("Select resource sample-one");
@@ -539,7 +671,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         ));
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    for header in ["Name", "Status", "Created"] {
+    for header in ["Name", "Status", "Age"] {
         window.get_by_label(header);
     }
     window.get_by_role_and_label(Role::ComboBox, "Namespace");

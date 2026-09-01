@@ -15,7 +15,7 @@ use k10s_ui::{
         ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
         WindowFreshness,
     },
-    workspace::{WindowId, WorkspaceCommand},
+    workspace::{WindowGeom, WindowId, WorkspaceCommand},
 };
 use std::collections::BTreeMap;
 
@@ -265,6 +265,70 @@ fn open_via_launcher(harness: &mut Harness<'static, Fixture>) {
         .get_by_role_and_label(Role::Button, "Services")
         .click();
     harness.run_steps(8);
+}
+
+#[test]
+fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            k10s_ui::workspace::LauncherItem::Services,
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_000.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_100.0, 650.0))
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let wide = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    for header in ["Name", "Type", "Cluster IP", "Ports", "Age"] {
+        wide.get_by_label(header);
+    }
+    for key in ["namespace", "name", "type", "cluster_ip", "ports", "age"] {
+        wide.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
+    }
+    let compact_port = wide.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
+    compact_port.hover();
+    harness.run_steps(2);
+    harness.get_by_label("https 443→https/TCP, metrics 9100→9100/UDP");
+
+    let rect = harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .rect();
+    let target = rect.min + egui::vec2(640.0, 520.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let compact = harness.get_by_role_and_label(Role::Window, "Services");
+    assert!(compact.query_by_label("Cluster IP").is_none());
+    compact.get_by_label("Type");
+    for key in ["namespace", "name", "type", "ports", "age"] {
+        compact.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
+    }
 }
 
 #[test]

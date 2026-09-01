@@ -161,8 +161,15 @@ where
         _ => &GENERIC_CLUSTER[..],
     };
     let columns = super::responsive_table::resolve_columns(specs, ui.available_width());
-    let _resolved_table_width: f32 = columns.visible.iter().map(|column| column.width).sum();
-    let _horizontal_scroll = columns.horizontal_scroll;
+    debug_assert_eq!(
+        columns.horizontal_scroll,
+        columns
+            .visible
+            .iter()
+            .map(|column| column.width)
+            .sum::<f32>()
+            > ui.available_width()
+    );
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
@@ -172,12 +179,15 @@ where
                 .show(ui, |ui| {
                     if range.start < header_rows {
                         for column in &columns.visible {
-                            let visible = column_title(column.key);
-                            if matches!(column.key, "namespace" | "name" | "status" | "created") {
-                                sort_header(ui, title, visible, column.key, sort, &mut actions);
-                            } else {
-                                ui.label(visible);
-                            }
+                            super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                                let visible = column_title(column.key);
+                                if matches!(column.key, "namespace" | "name" | "status" | "created")
+                                {
+                                    sort_header(ui, title, visible, column.key, sort, &mut actions);
+                                } else {
+                                    ui.label(visible);
+                                }
+                            });
                         }
                         ui.end_row();
                     }
@@ -191,77 +201,79 @@ where
                             format!("  {}", row.identity.name)
                         };
                         for column in &columns.visible {
-                            match column.key {
-                                "namespace" => {
-                                    ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
-                                }
-                                "name" => {
-                                    let name_button = ui.add(
-                                        egui::Button::new(if selected {
-                                            egui::RichText::new(&name).strong()
-                                        } else {
-                                            egui::RichText::new(&name)
-                                        })
-                                        .selected(selected)
-                                        .stroke(
-                                            if selected {
-                                                egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
-                                            } else {
-                                                egui::Stroke::NONE
-                                            },
-                                        ),
-                                    );
-                                    let label = super::responsive_table::row_action_label(
-                                        "resource",
-                                        &row.identity.name,
-                                        selected,
-                                    );
-                                    name_button.widget_info(move || {
-                                        WidgetInfo::selected(
-                                            WidgetType::Button,
-                                            true,
-                                            selected,
-                                            label.clone(),
-                                        )
-                                    });
-                                    let popped_out = super::responsive_table::row_interaction(
-                                        &name_button,
-                                        gesture_table_id,
-                                        identity_of(row),
-                                        selected,
-                                    );
-                                    if popped_out.is_some() {
-                                        actions.popped_out = popped_out;
+                            let numeric = matches!(column.key, "ready" | "restarts");
+                            super::responsive_table::sized_cell(ui, column.width, numeric, |ui| {
+                                match column.key {
+                                    "namespace" => {
+                                        ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
                                     }
-                                    name_button.context_menu(|ui| {
-                                        if ui.button("Open dedicated window").clicked() {
-                                            actions.popped_out = Some(identity_of(row));
-                                            ui.close();
+                                    "name" => {
+                                        let name_button =
+                                            ui.add(
+                                                egui::Button::new(if selected {
+                                                    egui::RichText::new(&name).strong()
+                                                } else {
+                                                    egui::RichText::new(&name)
+                                                })
+                                                .selected(selected)
+                                                .stroke(if selected {
+                                                    egui::Stroke::new(1.5, crate::ui::theme::ACCENT)
+                                                } else {
+                                                    egui::Stroke::NONE
+                                                }),
+                                            );
+                                        let label = super::responsive_table::row_action_label(
+                                            "resource",
+                                            &row.identity.name,
+                                            selected,
+                                        );
+                                        name_button.widget_info(move || {
+                                            WidgetInfo::selected(
+                                                WidgetType::Button,
+                                                true,
+                                                selected,
+                                                label.clone(),
+                                            )
+                                        });
+                                        let popped_out = super::responsive_table::row_interaction(
+                                            &name_button,
+                                            gesture_table_id,
+                                            identity_of(row),
+                                            selected,
+                                        );
+                                        if popped_out.is_some() {
+                                            actions.popped_out = popped_out;
                                         }
-                                    });
+                                        name_button.context_menu(|ui| {
+                                            if ui.button("Open dedicated window").clicked() {
+                                                actions.popped_out = Some(identity_of(row));
+                                                ui.close();
+                                            }
+                                        });
+                                    }
+                                    "status" => {
+                                        ui.label(resource_status(row));
+                                    }
+                                    "ready" => {
+                                        right_label(ui, resource_ready(row));
+                                    }
+                                    "image" => {
+                                        elided_label(ui, resource_image(row), 28);
+                                    }
+                                    "restarts" => {
+                                        right_label(ui, resource_restarts(row));
+                                    }
+                                    "node" => {
+                                        elided_label(ui, resource_node(row), 20);
+                                    }
+                                    "created" => {
+                                        ui.monospace(
+                                            row.created_at.get(..10).unwrap_or(&row.created_at),
+                                        );
+                                    }
+                                    _ => {}
                                 }
-                                "status" => {
-                                    ui.label(resource_status(row));
-                                }
-                                "ready" => {
-                                    right_label(ui, resource_ready(row));
-                                }
-                                "image" => {
-                                    elided_label(ui, resource_image(row), 28);
-                                }
-                                "restarts" => {
-                                    right_label(ui, resource_restarts(row));
-                                }
-                                "node" => {
-                                    elided_label(ui, resource_node(row), 20);
-                                }
-                                "created" => {
-                                    ui.monospace(
-                                        row.created_at.get(..10).unwrap_or(&row.created_at),
-                                    );
-                                }
-                                _ => {}
-                            }
+                            });
                         }
                         ui.end_row();
                     }
@@ -359,10 +371,7 @@ fn sort_header<I>(
         "↓"
     };
     ui.horizontal(|ui| {
-        let header = ui.label(visible);
-        if key == "created" {
-            header.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Created"));
-        }
+        ui.label(visible);
         let button = ui.small_button(arrow);
         let label = format!("Sort {} by {key}", title.to_lowercase());
         button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));

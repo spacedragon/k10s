@@ -441,8 +441,15 @@ where
     let header_rows = 1_usize;
     let columns =
         super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, ui.available_width());
-    let _resolved_table_width: f32 = columns.visible.iter().map(|column| column.width).sum();
-    let _horizontal_scroll = columns.horizontal_scroll;
+    debug_assert_eq!(
+        columns.horizontal_scroll,
+        columns
+            .visible
+            .iter()
+            .map(|column| column.width)
+            .sum::<f32>()
+            > ui.available_width()
+    );
     ScrollArea::both()
         .id_salt(("k10s.service.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
@@ -452,13 +459,15 @@ where
                 .show(ui, |ui| {
                     if range.start < header_rows {
                         for column in &columns.visible {
-                            sort_header(
-                                ui,
-                                service_column_title(column.key),
-                                column.key,
-                                sort,
-                                &mut actions,
-                            );
+                            super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                                sort_header(
+                                    ui,
+                                    service_column_title(column.key),
+                                    column.key,
+                                    sort,
+                                    &mut actions,
+                                );
+                            });
                         }
                         ui.end_row();
                     }
@@ -494,7 +503,7 @@ fn service_row<I>(
 {
     let selected = is_selected(row);
     for column in &columns.visible {
-        match column.key {
+        super::responsive_table::sized_cell(ui, column.width, false, |ui| match column.key {
             "namespace" => {
                 ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
             }
@@ -557,7 +566,7 @@ fn service_row<I>(
                 ui.monospace(row.created_at.get(..10).unwrap_or(&row.created_at));
             }
             _ => {}
-        }
+        });
     }
 }
 

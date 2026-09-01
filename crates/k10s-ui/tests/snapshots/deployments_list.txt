@@ -192,44 +192,64 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            Label value="Namespace"
-                              TextRun value="Namespace"
-                            Button label="Sort deployments by namespace"
+                            GenericContainer
+                              Label value="Namespace"
+                                TextRun value="Namespace"
+                              Button label="Sort deployments by namespace"
                           GenericContainer
-                            Label value="Name"
-                              TextRun value="Name"
-                            Button label="Sort deployments by name"
+                            GenericContainer
+                              Label value="Name"
+                                TextRun value="Name"
+                              Button label="Sort deployments by name"
                           GenericContainer
-                            Label value="Status"
-                              TextRun value="Status"
-                            Button label="Sort deployments by status"
+                            GenericContainer
+                              Label value="Status"
+                                TextRun value="Status"
+                              Button label="Sort deployments by status"
                           GenericContainer
-                            Label value="Created"
-                            Button label="Sort deployments by created"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="Select resource api-server"
-                          Label value="2/2 ready"
-                            TextRun value="2/2 ready"
-                          Label value="2026-08-21"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="Select resource customer-notification-dispatcher-with-a-long-release-suffix"
-                          Label value="0/3 ready · ImagePullBackOff"
-                            TextRun value="0/3 ready · ImagePullBackOff"
-                          Label value="2026-08-21"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="Select resource web-frontend"
-                          Label value="20/20 ready"
-                            TextRun value="20/20 ready"
-                          Label value="2026-08-21"
-                          Label value="default"
-                            TextRun value="default"
-                          Button label="Select resource retired-data-migration"
-                          Label value="Completed · 1/1 succeeded"
-                            TextRun value="Completed · 1/1 succeeded"
-                          Label value="2026-08-21"
+                            GenericContainer
+                              Label value="Age"
+                              Button label="Sort deployments by created"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Select resource api-server"
+                          GenericContainer
+                            Label value="2/2 ready"
+                              TextRun value="2/2 ready"
+                          GenericContainer
+                            Label value="2026-08-21"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Select resource customer-notification-dispatcher-with-a-long-release-suffix"
+                          GenericContainer
+                            Label value="0/3 ready · ImagePullBackOff"
+                              TextRun value="0/3 ready · ImagePullBackOff"
+                          GenericContainer
+                            Label value="2026-08-21"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Select resource web-frontend"
+                          GenericContainer
+                            Label value="20/20 ready"
+                              TextRun value="20/20 ready"
+                          GenericContainer
+                            Label value="2026-08-21"
+                          GenericContainer
+                            Label value="default"
+                              TextRun value="default"
+                          GenericContainer
+                            Button label="Select resource retired-data-migration"
+                          GenericContainer
+                            Label value="Completed · 1/1 succeeded"
+                              TextRun value="Completed · 1/1 succeeded"
+                          GenericContainer
+                            Label value="2026-08-21"
                 ScrollBar
     Splitter
     Splitter
