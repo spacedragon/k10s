@@ -55,10 +55,16 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
 }
 
 fn harness(size: egui::Vec2) -> Harness<'static, Fixture> {
+    let mut fixture = Fixture::default();
+    // Pin the frame clock to 2026-09-01T08:00:00Z: the checkout fixture was
+    // created 2026-08-01T08:00:00Z, so its vital-strip age stays a stable
+    // `31d` instead of drifting with wall-clock time.
+    fixture.feed.render_time =
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_788_249_600));
     Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
-        .build_ui_state(render, Fixture::default())
+        .build_ui_state(render, fixture)
 }
 
 fn snapshot_deployment_window(harness: &Harness<Fixture>, name: &str) {

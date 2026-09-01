@@ -19,6 +19,8 @@ use k10s_ui::{
     },
 };
 
+mod common;
+
 const CONTEXT: &str = "dev-local";
 
 struct Fixture {
@@ -57,6 +59,8 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     );
 }
 
+use common::{namespace_combobox, workload_window};
+
 #[test]
 fn workload_namespace_combobox_searches_authoritative_options_and_selects() {
     let mut fixture = Fixture::default();
@@ -83,15 +87,13 @@ fn workload_namespace_combobox_searches_authoritative_options_and_selects() {
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window_node = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window_node = workload_window(&harness, "Deployments");
     assert!(
         window_node
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
     );
-    window_node
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(window_node).click();
     harness.run_steps(3);
     let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
     search.type_text("SEA");
@@ -136,10 +138,10 @@ fn missing_workload_namespace_stays_narrow_until_explicitly_cleared() {
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    let selector = namespace_combobox(harness.root());
     assert_eq!(
         selector.value().as_deref(),
-        Some("deleted-team · namespace no longer exists")
+        Some("Namespace: deleted-team · no longer exists")
     );
     assert_eq!(
         workspace_resource_namespace(harness.state().shell.workspace(), id).as_deref(),
@@ -171,12 +173,10 @@ fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     window.get_by_label("Namespaces unavailable: namespace access denied");
     assert!(window.query_by_label("backend raw details").is_none());
-    window
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(window).click();
     harness.run_steps(2);
     assert!(
         harness
@@ -189,8 +189,7 @@ fn namespace_catalog_unavailable_renders_only_safe_message_and_retries() {
             .query_by_role_and_label(Role::Button, "default")
             .is_none()
     );
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Retry namespaces")
         .click();
     harness.run_steps(1);
@@ -212,10 +211,10 @@ fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_emp
         .with_size(egui::vec2(1_440.0, 900.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    let selector = harness.get_by_role_and_label(Role::ComboBox, "Namespace");
+    let selector = namespace_combobox(harness.root());
     assert_eq!(
         selector.value().as_deref(),
-        Some("Namespace catalog not requested")
+        Some("Namespace: not requested")
     );
     selector.click();
     harness.run_steps(2);
@@ -228,9 +227,7 @@ fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_emp
     harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Loading;
     harness.run_steps(2);
     harness.get_by_label("Loading namespaces");
-    harness
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(harness.root()).click();
     harness.run_steps(2);
     assert!(
         harness
@@ -240,9 +237,7 @@ fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_emp
 
     harness.state_mut().feed.namespace_catalog = NamespaceCatalogState::Ready(Vec::new());
     harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(harness.root()).click();
     harness.run_steps(2);
     harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
     harness.get_by_label("No namespaces found");
@@ -453,8 +448,10 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
         .with_size(egui::vec2(1_100.0, 650.0))
         .build_ui_state(render, fixture);
     harness.run_steps(4);
-    let wide = harness.get_by_role_and_label(Role::Window, "Deployments");
-    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    let wide = workload_window(&harness, "Deployments");
+    // The Namespace label lives in the table header; the toolbar selector
+    // carries its own label inside the control text.
+    wide.get_by_label("Namespace");
     for header in ["Name", "Ready", "Status", "Image", "Age"] {
         wide.get_by_label(header);
     }
@@ -488,9 +485,7 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
         "short images have no redundant tooltip"
     );
 
-    let rect = harness
-        .get_by_role_and_label(Role::Window, "Deployments")
-        .rect();
+    let rect = workload_window(&harness, "Deployments").rect();
     let target = rect.min + egui::vec2(640.0, 520.0);
     harness.hover_at(rect.max);
     harness.run_steps(1);
@@ -500,7 +495,7 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     harness.run_steps(1);
     harness.drop_at(target);
     harness.run_steps(3);
-    let compact = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let compact = workload_window(&harness, "Deployments");
     assert!(compact.query_by_label("Image").is_none());
     compact.get_by_label("Status");
     let first_age_value_left = compact
@@ -527,7 +522,7 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     harness.run_steps(1);
     harness.drop_at(target);
     harness.run_steps(3);
-    let restored = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let restored = workload_window(&harness, "Deployments");
     restored.get_by_label("Image");
     restored.get_by_label("Status");
 }
@@ -560,7 +555,7 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
             Some("apiextensions.k8s.io/v1/CustomResourceDefinition".into()),
         ));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let window = workload_window(&harness, "Custom Resources");
     assert!(window.query_by_label("Namespace").is_none());
     window.get_by_label("Name");
     window.get_by_label("Status");
@@ -580,7 +575,7 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
     harness.run_steps(1);
     harness.drop_at(target);
     harness.run_steps(3);
-    let medium = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let medium = workload_window(&harness, "Custom Resources");
     assert!(medium.query_by_label("Status").is_none());
     medium.get_by_label("Age");
     let rect = medium.rect();
@@ -594,8 +589,7 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
     harness.drop_at(target);
     harness.run_steps(3);
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Custom Resources")
+        workload_window(&harness, "Custom Resources")
             .query_by_label("Age")
             .is_none()
     );
@@ -650,7 +644,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
         .with_size(egui::vec2(1_100.0, 650.0))
         .build_ui_state(render, fixture);
     harness.run_steps(4);
-    let wide = harness.get_by_role_and_label(Role::Window, "Pods");
+    let wide = workload_window(&harness, "Pods");
     for header in [
         "Namespace",
         "Name",
@@ -675,7 +669,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     wide.get_by_role_and_label(Role::Button, "Sort pods by status")
         .click();
     harness.run_steps(4);
-    let sorted = harness.get_by_role_and_label(Role::Window, "Pods");
+    let sorted = workload_window(&harness, "Pods");
     assert!(
         sorted
             .get_by_label("Select resource web-frontend-7d9f8-00001")
@@ -696,7 +690,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     harness.run_steps(1);
     harness.drop_at(target);
     harness.run_steps(3);
-    let medium = harness.get_by_role_and_label(Role::Window, "Pods");
+    let medium = workload_window(&harness, "Pods");
     assert!(medium.query_by_label("Node").is_none());
     medium.get_by_label("Restarts");
     let rect = medium.rect();
@@ -710,8 +704,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     harness.drop_at(target);
     harness.run_steps(3);
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Pods")
+        workload_window(&harness, "Pods")
             .query_by_label("Restarts")
             .is_none()
     );
@@ -760,7 +753,7 @@ fn responsive_generic_namespaced_hides_status_then_age() {
         .with_size(egui::vec2(800.0, 650.0))
         .build_ui_state(render, fixture);
     harness.run_steps(4);
-    let wide = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    let wide = workload_window(&harness, "StatefulSets");
     for header in ["Namespace", "Name", "Status", "Age"] {
         assert!(wide.get_all_by_label(header).count() >= 1);
     }
@@ -774,7 +767,7 @@ fn responsive_generic_namespaced_hides_status_then_age() {
     harness.run_steps(1);
     harness.drop_at(target);
     harness.run_steps(8);
-    let medium = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    let medium = workload_window(&harness, "StatefulSets");
     assert!(medium.query_by_label("Status").is_none());
     medium.get_by_label("Age");
     let rect = medium.rect();
@@ -788,8 +781,7 @@ fn responsive_generic_namespaced_hides_status_then_age() {
     harness.drop_at(target);
     harness.run_steps(3);
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "StatefulSets")
+        workload_window(&harness, "StatefulSets")
             .query_by_label("Age")
             .is_none()
     );
@@ -914,7 +906,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         "CronJobs",
         "Pods",
     ] {
-        let window = harness.get_by_role_and_label(Role::Window, title);
+        let window = workload_window(&harness, title);
         for header in ["Name", "Status", "Age"] {
             window.get_by_label(header);
         }
@@ -927,7 +919,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         &mut harness,
         LauncherItem::Workload(WorkspaceWorkload::CustomResources),
     );
-    let picker = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let picker = workload_window(&harness, "Custom Resources");
     picker.get_by_role_and_label(Role::Button, "monitoring.example.com/v1 Dashboard");
     assert!(
         picker.query_by_label("traffic-overview").is_none(),
@@ -943,11 +935,11 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
             Some("monitoring.example.com/v1/Dashboard".to_owned()),
         ));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let window = workload_window(&harness, "Custom Resources");
     for header in ["Name", "Status", "Age"] {
         window.get_by_label(header);
     }
-    window.get_by_role_and_label(Role::ComboBox, "Namespace");
+    namespace_combobox(window);
     window.get_by_label("Select resource traffic-overview");
 }
 
@@ -979,19 +971,18 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
             k10s_ui::workspace::NamespaceScope::Namespace("team-a".into()),
         ));
 
-    let picker = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let picker = workload_window(&harness, "Custom Resources");
     picker.get_by_role_and_label(Role::Button, "monitoring.example.com/v1 Dashboard");
     picker
         .get_by_role_and_label(Role::TextInput, "Search resource types")
         .focus();
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Custom Resources")
+    workload_window(&harness, "Custom Resources")
         .get_by_role_and_label(Role::TextInput, "Search resource types")
         .type_text("custom");
     harness.run_steps(4);
 
-    let picker = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let picker = workload_window(&harness, "Custom Resources");
     let crd_button = picker.get_by_role_and_label(
         Role::Button,
         "apiextensions.k8s.io/v1 CustomResourceDefinition",
@@ -1005,20 +996,20 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     crd_button.click();
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
-    assert!(
-        window
-            .query_by_role_and_label(Role::ComboBox, "Namespace")
-            .is_none()
-    );
-    // Cluster-scoped: no namespace column and no namespace filter control.
+    let window = workload_window(&harness, "Custom Resources");
+    // Cluster-scoped: no namespace selector, column, or filter control.
+    assert!(window.query_all_by_role(Role::ComboBox).all(|node| {
+        !node
+            .value()
+            .is_some_and(|value| value.starts_with("Namespace: "))
+    }));
     assert!(window.query_by_label("Namespace").is_none());
     assert!(
         window
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
     );
-    assert!(window.query_by_label("Clear filters").is_none());
+    assert!(window.query_by_label("Reset").is_none());
     assert_eq!(
         harness
             .state()
@@ -1037,8 +1028,7 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
         .get_by_role_and_label(Role::Button, "Change resource type")
         .click();
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Custom Resources")
+    workload_window(&harness, "Custom Resources")
         .get_by_role_and_label(Role::TextInput, "Search resource types");
 }
 
@@ -1081,10 +1071,7 @@ fn namespace_search_scratch_is_per_window() {
         .with_size(egui::vec2(1_440.0, 700.0))
         .build_ui_state(render, fixture);
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(workload_window(&harness, "Deployments")).click();
     harness.run_steps(2);
     let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
     search.type_text("sea");
@@ -1096,15 +1083,9 @@ fn namespace_search_scratch_is_per_window() {
             .as_deref(),
         Some("sea")
     );
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(workload_window(&harness, "Deployments")).click();
     harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(workload_window(&harness, "Pods")).click();
     harness.run_steps(2);
     assert_eq!(
         harness
@@ -1135,9 +1116,7 @@ fn namespace_combobox_remains_reachable_in_compact_viewport() {
         .with_size(egui::vec2(680.0, 700.0))
         .build_ui_state(render, fixture);
     harness.run_steps(3);
-    harness
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(harness.root()).click();
     harness.run_steps(2);
     harness
         .get_by_role_and_label(Role::Button, "default")
@@ -1227,9 +1206,7 @@ fn normal_mode_enforces_workload_minimum() {
     harness.run_steps(4);
 
     assert_normal_size(
-        harness
-            .get_by_role_and_label(Role::Window, "Deployments")
-            .rect(),
+        workload_window(&harness, "Deployments").rect(),
         egui::vec2(640.0, 420.0),
     );
 }
@@ -1251,11 +1228,7 @@ fn free_mode_preserves_compact_workload_geometry() {
     set_geometry(harness.state_mut(), id, [240.0, 160.0]);
     harness.run_steps(4);
 
-    assert_compact_size(
-        harness
-            .get_by_role_and_label(Role::Window, "Deployments")
-            .rect(),
-    );
+    assert_compact_size(workload_window(&harness, "Deployments").rect());
 }
 
 #[test]
@@ -1369,17 +1342,17 @@ fn windows_keep_search_sort_and_namespace_independent() {
     );
 
     // Sorting flips order in the sorted window only.
-    let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployments = workload_window(&harness, "Deployments");
     deployments
         .get_by_role_and_label(Role::Button, "Sort deployments by created")
         .click();
     harness.run_steps(4);
-    let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployments = workload_window(&harness, "Deployments");
     deployments
         .get_by_role_and_label(Role::Button, "Sort deployments by created")
         .click();
     harness.run_steps(4);
-    let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployments = workload_window(&harness, "Deployments");
     assert!(
         deployments
             .get_by_label("Select resource web-frontend")
@@ -1391,7 +1364,7 @@ fn windows_keep_search_sort_and_namespace_independent() {
                 .top(),
         "descending creation order must put web-frontend first"
     );
-    let pods = harness.get_by_role_and_label(Role::Window, "Pods");
+    let pods = workload_window(&harness, "Pods");
     assert!(
         pods.get_by_label("Select resource web-frontend-7d9f8-00001")
             .rect()
@@ -1404,21 +1377,20 @@ fn windows_keep_search_sort_and_namespace_independent() {
     );
 
     // A search typed into one window never leaks into another window.
-    let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployments = workload_window(&harness, "Deployments");
     deployments
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .focus();
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .type_text("api");
     harness.run_steps(4);
 
-    let deployments = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployments = workload_window(&harness, "Deployments");
     deployments.get_by_label("Select resource api-server");
     assert!(deployments.query_by_label("web-frontend").is_none());
-    let pods = harness.get_by_role_and_label(Role::Window, "Pods");
+    let pods = workload_window(&harness, "Pods");
     pods.get_by_label("Select resource web-frontend-7d9f8-00001");
     pods.get_by_label("Select resource db-postgres-0");
 
@@ -1480,13 +1452,12 @@ fn selection_driven_detail_panel_respects_split_minima() {
     );
     let id = workload_id(harness.state(), WorkspaceWorkload::Pods);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     window.get_by_label("Pod · default / db-postgres-0");
     // Without a resolved backend response the pane keeps its pinned
     // identity header and shows a loading state.
@@ -1498,7 +1469,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .shell
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 0.0));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
@@ -1507,7 +1478,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .shell
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     window.get_by_label("Select resource web-frontend-7d9f8-00001");
     window.get_by_label("Pod · default / db-postgres-0");
 
@@ -1516,7 +1487,7 @@ fn selection_driven_detail_panel_respects_split_minima() {
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     assert!(
         window
             .query_by_label("Pod · default / db-postgres-0")
@@ -1533,20 +1504,17 @@ fn selected_row_single_click_eventually_clears_selection_once() {
     );
 
     let row_label = "Select resource db-postgres-0";
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, row_label)
         .click();
     harness.run_steps(10);
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Pods")
+        workload_window(&harness, "Pods")
             .query_by_label("Pod · default / db-postgres-0")
             .is_some()
     );
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.run_steps(10);
@@ -1571,8 +1539,7 @@ fn clicking_another_resource_replaces_the_pending_row_action() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
@@ -1585,13 +1552,11 @@ fn clicking_another_resource_replaces_the_pending_row_action() {
         ));
     harness.run_steps(2);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.step();
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.run_steps(10);
@@ -1623,14 +1588,12 @@ fn hidden_resource_row_action_expires_once_at_table_scope() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.step();
@@ -1651,8 +1614,7 @@ fn hidden_resource_row_action_expires_once_at_table_scope() {
         "the pending clear must execute while its row is filtered out"
     );
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.run_steps(10);
@@ -1704,18 +1666,17 @@ fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
         .with_size(egui::vec2(1_000.0, 600.0))
         .build_ui_state(render, fixture);
     harness.run_steps(4);
-    let first = harness.get_by_role_and_label(Role::Window, "Pods");
+    let first = workload_window(&harness, "Pods");
     first
         .get_by_role_and_label(Role::Button, "Select resource pod-000")
         .click();
     harness.step();
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource pod-000")
         .scroll_down();
     harness.step();
     harness.run_steps(6);
-    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    let recycled = workload_window(&harness, "Pods");
     assert!(
         recycled
             .query_by_role_and_label(Role::Button, "Select resource pod-000")
@@ -1742,7 +1703,7 @@ fn virtualized_large_list_recycles_rows_and_keeps_interaction_correct() {
             .as_deref(),
         Some("Select resource pod-000")
     );
-    let recycled = harness.get_by_role_and_label(Role::Window, "Pods");
+    let recycled = workload_window(&harness, "Pods");
     let later_index = (1..500)
         .find(|index| {
             recycled
@@ -1777,8 +1738,7 @@ fn cross_row_resource_double_click_does_not_change_integrated_selection() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
@@ -1791,13 +1751,11 @@ fn cross_row_resource_double_click_does_not_change_integrated_selection() {
         ));
     harness.run_steps(2);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.step();
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend-7d9f8-00001")
         .click();
     harness.step();
@@ -1831,8 +1789,7 @@ fn resource_double_click_opens_dedicated_without_selecting_or_guarding() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    let row = harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    let row = workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0");
     row.click();
     row.click();
@@ -1860,8 +1817,7 @@ fn selected_clean_resource_double_click_across_frames_preserves_detail() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
@@ -1873,13 +1829,11 @@ fn selected_clean_resource_double_click_across_frames_preserves_detail() {
             k10s_ui::workspace::DetailTab::Yaml,
         ));
     harness.run_steps(2);
-    let row = harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    let row = workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
     row.click();
     harness.step();
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.step();
@@ -1907,8 +1861,7 @@ fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
@@ -1917,13 +1870,11 @@ fn selected_dirty_resource_double_click_preserves_selection_and_skips_guard() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
-    let row = harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    let row = workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0");
     row.click();
     harness.step();
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Clear selection for resource db-postgres-0")
         .click();
     harness.step();
@@ -1947,13 +1898,12 @@ fn detail_close_is_in_identity_row() {
         &mut harness,
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(10);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = workload_window(&harness, "Pods");
     let identity_row = window.get_by_label("Detail identity row");
     let close = window.get_by_role_and_label(Role::Button, "Clear selection");
     assert!(
@@ -2002,10 +1952,7 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
                 .find(|window| window.id == id)
                 .expect("workload window remains open")
                 .geometry;
-            let expected_size = harness
-                .get_by_role_and_label(Role::Window, title)
-                .rect()
-                .size();
+            let expected_size = workload_window(&harness, title).rect().size();
 
             for command in [
                 WorkspaceCommand::SelectRow(id, rows[0].identity.clone()),
@@ -2027,18 +1974,13 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
                     .geometry;
                 assert_eq!(geometry, expected, "{title} geometry changed");
                 assert!(
-                    (harness
-                        .get_by_role_and_label(Role::Window, title)
-                        .rect()
-                        .size()
-                        - expected_size)
-                        .length()
+                    (workload_window(&harness, title).rect().size() - expected_size).length()
                         <= 1.0,
                     "{title} outer rectangle changed"
                 );
             }
 
-            let split_window = harness.get_by_role_and_label(Role::Window, title);
+            let split_window = workload_window(&harness, title);
             let first_row_label = format!("Select resource {}", rows[0].identity.name);
             let list_anchor_before = split_window
                 .get_by_role_and_label(Role::Button, &first_row_label)
@@ -2057,7 +1999,7 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
                 .shell
                 .apply_workspace_command(WorkspaceCommand::MaximizeDetailPane(id));
             harness.run_steps(4);
-            let maximized = harness.get_by_role_and_label(Role::Window, title);
+            let maximized = workload_window(&harness, title);
             assert!(
                 maximized
                     .query_by_role_and_label(Role::Button, &first_row_label)
@@ -2071,7 +2013,7 @@ fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
                 .shell
                 .apply_workspace_command(WorkspaceCommand::RestoreDetailPane(id));
             harness.run_steps(4);
-            let restored = harness.get_by_role_and_label(Role::Window, title);
+            let restored = workload_window(&harness, title);
             let list_anchor_after = restored
                 .get_by_role_and_label(Role::Button, &first_row_label)
                 .rect();
@@ -2096,22 +2038,20 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
         LauncherItem::Workload(WorkspaceWorkload::Deployments),
     );
 
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = workload_window(&harness, "Deployments");
     window
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .focus();
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .type_text("web");
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = workload_window(&harness, "Deployments");
     window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
     assert!(
         window
@@ -2155,7 +2095,7 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     );
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = workload_window(&harness, "Deployments");
     window.get_by_role_and_label(Role::Button, "Clear selection for resource web-frontend");
     assert!(
         window
@@ -2167,11 +2107,9 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     window.get_by_label("18/18 ready");
 
     // Clearing the filter reveals the rest of the resynced snapshot.
-    window
-        .get_by_role_and_label(Role::Button, "Clear filters")
-        .click();
+    window.get_by_role_and_label(Role::Button, "Reset").click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");
     window.get_by_label("Select resource checkout");
 }

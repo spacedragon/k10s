@@ -159,7 +159,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Deployments"
+  Window label="Deployments · all namespaces"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -169,6 +169,30 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              GenericContainer
+                TextInput label="Search deployments" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox value="Namespace: not requested"
+                GenericContainer
+                  GenericContainer
+                    ComboBox value="Status: all"
+                GenericContainer
+                  Button label="Columns ▾"
+                Button label="↻"
+                GenericContainer
+              GenericContainer
+                Label value="1 deployments"
+                  TextRun value="1 deployments"
+                GenericContainer
+                  GenericContainer
+                    Label value="Age shown as relative ("
+                      TextRun value="Age shown as relative ("
+                    Button label="switch to absolute"
+                    Label value=")"
+                      TextRun value=")"
               Label value="■ Forbidden · user alice@example.com cannot list deployments.apps in --namespace=payments"
                 TextRun value="■ Forbidden · user alice@example.com cannot list deployments.apps in --namespace=payments"
               Label value="Ask a cluster administrator to grant this permission, then retry."
@@ -178,15 +202,6 @@ Window
                   TextRun value="kubectl auth can-i list deployments.apps --as=alice@example.com --namespace=payments"
                 Button label="Copy auth can-i command"
                 Button label="Retry now"
-              GenericContainer
-                TextInput label="Search deployments" value=""
-                  TextRun value=""
-                GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      ComboBox label="Namespace" value="Namespace catalog not requested"
-                    Label value="Namespace"
-                      TextRun value="Namespace"
               GenericContainer
                 GenericContainer
                   GenericContainer

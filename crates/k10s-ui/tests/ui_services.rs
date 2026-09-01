@@ -20,6 +20,8 @@ use k10s_ui::{
 };
 use std::collections::BTreeMap;
 
+mod common;
+
 const CONTEXT: &str = "dev-local";
 
 struct Fixture {
@@ -119,6 +121,8 @@ fn render(ui: &mut egui::Ui, fixture: &mut Fixture) {
     );
 }
 
+use common::namespace_combobox;
+
 #[test]
 fn service_namespace_combobox_only_selects_ready_catalog_values() {
     let mut fixture = Fixture::default();
@@ -151,9 +155,7 @@ fn service_namespace_combobox_only_selects_ready_catalog_values() {
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
             .is_none()
     );
-    window_node
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(window_node).click();
     harness.run_steps(3);
     let search = harness.get_by_role_and_label(Role::TextInput, "Search namespaces");
     search.type_text("TEAM");
@@ -196,20 +198,15 @@ fn missing_service_namespace_is_reported_without_broadening() {
         .build_ui_state(render, fixture);
     harness.run_steps(3);
     assert_eq!(
-        harness
-            .get_by_role_and_label(Role::ComboBox, "Namespace")
-            .value()
-            .as_deref(),
-        Some("deleted-team · namespace no longer exists")
+        namespace_combobox(harness.root()).value().as_deref(),
+        Some("Namespace: deleted-team · no longer exists")
     );
     assert!(matches!(
         &harness.state().shell.workspace().window(id).unwrap().content,
         k10s_ui::workspace::WindowContent::Services(state)
             if state.namespace_scope == k10s_ui::workspace::NamespaceScope::Namespace("deleted-team".into())
     ));
-    harness
-        .get_by_role_and_label(Role::ComboBox, "Namespace")
-        .click();
+    namespace_combobox(harness.root()).click();
     harness.run_steps(2);
     harness
         .get_by_role_and_label(Role::Button, "All namespaces")
@@ -302,7 +299,9 @@ fn responsive_service_headers_hide_order_tooltip_and_sort_affordances() {
         .build_ui_state(render, fixture);
     harness.run_steps(4);
     let wide = harness.get_by_role_and_label(Role::Window, "Services");
-    assert!(wide.get_all_by_label("Namespace").count() >= 2);
+    // The Namespace label lives in the table header; the toolbar selector
+    // carries its own label inside the control text.
+    wide.get_by_label("Namespace");
     for header in ["Name", "Type", "Cluster IP", "Ports", "Age"] {
         wide.get_by_label(header);
     }
@@ -771,7 +770,7 @@ fn list_columns_render_strictly_from_projections() {
     for header in ["Name", "Type", "Cluster IP", "Ports", "Age"] {
         window.get_by_label(header);
     }
-    window.get_by_role_and_label(Role::ComboBox, "Namespace");
+    namespace_combobox(window);
     for key in ["name", "namespace", "type", "cluster_ip", "ports", "age"] {
         window.get_by_role_and_label(Role::Button, format!("Sort services by {key}").as_str());
     }

@@ -26,6 +26,8 @@ use k10s_ui::{
     },
 };
 
+mod common;
+
 const CONTEXT: &str = "dev-local";
 const OTHER_CONTEXT: &str = "prod-readonly";
 
@@ -252,7 +254,7 @@ fn missing_snapshots_render_a_loading_state_not_an_empty_table() {
         LauncherItem::Workload(WorkspaceWorkload::Deployments),
     );
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Loading deployments");
     // A loading list must not be mistaken for an authoritative empty one.
     assert!(
@@ -282,7 +284,7 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         .lists
         .insert(WorkspaceWorkload::Deployments, Vec::new());
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("No Deployments in this view");
 
     // Rows return, but a filter with no matches gets its own state.
@@ -294,18 +296,17 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         ],
     );
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .focus();
     harness.run_steps(4);
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    common::workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .type_text("no-such-workload");
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("No resources match these filters");
     assert!(
         window
@@ -314,11 +315,9 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         "a filter miss must not claim the namespace is empty"
     );
 
-    window
-        .get_by_role_and_label(Role::Button, "Clear filters")
-        .click();
+    window.get_by_role_and_label(Role::Button, "Reset").click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");
     assert!(
         window
@@ -344,7 +343,7 @@ fn stale_connections_banner_every_data_window_as_text() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
 
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = common::workload_window(&harness, "Pods");
     window.get_by_label("[~] Reconnecting · last sync unknown · retry in pending · attempt 1");
     window.get_by_label("Mutations are disabled; recovery controls unlock after reconnecting.");
     assert!(
@@ -441,16 +440,16 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .insert(jobs, WindowFreshness::ReadyEmpty);
     harness.run_steps(4);
 
-    let stale = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let stale = common::workload_window(&harness, "Deployments");
     stale.get_by_label("▲ Stale · last sync 37s ago · retry in 3s · attempt 2");
     stale
         .get_by_role_and_label(Role::Button, "Retry now")
         .click();
-    let live = harness.get_by_role_and_label(Role::Window, "Pods");
-    live.get_by_label("● Live · synced 4s ago");
+    let live = common::workload_window(&harness, "Pods");
+    live.get_by_label("● Live · 4s ago");
     live.get_by_label("Select resource cached-pod");
 
-    let forbidden = harness.get_by_role_and_label(Role::Window, "StatefulSets");
+    let forbidden = common::workload_window(&harness, "StatefulSets");
     forbidden.get_by_label(
         "■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments",
     );
@@ -458,12 +457,11 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         "kubectl auth can-i list statefulsets.apps --as=alice@example.com --namespace=payments",
     );
     forbidden.get_by_role_and_label(Role::Button, "Copy auth can-i command");
-    harness
-        .get_by_role_and_label(Role::Window, "DaemonSets")
+    common::workload_window(&harness, "DaemonSets")
         .get_by_label("✕ Failed · watch ended unexpectedly");
-    let ready_empty = harness.get_by_role_and_label(Role::Window, "Jobs");
+    let ready_empty = common::workload_window(&harness, "Jobs");
     ready_empty.get_by_label("◇ Ready · no resources");
-    ready_empty.get_by_role_and_label(Role::Button, "Refresh list");
+    ready_empty.get_by_role_and_label(Role::Button, "↻");
 }
 
 #[test]
@@ -492,8 +490,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
         },
     );
     harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    common::workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::Button, "Select resource stale-api")
         .click();
     harness.run_steps(2);
@@ -514,7 +511,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
         .open_scale(window, identity.clone(), Some(2));
     harness.run_steps(2);
 
-    let deployment_window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let deployment_window = common::workload_window(&harness, "Deployments");
     assert!(
         deployment_window
             .get_by_role_and_label(Role::Button, "Scale…")
@@ -539,8 +536,7 @@ fn stale_window_disables_only_its_mutation_controls_with_a_reason() {
     harness.state_mut().connection = ConnectionState::Failed;
     harness.run_steps(2);
     assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Deployments")
+        common::workload_window(&harness, "Deployments")
             .get_by_role_and_label(Role::Button, "Scale…")
             .accesskit_node()
             .is_disabled(),
@@ -663,8 +659,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
     );
     let id = workload_id(harness.state(), WorkspaceWorkload::Deployments);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    common::workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
@@ -673,7 +668,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .shell
         .apply_workspace_command(tall_detail_pane(id));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Deployment · default / web-frontend");
 
     // The object is deleted behind the watch: the authoritative rows drop
@@ -684,7 +679,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
     );
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     assert!(
         window
             .query_by_role_and_label(Role::Button, "Select resource web-frontend")
@@ -703,7 +698,7 @@ fn a_gone_selection_shows_a_gone_state_instead_of_loading_forever() {
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     assert!(
         window
             .query_by_label("Deployment · default / web-frontend")
@@ -733,8 +728,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         .apply_workspace_command(tall_detail_pane(id));
     harness.run_steps(4);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    common::workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::Button, "Select resource web-frontend")
         .click();
     harness.run_steps(4);
@@ -746,7 +740,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         deployment_detail("web-frontend"),
     );
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Structured details unavailable");
     window.get_by_role_and_label(Role::Button, "Scale…");
 
@@ -757,7 +751,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
     );
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     assert!(
         window
             .query_by_role_and_label(Role::Button, "Select resource web-frontend")
@@ -778,7 +772,7 @@ fn a_gone_selection_beats_any_cached_detail_response() {
         .get_by_role_and_label(Role::Button, "Clear selection")
         .click();
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployments");
+    let window = common::workload_window(&harness, "Deployments");
     assert!(
         window
             .query_by_label("Deployment · default / web-frontend")
@@ -836,7 +830,7 @@ fn a_custom_kind_missing_after_a_context_switch_falls_back_to_the_picker() {
             Some("monitoring.example.com/v1/Dashboard".to_owned()),
         ));
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let window = common::workload_window(&harness, "Custom Resources");
     window.get_by_label("Select resource traffic-overview");
 
     // Switching contexts drops every authoritative row and the new
@@ -873,7 +867,7 @@ fn a_custom_kind_missing_after_a_context_switch_falls_back_to_the_picker() {
     harness.state_mut().selected_context = OTHER_CONTEXT.to_owned();
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Custom Resources");
+    let window = common::workload_window(&harness, "Custom Resources");
     window.get_by_label("Pick a resource type");
     assert!(
         window.query_by_label("traffic-overview").is_none(),
@@ -897,8 +891,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         LauncherItem::Workload(WorkspaceWorkload::Pods),
     );
     let logs_window = workload_id(harness.state(), WorkspaceWorkload::Pods);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
@@ -917,8 +910,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         .insert(detail_identity.clone(), pod_detail("db-postgres-0"));
     harness.run_steps(4);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Tab Logs")
         .click();
     harness.run_steps(4);
@@ -944,7 +936,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
             },
         )]
     );
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = common::workload_window(&harness, "Pods");
     window.get_by_label("Connecting");
 
     // Simulate a live session streaming two lines, then losing the socket.
@@ -957,7 +949,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         view.append("container ready");
     }
     harness.run_steps(4);
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = common::workload_window(&harness, "Pods");
     window.get_by_label("kubelet started pod");
     window.get_by_label("container ready");
 
@@ -969,7 +961,7 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
         .connection_lost();
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = common::workload_window(&harness, "Pods");
     window.get_by_label("kubelet started pod");
     window.get_by_label("container ready");
     window.get_by_label("Disconnected");
@@ -1079,8 +1071,7 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
     // The tree order defines keyboard focus order: the search field comes
     // before the sort headers and rows. Workload details are selection-driven,
     // so there is no separate detail-visibility control in the toolbar.
-    let labels: Vec<String> = harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    let labels: Vec<String> = common::workload_window(&harness, "Deployments")
         .children_recursive()
         .filter(|node| matches!(node.accesskit_node().role(), Role::TextInput | Role::Button))
         .filter_map(|node| node.accesskit_node().label())
@@ -1101,8 +1092,7 @@ fn interactive_controls_follow_a_stable_focus_order_within_a_window() {
     assert!(sort < row, "toolbar precedes table controls");
 
     // Keyboard focus starts on nothing and Tab walks forward.
-    harness
-        .get_by_role_and_label(Role::Window, "Deployments")
+    common::workload_window(&harness, "Deployments")
         .get_by_role_and_label(Role::TextInput, "Search deployments")
         .focus();
     harness.run_steps(4);
@@ -1150,13 +1140,12 @@ fn minimum_size_windows_keep_list_and_details_non_overlapping() {
                 collapsed: false,
             },
         ));
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     harness.run_steps(4);
 
-    let window = harness.get_by_role_and_label(Role::Window, "Pods");
+    let window = common::workload_window(&harness, "Pods");
     let window_rect = window.rect();
     let row = window.get_by_label("Select resource web-frontend-7d9f8-00001");
     let row_rect = row.rect();

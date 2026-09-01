@@ -174,7 +174,9 @@ impl<'a> DetailPresentationInput<'a> {
                 .filter(|metrics| metrics.identity == *identity),
             relations: feed.relations.get(identity),
             freshness,
-            now: SystemTime::now(),
+            // One clock sample per rendered frame, shared with the list age
+            // cells; deterministic fixtures pin it explicitly.
+            now: feed.render_time.unwrap_or_else(SystemTime::now),
             gone,
             mutations_allowed,
             // Starting a forward creates new backend state and therefore

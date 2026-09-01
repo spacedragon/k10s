@@ -1,8 +1,6 @@
 //! Instance-addressable bottom taskbar and deterministic layout controls.
 
-use crate::workspace::{
-    NamespaceScope, Window, WindowContent, WindowKind, WorkspaceCommand, WorkspaceState,
-};
+use crate::workspace::{Window, WindowContent, WindowKind, WorkspaceCommand, WorkspaceState};
 
 use super::{ConnectionState, resource_window::RowIdentity};
 use egui::{Button, WidgetInfo, WidgetType};
@@ -32,10 +30,9 @@ fn identity<I: RowIdentity>(window: &Window<I>) -> String {
         WindowContent::Detail(_) => None,
     };
     match (window.kind, scope) {
-        (WindowKind::Workload(_), Some(NamespaceScope::Namespace(namespace))) => {
-            format!("{} · {namespace}", window.title)
+        (WindowKind::Workload(_), Some(scope)) => {
+            crate::workspace::scoped_window_title(&window.title, scope)
         }
-        (WindowKind::Workload(_), _) => format!("{} · all namespaces", window.title),
         _ => window.title.clone(),
     }
 }

@@ -250,12 +250,9 @@ where
 
         let filters_active = !state.search.is_empty()
             || state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces;
-        let clear_label = if compact_controls {
-            "Clear"
-        } else {
-            "Clear filters"
-        };
-        if filters_active && ui.button(clear_label).clicked() {
+        // Same Reset semantics as the workload toolbar: one action clears
+        // search and namespace together.
+        if filters_active && ui.button("Reset").clicked() {
             queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
             queued.push(WorkspaceCommand::SetNamespaceScope(
                 window_id,
@@ -446,8 +443,14 @@ where
         .available_rect_before_wrap()
         .intersect(ui.clip_rect())
         .width();
-    let columns =
-        super::responsive_table::resolve_columns(&RESPONSIVE_COLUMNS, table_width, column_spacing);
+    // The Services window does not expose a Columns menu yet.
+    let hidden_columns = std::collections::BTreeSet::new();
+    let columns = super::responsive_table::resolve_columns(
+        &RESPONSIVE_COLUMNS,
+        table_width,
+        column_spacing,
+        &hidden_columns,
+    );
     debug_assert_eq!(
         columns.horizontal_scroll,
         columns

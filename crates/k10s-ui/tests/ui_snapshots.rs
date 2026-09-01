@@ -32,6 +32,8 @@ use k10s_ui::{
     workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
 
+mod common;
+
 const CONTEXT: &str = "dev-local";
 
 struct Fixture {
@@ -437,8 +439,7 @@ fn pod_detail_overview_with_resolved_response() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
@@ -477,8 +478,7 @@ fn pod_detail_disconnected_logs() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
     run_steps(&mut harness);
@@ -495,8 +495,7 @@ fn pod_detail_disconnected_logs() {
         .details
         .insert(identity, pod_runtime_detail("db-postgres-0"));
     run_steps(&mut harness);
-    harness
-        .get_by_role_and_label(Role::Window, "Pods")
+    common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Tab Logs")
         .click();
     run_steps(&mut harness);

@@ -160,6 +160,11 @@ where
             .identity
             .as_row_identity()
             .map_or_else(|| state.title.clone(), super::detail::frame::title),
+        // The list chrome carries the active scope in its title bar
+        // (`Deployments · all namespaces`) instead of a bare kind name.
+        WindowContent::Resource(resource) if matches!(state.kind, WindowKind::Workload(_)) => {
+            crate::workspace::scoped_window_title(&state.title, &resource.namespace_scope)
+        }
         WindowContent::Resource(_) | WindowContent::Services(_) => state.title.clone(),
     };
     let mut window = egui::Window::new(title)

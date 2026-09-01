@@ -440,9 +440,10 @@ fn main() {
     // one bounded 100-point step per frame, so crossing the whole list
     // takes a four-digit number of frames.
     // The 196 px launcher leaves slightly fewer row anchors per frame than
-    // the legacy shell, so retain enough deterministic steps to traverse
-    // the same 18,750-row model at the supported shell geometry.
-    for frame in 0..(SCROLL_STEP_BUDGET * 150) {
+    // the legacy shell, and the redesigned toolbar's match line takes ~23
+    // points of list height, so retain enough deterministic steps to
+    // traverse the same 18,750-row model at the supported shell geometry.
+    for frame in 0..(SCROLL_STEP_BUDGET * 170) {
         let anchors = locate_visible_pods(accesskit_tree.as_ref().unwrap());
         render_frame(
             &ctx,
@@ -487,7 +488,7 @@ fn main() {
                 && node
                     .accesskit_node()
                     .label()
-                    .is_some_and(|label| label == "Pods")
+                    .is_some_and(|label| label == "Pods" || label.starts_with("Pods ·"))
         })
         .and_then(|node| node.accesskit_node().bounding_box())
         .expect("the Pods window has a bounding box");

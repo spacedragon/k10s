@@ -7,10 +7,11 @@
 use egui::{ScrollArea, WidgetInfo, WidgetType};
 use k10s_protocol::{ResourceListRow, ResourceProjection};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use web_time::SystemTime;
 
 use super::responsive_table::RowAction;
-use crate::workspace::{SortSpec, WindowId, WorkloadKind};
+use crate::workspace::{AgeMode, SortSpec, WindowId, WorkloadKind};
 
 use super::responsive_table::ColumnSpec;
 
@@ -111,6 +112,17 @@ pub(super) fn sort_rows(rows: &mut [&ResourceListRow], sort: &SortSpec) {
     });
 }
 
+/// The column layout for one workload kind; the toolbar's Columns menu and
+/// the table itself share this single source of truth.
+pub(super) fn column_specs(kind: WorkloadKind, namespaced: bool) -> &'static [ColumnSpec] {
+    match kind {
+        WorkloadKind::Deployments => &DEPLOYMENT_COLUMNS[..],
+        WorkloadKind::Pods => &POD_COLUMNS[..],
+        _ if namespaced => &GENERIC_NAMESPACED[..],
+        _ => &GENERIC_CLUSTER[..],
+    }
+}
+
 /// Render the table. Stable IDs derive from the workspace `window_id`, so
 /// scroll positions and widget state never leak between windows.
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +135,8 @@ pub(super) fn show<I>(
     namespaced: bool,
     search: &str,
     sort: Option<&SortSpec>,
+    hidden_columns: &BTreeSet<String>,
+    age_mode: AgeMode,
     rows: &[&ResourceListRow],
     is_selected: impl Fn(&ResourceListRow) -> bool,
     identity_of: impl Fn(&ResourceListRow) -> I,
@@ -138,7 +152,7 @@ where
         if search.is_empty() {
             ui.label(format!("No {title} in this view"));
         } else {
-            // The toolbar owns the "Clear filters" control so the label
+            // The toolbar owns the "Reset" control so the label
             // stays unique per window.
             ui.label("No resources match these filters");
         }
@@ -157,18 +171,28 @@ where
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
     let header_rows = 1_usize;
-    let specs = match workload_kind {
-        WorkloadKind::Deployments => &DEPLOYMENT_COLUMNS[..],
-        WorkloadKind::Pods => &POD_COLUMNS[..],
-        _ if namespaced => &GENERIC_NAMESPACED[..],
-        _ => &GENERIC_CLUSTER[..],
-    };
+    // Absolute ages render full timestamps, which need a wider Age column.
+    let specs: Vec<ColumnSpec> = column_specs(workload_kind, namespaced)
+        .iter()
+        .map(|spec| {
+            if spec.key == "created" && age_mode == AgeMode::Absolute {
+                spec.with_min_width(118.0)
+            } else {
+                *spec
+            }
+        })
+        .collect();
     let column_spacing = ui.spacing().item_spacing.x;
     let table_width = ui
         .available_rect_before_wrap()
         .intersect(ui.clip_rect())
         .width();
-    let columns = super::responsive_table::resolve_columns(specs, table_width, column_spacing);
+    let columns = super::responsive_table::resolve_columns(
+        &specs,
+        table_width,
+        column_spacing,
+        hidden_columns,
+    );
     debug_assert_eq!(
         columns.horizontal_scroll,
         columns
@@ -288,8 +312,14 @@ where
                                             Some(&row.created_at),
                                             render_time,
                                         );
-                                        let response =
-                                            ui.monospace(age).on_hover_text(&row.created_at);
+                                        let (cell, hover) = if age_mode == AgeMode::Absolute
+                                            && !row.created_at.is_empty()
+                                        {
+                                            (row.created_at.clone(), age)
+                                        } else {
+                                            (age, row.created_at.clone())
+                                        };
+                                        let response = ui.monospace(cell).on_hover_text(hover);
                                         response.widget_info(|| {
                                             WidgetInfo::labeled(
                                                 WidgetType::Label,
@@ -309,7 +339,7 @@ where
     actions
 }
 
-fn column_title(key: &str) -> &'static str {
+pub(super) fn column_title(key: &str) -> &'static str {
     match key {
         "namespace" => "Namespace",
         "name" => "Name",
@@ -322,7 +352,7 @@ fn column_title(key: &str) -> &'static str {
         _ => "",
     }
 }
-fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
+pub(super) fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
     match row.projection.as_ref() {
         Some(ResourceProjection::Pod(p)) => p
             .phase
