@@ -418,6 +418,16 @@ fn deployment_projection_complete_uses_typed_fields_only() {
     ] {
         window.get_by_label(label);
     }
+    let painted = window
+        .query_all_by_role(Role::TextRun)
+        .filter_map(|node| node.value())
+        .collect::<Vec<_>>();
+    assert!(
+        painted
+            .iter()
+            .any(|value| value == "ghcr.io/acme/checkout:v4")
+    );
+    assert!(painted.iter().any(|value| value == "app=checkout"));
     assert!(window.query_by_label("checkout-without-revision").is_none());
     assert!(
         window

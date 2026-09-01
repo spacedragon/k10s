@@ -64,64 +64,68 @@ pub(super) fn long_value_text(value: &str, max_chars: usize) -> String {
 }
 
 /// A full-width, two-line value used for images, selectors and annotations.
-pub(super) fn long_value(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
+pub(super) fn long_value(ui: &mut egui::Ui, width: f32, label: &str, value: Option<&str>) {
     let available = value.filter(|value| !value.is_empty());
     let original = available.unwrap_or("—");
-    ui.label(RichText::new(label).weak());
-    ui.horizontal(|ui| {
-        let copy_width = if available.is_some() { 48.0 } else { 0.0 };
-        // Grid intrinsic sizing may report zero available width. The clip is
-        // already the bounded parent cell/column viewport, so establish a
-        // stable one-cell row from it before measuring the value.
-        let clipped = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
-        let row_width = clipped.min(320.0);
-        let value_width = (row_width - copy_width - ui.spacing().item_spacing.x).max(1.0);
-        let mut limit =
-            unicode_segmentation::UnicodeSegmentation::graphemes(original, true).count();
-        let mut shown = original.to_owned();
-        while limit > 1
-            && ui
-                .painter()
-                .layout_no_wrap(
-                    shown.clone(),
-                    egui::FontId::default(),
-                    ui.visuals().text_color(),
-                )
-                .size()
-                .x
-                > value_width
-        {
-            limit -= 1;
-            shown = long_value_text(original, limit);
-        }
-        let response = ui.add_sized(
-            [value_width, ui.spacing().interact_size.y],
-            egui::Label::new(&shown).truncate(),
-        );
-        response.widget_info(|| {
-            WidgetInfo::labeled(WidgetType::Label, true, format!("{label}: {original}"))
-        });
-        if shown != original {
-            response.on_hover_text(original);
-        }
-        if available.is_some() {
-            let copy = ui.add_sized(
-                [copy_width, ui.spacing().interact_size.y],
-                egui::Button::new("Copy").small(),
-            );
-            copy.widget_info(|| {
-                WidgetInfo::labeled(WidgetType::Button, true, format!("Copy {label}"))
+    ui.allocate_ui_with_layout(
+        egui::vec2(width.max(1.0), 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.label(RichText::new(label).weak());
+            ui.horizontal(|ui| {
+                let copy_width = if available.is_some() { 48.0 } else { 0.0 };
+                // Grid intrinsic sizing may report zero available width. The clip is
+                // already the bounded parent cell/column viewport, so establish a
+                // stable one-cell row from it before measuring the value.
+                let value_width = (width - copy_width - ui.spacing().item_spacing.x).max(1.0);
+                let mut limit =
+                    unicode_segmentation::UnicodeSegmentation::graphemes(original, true).count();
+                let mut shown = original.to_owned();
+                while limit > 1
+                    && ui
+                        .painter()
+                        .layout_no_wrap(
+                            shown.clone(),
+                            egui::FontId::default(),
+                            ui.visuals().text_color(),
+                        )
+                        .size()
+                        .x
+                        > value_width
+                {
+                    limit -= 1;
+                    shown = long_value_text(original, limit);
+                }
+                let response = ui.add_sized(
+                    [value_width, ui.spacing().interact_size.y],
+                    egui::Label::new(&shown).truncate(),
+                );
+                response.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Label, true, format!("{label}: {original}"))
+                });
+                if shown != original {
+                    response.on_hover_text(original);
+                }
+                if available.is_some() {
+                    let copy = ui.add_sized(
+                        [copy_width, ui.spacing().interact_size.y],
+                        egui::Button::new("Copy").small(),
+                    );
+                    copy.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Button, true, format!("Copy {label}"))
+                    });
+                    if copy.clicked() {
+                        ui.ctx().copy_text(original.to_owned());
+                    }
+                }
             });
-            if copy.clicked() {
-                ui.ctx().copy_text(original.to_owned());
-            }
-        }
-    });
+        },
+    );
 }
 
 /// Keeps a two-line long value inside one parent Grid cell.
-pub(super) fn long_value_cell(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
-    ui.vertical(|ui| long_value(ui, label, value));
+pub(super) fn long_value_cell(ui: &mut egui::Ui, width: f32, label: &str, value: Option<&str>) {
+    ui.vertical(|ui| long_value(ui, width, label, value));
 }
 
 #[cfg(test)]
@@ -210,7 +214,7 @@ mod responsive_contract_tests {
 
     #[test]
     fn unavailable_long_value_never_exposes_copy() {
-        let mut harness = Harness::new_ui(|ui| super::long_value(ui, "Image", None));
+        let mut harness = Harness::new_ui(|ui| super::long_value(ui, 240.0, "Image", None));
         harness.run();
         harness.get_by_label("Image: —");
         assert!(
@@ -226,8 +230,8 @@ mod responsive_contract_tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(360.0, 180.0))
             .build_ui(move |ui| {
-                super::long_value(ui, "Image", Some("repo/app:v1"));
-                super::long_value(ui, "Annotation", Some(long));
+                super::long_value(ui, 320.0, "Image", Some("repo/app:v1"));
+                super::long_value(ui, 320.0, "Annotation", Some(long));
             });
         harness.run();
         assert!(

@@ -654,6 +654,7 @@ fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProje
                 for container in &deployment.template_containers {
                     super::overview::long_value(
                         ui,
+                        280.0,
                         &format!("Image ({})", container.name),
                         container.image.as_deref(),
                     );
@@ -673,7 +674,7 @@ fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProje
                 value(deployment.max_unavailable.as_deref()),
             );
             let selector = map_list(&deployment.selector);
-            super::overview::long_value(ui, "Selector", Some(&selector));
+            super::overview::long_value(ui, 280.0, "Selector", Some(&selector));
             ui.end_row();
             row(
                 ui,
@@ -752,7 +753,7 @@ fn annotations(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentPr
     ui.heading(format!("ANNOTATIONS · {}", deployment.annotations.len()));
     if expanded {
         for (key, value) in &deployment.annotations {
-            super::overview::long_value(ui, key, Some(value));
+            super::overview::long_value(ui, ui.available_width(), key, Some(value));
         }
         if ui.button("Hide annotations").clicked() {
             expanded = false;

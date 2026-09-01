@@ -477,7 +477,7 @@ fn show_operational<I: RowIdentity>(
                 ui.end_row();
                 for container in &pod.containers {
                     ui.label(&container.name);
-                    super::overview::long_value_cell(ui, "Image", Some(&container.image));
+                    super::overview::long_value_cell(ui, 220.0, "Image", Some(&container.image));
                     ui.label(&container.state);
                     ui.label(&container.ready);
                     ui.label(&container.restarts);
@@ -640,7 +640,7 @@ fn show_metadata<I: RowIdentity>(
                 ui.label("No annotations");
             } else {
                 for (key, value) in &pod.annotations {
-                    super::overview::long_value(ui, key, Some(value));
+                    super::overview::long_value(ui, ui.available_width(), key, Some(value));
                 }
             }
         });

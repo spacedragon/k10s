@@ -169,7 +169,7 @@ fn service_configuration(
         .join(", ");
     if !selector.is_empty() {
         ui.heading("SELECTORS");
-        super::overview::long_value(ui, "Selector", Some(&selector));
+        super::overview::long_value(ui, ui.available_width(), "Selector", Some(&selector));
         painted = true;
     }
     if projection.session_affinity.is_none()

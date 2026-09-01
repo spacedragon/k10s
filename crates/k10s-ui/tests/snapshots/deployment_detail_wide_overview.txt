@@ -127,28 +127,30 @@ Window label="Deployment · payments / checkout"
                         TextRun value="TEMPLATE"
                       GenericContainer
                         GenericContainer
-                          Label value="Image (api)"
-                            TextRun value="Image (api)"
                           GenericContainer
+                            Label value="Image (api)"
+                              TextRun value="Image (api)"
                             GenericContainer
-                              Label value="Image (api): ghcr.io/acme/checkout:v4"
-                                TextRun value="gh…:v4"
-                            GenericContainer
-                              Button label="Copy Image (api)"
+                              GenericContainer
+                                Label value="Image (api): ghcr.io/acme/checkout:v4"
+                                  TextRun value="ghcr.io/acme/checkout:v4"
+                              GenericContainer
+                                Button label="Copy Image (api)"
                           Label value="Replicas · 3/3 available"
                             TextRun value="Replicas · 3/3 available"
                           Label value="Max surge · 25%"
                             TextRun value="Max surge · 25%"
                           Label value="Max unavailable · 1"
                             TextRun value="Max unavailable · 1"
-                          Label value="Selector"
-                            TextRun value="Selector"
                           GenericContainer
+                            Label value="Selector"
+                              TextRun value="Selector"
                             GenericContainer
-                              Label value="Selector: app=checkout"
-                                TextRun value="ap…ut"
-                            GenericContainer
-                              Button label="Copy Selector"
+                              GenericContainer
+                                Label value="Selector: app=checkout"
+                                  TextRun value="app=checkout"
+                              GenericContainer
+                                Button label="Copy Selector"
                           Label value="Template labels · app=checkout"
                             TextRun value="Template labels · app=checkout"
                           Label value="Template annotations · checksum/config=abc123"
@@ -188,9 +190,7 @@ Window label="Deployment · payments / checkout"
                           Label value="Created · 2026-08-01T08:00:00Z"
                             TextRun value="Created · 2026-08-01T08:00:00Z"
                           Label value="UID · uid-deployment-checkout"
-                            TextRun value="UID · uid-deployment-checkout"
                           Label value="Context · deployment-test"
-                            TextRun value="Context · deployment-test"
               ScrollBar
             GenericContainer
               Label value="Shortcuts: p pods · y yaml · e events · c copy name · Esc restore/close"
