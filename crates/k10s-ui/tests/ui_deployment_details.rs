@@ -889,10 +889,10 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     assert!(window.query_by_label("TEMPLATE").is_none());
     for control in [
         "Tab Overview",
+        "More detail tabs",
         "Scale…",
-        "Restart…",
         "Delete…",
-        "Actions",
+        "More detail actions",
         "Show Deployment metadata",
     ] {
         let rect = window.get_by_role_and_label(Role::Button, control).rect();

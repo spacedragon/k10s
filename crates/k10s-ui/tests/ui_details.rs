@@ -2620,22 +2620,24 @@ fn narrow_integrated_detail_budgets_intrinsic_tab_and_action_controls() {
         .rect();
     let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
     let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
-    if let Some(more_tabs) = window.query_by_role_and_label(Role::Button, "More detail tabs") {
-        let more_actions = window
-            .get_by_role_and_label(Role::Button, "More detail actions")
-            .rect();
-        assert!(tabs_row.width() >= active.width() + more_tabs.rect().width() + 8.0);
+    let more_tabs = window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .rect();
+    let more_actions = window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .rect();
+    assert!(tabs_row.width() >= active.width() + more_tabs.width() + 8.0);
+    assert!(actions_row.width() >= scale.width() + more_actions.width() + delete.width() + 16.0);
+    let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 900.0));
+    for (name, rect) in [
+        ("more tabs", more_tabs),
+        ("scale", scale),
+        ("more actions", more_actions),
+        ("delete", delete),
+    ] {
         assert!(
-            actions_row.width() >= scale.width() + more_actions.width() + delete.width() + 16.0
-        );
-    } else {
-        let restart = window
-            .get_by_role_and_label(Role::Button, "Restart…")
-            .rect();
-        let actions = window.get_by_role_and_label(Role::Button, "Actions").rect();
-        assert!(
-            actions_row.width()
-                >= scale.width() + restart.width() + actions.width() + delete.width() + 24.0
+            canvas.contains_rect(rect),
+            "{name} {rect:?} escapes visible canvas {canvas:?}"
         );
     }
 }

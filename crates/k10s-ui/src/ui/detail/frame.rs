@@ -193,9 +193,13 @@ pub(super) fn show<I: RowIdentity>(
         );
     }
     let row_width = ui.available_width();
+    let visible_row_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
     let row_height = ui.spacing().interact_size.y;
     let gap = ui.spacing().item_spacing.x;
-    let usable_width = (row_width - gap).max(0.0);
+    let usable_width = (visible_row_width - gap).max(0.0);
     let full_freshness_width = if integrated { 0.0 } else { 152.0 };
     let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
     let action_count = usize::from(projection.actions.can_scale)
@@ -253,12 +257,19 @@ pub(super) fn show<I: RowIdentity>(
     };
     let (chrome_rect, _) =
         ui.allocate_exact_size(egui::vec2(row_width, chrome_height), Sense::hover());
+    let visible_chrome_rect = chrome_rect.intersect(ui.clip_rect());
     let (tabs_region, actions_rect) = if stacked_chrome {
         (
-            egui::Rect::from_min_size(chrome_rect.min, egui::vec2(row_width, row_height)),
             egui::Rect::from_min_size(
-                egui::pos2(chrome_rect.left(), chrome_rect.top() + row_height + gap),
-                egui::vec2(row_width, row_height),
+                visible_chrome_rect.min,
+                egui::vec2(visible_chrome_rect.width(), row_height),
+            ),
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    visible_chrome_rect.left(),
+                    visible_chrome_rect.top() + row_height + gap,
+                ),
+                egui::vec2(visible_chrome_rect.width(), row_height),
             ),
         )
     } else {
@@ -275,10 +286,13 @@ pub(super) fn show<I: RowIdentity>(
         let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
         let tab_width = usable_width - action_width;
         (
-            egui::Rect::from_min_size(chrome_rect.min, egui::vec2(tab_width, row_height)),
+            egui::Rect::from_min_size(visible_chrome_rect.min, egui::vec2(tab_width, row_height)),
             egui::Rect::from_min_max(
-                egui::pos2(chrome_rect.left() + tab_width + gap, chrome_rect.top()),
-                chrome_rect.max,
+                egui::pos2(
+                    visible_chrome_rect.left() + tab_width + gap,
+                    visible_chrome_rect.top(),
+                ),
+                visible_chrome_rect.max,
             ),
         )
     };
