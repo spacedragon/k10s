@@ -11,11 +11,26 @@ pub(super) const WINDOW_BACKGROUND: Color32 = Color32::from_rgb(27, 30, 33);
 pub(super) const CONTROL_BACKGROUND: Color32 = Color32::from_rgb(36, 40, 44);
 pub(super) const STATUS_BACKGROUND: Color32 = Color32::from_rgb(30, 34, 38);
 pub(super) const BORDER: Color32 = Color32::from_rgb(61, 66, 72);
+pub(super) const SECTION_DIVIDER: Color32 = Color32::from_rgb(96, 103, 112);
 pub(super) const TEXT: Color32 = Color32::from_rgb(229, 232, 235);
 pub(super) const MUTED_TEXT: Color32 = Color32::from_rgb(171, 178, 186);
+/// One step below [`MUTED_TEXT`]: chip keys, table sub-values, and the
+/// `current`/`revision` qualifiers that must read as secondary next to a
+/// muted label. Still WCAG AA against every shell surface.
+pub(super) const FAINT_TEXT: Color32 = Color32::from_rgb(134, 141, 149);
+/// Fill and stroke for the bordered vital chips of the detail header. The
+/// fill sits one step above the window so the chip boundary is visible
+/// without a heavy border.
+pub(super) const CHIP_BACKGROUND: Color32 = Color32::from_rgb(38, 42, 47);
 pub(super) const ACCENT: Color32 = Color32::from_rgb(51, 169, 216);
 pub(super) const ACCENT_DARK: Color32 = Color32::from_rgb(24, 104, 140);
-pub(super) const SELECTED_ROW: Color32 = Color32::from_rgb(34, 52, 69);
+/// Full-row selection fill: an accent-tinted band (the reference design's
+/// `#174c66`) that reads as selected at a glance without washing out the
+/// text painted on top of it.
+pub(super) const SELECTED_ROW: Color32 = Color32::from_rgb(23, 76, 102);
+/// Full-row hover fill: one clear step above the window ground, since the
+/// row band is the only hover affordance the table paints.
+pub(super) const HOVER_ROW: Color32 = Color32::from_rgb(40, 45, 51);
 pub(super) const HEALTHY: Color32 = Color32::from_rgb(91, 214, 156);
 pub(super) const CONNECTING: Color32 = Color32::from_rgb(246, 200, 95);
 pub(super) const WARNING: Color32 = Color32::from_rgb(246, 200, 95);
@@ -184,6 +199,7 @@ mod tests {
         for background in [APP_BACKGROUND, PANEL_BACKGROUND, WINDOW_BACKGROUND] {
             assert!(contrast(TEXT, background) >= 4.5);
             assert!(contrast(MUTED_TEXT, background) >= 4.5);
+            assert!(contrast(FAINT_TEXT, background) >= 4.5);
         }
         assert!(contrast(Color32::WHITE, ACCENT_DARK) >= 4.5);
         for status in [HEALTHY, CONNECTING, WARNING, DANGER] {

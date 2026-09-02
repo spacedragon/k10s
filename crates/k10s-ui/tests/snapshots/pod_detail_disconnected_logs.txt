@@ -198,22 +198,18 @@ Window
                     TextRun value=" default / "
                   Label value="db-postgres-0"
                     TextRun value="db-postgres-0"
-                  Label value="Freshness · unavailable"
-                    TextRun value="Freshness · unavailable"
                   GenericContainer
                     Button label="Clear selection"
                     Button label="Restore split"
                     Button label="Pop out ↗"
+                    Label value="Freshness · unavailable"
+                      TextRun value="⟳ unavail."
                 GenericContainer label="Detail identity row"
                 Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
                     Label value="Status ● —"
-                    GenericContainer
-                      GenericContainer
                     Label value="Ready · —"
-                    GenericContainer
-                      GenericContainer
                     Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"

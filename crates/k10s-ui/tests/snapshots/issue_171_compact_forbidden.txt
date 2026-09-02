@@ -199,28 +199,22 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort deployments by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort deployments by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort deployments by name"
+                            Label value="NAME"
+                            Button label="Sort deployments by name"
                           GenericContainer
-                            Label value="Ready"
-                              TextRun value="Ready"
+                            Label value="READY"
+                              TextRun value="READY"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort deployments by created"
+                            Label value="AGE"
+                            Button label="Sort deployments by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Select resource api-server"
+                            Label value="api-server"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -228,6 +222,7 @@ Window
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Select resource api-server"
     Splitter
     Splitter
     Splitter

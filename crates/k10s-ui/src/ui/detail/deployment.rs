@@ -4,14 +4,14 @@
 //! resource projections. Display summaries, generic detail sections, and YAML
 //! are deliberately outside this module's data path.
 
-use egui::{Grid, RichText, ScrollArea, WidgetInfo, WidgetType, accesskit::Role};
+use egui::{RichText, ScrollArea, WidgetInfo, WidgetType, accesskit::Role};
 use k10s_protocol::{
     ContainerStateProjection, DeploymentProjection, EventRow, EventsCondition, GroupVersionKind,
     PodProjection, ReplicaSetProjection, ResourceIdentity, ResourceListRow, ResourceProjection,
 };
 
 use crate::ui::resource_window::RowIdentity;
-use crate::workspace::{DetailState, WindowId, WorkspaceCommand};
+use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use super::presentation::{
@@ -44,6 +44,8 @@ pub(super) fn configure_frame(
         }
         return;
     };
+    // The Pods tab badge states how many Pods that tab will show.
+    frame.pod_count = related_pod_count(input);
     let rollout = rollout(deployment);
     if let Some(vital) = frame
         .visible_vitals
@@ -53,7 +55,28 @@ pub(super) fn configure_frame(
         vital.value = rollout.text;
         vital.shape = rollout.shape;
         vital.tone = rollout.tone;
+        vital.hint = rollout.hint;
     }
+}
+
+/// The number of Pods this Deployment's relation feed has resolved, or
+/// `None` while the feed is loading, failed, or bound to another identity.
+fn related_pod_count(input: &DetailPresentationInput<'_>) -> Option<usize> {
+    let Some(crate::ui::RelationState::Loaded { response, .. }) = input.relations else {
+        return None;
+    };
+    if response.identity != *input.identity {
+        return None;
+    }
+    Some(
+        response
+            .groups
+            .iter()
+            .filter(|group| exact_gvk(&group.gvk, POD_GROUP))
+            .flat_map(|group| group.rows.iter())
+            .filter(|row| exact_related_row(input.identity, row, POD_GROUP))
+            .count(),
+    )
 }
 
 /// Compatibility entry point for the frozen frame call site.
@@ -112,7 +135,16 @@ pub(super) fn show_with_actions<I: RowIdentity>(
                 queued,
             );
         },
-        |column| metadata_column(column, window_id, input.identity, &projection, frame),
+        |column| {
+            metadata_column(
+                column,
+                window_id,
+                input.identity,
+                &projection,
+                input.now,
+                frame,
+            );
+        },
     ) {
         // Both responsive columns were painted by the shared 1.35:1 layout.
     } else {
@@ -141,7 +173,7 @@ pub(super) fn show_with_actions<I: RowIdentity>(
         );
         if frame.expansion.metadata {
             ui.separator();
-            metadata_column(ui, window_id, input.identity, &projection, frame);
+            metadata_column(ui, window_id, input.identity, &projection, input.now, frame);
         }
     }
 }
@@ -250,6 +282,30 @@ struct RolloutVital {
     text: String,
     tone: DetailVitalTone,
     shape: Option<DetailVitalShape>,
+    /// Condition reason/message; belongs in the chip tooltip, not the chip.
+    hint: Option<String>,
+}
+
+/// `Progressing · NewReplicaSetAvailable: Deployment "x" has successfully
+/// progressed.` — the raw condition, kept for hover.
+fn condition_hint(condition: &k10s_protocol::ResourceConditionProjection) -> Option<String> {
+    let reason = condition
+        .reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty());
+    let message = condition
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty());
+    match (reason, message) {
+        (None, None) => None,
+        (Some(reason), None) => Some(format!("{} · {reason}", condition.condition_type)),
+        (None, Some(message)) => Some(format!("{} · {message}", condition.condition_type)),
+        (Some(reason), Some(message)) => Some(format!(
+            "{} · {reason}: {message}",
+            condition.condition_type
+        )),
+    }
 }
 
 fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
@@ -262,6 +318,7 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
             text: condition.reason.as_deref().unwrap_or("Failed").to_owned(),
             tone: DetailVitalTone::Danger,
             shape: Some(DetailVitalShape::Cross),
+            hint: condition_hint(condition),
         };
     }
 
@@ -271,10 +328,13 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
         .find(|condition| condition.condition_type == "Progressing" && condition.status == "True")
     {
         if condition.reason.as_deref() == Some("NewReplicaSetAvailable") {
+            // The reason is implementation vocabulary; the chip says what it
+            // means and keeps the reason for hover.
             return RolloutVital {
-                text: "NewReplicaSetAvailable".into(),
+                text: "Complete".into(),
                 tone: DetailVitalTone::Healthy,
                 shape: Some(DetailVitalShape::Dot),
+                hint: condition_hint(condition),
             };
         }
         return RolloutVital {
@@ -285,6 +345,7 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
                 .to_owned(),
             tone: DetailVitalTone::Warning,
             shape: Some(DetailVitalShape::Triangle),
+            hint: condition_hint(condition),
         };
     }
 
@@ -293,6 +354,7 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
             text: "Complete".into(),
             tone: DetailVitalTone::Healthy,
             shape: Some(DetailVitalShape::Dot),
+            hint: None,
         };
     }
 
@@ -309,6 +371,7 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
                 .to_owned(),
             tone: DetailVitalTone::Warning,
             shape: Some(DetailVitalShape::Triangle),
+            hint: condition_hint(condition),
         };
     }
 
@@ -316,6 +379,7 @@ fn rollout(deployment: &DeploymentProjection) -> RolloutVital {
         text: "—".into(),
         tone: DetailVitalTone::Neutral,
         shape: None,
+        hint: None,
     }
 }
 
@@ -397,7 +461,11 @@ fn elided_cell(ui: &mut egui::Ui, width: f32, value: &str) {
 
 fn elided_cell_toned(ui: &mut egui::Ui, width: f32, value: &str, color: Option<egui::Color32>) {
     let width = width.max(1.0);
-    let row_height = ui.spacing().interact_size.y;
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
     let color = color.unwrap_or(ui.visuals().text_color());
     let content = ui
         .painter()
@@ -406,7 +474,12 @@ fn elided_cell_toned(ui: &mut egui::Ui, width: f32, value: &str, color: Option<e
         .x;
     let response = ui.add_sized(
         [width, row_height],
-        egui::Label::new(RichText::new(value).color(color)).truncate(),
+        egui::Label::new(
+            RichText::new(value)
+                .text_style(egui::TextStyle::Body)
+                .color(color),
+        )
+        .truncate(),
     );
     if content > width {
         response.on_hover_text(value);
@@ -439,7 +512,7 @@ fn pod_status_text(pod: Option<&PodProjection>) -> (String, egui::Color32) {
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("Exit {}", termination.exit_code));
-            Some(("✕", text, crate::ui::theme::DANGER))
+            Some(("⨯", text, crate::ui::theme::DANGER))
         }
         ContainerStateProjection::Running | ContainerStateProjection::Terminated(_) => None,
     }) {
@@ -450,10 +523,38 @@ fn pod_status_text(pod: Option<&PodProjection>) -> (String, egui::Color32) {
     };
     let (shape, color) = match phase {
         "Running" | "Succeeded" => ("●", crate::ui::theme::HEALTHY),
-        "Failed" => ("✕", crate::ui::theme::DANGER),
+        "Failed" => ("⨯", crate::ui::theme::DANGER),
         _ => ("▲", crate::ui::theme::WARNING),
     };
     (format!("{shape} {phase}"), color)
+}
+
+/// Table header cell: small uppercase muted text, aligned exactly like the
+/// column's own cells (never centered).
+fn header_cell(ui: &mut egui::Ui, width: f32, height: f32, align: egui::Align, label: &str) {
+    let font = egui::FontId::new(10.0, egui::FontFamily::Monospace);
+    aligned_label_cell_in(
+        ui,
+        width,
+        height,
+        align,
+        label,
+        egui::Label::new(
+            RichText::new(label.to_uppercase())
+                .font(font.clone())
+                .color(crate::ui::theme::MUTED_TEXT),
+        ),
+        font,
+    );
+}
+
+/// The width the table may paint into: bounded by the enclosing clip *and*
+/// by what is still free after the cursor, so the last column is never cut
+/// off at the column or window edge.
+fn table_content_width(ui: &egui::Ui) -> f32 {
+    ui.available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width()
 }
 
 fn pods_table<I: RowIdentity>(
@@ -463,9 +564,13 @@ fn pods_table<I: RowIdentity>(
     now: SystemTime,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
-    ui.heading(format!("PODS · {}", pods.len()));
+    // The section header doubles as the route to the full Pods tab.
+    if super::overview::section_action(ui, "PODS", Some(&pods.len().to_string()), "Open Pods tab →")
+    {
+        queued.push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Pods));
+    }
     if pods.is_empty() {
-        ui.label("No related Pods");
+        ui.label(RichText::new("No related Pods").weak());
         return;
     }
     // Reference column widths; NAME flexes to fill the remaining space.
@@ -476,23 +581,23 @@ fn pods_table<I: RowIdentity>(
     const AGE: f32 = 42.0;
     horizontal_table(ui, window_id, "pods", "Deployment Pods table", |ui| {
         let spacing = ui.spacing().item_spacing.x;
-        let available = ui.clip_rect().width().max(200.0);
-        let name_width =
-            (available - READY - STATUS - RESTARTS - NODE - AGE - spacing * 5.0).max(60.0);
+        let fixed = READY + STATUS + RESTARTS + NODE + AGE + spacing * 5.0;
+        let semantic_minimum = 60.0 + fixed;
+        let table_width = table_content_width(ui).max(semantic_minimum);
+        let name_width = table_width - fixed;
+        let row_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Body));
         // Header row: fixed columns match the body so values never drift.
         ui.horizontal(|ui| {
-            let mut header = |label: &str, width: f32| {
-                ui.add_sized(
-                    [width, ui.spacing().interact_size.y],
-                    egui::Label::new(RichText::new(label).strong().weak()),
-                );
-            };
-            header("Name", name_width);
-            header("Ready", READY);
-            header("Status", STATUS);
-            header("Restarts", RESTARTS);
-            header("Node", NODE);
-            header("Age", AGE);
+            header_cell(ui, name_width, row_height, egui::Align::Min, "Name");
+            header_cell(ui, READY, row_height, egui::Align::Max, "Ready");
+            header_cell(ui, STATUS, row_height, egui::Align::Min, "Status");
+            header_cell(ui, RESTARTS, row_height, egui::Align::Max, "Restarts");
+            header_cell(ui, NODE, row_height, egui::Align::Min, "Node");
+            header_cell(ui, AGE, row_height, egui::Align::Max, "Age");
         });
         ui.separator();
         for row in pods {
@@ -500,20 +605,14 @@ fn pods_table<I: RowIdentity>(
                 Some(ResourceProjection::Pod(pod)) => Some(pod),
                 _ => None,
             };
-            ui.horizontal(|ui| {
-                let name = row.identity.name.clone();
-                let label = format!("Pod · {}", name);
-                let open = ui.add_sized(
-                    [name_width, ui.spacing().interact_size.y],
-                    egui::Button::new(name.clone()).truncate(),
-                );
-                open.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
-                if open.clicked() {
-                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                        &row.identity,
-                    )));
-                }
-                elided_cell(
+            // Reserve the row background slot before the cells so a hover
+            // highlight paints behind the text instead of over it.
+            let background = ui.painter().add(egui::Shape::Noop);
+            let cells = ui.horizontal(|ui| {
+                // Plain text, not a framed button: the whole row is the
+                // affordance, so the name must not look like a control.
+                elided_cell(ui, name_width, &row.identity.name);
+                right_aligned_cell(
                     ui,
                     READY,
                     &pod.and_then(|pod| pair(pod.ready_containers, pod.total_containers))
@@ -522,20 +621,119 @@ fn pods_table<I: RowIdentity>(
                 // Status cell keeps its tone dot; the label stays fixed-width.
                 let (status_text, status_color) = pod_status_text(pod);
                 elided_cell_toned(ui, STATUS, &status_text, Some(status_color));
-                elided_cell(ui, RESTARTS, &number(pod.and_then(|pod| pod.restart_count)));
+                right_aligned_cell(ui, RESTARTS, &number(pod.and_then(|pod| pod.restart_count)));
                 elided_cell(
                     ui,
                     NODE,
                     value(pod.and_then(|pod| pod.node_name.as_deref())),
                 );
-                elided_cell(
+                right_aligned_cell(
                     ui,
                     AGE,
                     &format_age(pod.and_then(|pod| pod.created_at.as_deref()), now),
                 );
             });
+            let row_rect = egui::Rect::from_min_size(
+                cells.response.rect.min,
+                egui::vec2(table_width, cells.response.rect.height()),
+            );
+            let label = format!("Pod · {}", row.identity.name);
+            let open = ui.interact(
+                row_rect,
+                ui.id().with((
+                    "k10s.detail.deployment.pod-row",
+                    &row.identity.name,
+                    &row.identity.uid,
+                )),
+                egui::Sense::click(),
+            );
+            open.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+            if open.hovered() {
+                ui.painter().set(
+                    background,
+                    egui::Shape::rect_filled(
+                        row_rect,
+                        0.0,
+                        ui.visuals().widgets.hovered.weak_bg_fill,
+                    ),
+                );
+            }
+            if open.clicked() {
+                queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                    &row.identity,
+                )));
+            }
         }
     });
+}
+
+fn right_aligned_cell(ui: &mut egui::Ui, width: f32, value: &str) {
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    aligned_label_cell(
+        ui,
+        width,
+        row_height,
+        egui::Align::Max,
+        value,
+        egui::Label::new(RichText::new(value).text_style(egui::TextStyle::Body)),
+    );
+}
+
+fn aligned_label_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    align: egui::Align,
+    text: &str,
+    label: egui::Label,
+) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    aligned_label_cell_in(ui, width, height, align, text, label, font);
+}
+
+/// `aligned_label_cell`, measuring the right-aligned offset in `font` so a
+/// header painted smaller than the body still lines up with its column.
+fn aligned_label_cell_in(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    align: egui::Align,
+    text: &str,
+    label: egui::Label,
+    font: egui::FontId,
+) {
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, ui.visuals().text_color())
+        .size()
+        .x;
+    let overflowing = text_width > width;
+    // `add_sized` centers its widget, so left-aligned cells lay the label out
+    // in an explicit left-to-right cell instead; right-aligned cells keep
+    // padding the text to the cell's right edge.
+    let response = if align == egui::Align::Max {
+        let label_width = text_width.min(width);
+        ui.add_space(width - label_width);
+        ui.add_sized([label_width, height], label.truncate())
+    } else {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(egui::vec2(width, height));
+                ui.add(label.truncate().halign(egui::Align::Min))
+            },
+        )
+        .inner
+    };
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text));
+    if overflowing {
+        response.on_hover_text(text);
+    }
 }
 
 /// The short image tag (after the final ':') for the IMAGE TAG column.
@@ -549,15 +747,56 @@ fn image_tag(images: &[k10s_protocol::ContainerImageProjection]) -> String {
         .unwrap_or_else(|| image.to_owned())
 }
 
+/// `9` in normal text with a weak `current` qualifier: the number is the
+/// fact, the qualifier is context, so they must not read as one value.
+fn revision_cell(ui: &mut egui::Ui, width: f32, revision: u64, current: bool) {
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    job.append(
+        &revision.to_string(),
+        0.0,
+        egui::TextFormat::simple(font.clone(), ui.visuals().text_color()),
+    );
+    let accessible = if current {
+        job.append(
+            " current",
+            0.0,
+            egui::TextFormat::simple(font, crate::ui::theme::FAINT_TEXT),
+        );
+        format!("{revision} current")
+    } else {
+        revision.to_string()
+    };
+    aligned_label_cell(
+        ui,
+        width,
+        row_height,
+        egui::Align::Min,
+        &accessible,
+        egui::Label::new(job),
+    );
+}
+
 fn rollout_history(
     ui: &mut egui::Ui,
     window_id: WindowId,
     history: &[ReplicaSetHistory<'_>],
     now: SystemTime,
 ) {
-    ui.heading("ROLLOUT HISTORY");
+    let note = if history.len() == 1 {
+        "1 revision".to_owned()
+    } else {
+        format!("{} revisions", history.len())
+    };
+    super::overview::section_note(ui, "ROLLOUT HISTORY", &note);
     if history.is_empty() {
-        ui.label("No rollout history");
+        ui.label(RichText::new("No rollout history").weak());
         return;
     }
     // Reference column widths; REPLICASET flexes to fill the remaining space.
@@ -571,32 +810,40 @@ fn rollout_history(
         "Deployment rollout history table",
         |ui| {
             let spacing = ui.spacing().item_spacing.x;
-            let available = ui.clip_rect().width().max(200.0);
+            let available = table_content_width(ui).max(200.0);
             let replica_set_width = (available - REV - IMAGE_TAG - WHEN - spacing * 3.0).max(60.0);
+            let row_height = ui
+                .spacing()
+                .interact_size
+                .y
+                .max(ui.text_style_height(&egui::TextStyle::Body));
             ui.horizontal(|ui| {
-                let mut header = |label: &str, width: f32| {
-                    ui.add_sized(
-                        [width, ui.spacing().interact_size.y],
-                        egui::Label::new(RichText::new(label).strong().weak()),
-                    );
-                };
-                header("Rev", REV);
-                header("ReplicaSet", replica_set_width);
-                header("Image tag", IMAGE_TAG);
-                header("When", WHEN);
+                header_cell(ui, REV, row_height, egui::Align::Min, "Rev");
+                header_cell(
+                    ui,
+                    replica_set_width,
+                    row_height,
+                    egui::Align::Min,
+                    "ReplicaSet",
+                );
+                header_cell(ui, IMAGE_TAG, row_height, egui::Align::Min, "Image tag");
+                header_cell(ui, WHEN, row_height, egui::Align::Max, "When");
             });
             ui.separator();
             for (index, history) in history.iter().enumerate() {
                 let is_current = index == 0;
-                let mut revision = format!("{}", history.replica_set.revision);
-                if is_current {
-                    revision.push_str(" current");
-                }
                 ui.horizontal(|ui| {
-                    elided_cell(ui, REV, &revision);
-                    elided_cell(ui, replica_set_width, &history.row.identity.name);
+                    revision_cell(ui, REV, history.replica_set.revision, is_current);
+                    // The ReplicaSet hash is context, not the fact being
+                    // read; the revision and tag carry that.
+                    elided_cell_toned(
+                        ui,
+                        replica_set_width,
+                        &history.row.identity.name,
+                        Some(crate::ui::theme::FAINT_TEXT),
+                    );
                     elided_cell(ui, IMAGE_TAG, &image_tag(&history.replica_set.images));
-                    elided_cell(
+                    right_aligned_cell(
                         ui,
                         WHEN,
                         &format_age(history.replica_set.created_at.as_deref(), now),
@@ -698,7 +945,7 @@ fn rollout_events(ui: &mut egui::Ui, condition: EventsCondition, events: &[Event
         ui.label(RichText::new("No rollout events in the last 24h.").weak());
         return;
     }
-    ui.heading("RECENT ROLLOUT EVENTS");
+    super::overview::section(ui, "RECENT ROLLOUT EVENTS", None);
     for event in events.iter().take(5) {
         ui.label(format!(
             "{} · {} · ×{} · {}",
@@ -707,260 +954,225 @@ fn rollout_events(ui: &mut egui::Ui, condition: EventsCondition, events: &[Event
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigurationSection {
+    Template,
+    LabelsAnnotations,
+    Identity,
+}
+
+/// Reference right column: TEMPLATE, then LABELS (with the annotations
+/// disclosure) only when there is something to show, then IDENTITY. The
+/// manager (Helm/Argo) is one IDENTITY row, not a section of its own.
+fn configuration_section_sequence(
+    has_labels: bool,
+    has_annotations: bool,
+) -> Vec<ConfigurationSection> {
+    let mut sections = vec![ConfigurationSection::Template];
+    if has_labels || has_annotations {
+        sections.push(ConfigurationSection::LabelsAnnotations);
+    }
+    sections.push(ConfigurationSection::Identity);
+    sections
+}
+
 fn metadata_column(
     ui: &mut egui::Ui,
-    window_id: WindowId,
+    _window_id: WindowId,
     identity: &ResourceIdentity,
     projection: &DeploymentDetailProjection<'_>,
-    frame: &mut DetailFrameProjection<'_>,
+    now: SystemTime,
+    _frame: &mut DetailFrameProjection<'_>,
 ) {
-    template(ui, window_id, projection.deployment);
-    ui.separator();
-    managed_by(ui, window_id, projection.deployment);
-    ui.separator();
-    labels(ui, projection.deployment, frame);
-    ui.separator();
-    annotations(ui, window_id, projection.deployment);
-    ui.separator();
-    identity_section(ui, window_id, identity, projection.deployment);
-}
-
-fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProjection) {
-    ui.heading("TEMPLATE");
-    // The long values (Image, Selector) use the full column width so the
-    // elided code text has room and the copy control never overlaps.
-    let width = ui.available_width().max(120.0);
-    Grid::new(("k10s.detail.deployment.template", window_id.0))
-        .num_columns(1)
-        .striped(true)
-        .show(ui, |ui| {
-            if deployment.template_containers.is_empty() {
-                row(ui, "Images", "—");
-            } else {
-                for container in &deployment.template_containers {
-                    super::overview::long_value(
-                        ui,
-                        width,
-                        &format!("Image ({})", container.name),
-                        container.image.as_deref(),
-                    );
-                    ui.end_row();
-                }
-            }
-            row(
-                ui,
-                "Replicas",
-                &pair(deployment.available_replicas, deployment.desired_replicas)
-                    .map_or_else(|| "—".into(), |pair| format!("{pair} available")),
-            );
-            row(ui, "Max surge", value(deployment.max_surge.as_deref()));
-            row(
-                ui,
-                "Max unavailable",
-                value(deployment.max_unavailable.as_deref()),
-            );
-            let selector = map_list(&deployment.selector);
-            super::overview::long_value(ui, width, "Selector", Some(&selector));
-            ui.end_row();
-            row(
-                ui,
-                "Template labels",
-                &map_list(&deployment.template_labels),
-            );
-            row(
-                ui,
-                "Template annotations",
-                &map_list(&deployment.template_annotations),
-            );
-        });
-}
-
-fn managed_by(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProjection) {
-    ui.heading("MANAGED BY");
-    Grid::new(("k10s.detail.deployment.manager", window_id.0))
-        .num_columns(1)
-        .striped(true)
-        .show(ui, |ui| {
-            row(
-                ui,
-                "Manager",
-                value(
+    let deployment = projection.deployment;
+    let sections = configuration_section_sequence(
+        !deployment.labels.is_empty(),
+        !deployment.annotations.is_empty(),
+    );
+    for section in sections {
+        match section {
+            ConfigurationSection::Template => template(ui, deployment),
+            ConfigurationSection::LabelsAnnotations => {
+                super::overview::metadata_sections(
+                    ui,
                     deployment
                         .labels
-                        .get("app.kubernetes.io/managed-by")
-                        .map(String::as_str),
-                ),
-            );
-            if let Some(release) = deployment.annotations.get("meta.helm.sh/release-name") {
-                row(ui, "Helm release", release);
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                    ": ",
+                    deployment
+                        .annotations
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                );
             }
-            if let Some(namespace) = deployment.annotations.get("meta.helm.sh/release-namespace") {
-                row(ui, "Helm namespace", namespace);
-            }
-            if let Some(chart) = deployment.labels.get("helm.sh/chart") {
-                row(ui, "Chart", chart);
-            }
-        });
-}
-
-/// A single label chip: key + value with a bounded, tinted fill, matching the
-/// reference `.chip`. The inner label carries the `key: value` accessible name
-/// so the chip stays queryable even though the visible text omits the colon.
-fn label_chip(ui: &mut egui::Ui, key: &str, value: &str) -> egui::Response {
-    // Truncate visible text so wide k8s keys don't overflow the wrap row;
-    // the full `key: value` stays the accessible name and hover text.
-    let full = format!("{}: {}", key, value);
-    let text = crate::ui::responsive_table::middle_elide(&full, 18);
-    let accessible = full.clone();
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(35, 35, 35))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(59, 59, 59)))
-        .corner_radius(11.0)
-        .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            let response = ui.label(RichText::new(text).small());
-            let response = response.on_hover_text(&accessible);
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, accessible.clone())
-            });
-            response
-        })
-        .inner
-}
-
-/// Estimate a label chip's painted width (text + padding + border) without
-/// rendering it, so chips can be grouped into rows that respect the column
-/// width.
-fn label_chip_width(ui: &mut egui::Ui, key: &str, value: &str) -> f32 {
-    let full = format!("{}: {}", key, value);
-    let text = crate::ui::responsive_table::middle_elide(&full, 18);
-    let text_width = ui
-        .painter()
-        .layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE)
-        .size()
-        .x;
-    // inner_margin symmetric(8,2) => 16px horizontal padding, +2px border
-    text_width + 16.0 + 2.0
-}
-
-/// Render label chips in manually-wrapped rows. egui's built-in wrap only
-/// triggers when a single chip exceeds the full row width, so with many long
-/// k8s keys chips would overflow instead of wrapping; this groups them by width.
-fn render_label_chips(ui: &mut egui::Ui, deployment: &DeploymentProjection, visible: usize) {
-    let available = ui.available_width();
-    let spacing = ui.spacing().item_spacing.x;
-    let chips: Vec<(String, String)> = deployment
-        .labels
-        .iter()
-        .take(visible)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let mut rows: Vec<Vec<(String, String)>> = Vec::new();
-    let mut current: Vec<(String, String)> = Vec::new();
-    let mut row_width = 0.0;
-    for chip in &chips {
-        let chip_width = label_chip_width(ui, &chip.0, &chip.1);
-        let needed = if current.is_empty() { 0.0 } else { spacing } + chip_width;
-        if !current.is_empty() && row_width + needed > available {
-            rows.push(std::mem::take(&mut current));
-            row_width = 0.0;
+            ConfigurationSection::Identity => identity_section(ui, identity, deployment, now),
         }
-        row_width += needed;
-        current.push((chip.0.clone(), chip.1.clone()));
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
-    for row in rows {
-        ui.horizontal(|ui| {
-            for (key, value) in row {
-                label_chip(ui, &key, &value);
-            }
-        });
     }
 }
 
-fn labels(
-    ui: &mut egui::Ui,
-    deployment: &DeploymentProjection,
-    frame: &mut DetailFrameProjection<'_>,
-) {
-    ui.heading(format!("LABELS · {}", deployment.labels.len()));
-    let total = deployment.labels.len();
-    let visible = if frame.expansion.labels {
-        total
+fn template(ui: &mut egui::Ui, deployment: &DeploymentProjection) {
+    super::overview::section(ui, "TEMPLATE", None);
+    // Long values (Image, Selector, template annotations) take the full
+    // column as two-line rows; short facts share the fixed-label KV grid.
+    let width = ui.available_width().max(120.0);
+    if deployment.template_containers.is_empty() {
+        super::overview::long_value(ui, width, "Image", None);
     } else {
-        total.min(4)
-    };
-    // egui's horizontal_wrapped only wraps when an item is wider than the whole
-    // available width, not when it would overflow the current row. With long k8s
-    // keys, chips accumulate past the row width without wrapping and get
-    // stretched vertically, pushing later controls below the fold. So we wrap
-    // manually: start a new row once adding the next chip would overflow.
-    render_label_chips(ui, deployment, visible);
-    let hidden = total.saturating_sub(visible);
-    if !frame.expansion.labels && hidden > 0 {
-        if ui.button(format!("Show {hidden} more labels")).clicked() {
-            frame.expansion.labels = true;
+        for container in &deployment.template_containers {
+            super::overview::long_value(
+                ui,
+                width,
+                &format!("Image ({})", container.name),
+                container.image.as_deref(),
+            );
         }
-    } else if frame.expansion.labels && total > 4 {
-        let extra = total - 4;
-        if ui.button(format!("Hide {extra} labels")).clicked() {
-            frame.expansion.labels = false;
-        }
+    }
+    super::overview::kv_row(ui, "Replicas", &replicas_summary(deployment));
+    if let Some(rolling_update) = rolling_update_summary(deployment) {
+        super::overview::kv_row(ui, "Rolling update", &rolling_update);
+    }
+    // One `key=value` per line: joining a map and middle-eliding it hides
+    // every pair but the first, and a one-key selector must read exactly
+    // as `app=mcp-kubernetes`.
+    super::overview::long_value_list(ui, width, "Selector", &map_pairs(&deployment.selector));
+    // Template labels normally repeat the selector, and often the object's
+    // own labels; only render what they actually add.
+    if !deployment.template_labels.is_empty()
+        && deployment.template_labels != deployment.selector
+        && deployment.template_labels != deployment.labels
+    {
+        super::overview::long_value_list(
+            ui,
+            width,
+            "Template labels",
+            &map_pairs(&deployment.template_labels),
+        );
+    }
+    if !deployment.template_annotations.is_empty() {
+        super::overview::long_value_list(
+            ui,
+            width,
+            "Template annotations",
+            &map_pairs(&deployment.template_annotations),
+        );
     }
 }
 
-fn annotations(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProjection) {
-    let expansion_id = egui::Id::new(("k10s.detail.deployment.annotations", window_id.0));
-    let mut expanded = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<bool>(expansion_id))
-        .unwrap_or(false);
-    ui.heading(format!("ANNOTATIONS · {}", deployment.annotations.len()));
-    if expanded {
-        for (key, value) in &deployment.annotations {
-            super::overview::long_value(ui, ui.available_width(), key, Some(value));
-        }
-        if ui.button("Hide annotations").clicked() {
-            expanded = false;
-        }
-    } else if ui
-        .button(format!("Show {} annotations", deployment.annotations.len()))
-        .clicked()
-    {
-        expanded = true;
+/// `3 desired · 3 available`, or `—` when the counts are unknown.
+fn replicas_summary(deployment: &DeploymentProjection) -> String {
+    match (deployment.desired_replicas, deployment.available_replicas) {
+        (Some(desired), Some(available)) => format!("{desired} desired · {available} available"),
+        (Some(desired), None) => format!("{desired} desired"),
+        (None, Some(available)) => format!("{available} available"),
+        (None, None) => "—".into(),
     }
-    ui.ctx()
-        .data_mut(|data| data.insert_temp(expansion_id, expanded));
+}
+
+/// `surge 25% · unavailable 1`; `None` when neither parameter is known, so
+/// the row does not render as a dash.
+fn rolling_update_summary(deployment: &DeploymentProjection) -> Option<String> {
+    let parts: Vec<String> = [
+        deployment
+            .max_surge
+            .as_deref()
+            .map(|surge| format!("surge {surge}")),
+        deployment
+            .max_unavailable
+            .as_deref()
+            .map(|unavailable| format!("unavailable {unavailable}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// `Helm · release checkout-prod (payments) · chart checkout-1.2.0`, or `—`.
+/// Name and namespace are not repeated here: the detail header carries them.
+fn managed_by_summary(deployment: &DeploymentProjection) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(manager) = deployment.labels.get("app.kubernetes.io/managed-by") {
+        parts.push(manager.clone());
+    }
+    match (
+        deployment.annotations.get("meta.helm.sh/release-name"),
+        deployment.annotations.get("meta.helm.sh/release-namespace"),
+    ) {
+        (Some(release), Some(namespace)) => parts.push(format!("release {release} ({namespace})")),
+        (Some(release), None) => parts.push(format!("release {release}")),
+        (None, Some(namespace)) => parts.push(format!("release namespace {namespace}")),
+        (None, None) => {}
+    }
+    if let Some(chart) = deployment.labels.get("helm.sh/chart") {
+        parts.push(format!("chart {chart}"));
+    }
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// `2026-08-01 08:00 · 32d ago` when the timestamp parses, else the raw value.
+fn created_summary(created_at: Option<&str>, now: SystemTime) -> String {
+    let Some(created_at) = created_at.filter(|value| !value.is_empty()) else {
+        return "—".into();
+    };
+    let Ok(timestamp) = created_at.parse::<jiff::Timestamp>() else {
+        return created_at.to_owned();
+    };
+    let absolute = timestamp.strftime("%Y-%m-%d %H:%M").to_string();
+    let relative = format_age(Some(created_at), now);
+    if relative == "—" {
+        absolute
+    } else {
+        format!("{absolute} · {relative} ago")
+    }
 }
 
 fn identity_section(
     ui: &mut egui::Ui,
-    window_id: WindowId,
     identity: &ResourceIdentity,
     deployment: &DeploymentProjection,
+    now: SystemTime,
 ) {
-    ui.heading("IDENTITY");
-    Grid::new(("k10s.detail.deployment.identity", window_id.0))
-        .num_columns(1)
-        .striped(true)
-        .show(ui, |ui| {
-            row(ui, "Name", &identity.name);
-            row(ui, "Namespace", value(identity.namespace.as_deref()));
-            row(ui, "Created", value(deployment.created_at.as_deref()));
-            row(
-                ui,
-                "UID",
-                value((!identity.uid.is_empty()).then_some(&identity.uid)),
-            );
-            row(ui, "Context", &identity.context);
+    super::overview::section(ui, "IDENTITY", None);
+    super::overview::kv_row(
+        ui,
+        "Created",
+        &created_summary(deployment.created_at.as_deref(), now),
+    );
+    // A UID is never read in full: keep the head that identifies it and the
+    // tail that separates near-identical ids, with copy and hover for the
+    // rest.
+    let uid = if identity.uid.is_empty() {
+        super::overview::kv_row(ui, "UID", "—")
+    } else {
+        super::overview::kv_value_row(
+            ui,
+            "UID",
+            super::overview::KvValue::new(&identity.uid)
+                .display(super::overview::head_tail_elide(&identity.uid, 8, 4))
+                .faint()
+                .copyable(),
+        )
+    };
+    if !identity.uid.is_empty() {
+        uid.context_menu(|ui| {
+            if ui.button("Copy UID").clicked() {
+                ui.ctx().copy_text(identity.uid.clone());
+                ui.close();
+            }
         });
-}
-
-fn row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.label(format!("{label} · {value}"));
-    ui.end_row();
+    }
+    // Middle elision keeps the chart version, which is the part of a
+    // manager summary that actually changes between releases.
+    super::overview::kv_value_row(
+        ui,
+        "Managed by",
+        super::overview::KvValue::new(&managed_by_summary(deployment)).faint(),
+    );
 }
 
 fn deployment_of<'a>(input: &'a DetailPresentationInput<'a>) -> Option<&'a DeploymentProjection> {
@@ -1002,25 +1214,106 @@ fn value(value: Option<&str>) -> &str {
     value.unwrap_or("—")
 }
 
-fn map_list(values: &std::collections::BTreeMap<String, String>) -> String {
-    if values.is_empty() {
-        return "—".into();
-    }
+fn map_pairs(values: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
     values
         .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 #[cfg(test)]
 mod shared_seam_tests {
     use super::super::overview::detail_columns;
+    use super::{ConfigurationSection, configuration_section_sequence};
 
     #[test]
     fn deployment_body_breakpoint_is_exactly_760_points() {
         assert!(detail_columns(759.0, 8.0).is_none());
         assert!(detail_columns(760.0, 8.0).is_some());
+    }
+
+    #[test]
+    fn configuration_sections_include_only_non_empty_rendered_regions() {
+        use ConfigurationSection::{Identity, LabelsAnnotations, Template};
+
+        let cases = [
+            (true, true, vec![Template, LabelsAnnotations, Identity]),
+            (true, false, vec![Template, LabelsAnnotations, Identity]),
+            (false, true, vec![Template, LabelsAnnotations, Identity]),
+            (false, false, vec![Template, Identity]),
+        ];
+        for (labels, annotations, expected) in cases {
+            assert_eq!(
+                configuration_section_sequence(labels, annotations),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn identity_summaries_collapse_manager_and_creation_facts() {
+        use k10s_protocol::DeploymentProjection;
+        use std::collections::BTreeMap;
+
+        let mut deployment = DeploymentProjection {
+            desired_replicas: None,
+            ready_replicas: None,
+            updated_replicas: None,
+            available_replicas: None,
+            strategy: None,
+            selector: BTreeMap::new(),
+            max_surge: None,
+            max_unavailable: None,
+            conditions: Vec::new(),
+            template_containers: Vec::new(),
+            template_labels: BTreeMap::new(),
+            template_annotations: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            created_at: None,
+        };
+        assert_eq!(super::managed_by_summary(&deployment), "—");
+        assert_eq!(super::replicas_summary(&deployment), "—");
+        assert_eq!(super::rolling_update_summary(&deployment), None);
+        deployment.labels = BTreeMap::from([
+            ("app.kubernetes.io/managed-by".to_owned(), "Helm".to_owned()),
+            ("helm.sh/chart".to_owned(), "checkout-1.2.0".to_owned()),
+        ]);
+        deployment.annotations = BTreeMap::from([
+            (
+                "meta.helm.sh/release-name".to_owned(),
+                "checkout-prod".to_owned(),
+            ),
+            (
+                "meta.helm.sh/release-namespace".to_owned(),
+                "payments".to_owned(),
+            ),
+        ]);
+        deployment.desired_replicas = Some(3);
+        deployment.available_replicas = Some(2);
+        deployment.max_surge = Some("25%".to_owned());
+        assert_eq!(
+            super::managed_by_summary(&deployment),
+            "Helm · release checkout-prod (payments) · chart checkout-1.2.0"
+        );
+        assert_eq!(
+            super::replicas_summary(&deployment),
+            "3 desired · 2 available"
+        );
+        assert_eq!(
+            super::rolling_update_summary(&deployment).as_deref(),
+            Some("surge 25%")
+        );
+        let now = web_time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 8);
+        assert_eq!(
+            super::created_summary(Some("1970-01-01T00:00:00Z"), now),
+            "1970-01-01 00:00 · 8d ago"
+        );
+        assert_eq!(
+            super::created_summary(Some("not-a-timestamp"), now),
+            "not-a-timestamp"
+        );
+        assert_eq!(super::created_summary(None, now), "—");
     }
 }
 

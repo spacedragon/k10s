@@ -73,6 +73,28 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("WHY IT'S FAILING").is_none());
+    let chips = [
+        "alpha=first",
+        "bravo=second",
+        "charlie=third",
+        "delta=fourth",
+        "echo=fifth",
+        "foxtrot=sixth",
+    ]
+    .map(|label| detail.get_by_label(label).rect());
+    let metadata_right = detail
+        .get_by_label("Configuration detail column")
+        .rect()
+        .right();
+    assert!(
+        chips
+            .iter()
+            .all(|rect| rect.right() <= metadata_right + 1.0)
+    );
+    let mut tops = chips.map(|rect| rect.top()).to_vec();
+    tops.sort_by(f32::total_cmp);
+    tops.dedup_by(|left, right| (*left - *right).abs() < 1.0);
+    assert!(tops.len() >= 2, "constrained metadata labels must wrap");
     assert!(detail.query_by_label("SENTINEL SUMMARY").is_none());
     assert!(detail.query_by_label("SENTINEL MANIFEST").is_none());
 }
@@ -146,7 +168,6 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
         "WHY IT'S FAILING",
         "sidecar · CrashLoopBackOff · exit 1 · Error",
         "Waiting · CrashLoopBackOff",
-        "1 · Error",
     ] {
         detail.get_by_label(label);
     }
@@ -229,7 +250,6 @@ fn projection_terminated_failure_requires_a_nonempty_authoritative_reason() {
         let harness = harness(1_100.0, response);
         let detail = pod_window(&harness);
         detail.get_by_label("Terminated · —");
-        detail.get_by_label("137 · —");
         assert!(detail.query_by_label("WHY IT'S FAILING").is_none());
         assert!(
             detail
@@ -265,7 +285,7 @@ fn projection_terminated_failure_with_reason_exposes_previous_logs() {
 
     let harness = harness(1_100.0, response);
     let detail = pod_window(&harness);
-    detail.get_by_label("Status ✕ OOMKilled");
+    detail.get_by_label("Status ⨯ OOMKilled");
     detail.get_by_label("WHY IT'S FAILING");
     detail.get_by_label("web · OOMKilled · exit 137 · OOMKilled");
     detail.get_by_role_and_label(Role::Button, "Previous logs");
@@ -417,9 +437,9 @@ fn projection_owner_labels_and_events_remain_exact_and_deterministic() {
     ] {
         detail.get_by_label(label);
     }
-    detail.get_by_role_and_label(Role::Button, "Show 2 more labels");
-    assert!(detail.query_by_label("echo=fifth").is_none());
-    assert!(detail.query_by_label("foxtrot=sixth").is_none());
+    detail.get_by_label("echo=fifth");
+    detail.get_by_label("foxtrot=sixth");
+    assert!(detail.query_by_label("Show 2 more labels").is_none());
     assert!(detail.query_by_label("not-controller").is_none());
     assert!(detail.query_by_label("Deployment/web").is_none());
     assert!(detail.query_by_label("Warning").is_none());
@@ -516,7 +536,7 @@ fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable() {
 }
 
 #[test]
-fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
+fn pod_layout_760_is_two_columns_with_all_vitals_and_annotations_section() {
     let harness = harness(784.0, healthy_detail());
     let detail = pod_window(&harness);
     let body = detail.get_by_role_and_label(Role::ScrollView, "Detail body");
@@ -533,8 +553,8 @@ fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
     );
     detail.get_by_label("Node · worker-a");
     detail.get_by_label("Pod IP · 10.244.0.9");
-    detail.get_by_role_and_label(Role::Button, "ANNOTATIONS · 1");
-    assert!(detail.query_by_label("checksum/config").is_none());
+    detail.get_by_label("ANNOTATIONS · 1");
+    detail.get_by_label("checksum/config: abcdef");
     assert!(detail.query_by_label("Show Pod metadata").is_none());
     assert!(detail.query_by_label("Show more Pod vitals").is_none());
 }
@@ -545,10 +565,8 @@ fn pod_actual_1000_640_resize_preserves_identity_and_metadata_expansion() {
     let wide = pod_window(&harness);
     let operational = wide.get_by_label("Operational detail column").rect();
     let configuration = wide.get_by_label("Configuration detail column").rect();
-    assert!(
-        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
-        "{operational:?} {configuration:?}"
-    );
+    assert!(operational.width() > configuration.width());
+    assert!(wide.query_all_by_role(Role::Splitter).next().is_some());
     harness
         .state_mut()
         .shell
@@ -630,13 +648,7 @@ fn pod_tables_at_760_keep_wide_columns_reachable_via_horizontal_regions() {
     let detail = pod_window(&harness);
     let body = detail.get_by_role_and_label(Role::ScrollView, "Detail body");
     assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
-    for label in [
-        "LAST EXIT",
-        "CPU / MEM",
-        "0 · Completed",
-        "125m / 64Mi",
-        "Containers are ready and accepting traffic",
-    ] {
+    for label in ["CPU / MEM", "125m / 64Mi"] {
         detail.get_by_label(label);
     }
     for label in ["Pod containers table", "Pod conditions table"] {
@@ -649,24 +661,98 @@ fn pod_tables_at_760_keep_wide_columns_reachable_via_horizontal_regions() {
 }
 
 #[test]
-fn pod_interaction_expands_labels_and_annotations_accessibly() {
-    let mut harness = harness(1_100.0, healthy_detail());
-    pod_window(&harness)
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .click();
-    harness.run_steps(3);
+fn pod_metadata_renders_annotations_as_a_sibling_section() {
+    let harness = harness(1_100.0, healthy_detail());
     let detail = pod_window(&harness);
     detail.get_by_label("echo=fifth");
     detail.get_by_label("foxtrot=sixth");
-    detail.get_by_role_and_label(Role::Button, "Show fewer labels");
+    assert!(detail.query_by_label("Show 2 more labels").is_none());
+    let labels = detail.get_by_label("LABELS · 6").rect();
+    let annotations = detail.get_by_label("ANNOTATIONS · 1").rect();
+    assert!(annotations.top() > labels.top());
+    detail.get_by_label("checksum/config: abcdef");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Annotations 1 ▾")
+            .is_none()
+    );
+}
 
-    detail
-        .get_by_role_and_label(Role::Button, "ANNOTATIONS · 1")
+#[test]
+fn pod_metadata_omits_empty_combined_region() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.labels.clear();
+    pod.annotations.clear();
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    assert!(detail.query_by_label("LABELS · 0").is_none());
+    assert!(detail.query_by_label("ANNOTATIONS · 0").is_none());
+}
+
+#[test]
+fn pod_metadata_annotations_only_omits_empty_labels_heading() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.labels.clear();
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    assert!(detail.query_by_label("LABELS · 0").is_none());
+    detail.get_by_label("ANNOTATIONS · 1");
+}
+
+#[test]
+fn pod_narrow_metadata_bounds_long_annotations_compactly() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.annotations = [
+        (
+            "example.io/very-long-unbroken-annotation-key-alpha".into(),
+            "a".repeat(240),
+        ),
+        (
+            "example.io/very-long-unbroken-annotation-key-bravo".into(),
+            "b".repeat(240),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut harness = harness(700.0, response);
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Show Pod metadata")
         .click();
     harness.run_steps(3);
     let detail = pod_window(&harness);
-    detail.get_by_label("checksum/config");
-    detail.get_by_label("checksum/config: abcdef");
+    let rows = [
+        detail
+            .get_by_label(&format!(
+                "{}: {}",
+                "example.io/very-long-unbroken-annotation-key-alpha",
+                "a".repeat(240)
+            ))
+            .rect(),
+        detail
+            .get_by_label(&format!(
+                "{}: {}",
+                "example.io/very-long-unbroken-annotation-key-bravo",
+                "b".repeat(240)
+            ))
+            .rect(),
+    ];
+    assert!(
+        rows.iter()
+            .all(|row| row.right() <= detail.rect().right() + 1.0)
+    );
+    assert!(
+        rows[1].top() - rows[0].top() <= 28.0,
+        "annotation rows must remain Body-dense: {rows:?}"
+    );
 }
 
 #[test]

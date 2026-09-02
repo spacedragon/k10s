@@ -454,8 +454,8 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     let wide = workload_window(&harness, "Deployments");
     // The Namespace label lives in the table header; the toolbar selector
     // carries its own label inside the control text.
-    wide.get_by_label("Namespace");
-    for header in ["Name", "Ready", "Status", "Image", "Age"] {
+    wide.get_by_label("NAMESPACE");
+    for header in ["NAME", "READY", "STATUS", "IMAGE", "AGE"] {
         wide.get_by_label(header);
     }
     for key in ["namespace", "name", "status", "created"] {
@@ -470,7 +470,22 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
             .is_none()
         );
     }
-    assert!(wide.get_by_label("2/2").rect().right() > wide.get_by_label("Ready").rect().center().x);
+    let ready_value = wide.get_by_label("2/2").rect();
+    let status_value = wide.get_by_label("Available").rect();
+    assert!(ready_value.right() > wide.get_by_label("READY").rect().center().x);
+    let age_right = wide
+        .get_all_by_label("Resource age")
+        .map(|node| node.rect().right())
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        wide.rect().right() - age_right <= 40.0,
+        "the final table column must reach the window edge so its scrollbar stays at the edge: window={:?}, age_right={age_right}",
+        wide.rect()
+    );
+    assert!(
+        ready_value.right() <= status_value.left(),
+        "wide Ready and Status values must not overlap: ready={ready_value:?}, status={status_value:?}"
+    );
     wide.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
         .hover();
     harness.run_steps(15);
@@ -499,8 +514,8 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     harness.drop_at(target);
     harness.run_steps(3);
     let compact = workload_window(&harness, "Deployments");
-    assert!(compact.query_by_label("Image").is_none());
-    compact.get_by_label("Status");
+    assert!(compact.query_by_label("IMAGE").is_none());
+    compact.get_by_label("STATUS");
     let first_age_value_left = compact
         .get_all_by_label("Resource age")
         .map(|node| node.rect().left())
@@ -510,6 +525,17 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
             .get_all_by_label("Resource age")
             .all(|node| node.rect().width() <= 56.0),
         "compact Age values must fit the resolved 56-point column"
+    );
+    let compact_ages = compact.get_all_by_label("Resource age").collect::<Vec<_>>();
+    assert!(
+        !compact_ages.is_empty(),
+        "compact table must render Age values"
+    );
+    assert!(
+        compact_ages.into_iter().any(|node| node
+            .children()
+            .any(|child| child.accesskit_node().role() == Role::TextRun)),
+        "compact Age values must remain visibly painted inside the table clip"
     );
     assert!(
         compact.get_by_label("2/2").rect().right() <= first_age_value_left,
@@ -526,8 +552,105 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     harness.drop_at(target);
     harness.run_steps(3);
     let restored = workload_window(&harness, "Deployments");
-    restored.get_by_label("Image");
-    restored.get_by_label("Status");
+    restored.get_by_label("IMAGE");
+    restored.get_by_label("STATUS");
+}
+
+#[test]
+fn compact_deployment_keeps_age_text_inside_scrollbar_clip() {
+    let mut fixture = Fixture::default();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 480.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+
+    let window = workload_window(&harness, "Deployments");
+    let ages = window.get_all_by_label("Resource age").collect::<Vec<_>>();
+    assert!(!ages.is_empty(), "compact table must render Age values");
+    assert!(
+        ages.into_iter().any(|age| age
+            .children()
+            .any(|child| child.accesskit_node().role() == Role::TextRun)),
+        "compact Age values must paint TextRuns inside their local table clip: window={:?}, namespace={:?}, name={:?}, ready={:?}, age={:?}",
+        window.rect(),
+        window.get_by_label("NAMESPACE").rect(),
+        window.get_by_label("NAME").rect(),
+        window.get_by_label("READY").rect(),
+        window.get_by_label("AGE").rect(),
+    );
+}
+
+#[test]
+fn deployment_columns_use_the_actual_scroll_viewport_with_few_and_many_rows() {
+    for row_count in [1, 40] {
+        let mut fixture = Fixture::default();
+        let seed = fixture.feed.lists[&WorkspaceWorkload::Deployments][0].clone();
+        fixture.feed.lists.insert(
+            WorkspaceWorkload::Deployments,
+            (0..row_count)
+                .map(|index| {
+                    let mut row = seed.clone();
+                    row.identity.name = format!("api-server-{index}");
+                    row.identity.uid = format!("uid-api-server-{index}");
+                    row
+                })
+                .collect(),
+        );
+        let id = fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(WorkspaceWorkload::Deployments),
+            ))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .expect("Deployment window");
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [20.0, 20.0],
+                    size: [560.0, 420.0],
+                    collapsed: false,
+                },
+            ));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(800.0, 520.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(render, fixture);
+        harness.run_steps(4);
+
+        let window = workload_window(&harness, "Deployments");
+        for header in ["NAMESPACE", "NAME", "READY", "AGE"] {
+            window.get_by_label(header);
+        }
+        if row_count == 1 {
+            window.get_by_label("STATUS");
+        }
+        let ages = window.get_all_by_label("Resource age").collect::<Vec<_>>();
+        assert!(
+            !ages.is_empty(),
+            "{row_count} rows must render an Age value"
+        );
+        assert!(
+            ages.into_iter().any(|age| age
+                .children()
+                .any(|child| child.accesskit_node().role() == Role::TextRun)),
+            "{row_count} rows must keep a rendered Age TextRun visible"
+        );
+    }
 }
 
 #[test]
@@ -559,10 +682,10 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
         ));
     harness.run_steps(4);
     let window = workload_window(&harness, "Custom Resources");
-    assert!(window.query_by_label("Namespace").is_none());
-    window.get_by_label("Name");
-    window.get_by_label("Status");
-    window.get_by_label("Age");
+    assert!(window.query_by_label("NAMESPACE").is_none());
+    window.get_by_label("NAME");
+    window.get_by_label("STATUS");
+    window.get_by_label("AGE");
     let rect = window.rect();
     harness
         .state_mut()
@@ -579,8 +702,8 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
     harness.drop_at(target);
     harness.run_steps(3);
     let medium = workload_window(&harness, "Custom Resources");
-    assert!(medium.query_by_label("Status").is_none());
-    medium.get_by_label("Age");
+    assert!(medium.query_by_label("STATUS").is_none());
+    medium.get_by_label("AGE");
     let rect = medium.rect();
     let target = rect.min + egui::vec2(180.0, 520.0);
     harness.hover_at(rect.max);
@@ -593,7 +716,7 @@ fn responsive_cluster_scoped_list_omits_namespace_and_reclaims_width() {
     harness.run_steps(3);
     assert!(
         workload_window(&harness, "Custom Resources")
-            .query_by_label("Age")
+            .query_by_label("AGE")
             .is_none()
     );
 }
@@ -649,13 +772,13 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     harness.run_steps(4);
     let wide = workload_window(&harness, "Pods");
     for header in [
-        "Namespace",
-        "Name",
-        "Ready",
-        "Status",
-        "Restarts",
-        "Node",
-        "Age",
+        "NAMESPACE",
+        "NAME",
+        "READY",
+        "STATUS",
+        "RESTARTS",
+        "NODE",
+        "AGE",
     ] {
         assert!(wide.get_all_by_label(header).count() >= 1);
     }
@@ -666,7 +789,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
         );
     }
     assert!(
-        wide.get_by_label("7").rect().right() > wide.get_by_label("Restarts").rect().center().x
+        wide.get_by_label("7").rect().right() > wide.get_by_label("RESTARTS").rect().center().x
     );
     let rect = wide.rect();
     wide.get_by_role_and_label(Role::Button, "Sort pods by status")
@@ -694,8 +817,8 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     harness.drop_at(target);
     harness.run_steps(3);
     let medium = workload_window(&harness, "Pods");
-    assert!(medium.query_by_label("Node").is_none());
-    medium.get_by_label("Restarts");
+    assert!(medium.query_by_label("NODE").is_none());
+    medium.get_by_label("RESTARTS");
     let rect = medium.rect();
     let target = rect.min + egui::vec2(520.0, 520.0);
     harness.hover_at(rect.max);
@@ -708,7 +831,7 @@ fn responsive_pod_schema_uses_kind_and_hides_node_before_restarts() {
     harness.run_steps(3);
     assert!(
         workload_window(&harness, "Pods")
-            .query_by_label("Restarts")
+            .query_by_label("RESTARTS")
             .is_none()
     );
 }
@@ -757,7 +880,7 @@ fn responsive_generic_namespaced_hides_status_then_age() {
         .build_ui_state(render, fixture);
     harness.run_steps(4);
     let wide = workload_window(&harness, "StatefulSets");
-    for header in ["Namespace", "Name", "Status", "Age"] {
+    for header in ["NAMESPACE", "NAME", "STATUS", "AGE"] {
         assert!(wide.get_all_by_label(header).count() >= 1);
     }
     let rect = wide.rect();
@@ -771,8 +894,8 @@ fn responsive_generic_namespaced_hides_status_then_age() {
     harness.drop_at(target);
     harness.run_steps(8);
     let medium = workload_window(&harness, "StatefulSets");
-    assert!(medium.query_by_label("Status").is_none());
-    medium.get_by_label("Age");
+    assert!(medium.query_by_label("STATUS").is_none());
+    medium.get_by_label("AGE");
     let rect = medium.rect();
     let target = rect.min + egui::vec2(180.0, 520.0);
     harness.hover_at(rect.max);
@@ -785,7 +908,7 @@ fn responsive_generic_namespaced_hides_status_then_age() {
     harness.run_steps(3);
     assert!(
         workload_window(&harness, "StatefulSets")
-            .query_by_label("Age")
+            .query_by_label("AGE")
             .is_none()
     );
 }
@@ -910,7 +1033,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         "Pods",
     ] {
         let window = workload_window(&harness, title);
-        for header in ["Name", "Status", "Age"] {
+        for header in ["NAME", "STATUS", "AGE"] {
             window.get_by_label(header);
         }
         window.get_by_label("Select resource sample-one");
@@ -939,7 +1062,7 @@ fn all_seven_workload_kinds_render_rows_and_columns() {
         ));
     harness.run_steps(4);
     let window = workload_window(&harness, "Custom Resources");
-    for header in ["Name", "Status", "Age"] {
+    for header in ["NAME", "STATUS", "AGE"] {
         window.get_by_label(header);
     }
     namespace_combobox(window);
@@ -1006,7 +1129,7 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
             .value()
             .is_some_and(|value| value.starts_with("Namespace: "))
     }));
-    assert!(window.query_by_label("Namespace").is_none());
+    assert!(window.query_by_label("NAMESPACE").is_none());
     assert!(
         window
             .query_by_role_and_label(Role::TextInput, "Namespace filter")
@@ -2439,4 +2562,131 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     let window = workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");
     window.get_by_label("Select resource checkout");
+}
+
+/// The match line reads as one sentence anchored to the table's right edge:
+/// counts on the left, the sort note and the age-mode link on the right with
+/// no stray spacing around the parentheses.
+#[test]
+fn match_line_anchors_the_sort_and_age_notes_to_the_right_edge() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployment window");
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSort(
+            id,
+            Some(k10s_ui::workspace::SortSpec {
+                column: "namespace".to_owned(),
+                ascending: true,
+            }),
+        ));
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_500.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_600.0, 650.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+
+    let window = workload_window(&harness, "Deployments");
+    let bounds = window.rect();
+    let count = window.get_by_label("2 deployments").rect();
+    let sort_note = window.get_by_label("sorted by Namespace ▲ · ").rect();
+    let link = window
+        .get_by_role_and_label(Role::Button, "switch to absolute")
+        .rect();
+    let closing = window.get_by_label(")").rect();
+    assert!(
+        count.left() < bounds.center().x,
+        "the count stays on the left: count={count:?} window={bounds:?}"
+    );
+    assert!(
+        sort_note.left() > bounds.center().x,
+        "the sort note belongs to the right-hand group: sort={sort_note:?} window={bounds:?}"
+    );
+    assert!(
+        closing.right() > bounds.right() - 40.0,
+        "the group is anchored to the right edge: closing={closing:?} window={bounds:?}"
+    );
+    assert!(
+        sort_note.right() <= link.left() + 1.0 && link.right() <= closing.left() + 1.0,
+        "reading order stays left-to-right: sort={sort_note:?} link={link:?} closing={closing:?}"
+    );
+}
+
+/// The search field is the filter row's only elastic control: it absorbs
+/// the width the fixed controls leave over, which also pushes the live
+/// indicator to the row's right edge.
+#[test]
+fn search_field_absorbs_the_free_width_of_the_filter_row() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployment window");
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            id,
+            WindowGeom {
+                position: [20.0, 30.0],
+                size: [1_500.0, 520.0],
+                collapsed: false,
+            },
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_600.0, 650.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+
+    let window = workload_window(&harness, "Deployments");
+    let bounds = window.rect();
+    let search = window
+        .get_by_role_and_label(Role::TextInput, "Search deployments")
+        .rect();
+    let namespace = namespace_combobox(window).rect();
+    assert!(
+        search.width() > 600.0,
+        "the search field must grow with the window: search={search:?} window={bounds:?}"
+    );
+    assert!(
+        search.right() <= namespace.left() + 1.0,
+        "growing the field must not overlap the next control: search={search:?} namespace={namespace:?}"
+    );
+    assert!(
+        bounds.right() - namespace.right() < bounds.width() / 3.0,
+        "the fixed controls stay on the right of the flexed field: namespace={namespace:?} window={bounds:?}"
+    );
 }

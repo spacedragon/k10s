@@ -323,7 +323,7 @@ pub(super) fn show_window_freshness(
         }
         WindowFreshness::Failed { message } => {
             ui.label(
-                RichText::new(format!("✕ Failed · {message}")).color(egui::Color32::LIGHT_RED),
+                RichText::new(format!("⨯ Failed · {message}")).color(egui::Color32::LIGHT_RED),
             );
             ui.horizontal(|ui| {
                 if ui.button("Retry now").clicked() {
@@ -529,22 +529,21 @@ fn show_status_combobox<I>(
     }
 }
 
+/// `reversed` emits the pieces back-to-front, which is what a
+/// right-to-left layout needs to end up reading left-to-right while the
+/// whole group stays anchored to the table's right edge.
 fn show_match_details<I>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     state: &ResourceWindowState<I>,
+    reversed: bool,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
-    if let Some(sort) = state.sort.as_ref() {
-        let arrow = if sort.ascending { "▲" } else { "▼" };
-        ui.label(
-            RichText::new(format!(
-                "sorted by {} {arrow} · ",
-                super::resource_table::column_title(&sort.column)
-            ))
-            .color(theme::MUTED_TEXT),
-        );
-    }
+    // The line is one sentence, so the pieces carry their own spacing and
+    // the layout adds none: standard control gaps and button padding put
+    // stray spaces around the parentheses.
+    ui.spacing_mut().item_spacing.x = 0.0;
+    ui.spacing_mut().button_padding.x = 0.0;
     let (age_text, switch_label, next_mode) = match state.age_mode {
         crate::workspace::AgeMode::Relative => (
             "Age shown as relative",
@@ -557,18 +556,48 @@ fn show_match_details<I>(
             crate::workspace::AgeMode::Relative,
         ),
     };
-    ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
-    if ui
-        .add(
+    let sort_note = state.sort.as_ref().map(|sort| {
+        format!(
+            "sorted by {} {} · ",
+            super::resource_table::column_title(&sort.column),
+            if sort.ascending { "▲" } else { "▼" }
+        )
+    });
+    let show_sort = |ui: &mut egui::Ui| {
+        if let Some(note) = sort_note.as_ref() {
+            ui.label(RichText::new(note).color(theme::MUTED_TEXT));
+        }
+    };
+    let show_prefix = |ui: &mut egui::Ui| {
+        ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
+    };
+    let show_link = |ui: &mut egui::Ui| -> bool {
+        ui.add(
             egui::Button::new(RichText::new(switch_label).color(theme::ACCENT))
                 .frame(false)
                 .wrap_mode(egui::TextWrapMode::Extend),
         )
         .clicked()
-    {
+    };
+    let show_suffix = |ui: &mut egui::Ui| {
+        ui.label(RichText::new(")").color(theme::MUTED_TEXT));
+    };
+    let switched = if reversed {
+        show_suffix(ui);
+        let switched = show_link(ui);
+        show_prefix(ui);
+        show_sort(ui);
+        switched
+    } else {
+        show_sort(ui);
+        show_prefix(ui);
+        let switched = show_link(ui);
+        show_suffix(ui);
+        switched
+    };
+    if switched {
         queued.push(WorkspaceCommand::SetAgeMode(window_id, next_mode));
     }
-    ui.label(RichText::new(")").color(theme::MUTED_TEXT));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -845,15 +874,32 @@ pub(super) fn show<I>(
         .intersect(ui.clip_rect())
         .width();
     let available_width = clipped_width.min(ui.ctx().content_rect().right() - ui.cursor().left());
-    let compact_controls = available_width
-        < direct_toolbar_width(
-            available_width,
-            namespaced,
-            kind == WorkloadKind::CustomResources,
-            filters_active,
-            shows_freshness,
-        );
-    ui.horizontal_wrapped(|ui| {
+    let toolbar_width = direct_toolbar_width(
+        available_width,
+        namespaced,
+        kind == WorkloadKind::CustomResources,
+        filters_active,
+        shows_freshness,
+    );
+    let compact_controls = available_width < toolbar_width;
+    // The search field is the only elastic control in the filter row, so it
+    // absorbs whatever width the fixed controls leave over. The estimate in
+    // `direct_toolbar_width` is deliberately conservative, so the real
+    // width of everything beside the field is measured from the painted row
+    // and reused next frame; the fixed point is stable because growing the
+    // field never changes the fixed controls.
+    let fixed_width_id = egui::Id::new(("k10s.resource.filters.fixed-width", window_id.0));
+    let measured_fixed: Option<f32> = ui.data(|data| data.get_temp(fixed_width_id));
+    let search_width = if compact_controls {
+        20.0
+    } else {
+        match measured_fixed {
+            // The margin keeps a rounding error from wrapping the row.
+            Some(fixed) => (available_width - fixed - 8.0).max(200.0),
+            None => 200.0 + (available_width - toolbar_width - 8.0).max(0.0),
+        }
+    };
+    let filter_row = ui.horizontal_wrapped(|ui| {
         if compact_controls {
             ui.spacing_mut().item_spacing.x = 0.0;
         }
@@ -862,8 +908,9 @@ pub(super) fn show<I>(
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
                 .hint_text(search_hint.clone())
-                .desired_width(if compact_controls { 20.0 } else { 200.0 }),
+                .desired_width(search_width),
         );
+        let search_rect = search_edit.rect;
         search_edit.widget_info(move || {
             WidgetInfo::labeled(WidgetType::TextEdit, true, search_hint.clone())
         });
@@ -894,7 +941,7 @@ pub(super) fn show<I>(
 
         if compact_controls {
             let menu = ui.menu_button("More", |ui| {
-                show_match_details(ui, window_id, state, queued);
+                show_match_details(ui, window_id, state, false, queued);
                 ui.separator();
                 show_secondary_controls(
                     ui,
@@ -955,7 +1002,15 @@ pub(super) fn show<I>(
                 _ => {}
             }
         }
+        search_rect
     });
+    if !compact_controls {
+        // Everything beside the field, measured where it actually landed.
+        let row = filter_row.response.rect;
+        let search_rect = filter_row.inner;
+        let fixed = (search_rect.left() - row.left()) + (row.right() - search_rect.right());
+        ui.data_mut(|data| data.insert_temp(fixed_width_id, fixed.max(0.0)));
+    }
 
     // Compact match line: result count, selection, active sort, and the
     // relative/absolute age affordance.
@@ -975,12 +1030,12 @@ pub(super) fn show<I>(
         if compact_controls {
             // Sort and age are available from the toolbar overflow.
         } else {
-            // The whole right-hand group keeps natural left-to-right reading
-            // order while staying anchored to the toolbar's right edge.
+            // The group is emitted back-to-front in a right-to-left layout,
+            // so it reads left-to-right while hugging the table's right
+            // edge. A nested left-to-right child would claim the whole
+            // remaining width and jam the text back against the count.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    show_match_details(ui, window_id, state, queued);
-                });
+                show_match_details(ui, window_id, state, true, queued);
             });
         }
     });
