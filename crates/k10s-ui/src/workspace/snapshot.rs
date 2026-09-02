@@ -574,6 +574,7 @@ where
                 kind,
                 title: window.title.clone(),
                 geometry,
+                initial_geometry: false,
                 layout_revision: 0,
                 z: window.z,
                 content,

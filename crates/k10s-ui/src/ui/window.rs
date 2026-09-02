@@ -11,6 +11,9 @@ use super::{
 };
 
 const WINDOW_CHROME_SIZE: Vec2 = Vec2::new(24.0, 48.0);
+const DEPLOYMENT_DETAIL_BODY_MIN_WIDTH: f32 = 760.0;
+const FIRST_DEPLOYMENT_CANVAS_MIN_WIDTH: f32 = DEPLOYMENT_DETAIL_BODY_MIN_WIDTH + 24.0;
+const FIRST_DEPLOYMENT_CANVAS_MAX_WIDTH: f32 = 1_000.0;
 
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
@@ -131,10 +134,24 @@ where
     I: resource_window::RowIdentity,
 {
     let mut open = true;
+    // A first Deployment window needs enough horizontal room for its
+    // integrated Detail body on browser-sized canvases. This is deliberately
+    // render-local: workspace geometry remains the normal persisted default.
+    let first_deployment_render = (FIRST_DEPLOYMENT_CANVAS_MIN_WIDTH
+        ..=FIRST_DEPLOYMENT_CANVAS_MAX_WIDTH)
+        .contains(&canvas.width())
+        && state.initial_geometry
+        && state.layout_revision == 0
+        && state.kind == WindowKind::Workload(crate::workspace::WorkloadKind::Deployments);
     let position = Pos2::new(
-        canvas.min.x + state.geometry.position[0],
+        if first_deployment_render {
+            canvas.min.x
+        } else {
+            canvas.min.x + state.geometry.position[0]
+        },
         canvas.min.y + state.geometry.position[1],
     );
+    let first_render_size = [canvas.width(), state.geometry.size[1]];
     let min_size = Vec2::from(state.kind.min_size());
     let id = layer_id(state.id).id;
     let layout_revision_id = id.with("layout_revision");
@@ -175,7 +192,11 @@ where
         .collapsible(true)
         .default_open(!state.geometry.collapsed)
         .current_pos(position)
-        .default_size(state.geometry.size)
+        .default_size(if first_deployment_render {
+            first_render_size
+        } else {
+            state.geometry.size
+        })
         .frame(super::theme::window_frame(focused));
     window = if free_window_resizing {
         // Detail owns its finite body scroll region. Let it resize freely
@@ -362,7 +383,7 @@ where
     // A layout resize updates egui's persisted area/resize state during this
     // frame. Do not let the response from that transition frame overwrite
     // the command's target geometry before egui presents it next frame.
-    if geometry != state.geometry && !apply_layout_size {
+    if geometry != state.geometry && !apply_layout_size && !first_deployment_render {
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)
