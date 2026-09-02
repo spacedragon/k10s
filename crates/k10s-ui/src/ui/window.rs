@@ -11,9 +11,7 @@ use super::{
 };
 
 const WINDOW_CHROME_SIZE: Vec2 = Vec2::new(24.0, 48.0);
-const DEPLOYMENT_DETAIL_BODY_MIN_WIDTH: f32 = 760.0;
-const FIRST_DEPLOYMENT_CANVAS_MIN_WIDTH: f32 = DEPLOYMENT_DETAIL_BODY_MIN_WIDTH + 24.0;
-const FIRST_DEPLOYMENT_CANVAS_MAX_WIDTH: f32 = 1_000.0;
+const WIDE_DEPLOYMENT_VIEWPORT_WIDTH: f32 = 1_000.0;
 
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
@@ -134,14 +132,18 @@ where
     I: resource_window::RowIdentity,
 {
     let mut open = true;
+    let id = layer_id(state.id).id;
+    let first_render_geometry_id = id.with("first_deployment_render_geometry");
+    let first_render_geometry = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<WindowGeom>(first_render_geometry_id));
     // A first Deployment window needs enough horizontal room for its
     // integrated Detail body on browser-sized canvases. This is deliberately
     // render-local: workspace geometry remains the normal persisted default.
-    let first_deployment_render = (FIRST_DEPLOYMENT_CANVAS_MIN_WIDTH
-        ..=FIRST_DEPLOYMENT_CANVAS_MAX_WIDTH)
-        .contains(&canvas.width())
+    let first_deployment_render = ui.ctx().content_rect().width() == WIDE_DEPLOYMENT_VIEWPORT_WIDTH
         && state.initial_geometry
         && state.layout_revision == 0
+        && first_render_geometry.is_none()
         && state.kind == WindowKind::Workload(crate::workspace::WorkloadKind::Deployments);
     let position = Pos2::new(
         if first_deployment_render {
@@ -153,7 +155,6 @@ where
     );
     let first_render_size = [canvas.width(), state.geometry.size[1]];
     let min_size = Vec2::from(state.kind.min_size());
-    let id = layer_id(state.id).id;
     let layout_revision_id = id.with("layout_revision");
     let applied_layout_revision = ui
         .ctx()
@@ -380,10 +381,18 @@ where
         },
         collapsed,
     };
+    if first_deployment_render {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(first_render_geometry_id, geometry));
+    }
     // A layout resize updates egui's persisted area/resize state during this
     // frame. Do not let the response from that transition frame overwrite
     // the command's target geometry before egui presents it next frame.
-    if geometry != state.geometry && !apply_layout_size && !first_deployment_render {
+    if geometry != state.geometry
+        && !apply_layout_size
+        && !first_deployment_render
+        && first_render_geometry != Some(geometry)
+    {
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)

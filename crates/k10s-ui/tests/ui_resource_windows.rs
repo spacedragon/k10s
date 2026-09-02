@@ -2015,6 +2015,97 @@ fn manually_supplied_deployment_geometry_remains_untouched_on_a_wide_canvas() {
 }
 
 #[test]
+fn first_deployment_resize_persists_after_the_wide_canvas_render() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployments window opens");
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_000.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    let rect = workload_window(&harness, "Deployments").rect();
+    let target = rect.min + egui::vec2(680.0, 450.0);
+    harness.hover_at(rect.max);
+    harness.run_steps(1);
+    harness.drag_at(rect.max);
+    harness.run_steps(1);
+    harness.hover_at(target);
+    harness.run_steps(1);
+    harness.drop_at(target);
+    harness.run_steps(3);
+    let resized_size = workload_window(&harness, "Deployments").rect().size();
+    let persisted_size = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.id == id)
+        .expect("Deployments window remains persisted")
+        .geometry
+        .size;
+
+    assert_eq!(
+        persisted_size,
+        [resized_size.x, resized_size.y],
+        "a first-window resize must replace the temporary wide render geometry in the workspace"
+    );
+    assert_ne!(
+        persisted_size,
+        [700.0, 480.0],
+        "a first-window resize must not leave the normal default geometry persisted"
+    );
+}
+
+#[test]
+fn sub_1000_viewport_keeps_the_first_deployment_detail_compact() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployments window opens");
+    let row = fixture.feed.lists[&WorkspaceWorkload::Deployments][0]
+        .identity
+        .clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(999.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SelectRow(id, row));
+    harness.run_steps(4);
+
+    assert!(
+        workload_window(&harness, "Deployments")
+            .get_by_role_and_label(Role::ScrollView, "Detail body")
+            .rect()
+            .width()
+            < 760.0,
+        "the 1000-point first-render treatment must not apply below that viewport"
+    );
+}
+
+#[test]
 fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
     for kind in [WorkspaceWorkload::Deployments, WorkspaceWorkload::Pods] {
         for size in [[700.0, 500.0], [640.0, 420.0]] {
