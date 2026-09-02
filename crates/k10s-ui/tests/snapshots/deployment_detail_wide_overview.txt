@@ -39,6 +39,7 @@ Window label="Deployment · payments / checkout"
                     Button label="Tab Pods"
                     Button label="Tab Events"
                     Button label="Tab YAML"
+                    Button label="Tab Logs"
             GenericContainer
               GenericContainer
                 GenericContainer
@@ -210,8 +211,8 @@ Window label="Deployment · payments / checkout"
                           Label value="Context · deployment-test"
               ScrollBar
             GenericContainer
-              Label value="p pods · y yaml · e events · c copy name · Esc clear selection"
-                TextRun value="p pods · y yaml · e events · c copy name · Esc clear selection"
+              Label value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
+                TextRun value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
   Splitter
   Splitter
   Splitter
