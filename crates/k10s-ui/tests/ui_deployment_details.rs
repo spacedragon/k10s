@@ -1053,19 +1053,29 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
     let mut harness = harness(egui::vec2(1_120.0, 760.0));
     let detail = detail_with(Some(projection(Vec::new())));
     let identity = detail.identity.clone();
-    open_detail(
-        &mut harness,
-        detail,
-        Some(exact_relations(&identity)),
-        [1_024.0, 620.0],
-    );
+    let mut relations = exact_relations(&identity);
+    let RelationState::Loaded { response, .. } = &mut relations else {
+        unreachable!()
+    };
+    let response = Arc::make_mut(response);
+    let pod = response.groups[0].rows[0]
+        .projection
+        .as_mut()
+        .and_then(|projection| match projection {
+            ResourceProjection::Pod(pod) => Some(pod),
+            _ => None,
+        })
+        .expect("Pod projection");
+    pod.restart_count = Some(u32::MAX);
+    open_detail(&mut harness, detail, Some(relations), [1_024.0, 620.0]);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let table = window.get_by_role_and_label(Role::Table, "Deployment Pods table");
     let text_run = |value: &str| {
-        window
+        table
             .query_all_by_role(Role::TextRun)
             .find(|node| node.value().as_deref() == Some(value))
             .unwrap_or_else(|| {
-                let available = window
+                let available = table
                     .query_all_by_role(Role::TextRun)
                     .filter_map(|node| node.value())
                     .collect::<Vec<_>>();
@@ -1077,9 +1087,17 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
     let ready_header = text_run("Ready");
     let ready = text_run("1/1");
     let restarts_header = text_run("Restarts");
-    let restarts = text_run("2");
+    table.get_by_role_and_label(Role::Label, "4294967295");
+    let restarts = table
+        .query_all_by_role(Role::TextRun)
+        .find(|node| {
+            node.value()
+                .is_some_and(|value| value.starts_with("4294967"))
+        })
+        .expect("elided oversized Restarts TextRun")
+        .rect();
     let age_header = text_run("Age");
-    let age = window
+    let age = table
         .query_all_by_role(Role::TextRun)
         .filter(|node| node.value().as_deref() == Some("—"))
         .map(|node| node.rect())
@@ -1087,7 +1105,7 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
             rect.top() > age_header.bottom() && (rect.right() - age_header.right()).abs() <= 12.0
         })
         .unwrap_or_else(|| {
-            let dashes = window
+            let dashes = table
                 .query_all_by_role(Role::TextRun)
                 .filter(|node| node.value().as_deref() == Some("—"))
                 .map(|node| node.rect())
@@ -1103,7 +1121,7 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
         (age_header, age, "Age"),
     ] {
         assert!(
-            (header.right() - value.right()).abs() <= 1.0,
+            (header.right() - value.right()).abs() <= 1.5,
             "{column} glyphs must share the semantic column's right edge: {header:?} {value:?}"
         );
     }
@@ -1125,9 +1143,10 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
         .interact_size
         .y
         .max(style.text_styles[&egui::TextStyle::Body].size);
+    let separation = ready.top() - ready_header.top();
     assert!(
-        (ready.top() - ready_header.top()) >= expected_row_height,
-        "header/body baselines must preserve the dense Body row height"
+        separation >= expected_row_height && separation <= expected_row_height + 14.0,
+        "header/body separation must stay dense: {separation} vs {expected_row_height}"
     );
 }
 

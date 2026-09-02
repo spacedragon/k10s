@@ -590,6 +590,7 @@ fn aligned_label_cell(
     label: egui::Label,
 ) {
     let mut label_width = width;
+    let mut overflowing = false;
     if align == egui::Align::Max {
         let text_width = ui
             .painter()
@@ -600,10 +601,15 @@ fn aligned_label_cell(
             )
             .size()
             .x;
-        ui.add_space((width - text_width).max(0.0));
-        label_width = text_width;
+        label_width = text_width.min(width);
+        overflowing = text_width > width;
+        ui.add_space(width - label_width);
     }
-    ui.add_sized([label_width, height], label);
+    let response = ui.add_sized([label_width, height], label.truncate());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text));
+    if overflowing {
+        response.on_hover_text(text);
+    }
 }
 
 /// The short image tag (after the final ':') for the IMAGE TAG column.
