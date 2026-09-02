@@ -375,6 +375,7 @@ pub(super) fn show_namespace_combobox<I>(
     window_id: WindowId,
     scope: &crate::workspace::NamespaceScope,
     catalog: &NamespaceCatalogState,
+    compact: bool,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     let selected = match scope {
@@ -386,20 +387,25 @@ pub(super) fn show_namespace_combobox<I>(
         if matches!(catalog, NamespaceCatalogState::Ready(values) if !values.contains(value)));
     // The control carries its own label (`Namespace: … ▾`), so the status
     // text stays short and never repeats the prefix.
-    let selected_text = if matches!(catalog, NamespaceCatalogState::NotDemanded) {
+    let full_selected_text = if matches!(catalog, NamespaceCatalogState::NotDemanded) {
         "not requested".to_owned()
     } else if missing {
         format!("{selected} · no longer exists")
     } else {
         selected.to_owned()
     };
+    let selected_text = if compact {
+        "Namespace".to_owned()
+    } else {
+        full_selected_text.clone()
+    };
     let enabled = matches!(catalog, NamespaceCatalogState::Ready(_));
     ui.add_enabled_ui(enabled, |ui| {
         // The label lives inside the control (`Namespace: all ▾`) instead of
         // floating next to it.
-        ComboBox::from_id_salt(("namespace", window_id.0))
+        let response = ComboBox::from_id_salt(("namespace", window_id.0))
             .selected_text(format!("Namespace: {selected_text}"))
-            .width(120.0)
+            .width(70.0)
             .show_ui(ui, |ui| {
                 let search = scratch.namespace_search.entry(window_id).or_default();
                 let response = ui.add(
@@ -453,7 +459,17 @@ pub(super) fn show_namespace_combobox<I>(
                         }
                     }
                 }
+            })
+            .response;
+        if compact {
+            response.widget_info(|| {
+                WidgetInfo::labeled(
+                    WidgetType::ComboBox,
+                    enabled,
+                    format!("Namespace: {full_selected_text}"),
+                )
             });
+        }
     });
 }
 
@@ -465,6 +481,7 @@ fn show_status_combobox<I>(
     window_id: WindowId,
     status_filter: &Option<String>,
     rows: &[ResourceListRow],
+    compact: bool,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     let statuses: Vec<String> = rows
@@ -475,9 +492,14 @@ fn show_status_combobox<I>(
         .into_iter()
         .collect();
     let selected = status_filter.as_deref().unwrap_or("all");
-    ComboBox::from_id_salt(("status", window_id.0))
-        .selected_text(format!("Status: {selected}"))
-        .width(100.0)
+    let selected_text = if compact {
+        "Status".to_owned()
+    } else {
+        format!("Status: {selected}")
+    };
+    let response = ComboBox::from_id_salt(("status", window_id.0))
+        .selected_text(selected_text)
+        .width(65.0)
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(status_filter.is_none(), "all")
@@ -498,7 +520,13 @@ fn show_status_combobox<I>(
                     ui.close();
                 }
             }
+        })
+        .response;
+    if compact {
+        response.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::ComboBox, true, format!("Status: {selected}"))
         });
+    }
 }
 
 fn show_match_details<I>(
@@ -812,7 +840,11 @@ pub(super) fn show<I>(
             WindowFreshness::Live { .. } | WindowFreshness::ReadyEmpty
         )
     });
-    let available_width = ui.available_width();
+    let clipped_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let available_width = clipped_width.min(ui.ctx().content_rect().right() - ui.cursor().left());
     let compact_controls = available_width
         < direct_toolbar_width(
             available_width,
@@ -830,7 +862,7 @@ pub(super) fn show<I>(
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
                 .hint_text(search_hint.clone())
-                .desired_width(if compact_controls { 50.0 } else { 200.0 }),
+                .desired_width(if compact_controls { 20.0 } else { 200.0 }),
         );
         search_edit.widget_info(move || {
             WidgetInfo::labeled(WidgetType::TextEdit, true, search_hint.clone())
@@ -846,14 +878,22 @@ pub(super) fn show<I>(
                 window_id,
                 &state.namespace_scope,
                 &feed.namespace_catalog,
+                compact_controls,
                 queued,
             );
         }
 
-        show_status_combobox(ui, window_id, &state.status_filter, rows, queued);
+        show_status_combobox(
+            ui,
+            window_id,
+            &state.status_filter,
+            rows,
+            compact_controls,
+            queued,
+        );
 
         if compact_controls {
-            ui.menu_button(RichText::new("More list controls").size(10.0), |ui| {
+            let menu = ui.menu_button("More", |ui| {
                 show_match_details(ui, window_id, state, queued);
                 ui.separator();
                 show_secondary_controls(
@@ -867,6 +907,9 @@ pub(super) fn show<I>(
                     resource_actions,
                     queued,
                 );
+            });
+            menu.response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, true, "More list controls")
             });
         } else {
             show_secondary_controls(
@@ -885,9 +928,26 @@ pub(super) fn show<I>(
         if let Some(freshness) = effective_freshness {
             match freshness {
                 WindowFreshness::Live { last_sync_age } => {
-                    ui.label(
-                        RichText::new(format!("● Live · {last_sync_age}")).color(theme::HEALTHY),
-                    );
+                    let label = if compact_controls {
+                        "● Live".to_owned()
+                    } else {
+                        format!("● Live · {last_sync_age}")
+                    };
+                    let text = RichText::new(label).color(theme::HEALTHY);
+                    let response = ui.label(if compact_controls {
+                        text.size(6.0)
+                    } else {
+                        text
+                    });
+                    if compact_controls {
+                        response.widget_info(|| {
+                            WidgetInfo::labeled(
+                                WidgetType::Label,
+                                true,
+                                format!("Live; synced {last_sync_age}"),
+                            )
+                        });
+                    }
                 }
                 WindowFreshness::ReadyEmpty => {
                     ui.label(RichText::new("◇ Ready · no resources").weak());

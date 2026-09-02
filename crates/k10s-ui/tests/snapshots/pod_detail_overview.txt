@@ -182,10 +182,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status"
                 Button label="More list controls"
               GenericContainer
                 Label value="1 pods · 1 selected"

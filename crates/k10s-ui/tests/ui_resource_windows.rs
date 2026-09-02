@@ -4,7 +4,10 @@
 //! and snapshot resync preserving filters and selections.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, ContainerImageProjection, DeploymentProjection, GroupVersionKind,
     ResourceIdentity, ResourceListRow, ResourceProjection, ResourceTypeEntry,
@@ -140,7 +143,7 @@ fn missing_workload_namespace_stays_narrow_until_explicitly_cleared() {
     harness.run_steps(3);
     let selector = namespace_combobox(harness.root());
     assert_eq!(
-        selector.value().as_deref(),
+        selector.accesskit_node().label().as_deref(),
         Some("Namespace: deleted-team · no longer exists")
     );
     assert_eq!(
@@ -213,7 +216,7 @@ fn namespace_catalog_lifecycle_distinguishes_not_requested_loading_and_ready_emp
     harness.run_steps(3);
     let selector = namespace_combobox(harness.root());
     assert_eq!(
-        selector.value().as_deref(),
+        selector.accesskit_node().label().as_deref(),
         Some("Namespace: not requested")
     );
     selector.click();

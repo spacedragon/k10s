@@ -168,8 +168,14 @@ fn open_integrated_deployment(
     assert_eq!(
         window
             .query_all_by_role(Role::ComboBox)
-            .filter_map(|node| node.value())
-            .filter(|value| value.starts_with("Namespace: ") || value.starts_with("Status: "))
+            .filter(|node| {
+                node.accesskit_node()
+                    .label()
+                    .or_else(|| node.value())
+                    .is_some_and(|text| {
+                        text.starts_with("Namespace: ") || text.starts_with("Status: ")
+                    })
+            })
             .count(),
         2,
         "the integrated list toolbar exposes Namespace and Status controls"

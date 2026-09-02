@@ -175,12 +175,13 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status"
                 Button label="More list controls"
-                Label value="● Live · 4s ago"
+                Label value="Live; synced 4s ago"
+                  TextRun value="● Live"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"

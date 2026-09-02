@@ -451,7 +451,7 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .get_by_role_and_label(Role::Button, "Retry now")
         .click();
     let live = common::workload_window(&harness, "Pods");
-    live.get_by_label("● Live · 4s ago");
+    live.get_by_label("Live; synced 4s ago");
     live.get_by_label("Select resource cached-pod");
 
     let forbidden = common::workload_window(&harness, "StatefulSets");

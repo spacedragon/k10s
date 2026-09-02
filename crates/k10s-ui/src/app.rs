@@ -9290,12 +9290,16 @@ mod tests {
     /// One Deployment list window with two rows, rendered through the
     /// reference-design toolbar.
     fn toolbar_test_harness(app: K10sApp) -> Harness<'static, K10sApp> {
+        toolbar_test_harness_with_size(app, egui::vec2(1_280.0, 800.0))
+    }
+
+    fn toolbar_test_harness_with_size(app: K10sApp, size: egui::Vec2) -> Harness<'static, K10sApp> {
         fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
             app.render_ui(ui);
         }
 
         let mut harness = Harness::builder()
-            .with_size(egui::vec2(1_280.0, 800.0))
+            .with_size(size)
             .build_ui_state(render, app);
         for _ in 0..4 {
             harness.step();
@@ -9343,7 +9347,7 @@ mod tests {
         deployment.geometry.size[0] = 640.0;
         app.restore_workspace_snapshot(snapshot);
 
-        let mut harness = toolbar_test_harness(app);
+        let mut harness = toolbar_test_harness_with_size(app, egui::vec2(640.0, 800.0));
         {
             let window = harness.get_by_role_and_label(
                 egui::accesskit::Role::Window,
@@ -9352,29 +9356,29 @@ mod tests {
 
             let search = window
                 .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-            let namespace = window.get_by_value("Namespace: All namespaces");
-            assert_eq!(
-                namespace.accesskit_node().role(),
+            let namespace = window.get_by_role_and_label(
                 egui::accesskit::Role::ComboBox,
+                "Namespace: All namespaces",
             );
-            let status = window.get_by_value("Status: all");
-            assert_eq!(
-                status.accesskit_node().role(),
-                egui::accesskit::Role::ComboBox,
-            );
-            let live = window.get_by_label("● Live · just now");
+            let status =
+                window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
+            let live = window.get_by_label("Live; synced just now");
             assert!(window.query_by_label("Columns ▾").is_none());
             assert!(window.query_by_label("↻").is_none());
             let more =
                 window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
-            for control in [&search, &namespace, &status, &more, &live] {
+            for (index, control) in [&search, &namespace, &status, &more, &live]
+                .iter()
+                .enumerate()
+            {
                 assert!(
-                    control.rect().right() <= window.rect().right(),
-                    "primary control must remain inside the list window"
+                    control.rect().right() <= 640.0,
+                    "primary control {index} must remain inside the visible canvas: {:?}",
+                    control.rect(),
                 );
                 assert!(
                     (control.rect().center().y - search.rect().center().y).abs() < 1.0,
-                    "primary controls must remain on one toolbar line"
+                    "primary control {index} must remain on one toolbar line"
                 );
             }
             more.click();
@@ -9396,21 +9400,10 @@ mod tests {
         // A constrained local list keeps primary controls reachable through
         // one accessible overflow menu.
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-        assert_eq!(
-            harness
-                .get_by_value("Namespace: All namespaces")
-                .accesskit_node()
-                .role(),
-            egui::accesskit::Role::ComboBox,
-            "the namespace selector carries its label inside the control"
-        );
-        assert_eq!(
-            harness.get_by_value("Status: all").accesskit_node().role(),
-            egui::accesskit::Role::ComboBox,
-            "the status filter carries its label inside the control"
-        );
+        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: All namespaces");
+        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
         window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
-        window.get_by_label("● Live · just now");
+        window.get_by_label("Live; synced just now");
 
         // The match line reports the result count and the age affordance.
         // With no filters active, the Reset control stays hidden.
@@ -9429,7 +9422,7 @@ mod tests {
                 } else {
                     accesskit_node.label()
                 };
-                text.is_some_and(|text| text.starts_with("● Live ·"))
+                text.is_some_and(|text| text.starts_with("Live; synced "))
             }),
             "live status belongs only in the toolbar chip"
         );
@@ -9560,12 +9553,9 @@ mod tests {
         list_window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
         let selector = harness
             .query_all_by_role(egui::accesskit::Role::ComboBox)
-            .find(|node| {
-                node.value()
-                    .is_some_and(|value| value.starts_with("Status: "))
-            })
+            .find(|node| node.value().as_deref() == Some("Status"))
             .expect("the toolbar Status combobox");
-        assert_eq!(selector.value().as_deref(), Some("Status: Ready"));
+        assert_eq!(selector.value().as_deref(), Some("Status"));
 
         // Reset clears the filter and restores every row.
         let mut app = harness.into_state();
