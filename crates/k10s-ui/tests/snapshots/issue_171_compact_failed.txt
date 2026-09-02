@@ -180,26 +180,16 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
-              Label value="✕ Failed · watch ended unexpectedly"
-                TextRun value="✕ Failed · watch ended unexpectedly"
+              Label value="⨯ Failed · watch ended unexpectedly"
+                TextRun value="⨯ Failed · watch ended unexpectedly"
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
@@ -210,28 +200,22 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort deployments by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort deployments by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort deployments by name"
+                            Label value="NAME"
+                            Button label="Sort deployments by name"
                           GenericContainer
-                            Label value="Ready"
-                              TextRun value="Ready"
+                            Label value="READY"
+                              TextRun value="READY"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort deployments by created"
+                            Label value="AGE"
+                            Button label="Sort deployments by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Select resource api-server"
+                            Label value="api-server"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -239,6 +223,7 @@ Window
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Select resource api-server"
     Splitter
     Splitter
     Splitter

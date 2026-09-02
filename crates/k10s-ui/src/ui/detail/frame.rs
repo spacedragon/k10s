@@ -1,7 +1,6 @@
 //! Fixed shared detail chrome: identity, vitals, controls, tabs, one body
 //! scroll region, and a footer. Kind modules only supply the body content.
 
-use egui::containers::scroll_area::ScrollBarVisibility;
 use egui::{
     Align, Layout, RichText, ScrollArea, Sense, UiBuilder, WidgetInfo, WidgetText, WidgetType,
 };
@@ -22,8 +21,10 @@ use crate::ui::resource_window::RowIdentity;
 pub(crate) enum DetailActionSegment {
     /// The destructive `Delete…` button, rightmost and danger-styled.
     Delete,
-    /// `Restart…` and `Scale…`, left of the overflow menu.
-    Primary,
+    /// The `Restart…` command.
+    Restart,
+    /// The `Scale…` command.
+    Scale,
 }
 
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
@@ -99,9 +100,6 @@ pub(super) fn show<I: RowIdentity>(
                 );
             }
             ui.label(RichText::new(&identity.name).strong());
-            // Freshness stays adjacent to the identity instead of owning the
-            // far right of the row.
-            ui.label(RichText::new(freshness_text(projection.freshness)).weak());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let clear = ui.button("×").on_hover_text("Clear selection");
                 clear.widget_info(|| {
@@ -111,11 +109,17 @@ pub(super) fn show<I: RowIdentity>(
                     queued.push(WorkspaceCommand::ClearSelection(window_id));
                 }
                 if !input.gone {
-                    let maximize = ui.button(if detail_maximized {
+                    // Icon-only: the accessible label carries the meaning
+                    // so the control costs one glyph of chrome width.
+                    let accessible = if detail_maximized {
                         "Restore split"
                     } else {
                         "Maximize"
-                    });
+                    };
+                    let maximize = ui.button("⛶");
+                    maximize
+                        .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible));
+                    let maximize = maximize.on_hover_text(accessible);
                     if maximize.clicked() {
                         queued.push(if detail_maximized {
                             WorkspaceCommand::RestoreDetailPane(window_id)
@@ -129,6 +133,23 @@ pub(super) fn show<I: RowIdentity>(
                         ));
                     }
                 }
+                // Reference placement: the freshness badge sits at the right
+                // of the identity row, just left of `Pop out`. Running text
+                // (`Freshness · live (just now)`) next to the name costs the
+                // row width it does not have; the full sentence stays as the
+                // accessible label and the tooltip.
+                let full_freshness = freshness_text(projection.freshness);
+                let badge = ui.label(
+                    RichText::new(format!(
+                        "⟳ {}",
+                        compact_freshness_text(projection.freshness).to_lowercase()
+                    ))
+                    .color(freshness_color(projection.freshness)),
+                );
+                badge.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone())
+                });
+                badge.on_hover_text(full_freshness);
             });
         });
         let identity_semantics = ui.interact(
@@ -162,19 +183,10 @@ pub(super) fn show<I: RowIdentity>(
     let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
     let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
         + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
-    if wide && wide_minimum <= vitals_width {
-        show_vital_strip(&mut vitals_ui, &mut projection, true);
-    } else {
-        ScrollArea::horizontal()
-            .id_salt(("k10s.detail.vitals.scroll", window_id.0))
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-            .stick_to_right(true)
-            .show(&mut vitals_ui, |ui| {
-                ui.horizontal(|ui| {
-                    popup_rects = show_vital_strip(ui, &mut projection, wide);
-                });
-            });
-    }
+    let show_all_vitals = wide && wide_minimum <= vitals_width;
+    vitals_ui.horizontal(|ui| {
+        popup_rects = show_vital_strip(ui, &mut projection, show_all_vitals);
+    });
     if let Some((button_rect, popup_rect)) = popup_rects {
         let escape =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -200,21 +212,130 @@ pub(super) fn show<I: RowIdentity>(
             .wrap(),
         );
     }
-    let (tab_row, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        Sense::hover(),
-    );
+    let row_width = ui.available_width();
+    let visible_row_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let row_height = ui.spacing().interact_size.y;
     let gap = ui.spacing().item_spacing.x;
-    let usable_width = (tab_row.width() - gap).max(0.0);
-    let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
-    let tab_width = usable_width - action_width;
-    let tabs_region =
-        egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
-    let freshness_width = if integrated {
-        0.0
+    let usable_width = (visible_row_width - gap).max(0.0);
+    // Chrome budget reserved for the freshness label. The painted text is the
+    // compact `● Live` form, but the budget keeps the committed thresholds so
+    // the wide/compact/stacked chrome decisions do not move.
+    let full_freshness_width = if integrated { 0.0 } else { 152.0 };
+    let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
+    let action_count = usize::from(projection.actions.can_scale)
+        + usize::from(projection.actions.can_restart)
+        + usize::from(projection.actions.can_delete)
+        + 1;
+    // Budgeted from the accessible name: the `⋯`/`▾` decoration around it
+    // must not push the row into the compact layout on its own.
+    let wide_action_width = menu_button_width(ui, "Actions")
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_restart {
+            button_width(ui, "Restart…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
+        + gap * action_count.saturating_sub(1) as f32;
+    let compact_action_count =
+        usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
+    let compact_action_width = menu_button_width(ui, "More")
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
+        + gap * compact_action_count.saturating_sub(1) as f32;
+    let wide_tabs_width = tabs
+        .iter()
+        .map(|tab| {
+            button_width(ui, super::tab_label(*tab))
+                + if *tab == DetailTab::Pods {
+                    projection
+                        .pod_count
+                        .map_or(0.0, |count| button_width(ui, &format!(" {count}")))
+                } else {
+                    0.0
+                }
+        })
+        .sum::<f32>()
+        + gap * tabs.len().saturating_sub(1) as f32
+        + full_freshness_width;
+    let compact_tabs_width = button_width(ui, super::tab_label(detail.active_tab))
+        + menu_button_width(ui, "More")
+        + gap
+        + compact_freshness_width;
+    let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
+    let stacked_chrome =
+        compact_chrome && compact_tabs_width + gap + compact_action_width > usable_width;
+    let chrome_height = if stacked_chrome {
+        row_height * 2.0 + gap
     } else {
-        tabs_region.width().min(152.0)
+        row_height
     };
+    let (chrome_rect, _) =
+        ui.allocate_exact_size(egui::vec2(row_width, chrome_height), Sense::hover());
+    let visible_chrome_rect = chrome_rect.intersect(ui.clip_rect());
+    let (tabs_region, actions_rect) = if stacked_chrome {
+        (
+            egui::Rect::from_min_size(
+                visible_chrome_rect.min,
+                egui::vec2(visible_chrome_rect.width(), row_height),
+            ),
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    visible_chrome_rect.left(),
+                    visible_chrome_rect.top() + row_height + gap,
+                ),
+                egui::vec2(visible_chrome_rect.width(), row_height),
+            ),
+        )
+    } else {
+        let desired_action_width = if compact_chrome {
+            compact_action_width
+        } else {
+            wide_action_width
+        };
+        let reserved_tabs_width = if compact_chrome {
+            compact_tabs_width
+        } else {
+            wide_tabs_width
+        };
+        let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
+        let tab_width = usable_width - action_width;
+        (
+            egui::Rect::from_min_size(visible_chrome_rect.min, egui::vec2(tab_width, row_height)),
+            egui::Rect::from_min_max(
+                egui::pos2(
+                    visible_chrome_rect.left() + tab_width + gap,
+                    visible_chrome_rect.top(),
+                ),
+                visible_chrome_rect.max,
+            ),
+        )
+    };
+    let freshness_width = if compact_chrome {
+        compact_freshness_width
+    } else {
+        full_freshness_width
+    }
+    .min(tabs_region.width());
     let tabs_rect = egui::Rect::from_min_max(
         tabs_region.min,
         egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
@@ -230,12 +351,14 @@ pub(super) fn show<I: RowIdentity>(
                 .layout(Layout::right_to_left(Align::Center)),
         );
         freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
-        freshness_ui.label(freshness_text(projection.freshness));
+        let full_freshness = freshness_text(projection.freshness);
+        let freshness_display = format!("● {}", compact_freshness_text(projection.freshness));
+        let freshness = freshness_ui
+            .label(freshness_display)
+            .on_hover_text(full_freshness.clone());
+        freshness
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone()));
     }
-    let actions_rect = egui::Rect::from_min_max(
-        egui::pos2(tabs_region.right() + gap, tab_row.top()),
-        tab_row.max,
-    );
     let mut tabs_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.tabs", window_id.0))
@@ -243,12 +366,36 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.tabs.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .show(&mut tabs_ui, |ui| {
-            ui.horizontal(|ui| {
+    let tabs_semantics = ui.interact(
+        tabs_rect,
+        ui.id().with(("k10s.detail.tabs.row", window_id.0)),
+        Sense::hover(),
+    );
+    tabs_semantics.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail tabs row"));
+    tabs_ui.horizontal(|ui| {
+        let compact = compact_chrome;
+        for tab in tabs {
+            if !compact || *tab == detail.active_tab {
+                let active = *tab == detail.active_tab;
+                let response = ui.selectable_label(active, tab_text(ui, *tab, &projection));
+                response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        true,
+                        format!("Tab {}", super::tab_label(*tab)),
+                    )
+                });
+                if response.clicked() && !active {
+                    queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                }
+            }
+        }
+        if compact && tabs.len() > 1 {
+            let menu = ui.menu_button("More", |ui| {
                 for tab in tabs {
+                    if *tab == detail.active_tab {
+                        continue;
+                    }
                     let active = *tab == detail.active_tab;
                     let response = ui.selectable_label(active, super::tab_label(*tab));
                     response.widget_info(|| {
@@ -260,10 +407,14 @@ pub(super) fn show<I: RowIdentity>(
                     });
                     if response.clicked() && !active {
                         queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                        ui.close();
                     }
                 }
             });
-        });
+            menu.response
+                .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "More detail tabs"));
+        }
+    });
     let owner = projection.actions.verified_owner;
     let mut actions_ui = ui.new_child(
         UiBuilder::new()
@@ -272,65 +423,104 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::right_to_left(Align::Center)),
     );
     actions_ui.set_clip_rect(actions_ui.clip_rect().intersect(actions_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.actions.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .stick_to_right(true)
-        .show(&mut actions_ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                // Reference order (left to right): Scale, Restart, Actions,
-                // Delete. Right-to-left rendering therefore paints Delete
-                // first (rightmost), the overflow menu, then the primary
-                // segment.
+    let actions_semantics = ui.interact(
+        actions_rect,
+        ui.id().with(("k10s.detail.actions.row", window_id.0)),
+        Sense::hover(),
+    );
+    actions_semantics
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail actions row"));
+    actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Reference order (left to right): Scale, Restart, Actions,
+        // Delete. Right-to-left rendering therefore paints Delete
+        // first (rightmost), the overflow menu, then the primary
+        // segment.
+        content(
+            ui,
+            input.primary,
+            Some(DetailActionSegment::Delete),
+            &mut projection,
+        );
+        let compact = compact_chrome;
+        let namespace = projection.identity.namespace.as_deref();
+        let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
+        // The overflow marker and the disclosure arrow are part of the
+        // label; `Actions` stays the accessible name.
+        let menu_label: WidgetText = if compact {
+            "More".into()
+        } else {
+            icon(action_menu_label()).into()
+        };
+        let action_menu = ui.menu_button(menu_label, |ui| {
+            if compact {
                 content(
                     ui,
                     input.primary,
-                    Some(DetailActionSegment::Delete),
+                    Some(DetailActionSegment::Restart),
                     &mut projection,
                 );
-                let namespace = projection.identity.namespace.as_deref();
-                let uid = (!projection.identity.uid.is_empty())
-                    .then_some(projection.identity.uid.as_str());
-                ui.menu_button("Actions", |ui| {
-                    // Copy name moved out of the action row into the
-                    // overflow menu per the reference design.
-                    copy(ui, "Copy name", &projection.identity.name);
-                    if let Some(owner) = owner {
-                        let label = format!("Open owner {}", owner.name);
-                        if ui.button(&label).clicked() {
-                            queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                                I::from_row_identity(&super::presentation::owner_identity(
-                                    projection.identity,
-                                    owner,
-                                )),
-                            ));
-                            ui.close();
-                        }
-                    }
-                    if let Some(namespace) = namespace {
-                        copy(ui, "Copy namespace", namespace);
-                    }
-                    if let Some(uid) = uid {
-                        copy(ui, "Copy UID", uid);
-                    }
-                });
-                content(
-                    ui,
-                    input.primary,
-                    Some(DetailActionSegment::Primary),
-                    &mut projection,
-                );
-            });
+                ui.separator();
+            }
+            // Copy name moved out of the action row into the
+            // overflow menu per the reference design.
+            copy(ui, "Copy name", &projection.identity.name);
+            if let Some(owner) = owner {
+                let label = format!("Open owner {}", owner.name);
+                if ui.button(&label).clicked() {
+                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                        &super::presentation::owner_identity(projection.identity, owner),
+                    )));
+                    ui.close();
+                }
+            }
+            if let Some(namespace) = namespace {
+                copy(ui, "Copy namespace", namespace);
+            }
+            if let Some(uid) = uid {
+                copy(ui, "Copy UID", uid);
+            }
         });
+        action_menu.response.widget_info(|| {
+            WidgetInfo::labeled(
+                WidgetType::Button,
+                true,
+                if compact {
+                    "More detail actions"
+                } else {
+                    "Actions"
+                },
+            )
+        });
+        content(
+            ui,
+            input.primary,
+            Some(if compact {
+                DetailActionSegment::Scale
+            } else {
+                DetailActionSegment::Restart
+            }),
+            &mut projection,
+        );
+        if !compact {
+            content(
+                ui,
+                input.primary,
+                Some(DetailActionSegment::Scale),
+                &mut projection,
+            );
+        }
+    });
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
-    let footer_text = RichText::new(format!(
-        "{} · Esc clear selection",
-        projection.shortcut_labels.join(" · ")
-    ))
-    .weak();
-    let footer_galley = WidgetText::from(footer_text.clone()).into_galley(
+    let mut shortcuts: Vec<&str> = projection.shortcut_labels.to_vec();
+    if projection.delete_shortcut {
+        shortcuts.push("Ctrl+D delete");
+    }
+    shortcuts.push("Esc clear selection");
+    let footer_plain = shortcuts.join(" · ");
+    let footer_job = shortcut_footer_job(ui, &shortcuts);
+    let footer_galley = WidgetText::from(footer_job.clone()).into_galley(
         ui,
         Some(egui::TextWrapMode::Wrap),
         remaining.width(),
@@ -386,15 +576,76 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::top_down(Align::Min)),
     );
     footer_ui.separator();
-    footer_ui.add(egui::Label::new(footer_text).wrap());
+    let footer = footer_ui.add(egui::Label::new(footer_job).wrap());
+    footer.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, footer_plain.clone()));
     ui.ctx().data_mut(|data| {
         data.insert_temp(expansion_id, projection.expansion);
     });
 }
 
+/// `**p** pods · **y** yaml …`: the key is the actionable half of a
+/// shortcut hint, so it reads at full strength while the verb stays muted.
+fn shortcut_footer_job(ui: &egui::Ui, shortcuts: &[&str]) -> egui::text::LayoutJob {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let key_font = egui::FontId {
+        family: body.family.clone(),
+        size: body.size,
+    };
+    let key_color = crate::ui::theme::ACCENT;
+    let verb_color = ui.visuals().weak_text_color();
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    for (index, shortcut) in shortcuts.iter().enumerate() {
+        if index > 0 {
+            job.append(
+                " · ",
+                0.0,
+                egui::TextFormat::simple(body.clone(), verb_color),
+            );
+        }
+        match shortcut.split_once(' ') {
+            Some((key, verb)) => {
+                job.append(
+                    key,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: key_font.clone(),
+                        color: key_color,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &format!(" {verb}"),
+                    0.0,
+                    egui::TextFormat::simple(body.clone(), verb_color),
+                );
+            }
+            None => job.append(
+                shortcut,
+                0.0,
+                egui::TextFormat::simple(body.clone(), verb_color),
+            ),
+        }
+    }
+    job
+}
+
 const VITAL_VALUE_MAX_CHARS: usize = 24;
 const VITAL_CHIP_MAX_WIDTH: f32 = 184.0;
 const VITAL_CHIP_SANE_MIN_WIDTH: f32 = 64.0;
+/// The one-glyph overflow toggle at the end of the vital strip. `⋯` keeps
+/// the strip from wrapping; the button's accessible label spells it out.
+const VITAL_OVERFLOW_GLYPH: &str = "⋯";
+/// The disclosure arrow of the action menu. Like `⋯`, `▾` (U+25BE) is
+/// covered only by the bundled monospace family, so both are painted with
+/// [`icon`] rather than the proportional button font.
+const MENU_ARROW_GLYPH: &str = "▾";
+
+/// Symbol text painted in the monospace family: the default proportional
+/// fonts do not cover the geometric icons and would paint a blank box.
+fn icon(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(egui::FontFamily::Monospace)
+}
 
 struct VitalDisplay {
     visible: String,
@@ -428,7 +679,11 @@ fn vital_value_text(vital: &DetailVital, visible: &str) -> String {
 /// Tone-tinted chip fill: dark and neutral for plain values, subtly tinted
 /// toward the semantic color for healthy/warning/danger vitals.
 fn chip_fill(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Color32 {
-    chip_tint(visuals.faint_bg_color, vital_color(visuals, tone), 0.22)
+    chip_tint(
+        crate::ui::theme::CHIP_BACKGROUND,
+        vital_color(visuals, tone),
+        0.22,
+    )
 }
 
 fn chip_stroke(visuals: &egui::Visuals, tone: DetailVitalTone) -> egui::Stroke {
@@ -477,33 +732,71 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
         ui.allocate_exact_size(egui::vec2(chip_width, chip_height), Sense::hover());
     chip_response
         .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone()));
-    if display.elided || natural_width > chip_width + 0.1 {
-        chip_response.on_hover_text(display.accessible.clone());
+    let truncated = display.elided || natural_width > chip_width + 0.1;
+    match (&vital.hint, truncated) {
+        (Some(hint), true) => {
+            chip_response.on_hover_text(format!("{}\n{hint}", display.accessible));
+        }
+        (Some(hint), false) => {
+            chip_response.on_hover_text(hint.clone());
+        }
+        (None, true) => {
+            chip_response.on_hover_text(display.accessible.clone());
+        }
+        (None, false) => {}
     }
-    let mut chip_ui = ui.new_child(
-        UiBuilder::new()
-            .max_rect(chip_rect)
-            .layout(Layout::left_to_right(Align::Center)),
+    if !ui.is_rect_visible(chip_rect) {
+        return;
+    }
+    // The border and fill are painted directly. An `egui::Frame` sizes
+    // itself from what its content allocates, and this chip only paints
+    // galleys, so a Frame collapsed to a degenerate rectangle and the chip
+    // read as plain `label · value` text.
+    // The chip clip also keeps a long value from bleeding into its neighbor.
+    let painter = ui
+        .painter()
+        .with_clip_rect(chip_rect.intersect(ui.clip_rect()));
+    painter.rect(
+        chip_rect,
+        3.0,
+        chip_fill(ui.visuals(), vital.tone),
+        chip_stroke(ui.visuals(), vital.tone),
+        egui::StrokeKind::Inside,
     );
-    chip_ui.set_clip_rect(chip_ui.clip_rect().intersect(chip_rect));
-    egui::Frame::new()
-        .fill(chip_fill(chip_ui.visuals(), vital.tone))
-        .stroke(chip_stroke(chip_ui.visuals(), vital.tone))
-        .corner_radius(3.0)
-        .show(&mut chip_ui, |ui| {
-            let rect = ui.max_rect();
-            let label_pos = egui::pos2(
-                rect.left() + padding_x,
-                rect.center().y - label_galley.size().y / 2.0,
-            );
-            let value_pos = egui::pos2(
-                rect.left() + padding_x + label_galley.size().x + inner_gap,
-                rect.center().y - value_galley.size().y / 2.0,
-            );
-            let painter = ui.ctx().layer_painter(ui.layer_id());
-            painter.galley(label_pos, label_galley.clone(), label_color);
-            painter.galley(value_pos, value_galley.clone(), value_color);
-        });
+    let label_pos = egui::pos2(
+        chip_rect.left() + padding_x,
+        chip_rect.center().y - label_galley.size().y / 2.0,
+    );
+    let value_pos = egui::pos2(
+        chip_rect.left() + padding_x + label_galley.size().x + inner_gap,
+        chip_rect.center().y - value_galley.size().y / 2.0,
+    );
+    painter.galley(label_pos, label_galley, label_color);
+    painter.galley(value_pos, value_galley, value_color);
+}
+
+/// The painted tab label. `Pods` carries a yellow count badge once the
+/// related-Pod count is known, so the tab row states the size of the thing
+/// it links to.
+fn tab_text(ui: &egui::Ui, tab: DetailTab, projection: &DetailFrameProjection<'_>) -> WidgetText {
+    let label = super::tab_label(tab);
+    let Some(count) = projection.pod_count.filter(|_| tab == DetailTab::Pods) else {
+        return label.into();
+    };
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    job.append(
+        label,
+        0.0,
+        egui::TextFormat::simple(font.clone(), ui.visuals().text_color()),
+    );
+    job.append(
+        &format!(" {count}"),
+        0.0,
+        egui::TextFormat::simple(font, crate::ui::theme::WARNING),
+    );
+    job.into()
 }
 
 fn show_vital_strip(
@@ -512,7 +805,13 @@ fn show_vital_strip(
     wide: bool,
 ) -> Option<(egui::Rect, egui::Rect)> {
     normalize_vital_expansion(wide, &mut projection.expansion);
-    let count = projection.visible_vitals.len()
+    let narrow_visible_count = projection.visible_vitals.len().min(2);
+    let visible_count = if wide {
+        projection.visible_vitals.len()
+    } else {
+        narrow_visible_count
+    };
+    let count = visible_count
         + if wide {
             projection.overflow_vitals.len()
         } else {
@@ -521,10 +820,26 @@ fn show_vital_strip(
     let gaps = ui.spacing().item_spacing.x * count.saturating_sub(1) as f32;
     let max_width = if wide && count > 0 {
         ((ui.available_width() - gaps) / count as f32).min(VITAL_CHIP_MAX_WIDTH)
+    } else if count > 0 {
+        let overflow_width = projection.vital_expansion_label.map_or(0.0, |_| {
+            WidgetText::from(icon(VITAL_OVERFLOW_GLYPH))
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+                .size()
+                .x
+                + ui.spacing().button_padding.x * 2.0
+                + ui.spacing().item_spacing.x
+        });
+        ((ui.available_width() - overflow_width - gaps) / count as f32)
+            .clamp(VITAL_CHIP_SANE_MIN_WIDTH, VITAL_CHIP_MAX_WIDTH)
     } else {
         VITAL_CHIP_MAX_WIDTH
     };
-    for metric in &projection.visible_vitals {
+    for metric in projection.visible_vitals.iter().take(visible_count) {
         vital(ui, metric, max_width);
     }
     if wide {
@@ -532,13 +847,24 @@ fn show_vital_strip(
             vital(ui, metric, max_width);
         }
     } else if let Some(kind) = projection.vital_expansion_label
-        && !projection.overflow_vitals.is_empty()
+        && (projection.visible_vitals.len() > narrow_visible_count
+            || !projection.overflow_vitals.is_empty())
     {
-        let response = ui.button(if projection.expansion.more_vitals {
+        // The strip must not wrap or clip, so the toggle stays one glyph
+        // wide; the spoken label keeps the full sentence.
+        let accessible = if projection.expansion.more_vitals {
             format!("Hide more {kind} vitals")
         } else {
             format!("Show more {kind} vitals")
-        });
+        };
+        // A ghost button: transparent fill, one muted glyph, so the
+        // toggle reads as an affordance without competing with the chips.
+        let response = ui.add(
+            egui::Button::new(icon(VITAL_OVERFLOW_GLYPH).color(crate::ui::theme::MUTED_TEXT))
+                .fill(egui::Color32::TRANSPARENT),
+        );
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
+        let response = response.on_hover_text(accessible);
         if response.clicked() {
             projection.expansion.more_vitals = !projection.expansion.more_vitals;
         }
@@ -549,6 +875,11 @@ fn show_vital_strip(
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.vertical(|ui| {
+                            for metric in
+                                projection.visible_vitals.iter().skip(narrow_visible_count)
+                            {
+                                vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
+                            }
                             for metric in &projection.overflow_vitals {
                                 vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
                             }
@@ -608,6 +939,32 @@ fn freshness_text(freshness: DetailFreshness<'_>) -> String {
     }
 }
 
+/// Live feeds read green; every recovery state keeps the muted tone so the
+/// badge never claims health it does not have.
+fn freshness_color(freshness: DetailFreshness<'_>) -> egui::Color32 {
+    match freshness {
+        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => {
+            crate::ui::theme::HEALTHY
+        }
+        DetailFreshness::Gone | DetailFreshness::Unavailable => crate::ui::theme::DANGER,
+        _ => crate::ui::theme::MUTED_TEXT,
+    }
+}
+
+fn compact_freshness_text(freshness: DetailFreshness<'_>) -> &'static str {
+    match freshness {
+        DetailFreshness::Loading => "Loading",
+        DetailFreshness::Unavailable => "Unavail.",
+        DetailFreshness::Gone => "Gone",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => "Live",
+        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Stale",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconn.",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Denied",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => "Failed",
+        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => "Ready",
+    }
+}
+
 const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
     matches!(tab, DetailTab::Overview | DetailTab::Events)
 }
@@ -629,6 +986,30 @@ fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
     }
 }
 
+fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    WidgetText::from(label)
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        )
+        .size()
+        .x
+        + ui.spacing().button_padding.x * 2.0
+}
+
+fn menu_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    button_width(ui, label) + ui.spacing().icon_width + ui.spacing().icon_spacing
+}
+
+/// The reference action-row overflow label: the `⋯` overflow marker and the
+/// `▾` disclosure arrow are decoration around the accessible name, which
+/// stays `Actions`.
+fn action_menu_label() -> String {
+    format!("{VITAL_OVERFLOW_GLYPH} Actions {MENU_ARROW_GLYPH}")
+}
+
 #[cfg(test)]
 mod tests {
     use egui_kittest::{Harness, kittest::Queryable as _};
@@ -638,6 +1019,58 @@ mod tests {
     use crate::ui::detail::presentation::{
         DetailMetrics, DetailVital, DetailVitalShape, DetailVitalTone,
     };
+
+    /// Every icon-only control carries its whole meaning in one glyph, so a
+    /// glyph the bundled fonts lack paints as a blank box (as `✕` U+2715
+    /// did). `Fonts::has_glyph` answers from the family's face cache and
+    /// reports false negatives for plain ASCII, so coverage is probed
+    /// through the advance width: a character no face in the family owns
+    /// resolves to the replacement face and measures 0.
+    ///
+    /// The default proportional family covers far fewer symbols than the
+    /// bundled monospace one, which is why the geometric icons (`⋯`, `▾`,
+    /// `●`, `▲`, `⨯`) are painted in the monospace family.
+    #[test]
+    fn icon_only_chrome_glyphs_exist_in_the_fonts_that_paint_them() {
+        let mut harness = Harness::new_ui(|ui| {
+            ui.label("glyph probe");
+        });
+        harness.run_steps(2);
+        let proportional = egui::FontId::proportional(12.0);
+        let monospace = egui::FontId::monospace(12.0);
+        harness.ctx.fonts_mut(|fonts| {
+            let mut covered = |font: &egui::FontId, glyph: &str| {
+                glyph
+                    .chars()
+                    .all(|character| fonts.glyph_width(font, character) > 0.0)
+            };
+            assert!(
+                !covered(&proportional, "\u{FFFD}"),
+                "probe assumes an uncovered character measures 0"
+            );
+            // Painted with the proportional button/label font.
+            for glyph in ["⟳", "⛶", "↗", "×"] {
+                assert!(
+                    covered(&proportional, glyph),
+                    "chrome glyph {glyph:?} is missing from the proportional font"
+                );
+            }
+            // Painted with the monospace family: the vital chips, the
+            // overflow toggle, and the action-menu affordances.
+            for glyph in [
+                VITAL_OVERFLOW_GLYPH,
+                MENU_ARROW_GLYPH,
+                DetailVitalShape::Dot.glyph(),
+                DetailVitalShape::Triangle.glyph(),
+                DetailVitalShape::Cross.glyph(),
+            ] {
+                assert!(
+                    covered(&monospace, glyph),
+                    "chrome glyph {glyph:?} is missing from the monospace font"
+                );
+            }
+        });
+    }
 
     #[test]
     fn only_overview_and_events_use_the_shared_body_scroll_owner() {
@@ -742,10 +1175,41 @@ mod tests {
     }
 
     #[test]
+    fn compact_long_freshness_labels_fit_the_reserved_narrow_budget() {
+        use crate::ui::WindowFreshness;
+
+        let states = [
+            DetailFreshness::Unavailable,
+            DetailFreshness::Source(&WindowFreshness::Reconnecting {
+                last_sync_age: "8s".into(),
+                attempt: 2,
+                retry_in: "1s".into(),
+            }),
+            DetailFreshness::Source(&WindowFreshness::Forbidden {
+                user: "alice".into(),
+                verb: "get".into(),
+                resource: "pods".into(),
+                scope: "default".into(),
+            }),
+        ];
+        for state in states {
+            let painted = super::compact_freshness_text(state);
+            assert!(
+                painted.chars().count() <= 8,
+                "compact freshness {painted:?} exceeds the 64px text budget"
+            );
+            assert!(
+                super::freshness_text(state).starts_with("Freshness · "),
+                "full accessible freshness must remain stable"
+            );
+        }
+    }
+
+    #[test]
     fn semantic_vital_shapes_are_visible_and_tones_use_theme_palette() {
         assert_eq!(DetailVitalShape::Dot.glyph(), "●");
         assert_eq!(DetailVitalShape::Triangle.glyph(), "▲");
-        assert_eq!(DetailVitalShape::Cross.glyph(), "✕");
+        assert_eq!(DetailVitalShape::Cross.glyph(), "⨯");
 
         let visuals = egui::Visuals::dark();
         assert_eq!(
@@ -811,6 +1275,7 @@ mod tests {
                             value: "Configured".into(),
                             tone: DetailVitalTone::Danger,
                             shape: Some(DetailVitalShape::Cross),
+                            hint: None,
                         }];
                     },
                     |ui, _, actions, projection| {
@@ -825,7 +1290,7 @@ mod tests {
             });
         harness.run_steps(2);
 
-        harness.get_by_label("Status ✕ Configured");
+        harness.get_by_label("Status ⨯ Configured");
         harness.get_by_label("Body observed Configured");
         assert!(harness.query_by_label("Status · Pending").is_none());
         harness

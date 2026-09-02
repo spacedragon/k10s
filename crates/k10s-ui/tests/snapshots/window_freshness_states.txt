@@ -209,26 +209,16 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
-                  Label value="● Live · 4s ago"
-                    TextRun value="● Live · 4s ago"
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
+                Label value="Live; synced 4s ago"
+                  TextRun value="● Live"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -236,36 +226,28 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort deployments by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort deployments by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort deployments by name"
+                            Label value="NAME"
+                            Button label="Sort deployments by name"
                           GenericContainer
-                            Label value="Ready"
-                              TextRun value="Ready"
+                            Label value="READY"
+                              TextRun value="READY"
                           GenericContainer
-                            GenericContainer
-                              Label value="Status"
-                                TextRun value="Status"
-                              Button label="Sort deployments by status"
+                            Label value="STATUS"
+                            Button label="Sort deployments by status"
                           GenericContainer
-                            Label value="Image"
-                              TextRun value="Image"
+                            Label value="IMAGE"
+                              TextRun value="IMAGE"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort deployments by created"
+                            Label value="AGE"
+                            Button label="Sort deployments by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Select resource healthy-api"
+                            Label value="healthy-api"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -279,6 +261,7 @@ Window
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Select resource healthy-api"
     Splitter
     Splitter
     Splitter
@@ -303,24 +286,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 pods"
                   TextRun value="1 pods"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
                 TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
               Label value="Mutations disabled while this window is stale"
@@ -335,39 +308,31 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort pods by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort pods by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort pods by name"
+                            Label value="NAME"
+                            Button label="Sort pods by name"
                           GenericContainer
-                            Label value="Ready"
-                              TextRun value="Ready"
+                            Label value="READY"
+                              TextRun value="READY"
                           GenericContainer
-                            GenericContainer
-                              Label value="Status"
-                                TextRun value="Status"
-                              Button label="Sort pods by status"
+                            Label value="STATUS"
+                            Button label="Sort pods by status"
                           GenericContainer
-                            Label value="Restarts"
-                              TextRun value="Restarts"
+                            Label value="RESTARTS"
+                              TextRun value="RESTARTS"
                           GenericContainer
-                            Label value="Node"
-                              TextRun value="Node"
+                            Label value="NODE"
+                              TextRun value="NODE"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort pods by created"
+                            Label value="AGE"
+                            Button label="Sort pods by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Select resource cached-pod"
+                            Label value="cached-pod"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -385,6 +350,7 @@ Window
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Select resource cached-pod"
     Splitter
     Splitter
     Splitter
@@ -409,24 +375,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 statefulsets"
                   TextRun value="0 statefulsets"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
                 TextRun value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
               Label value="Ask a cluster administrator to grant this permission, then retry."
@@ -463,26 +419,16 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 daemonsets"
                   TextRun value="0 daemonsets"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
-              Label value="✕ Failed · watch ended unexpectedly"
-                TextRun value="✕ Failed · watch ended unexpectedly"
+              Label value="⨯ Failed · watch ended unexpectedly"
+                TextRun value="⨯ Failed · watch ended unexpectedly"
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
@@ -513,26 +459,16 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
-                  Label value="◇ Ready · no resources"
-                    TextRun value="◇ Ready · no resources"
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
+                Label value="◇ Ready · no resources"
+                  TextRun value="◇ Ready · no resources"
               GenericContainer
                 Label value="0 jobs"
                   TextRun value="0 jobs"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 Label value="No Jobs in this view"
                   TextRun value="No Jobs in this view"
@@ -560,24 +496,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 cronjobs"
                   TextRun value="1 cronjobs"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
                 TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."
@@ -592,36 +518,29 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort cronjobs by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort cronjobs by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort cronjobs by name"
+                            Label value="NAME"
+                            Button label="Sort cronjobs by name"
                           GenericContainer
-                            GenericContainer
-                              Label value="Status"
-                                TextRun value="Status"
-                              Button label="Sort cronjobs by status"
+                            Label value="STATUS"
+                            Button label="Sort cronjobs by status"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort cronjobs by created"
+                            Label value="AGE"
+                            Button label="Sort cronjobs by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Select resource nightly"
+                            Label value="nightly"
                           GenericContainer
                             Label value="Active 0"
                               TextRun value="● Active 0"
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Select resource nightly"
     Splitter
     Splitter
     Splitter
@@ -646,25 +565,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                Button label="Reset"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 configmaps"
                   TextRun value="0 configmaps"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   Label value="[?]"

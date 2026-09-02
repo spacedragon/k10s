@@ -47,14 +47,14 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
             DetailTab::Logs,
             DetailTab::Shell,
         ],
-        Some(
-            WorkloadKind::Deployment
-            | WorkloadKind::ReplicaSet
-            | WorkloadKind::StatefulSet
-            | WorkloadKind::DaemonSet
-            | WorkloadKind::Job
-            | WorkloadKind::CronJob,
-        ) => &[
+        Some(WorkloadKind::Deployment | WorkloadKind::ReplicaSet | WorkloadKind::StatefulSet) => &[
+            DetailTab::Overview,
+            DetailTab::Pods,
+            DetailTab::Events,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+        ],
+        Some(WorkloadKind::DaemonSet | WorkloadKind::Job | WorkloadKind::CronJob) => &[
             DetailTab::Overview,
             DetailTab::Pods,
             DetailTab::Events,
@@ -92,11 +92,25 @@ enum DetailShortcut {
     Tab(DetailTab),
     CopyName,
     OpenOwner,
+    /// `Ctrl+D`: open the delete confirmation dialog.
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DetailRuntimeAction {
     PreviousLogs { window: WindowId, container: String },
+}
+
+/// Whether this detail may advertise and honor `Ctrl+D`: the backend
+/// reports the resource as deletable and the window is live.
+pub(super) fn delete_shortcut_available(
+    presentation: &presentation::DetailPresentationInput<'_>,
+) -> bool {
+    presentation.mutations_allowed
+        && matches!(
+            presentation.primary,
+            presentation::DetailPrimary::Loaded(view) if view.capabilities.can_delete
+        )
 }
 
 fn shortcut_for_key(
@@ -126,8 +140,15 @@ fn shortcut_labels_for(
         "c copy name",
         "o owner",
     ];
-    const CONTROLLER: &[&str] = &["p pods", "y yaml", "e events", "c copy name"];
-    const CONTROLLER_OWNER: &[&str] = &["p pods", "y yaml", "e events", "c copy name", "o owner"];
+    const CONTROLLER: &[&str] = &["p pods", "l logs", "y yaml", "e events", "c copy name"];
+    const CONTROLLER_OWNER: &[&str] = &[
+        "p pods",
+        "l logs",
+        "y yaml",
+        "e events",
+        "c copy name",
+        "o owner",
+    ];
     const GENERIC: &[&str] = &["y yaml", "e events", "c copy name"];
     const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
 
@@ -183,6 +204,14 @@ pub(super) fn show<I>(
         let tabs = tabs_for_kind(&detail_identity_gvk(detail));
         let verified_owner = presentation.verified_owner();
         let shortcut = ui.input(|input| {
+            // `Ctrl+D` only opens the delete confirmation dialog, so the
+            // keyboard can never destroy a resource on its own.
+            if delete_shortcut_available(presentation)
+                && input.modifiers.command_only()
+                && input.key_pressed(egui::Key::D)
+            {
+                return Some(DetailShortcut::Delete);
+            }
             [
                 egui::Key::L,
                 egui::Key::P,
@@ -202,6 +231,9 @@ pub(super) fn show<I>(
             }
             Some(DetailShortcut::CopyName) => {
                 ui.ctx().copy_text(presentation.identity.name.clone());
+            }
+            Some(DetailShortcut::Delete) => {
+                dialogs.open_delete(window_id, presentation.identity.clone());
             }
             Some(DetailShortcut::OpenOwner) => {
                 if let Some(owner) = verified_owner {
@@ -272,15 +304,16 @@ pub(super) fn show<I>(
                         frame::DetailActionSegment::Delete => {
                             show_delete_action(ui, window_id, presentation, frame, view, dialogs)
                         }
-                        frame::DetailActionSegment::Primary => show_primary_actions(
+                        frame::DetailActionSegment::Restart => show_restart_action(
                             ui,
                             window_id,
                             presentation,
                             frame,
-                            view,
-                            dialogs,
                             resource_actions,
                         ),
+                        frame::DetailActionSegment::Scale => {
+                            show_scale_action(ui, window_id, presentation, frame, view, dialogs)
+                        }
                     }
                 }
                 return;
@@ -434,19 +467,25 @@ fn show_generic_body<I: RowIdentity>(
             }
         }
         DetailTab::Logs => {
-            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
-            else {
-                ui.label("Pod runtime details unavailable");
-                return;
-            };
-            tools::logs::show(
-                ui,
-                window_id,
-                &mut streams.logs,
-                stream_target(detail, runtime.default_container()),
-                runtime.containers(),
-                runtime.default_previous(),
-            );
+            if WorkloadKind::from_gvk(&presentation.identity.gvk) == Some(WorkloadKind::Pod) {
+                let Some(runtime) =
+                    pod::PodRuntimeProjection::from_view(presentation.identity, view)
+                else {
+                    ui.label("Pod runtime details unavailable");
+                    return;
+                };
+                tools::logs::show(
+                    ui,
+                    window_id,
+                    &mut streams.logs,
+                    stream_target(detail, runtime.default_container()),
+                    runtime.containers(),
+                    runtime.default_previous(),
+                );
+            } else {
+                let targets = aggregate_log_targets(presentation.identity, presentation.relations);
+                tools::logs::show_aggregate(ui, window_id, &mut streams.logs, &targets);
+            }
         }
         DetailTab::Shell => {
             let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
@@ -462,6 +501,54 @@ fn show_generic_body<I: RowIdentity>(
             );
         }
     }
+}
+
+fn aggregate_log_targets(
+    owner: &k10s_protocol::ResourceIdentity,
+    relations: Option<&crate::ui::RelationState>,
+) -> Vec<k10s_protocol::StreamTarget> {
+    let Some(crate::ui::RelationState::Loaded { response, .. }) = relations else {
+        return Vec::new();
+    };
+    let mut targets = response
+        .groups
+        .iter()
+        .filter(|group| {
+            group.gvk.group.is_empty() && group.gvk.version == "v1" && group.gvk.kind == "Pod"
+        })
+        .flat_map(|group| &group.rows)
+        .flat_map(|row| {
+            let containers = match &row.projection {
+                Some(k10s_protocol::ResourceProjection::Pod(pod)) => pod
+                    .containers
+                    .iter()
+                    .map(|container| container.name.as_str())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            containers
+                .into_iter()
+                .map(move |container| k10s_protocol::StreamTarget {
+                    context: owner.context.clone(),
+                    namespace: row
+                        .identity
+                        .namespace
+                        .clone()
+                        .unwrap_or_else(|| "default".to_owned()),
+                    pod: row.identity.name.clone(),
+                    uid: row.identity.uid.clone(),
+                    container: container.to_owned(),
+                })
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| {
+        (&left.namespace, &left.pod, &left.container).cmp(&(
+            &right.namespace,
+            &right.pod,
+            &right.container,
+        ))
+    });
+    targets
 }
 
 /// The destructive `Delete…` button, rendered rightmost in the reference
@@ -488,15 +575,11 @@ fn show_delete_action(
     }
 }
 
-/// `Restart…` and `Scale…`, rendered left of the `Actions` overflow
-/// menu (Restart then Scale in the right-to-left action layout).
-fn show_primary_actions(
+fn show_restart_action(
     ui: &mut egui::Ui,
     window_id: WindowId,
     presentation: &presentation::DetailPresentationInput<'_>,
     frame: &presentation::DetailFrameProjection<'_>,
-    view: &ResourceDetailResponse,
-    dialogs: &mut dialogs::OperationDialogs,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
 ) {
     if frame.actions.can_restart {
@@ -513,6 +596,16 @@ fn show_primary_actions(
             });
         }
     }
+}
+
+fn show_scale_action(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    frame: &presentation::DetailFrameProjection<'_>,
+    view: &ResourceDetailResponse,
+    dialogs: &mut dialogs::OperationDialogs,
+) {
     if frame.actions.can_scale {
         let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
         scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));
@@ -599,8 +692,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DetailShortcut, shortcut_for_key, shortcut_tab};
+    use super::{DetailShortcut, shortcut_for_key, shortcut_tab, tabs_for_kind};
     use crate::workspace::DetailTab;
+    use k10s_protocol::GroupVersionKind;
+
+    fn apps(kind: &str) -> GroupVersionKind {
+        GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: kind.into(),
+        }
+    }
+
+    #[test]
+    fn aggregate_logs_are_limited_to_requested_controller_kinds() {
+        for kind in ["Deployment", "ReplicaSet", "StatefulSet"] {
+            assert!(
+                tabs_for_kind(&apps(kind)).contains(&DetailTab::Logs),
+                "{kind}"
+            );
+        }
+        assert!(!tabs_for_kind(&apps("DaemonSet")).contains(&DetailTab::Logs));
+    }
 
     #[test]
     fn detail_shortcuts_map_to_investigation_tabs() {

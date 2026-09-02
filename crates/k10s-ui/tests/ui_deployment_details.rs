@@ -21,7 +21,7 @@ use k10s_ui::{
         ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, RelationState,
         ResourceFeed, SafeUiError, UiShell, WindowFreshness,
     },
-    workspace::{WindowGeom, WindowKind, WorkspaceCommand},
+    workspace::{LauncherItem, WindowGeom, WindowKind, WorkloadKind, WorkspaceCommand},
 };
 
 const CONTEXT: &str = "deployment-test";
@@ -113,6 +113,134 @@ fn deployment_identity(name: &str) -> ResourceIdentity {
         name: name.into(),
         uid: format!("uid-deployment-{name}"),
     }
+}
+
+fn deployment_row(name: &str) -> ResourceListRow {
+    ResourceListRow {
+        identity: deployment_identity(name),
+        revision: BackendRevision::new(44),
+        labels: BTreeMap::new(),
+        summary: "3/3 ready".into(),
+        created_at: "2026-08-01T08:00:00Z".into(),
+        projection: Some(ResourceProjection::Deployment(projection(Vec::new()))),
+    }
+}
+
+fn open_integrated_deployment(
+    harness: &mut Harness<'static, Fixture>,
+    detail: ResourceDetailResponse,
+    verify_list_overflow: bool,
+) {
+    let identity = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .lists
+        .insert(WorkloadKind::Deployments, vec![deployment_row(NAME)]);
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), detail);
+    harness
+        .state_mut()
+        .feed
+        .relations
+        .insert(identity.clone(), exact_relations(&identity));
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkloadKind::Deployments),
+        ));
+    harness.run_steps(4);
+    let window = integrated_deployment_window(harness);
+    window.get_by_role_and_label(Role::TextInput, "Search deployments");
+    assert_eq!(
+        window
+            .query_all_by_role(Role::ComboBox)
+            .filter(|node| {
+                node.accesskit_node()
+                    .label()
+                    .or_else(|| node.value())
+                    .is_some_and(|text| {
+                        text.starts_with("Namespace: ") || text.starts_with("Status: ")
+                    })
+            })
+            .count(),
+        2,
+        "the integrated list toolbar exposes Namespace and Status controls"
+    );
+    window.get_by_label("1 deployments");
+    if verify_list_overflow {
+        window
+            .get_by_role_and_label(Role::Button, "More list controls")
+            .click();
+        harness.step();
+        let owner = integrated_deployment_window(harness).rect();
+        for item in ["switch to absolute", "Refresh list"] {
+            let rect = harness
+                .root()
+                .children_recursive()
+                .find(|node| {
+                    node.accesskit_node().role() == Role::Button
+                        && node
+                            .accesskit_node()
+                            .label()
+                            .is_some_and(|label| label.contains(item))
+                })
+                .unwrap_or_else(|| panic!("{item} in list overflow"))
+                .rect();
+            assert_rect_within(owner, rect, 1.0, item);
+        }
+        let columns = harness
+            .root()
+            .children_recursive()
+            .find(|node| {
+                node.accesskit_node().role() == Role::Button
+                    && node
+                        .accesskit_node()
+                        .label()
+                        .is_some_and(|label| label.contains("Columns ▾"))
+            })
+            .expect("Columns control in list overflow");
+        assert_rect_within(owner, columns.rect(), 1.0, "Columns menu");
+        harness.get_by_label_contains("Age shown as relative");
+        harness
+            .get_by_role_and_label(Role::Button, "More list controls")
+            .click();
+        harness.run_steps(1);
+    }
+    integrated_deployment_window(harness)
+        .get_by_role_and_label(Role::Button, "Select resource checkout")
+        .click();
+    harness.run_steps(5);
+}
+
+fn assert_rect_within(owner: egui::Rect, child: egui::Rect, tolerance: f32, name: &str) {
+    let owner = owner.expand(tolerance);
+    assert!(
+        owner.contains_rect(child),
+        "{name} {child:?} escapes owner {owner:?} (including {tolerance}pt tolerance)"
+    );
+}
+
+fn integrated_deployment_window<'a>(
+    harness: &'a Harness<'static, Fixture>,
+) -> egui_kittest::Node<'a> {
+    harness
+        .query_all_by_label_contains("Deployments ·")
+        .find(|node| node.accesskit_node().role() == Role::Window)
+        .expect("integrated Deployment workload window")
 }
 
 fn condition(
@@ -406,20 +534,19 @@ fn deployment_projection_complete_uses_typed_fields_only() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     for label in [
-        "Rollout ● NewReplicaSetAvailable",
+        "Rollout ● Complete",
         "PODS · 1",
-        "ROLLOUT HISTORY",
+        "ROLLOUT HISTORY · 1 revision",
         "4 current",
         "v4",
         "TEMPLATE",
         "Image (api): ghcr.io/acme/checkout:v4",
         "Selector: app=checkout",
-        "MANAGED BY",
-        "Manager · Helm",
-        "Helm release · checkout-prod",
+        "Replicas · 3 desired · 3 available",
+        "Rolling update · surge 25% · unavailable 1",
         "LABELS · 6",
         "IDENTITY",
-        "Context · deployment-test",
+        "Managed by · Helm · release checkout-prod (payments)",
     ] {
         window.get_by_label(label);
     }
@@ -461,7 +588,7 @@ fn deployment_projection_progressing_failed_and_missing_are_semantic() {
                 "False",
                 Some("ProgressDeadlineExceeded"),
             )])),
-            "Rollout ✕ ProgressDeadlineExceeded",
+            "Rollout ⨯ ProgressDeadlineExceeded",
             false,
         ),
         (None, "Rollout · —", true),
@@ -521,11 +648,15 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
         "Age · —",
         "Image (api): —",
         "Selector: —",
-        "Manager · —",
         "Created · —",
     ] {
         window.get_by_label(label);
     }
+    window.get_by_label("Managed by · —");
+    assert!(window.query_by_label("MANAGED BY").is_none());
+    assert!(window.query_by_label("Rolling update · —").is_none());
+    assert!(window.query_by_label("LABELS · 0").is_none());
+    assert!(window.query_by_label("ANNOTATIONS · 0").is_none());
 }
 
 #[test]
@@ -582,7 +713,7 @@ fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("▲ CrashLoopBackOff");
-    window.get_by_label("✕ Exit 137");
+    window.get_by_label("⨯ Exit 137");
     assert!(window.query_by_label("● Running").is_none());
 }
 
@@ -690,34 +821,33 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
 }
 
 /// Regression guard for the Overview geometry: at the 1000x700 wide viewport
-/// the operational/configuration columns keep the 1.35:1 ratio and label chips
-/// never overlap the expand buttons; at the 640x700 narrow viewport the
+/// the operational/configuration columns remain separated by a draggable panel
+/// and label chips never overlap the expand buttons; at the 640x700 narrow viewport the
 /// metadata column collapses behind its disclosure button.
 #[test]
 fn deployment_overview_verification_geometries_and_no_overlap() {
-    // Wide 1000x700: ratio holds and chips stay above the expand buttons.
-    let mut wide = harness(egui::vec2(1_240.0, 820.0));
-    let detail = detail_with(Some(projection(Vec::new())));
-    let identity = detail.identity.clone();
-    open_detail(
-        &mut wide,
-        detail,
-        Some(exact_relations(&identity)),
-        [1_000.0, 700.0],
-    );
-    let window = wide.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    // Wide 1000x700: select from the real Deployment list and verify the
+    // integrated detail pane, rather than manufacturing a dedicated window.
+    let mut wide = harness(egui::vec2(1_000.0, 700.0));
+    open_integrated_deployment(&mut wide, detail_with(Some(projection(Vec::new()))), true);
+    let window = integrated_deployment_window(&wide);
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
-    assert!(
-        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
-        "wide 1.35:1 ratio drifted: {operational:?} {configuration:?}"
-    );
-    let show_more = window
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .rect();
-    let annot_button = window
-        .get_by_role_and_label(Role::Button, "Show 2 annotations")
-        .rect();
+    assert!(operational.right() < configuration.left());
+    assert!(window.query_all_by_role(Role::Splitter).next().is_some());
+    for control in [
+        "Tab Overview",
+        "Tab YAML",
+        "Tab Events",
+        "Scale…",
+        "Restart…",
+        "Delete…",
+        "Actions",
+    ] {
+        let rect = window.get_by_role_and_label(Role::Button, control).rect();
+        assert_rect_within(window.rect(), rect, 1.0, control);
+    }
+    let mut chip_tops = Vec::new();
     for node in window.query_all_by_role(Role::Label) {
         let Some(value) = node.value() else { continue };
         if !value.contains(':') || !value.contains('.') {
@@ -726,30 +856,57 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         // A rendered label chip is `key: value`; it must sit above the
         // buttons rather than overlap them.
         let chip = node.rect();
+        chip_tops.push(chip.top());
         assert!(
-            chip.bottom() <= show_more.top() + 0.5,
-            "chip '{value}' overlaps the show-more button: {chip:?} vs {show_more:?}"
+            chip.right() <= configuration.right() + 1.0,
+            "chip '{value}' escapes metadata right edge: {chip:?} vs {configuration:?}"
         );
     }
-    // Annotations button must be present and reachable (not pushed below the
-    // fold), which is guaranteed when the chips wrap within the column width.
-    window.get_by_role_and_label(Role::Button, "Show 2 annotations");
-    let _ = annot_button;
-
-    // Narrow 640x700: metadata collapses behind the disclosure button.
-    let mut narrow = harness(egui::vec2(1_020.0, 800.0));
-    let detail = detail_with(Some(projection(Vec::new())));
-    let identity = detail.identity.clone();
-    open_detail(
-        &mut narrow,
-        detail,
-        Some(exact_relations(&identity)),
-        [640.0, 700.0],
+    chip_tops.sort_by(f32::total_cmp);
+    chip_tops.dedup_by(|left, right| (*left - *right).abs() < 1.0);
+    assert!(
+        chip_tops.len() >= 2,
+        "constrained metadata labels must wrap"
     );
-    let window = narrow.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    // The ANNOTATIONS section follows LABELS as its own section of chips.
+    window.get_by_label("ANNOTATIONS · 2");
+    window.get_by_label("meta.helm.sh/release-name: checkout-prod");
+    let actions = window.get_by_role_and_label(Role::Button, "Actions");
+    assert!(!actions.accesskit_node().is_disabled());
+    actions.click();
+    let owner = window.rect();
+    wide.run_steps(1);
+    let copy_name = wide.get_by_role_and_label(Role::Button, "Copy name").rect();
+    assert_rect_within(owner, copy_name, 1.0, "Copy name menu item");
+
+    // Narrow 640x700: the same integrated selection collapses metadata.
+    let mut narrow = harness(egui::vec2(640.0, 700.0));
+    open_integrated_deployment(
+        &mut narrow,
+        detail_with(Some(projection(Vec::new()))),
+        false,
+    );
+    let window = integrated_deployment_window(&narrow);
     window.get_by_label("PODS · 1");
     assert!(window.query_by_label("TEMPLATE").is_none());
-    window.get_by_role_and_label(Role::Button, "Show Deployment metadata");
+    for control in [
+        "Tab Overview",
+        "More detail tabs",
+        "Scale…",
+        "Delete…",
+        "More detail actions",
+        "Show Deployment metadata",
+    ] {
+        let rect = window.get_by_role_and_label(Role::Button, control).rect();
+        assert_rect_within(window.rect(), rect, 1.0, control);
+    }
+    window
+        .get_by_role_and_label(Role::Button, "Show Deployment metadata")
+        .click();
+    narrow.run_steps(2);
+    let window = integrated_deployment_window(&narrow);
+    window.get_by_label("TEMPLATE");
+    window.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
 }
 
 #[test]
@@ -766,10 +923,8 @@ fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
-    assert!(
-        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
-        "{operational:?} {configuration:?}"
-    );
+    assert!(operational.right() < configuration.left());
+    assert!(window.query_all_by_role(Role::Splitter).next().is_some());
 
     harness
         .state_mut()
@@ -892,6 +1047,109 @@ fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner(
 }
 
 #[test]
+fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
+    let mut harness = harness(egui::vec2(1_120.0, 760.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    let mut relations = exact_relations(&identity);
+    let RelationState::Loaded { response, .. } = &mut relations else {
+        unreachable!()
+    };
+    let response = Arc::make_mut(response);
+    let pod = response.groups[0].rows[0]
+        .projection
+        .as_mut()
+        .and_then(|projection| match projection {
+            ResourceProjection::Pod(pod) => Some(pod),
+            _ => None,
+        })
+        .expect("Pod projection");
+    pod.restart_count = Some(u32::MAX);
+    open_detail(&mut harness, detail, Some(relations), [1_024.0, 620.0]);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let table = window.get_by_role_and_label(Role::Table, "Deployment Pods table");
+    let text_run = |value: &str| {
+        table
+            .query_all_by_role(Role::TextRun)
+            .find(|node| node.value().as_deref() == Some(value))
+            .unwrap_or_else(|| {
+                let available = table
+                    .query_all_by_role(Role::TextRun)
+                    .filter_map(|node| node.value())
+                    .collect::<Vec<_>>();
+                panic!("TextRun {value:?}; available: {available:?}")
+            })
+            .rect()
+    };
+
+    // Table headers are small uppercase muted text per the reference.
+    let ready_header = text_run("READY");
+    let ready = text_run("1/1");
+    let restarts_header = text_run("RESTARTS");
+    table.get_by_role_and_label(Role::Label, "4294967295");
+    let restarts = table
+        .query_all_by_role(Role::TextRun)
+        .find(|node| {
+            node.value()
+                .is_some_and(|value| value.starts_with("4294967"))
+        })
+        .expect("elided oversized Restarts TextRun")
+        .rect();
+    let age_header = text_run("AGE");
+    let age = table
+        .query_all_by_role(Role::TextRun)
+        .filter(|node| node.value().as_deref() == Some("—"))
+        .map(|node| node.rect())
+        .find(|rect| {
+            rect.top() > age_header.bottom() && (rect.right() - age_header.right()).abs() <= 12.0
+        })
+        .unwrap_or_else(|| {
+            let dashes = table
+                .query_all_by_role(Role::TextRun)
+                .filter(|node| node.value().as_deref() == Some("—"))
+                .map(|node| node.rect())
+                .collect::<Vec<_>>();
+            panic!("Pod Age value TextRun beneath {age_header:?}; dashes: {dashes:?}")
+        });
+    let status = text_run("● Running");
+    let node = text_run("worker-a");
+
+    for (header, value, column) in [
+        (ready_header, ready, "Ready"),
+        (restarts_header, restarts, "Restarts"),
+        (age_header, age, "Age"),
+    ] {
+        assert!(
+            (header.right() - value.right()).abs() <= 1.5,
+            "{column} glyphs must share the semantic column's right edge: {header:?} {value:?}"
+        );
+    }
+    for (left, right) in [
+        (ready, status),
+        (status, restarts),
+        (restarts, node),
+        (node, age),
+    ] {
+        assert!(
+            left.right() <= right.left(),
+            "Pod glyphs overlap: {left:?} {right:?}"
+        );
+    }
+
+    let style = harness.ctx.style_of(egui::Theme::Dark);
+    let expected_row_height = style
+        .spacing
+        .interact_size
+        .y
+        .max(style.text_styles[&egui::TextStyle::Body].size);
+    let separation = ready.top() - ready_header.top();
+    assert!(
+        separation >= expected_row_height && separation <= expected_row_height + 14.0,
+        "header/body separation must stay dense: {separation} vs {expected_row_height}"
+    );
+}
+
+#[test]
 fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
     // The egui window contributes 24 points of chrome, so these exercise
     // Deployment body widths 759 and 760 exactly.
@@ -928,13 +1186,13 @@ fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     assert_eq!(window.query_all_by_role(Role::ScrollView).count(), 1);
     let footer = window
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(window.rect().contains_rect(footer));
 }
 
 #[test]
-fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
+fn deployment_metadata_renders_annotations_section_without_rollback() {
     let mut harness = harness(egui::vec2(1_240.0, 820.0));
     let detail = detail_with(Some(projection(Vec::new())));
     let identity = detail.identity.clone();
@@ -945,23 +1203,29 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
         [1_050.0, 700.0],
     );
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    assert!(window.query_by_label("team: payments").is_none());
-    window
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .click();
-    harness.run_steps(2);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window
-        .get_by_role_and_label(Role::Button, "Show 2 annotations")
-        .click();
-    harness.run_steps(2);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    // Labels render as chips; the chip exposes `key: value` as its accessible
-    // name even though the visible text drops the colon.
-    window.get_by_label("team: payments");
+    for label in [
+        "app.kubernetes.io/instance: checkout-prod",
+        "app.kubernetes.io/managed-by: Helm",
+        "app.kubernetes.io/name: checkout",
+        "app.kubernetes.io/part-of: shop",
+        "team: payments",
+        "tier: backend",
+    ] {
+        window.get_by_label(label);
+    }
+    assert!(window.query_by_label("Show 2 more labels").is_none());
+    // Annotations are a sibling section of chips, not a disclosure: every
+    // chip exposes `key: value` as its accessible name even though the
+    // visible text tones the key down.
+    window.get_by_label("LABELS · 6");
+    window.get_by_label("ANNOTATIONS · 2");
     window.get_by_label("meta.helm.sh/release-name: checkout-prod");
-    window.get_by_role_and_label(Role::Button, "Hide 2 labels");
-    window.get_by_role_and_label(Role::Button, "Hide annotations");
+    window.get_by_label("meta.helm.sh/release-namespace: payments");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Annotations 2 ▾")
+            .is_none()
+    );
     assert!(window.query_by_label("Roll back…").is_none());
 }
 
@@ -998,7 +1262,9 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
         .click();
     harness.run_steps(1);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window.get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection");
+    window.get_by_label(
+        "p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection",
+    );
     assert!(window.query_by_label("Roll back…").is_none());
 
     harness.state_mut().feed.detail_authority.insert(
@@ -1154,7 +1420,7 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
 
     // The footer is fixed at the bottom of the detail window.
     let footer_before = window
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(
         footer_before.top() > window.rect().bottom() - footer_before.height() - 12.0,
@@ -1185,7 +1451,7 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     let footer_after = window
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(
         (footer_after.center() - footer_before.center()).length() <= 1.0,

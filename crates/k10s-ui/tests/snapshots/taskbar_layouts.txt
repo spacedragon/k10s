@@ -236,38 +236,21 @@ Window
               Unknown label="Detail vital strip"
               GenericContainer
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Label value="Status ● —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Ready · —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Restarts · —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Age · —"
-                      GenericContainer
-                        GenericContainer
-                      Button label="Show more Pod vitals"
+                  Label value="Status ● —"
+                  Label value="Ready · —"
+                  Button label="Show more Pod vitals"
               GenericContainer
                 Label value="Freshness · loading"
-                  TextRun value="Freshness · loading"
+                  TextRun value="● Loading"
               GenericContainer
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Button label="Tab Overview"
-                      Button label="Tab Events"
-                      Button label="Tab YAML"
-                      Button label="Tab Logs"
-                      Button label="Tab Shell"
+                  Button label="Tab Overview"
+                  Button label="More detail tabs"
+              Unknown label="Detail tabs row"
               GenericContainer
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Button label="Actions"
+                  Button label="More detail actions"
+              Unknown label="Detail actions row"
               ScrollView label="Detail body"
                 GenericContainer
                   GenericContainer

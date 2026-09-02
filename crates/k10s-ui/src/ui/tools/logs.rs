@@ -379,6 +379,13 @@ pub enum LogsAction {
         since_seconds: Option<i64>,
         previous: bool,
     },
+    /// Request one logs stream for every related pod/container and merge
+    /// their source-prefixed output into the owning workload view.
+    OpenAggregateLogs {
+        window: WindowId,
+        targets: Vec<StreamTarget>,
+        since_seconds: Option<i64>,
+    },
 }
 
 /// Per-window connected log views plus the actions queued during rendering.
@@ -387,6 +394,7 @@ pub enum LogsAction {
 #[derive(Debug, Default)]
 pub struct LogsViews {
     views: HashMap<WindowId, LogsTool>,
+    aggregate_targets: HashMap<WindowId, Vec<StreamTarget>>,
     actions: Vec<(WindowId, LogsAction)>,
 }
 
@@ -397,6 +405,7 @@ impl LogsViews {
     /// to a different pod. Container choice belongs to this viewer and must
     /// survive the manifest-default target supplied by subsequent renders.
     pub fn ensure(&mut self, window: WindowId, target: StreamTarget) -> &mut LogsTool {
+        self.aggregate_targets.remove(&window);
         if self
             .target_of(window)
             .as_ref()
@@ -406,6 +415,32 @@ impl LogsViews {
                 .insert(window, LogsTool::new(target.clone(), DEFAULT_TAIL_CAPACITY));
         }
         self.views.get_mut(&window).expect("view just ensured")
+    }
+
+    /// Lazily bind a merged view to an exact, sorted set of pod/container
+    /// targets. A rollout that changes the set resets the retained history
+    /// and grants one fresh automatic fan-out attempt.
+    pub fn ensure_aggregate(
+        &mut self,
+        window: WindowId,
+        targets: &[StreamTarget],
+    ) -> Option<&mut LogsTool> {
+        let first = targets.first()?.clone();
+        if self
+            .aggregate_targets
+            .get(&window)
+            .is_none_or(|current| current != targets)
+        {
+            self.aggregate_targets.insert(window, targets.to_vec());
+            self.views
+                .insert(window, LogsTool::new(first, DEFAULT_TAIL_CAPACITY));
+        }
+        self.views.get_mut(&window)
+    }
+
+    #[must_use]
+    pub fn aggregate_targets(&self, window: WindowId) -> Option<&[StreamTarget]> {
+        self.aggregate_targets.get(&window).map(Vec::as_slice)
     }
 
     /// Bound target of one view, if it exists.
@@ -448,6 +483,7 @@ impl LogsViews {
     /// Drop entries for closed windows.
     pub fn retain(&mut self, live: impl Fn(WindowId) -> bool) {
         self.views.retain(|id, _| live(*id));
+        self.aggregate_targets.retain(|id, _| live(*id));
     }
 }
 
@@ -642,7 +678,12 @@ pub(crate) fn show(
         if view.take_scroll_reset() {
             egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
         }
-        let scroll_output = ScrollArea::vertical()
+        let log_scroll = if view.wraps() {
+            ScrollArea::vertical()
+        } else {
+            ScrollArea::both()
+        };
+        let scroll_output = log_scroll
             .id_salt(("logs.stream", window_id.0))
             .stick_to_bottom(was_following)
             .show(ui, |ui| {
@@ -700,6 +741,141 @@ pub(crate) fn show(
                 target: selected_target,
                 since_seconds: views.get(window_id).and_then(LogsTool::since_seconds),
                 previous: views.get(window_id).is_some_and(LogsTool::previous),
+            },
+        );
+    }
+}
+
+/// Render a workload log viewer backed by all exact related pod/container
+/// targets. Incoming chunks are prefixed by the application layer before
+/// being appended to this shared bounded view.
+pub(crate) fn show_aggregate(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    views: &mut LogsViews,
+    targets: &[StreamTarget],
+) {
+    if targets.is_empty() {
+        ui.label("No related pods with loggable containers");
+        return;
+    }
+    let mut open_requested = false;
+    {
+        let Some(view) = views.ensure_aggregate(window_id, targets) else {
+            return;
+        };
+        if let Some(error) = view.last_error() {
+            ui.label(RichText::new(error).color(crate::ui::theme::DANGER));
+        }
+        ui.label(
+            RichText::new("AGGREGATE SOURCE")
+                .small()
+                .strong()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{} pods · {} container streams",
+                targets
+                    .iter()
+                    .map(|target| target.pod.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                targets.len()
+            ));
+            egui::ComboBox::from_id_salt(("logs.aggregate.since", window_id.0))
+                .selected_text(match view.since_seconds() {
+                    Some(300) => "Since: 5m",
+                    Some(900) => "Since: 15m",
+                    Some(3600) => "Since: 1h",
+                    _ => "Since: all",
+                })
+                .show_ui(ui, |ui| {
+                    for (label, seconds) in [
+                        ("All retained", None),
+                        ("Last 5 minutes", Some(300)),
+                        ("Last 15 minutes", Some(900)),
+                        ("Last hour", Some(3600)),
+                    ] {
+                        if ui
+                            .selectable_label(view.since_seconds() == seconds, label)
+                            .clicked()
+                        {
+                            view.set_since_seconds(seconds);
+                        }
+                    }
+                });
+            open_requested |= view.begin_auto_connect();
+            match view.phase() {
+                LogsPhase::Disconnected => {
+                    if view.can_retry() && ui.button("Retry logs").clicked() {
+                        open_requested = view.retry();
+                    }
+                    ui.label(RichText::new("Disconnected").weak());
+                }
+                LogsPhase::Connecting => {
+                    ui.label("Connecting");
+                }
+                LogsPhase::Streaming => {
+                    let label = if view.is_paused() { "Resume" } else { "Pause" };
+                    if ui.button(label).clicked() {
+                        if view.is_paused() {
+                            view.resume();
+                        } else {
+                            view.pause();
+                        }
+                    }
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let mut find = view.find().unwrap_or_default().to_owned();
+            if ui
+                .add(egui::TextEdit::singleline(&mut find).hint_text("Find across pods"))
+                .changed()
+            {
+                view.set_find(Some(&find));
+            }
+            let mut wrap = view.wraps();
+            if ui.checkbox(&mut wrap, "Wrap").changed() {
+                view.set_wrap(wrap);
+            }
+            if ui.button("Export").clicked() {
+                ui.ctx().copy_text(view.export_text());
+            }
+        });
+        let log_scroll = if view.wraps() {
+            ScrollArea::vertical()
+        } else {
+            ScrollArea::both()
+        };
+        log_scroll
+            .id_salt(("logs.aggregate.stream", window_id.0))
+            .stick_to_bottom(view.follows())
+            .show(ui, |ui| {
+                let lines: Vec<&String> = if view.find().is_some() {
+                    view.find_matches()
+                } else {
+                    view.visible_lines().collect()
+                };
+                for line in lines {
+                    ui.add(egui::Label::new(RichText::new(line).monospace()).wrap_mode(
+                        if view.wraps() {
+                            egui::TextWrapMode::Wrap
+                        } else {
+                            egui::TextWrapMode::Extend
+                        },
+                    ));
+                }
+            });
+    }
+    if open_requested {
+        views.queue(
+            window_id,
+            LogsAction::OpenAggregateLogs {
+                window: window_id,
+                targets: targets.to_vec(),
+                since_seconds: views.get(window_id).and_then(LogsTool::since_seconds),
             },
         );
     }

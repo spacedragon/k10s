@@ -180,25 +180,16 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
-                  Label value="◇ Ready · no resources"
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
+                Label value="◇ Ready · no resources"
+                  TextRun value="◇ Ready · no resources"
               GenericContainer
                 Label value="0 deployments"
                   TextRun value="0 deployments"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 Label value="No Deployments in this view"
                   TextRun value="No Deployments in this view"

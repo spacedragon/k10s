@@ -284,7 +284,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
             harness.get_by_role_and_label(Role::Window, "StatefulSet · default / database");
         assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
         let footer = detail
-            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+            .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
             .rect();
         assert!(detail.rect().contains_rect(footer));
         assert!(
@@ -311,7 +311,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
     assert_eq!(
         footer_before,
         detail
-            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection",)
+            .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection",)
             .rect()
     );
 }
@@ -373,7 +373,7 @@ fn compact_frame_chrome_has_disjoint_contained_hitboxes_and_reserved_footer() {
         "compact tab hitbox {tab:?} overlaps action hitbox {action:?}"
     );
     let footer = detail
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     let body = detail
         .get_by_role_and_label(Role::ScrollView, "Detail body")
@@ -510,12 +510,7 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
-    for label in [
-        "Status ● Running",
-        "Ready · 1/1",
-        "Restarts · 2",
-        "Age · 2h",
-    ] {
+    for label in ["Status ● Running", "Ready · 1/1"] {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Node · worker-a").is_none());
@@ -523,6 +518,8 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
         .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(2);
+    harness.get_by_label("Restarts · 2");
+    harness.get_by_label("Age · 2h");
     harness.get_by_label("Node · worker-a");
     harness.get_by_label("Pod IP · 10.244.0.9");
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
@@ -567,7 +564,7 @@ fn kind_configurators_run_before_shared_vital_accessibility_paint() {
     deployment_harness.run_steps(4);
     deployment_harness
         .get_by_role_and_label(Role::Window, "Deployment · default / web-frontend")
-        .get_by_label("Rollout ● NewReplicaSetAvailable");
+        .get_by_label("Rollout ● Complete");
 }
 
 #[test]
@@ -599,12 +596,7 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    for label in [
-        "Rollout ● NewReplicaSetAvailable",
-        "Ready · 18/20",
-        "Up-to-date · 19",
-        "Available · 17",
-    ] {
+    for label in ["Rollout ● Complete", "Ready · 18/20"] {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Strategy · RollingUpdate").is_none());
@@ -612,6 +604,8 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
         .get_by_role_and_label(Role::Button, "Show more Deployment vitals")
         .click();
     harness.run_steps(2);
+    harness.get_by_label("Up-to-date · 19");
+    harness.get_by_label("Available · 17");
     harness.get_by_label("Strategy · RollingUpdate");
     harness.get_by_label("Age · 3d");
 }
@@ -680,7 +674,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     deployment_harness.run_steps(3);
     common::workload_window(&deployment_harness, "Deployments")
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection");
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection");
 
     let mut generic_harness = harness();
     let node = ResourceIdentity {
@@ -1066,8 +1060,12 @@ fn dedicated_detail_uses_identity_bound_authority_not_arbitrary_source_windows()
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     detail.get_by_label("Freshness · stale");
+    detail
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
     assert!(
-        detail
+        harness
             .get_by_role_and_label(Role::Button, "Restart…")
             .accesskit_node()
             .is_disabled()
@@ -1124,8 +1122,12 @@ fn dedicated_detail_without_identity_bound_authority_fails_closed() {
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     detail.get_by_label("Freshness · unavailable");
+    detail
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
     assert!(
-        detail
+        harness
             .get_by_role_and_label(Role::Button, "Restart…")
             .accesskit_node()
             .is_disabled()
@@ -1809,17 +1811,21 @@ fn tabs_and_actions_are_exact_per_kind() {
     harness.run_steps(4);
 
     let window = common::workload_window(&harness, "Deployments");
-    for tab in ["Tab Overview", "Tab Pods", "Tab Events", "Tab YAML"] {
+    for tab in [
+        "Tab Overview",
+        "Tab Pods",
+        "Tab Events",
+        "Tab YAML",
+        "Tab Logs",
+    ] {
         window.get_by_role_and_label(Role::Button, tab);
     }
-    for absent in ["Tab Logs", "Tab Shell"] {
-        assert!(
-            window
-                .query_by_role_and_label(Role::Button, absent)
-                .is_none(),
-            "{absent} must not be offered on a deployment"
-        );
-    }
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Tab Shell")
+            .is_none(),
+        "Tab Shell must not be offered on a deployment"
+    );
     window.get_by_role_and_label(Role::Button, "Scale…");
     window.get_by_role_and_label(Role::Button, "Delete…");
     assert!(window.query_by_label("Exec shell").is_none());
@@ -2400,6 +2406,242 @@ fn detail_action_row_orders_scale_restart_actions_delete_left_to_right() {
         .click();
     harness.run_steps(1);
     harness.get_by_role_and_label(Role::Button, "Copy name");
+}
+
+#[test]
+fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() {
+    let mut harness = harness();
+    let mut detail = typed_deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    detail.capabilities.can_scale = true;
+    detail.capabilities.can_delete = true;
+    let target = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(target.clone(), detail);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target.clone()));
+    let window_id = detail_window(harness.state().shell.workspace()).id;
+    harness.state_mut().feed.detail_authority.insert(
+        target.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window_id,
+            WorkspaceDetailTab::Yaml,
+        ));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [32.0, 32.0],
+                size: [440.0, 560.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    window.get_by_label("Rollout ● Complete");
+    window.get_by_label("Ready · 18/20");
+    window.get_by_role_and_label(Role::Button, "Show more Deployment vitals");
+    window.get_by_role_and_label(Role::Button, "Tab YAML");
+    window.get_by_role_and_label(Role::Button, "Scale…");
+    window.get_by_role_and_label(Role::Button, "Delete…");
+    let owner = window.rect();
+    let strip = window.get_by_label("Detail vital strip").rect();
+    let rollout = window.get_by_label("Rollout ● Complete").rect();
+    let ready = window.get_by_label("Ready · 18/20").rect();
+    let more_vitals = window
+        .get_by_role_and_label(Role::Button, "Show more Deployment vitals")
+        .rect();
+    let active_tab = window
+        .get_by_role_and_label(Role::Button, "Tab YAML")
+        .rect();
+    let more_tabs = window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .rect();
+    let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
+    let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
+    let more_actions = window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .rect();
+    let tabs_row = window.get_by_label("Detail tabs row").rect();
+    let actions_row = window.get_by_label("Detail actions row").rect();
+    for (name, rect) in [
+        ("rollout", rollout),
+        ("ready", ready),
+        ("more vitals", more_vitals),
+    ] {
+        assert!(
+            strip.contains_rect(rect),
+            "{name} {rect:?} escapes vital strip {strip:?}"
+        );
+    }
+    for (name, row, rect) in [
+        ("active tab", tabs_row, active_tab),
+        ("more tabs", tabs_row, more_tabs),
+        ("scale", actions_row, scale),
+        ("more actions", actions_row, more_actions),
+        ("delete", actions_row, delete),
+    ] {
+        assert!(
+            row.contains_rect(rect),
+            "{name} {rect:?} escapes row {row:?}"
+        );
+    }
+    let gap = 8.0;
+    assert!(
+        tabs_row.width() >= active_tab.width() + more_tabs.width() + gap,
+        "tabs row {:?} cannot paint intrinsic controls {:?} + {:?}",
+        tabs_row,
+        active_tab,
+        more_tabs
+    );
+    assert!(
+        actions_row.width() >= scale.width() + more_actions.width() + delete.width() + gap * 2.0,
+        "actions row {:?} cannot paint intrinsic controls {:?} + {:?} + {:?}",
+        actions_row,
+        scale,
+        more_actions,
+        delete
+    );
+    for pair in [
+        (rollout, ready),
+        (ready, more_vitals),
+        (active_tab, more_tabs),
+        (scale, more_actions),
+        (more_actions, delete),
+    ] {
+        assert!(
+            !pair.0.intersects(pair.1),
+            "narrow controls overlap: {pair:?}"
+        );
+    }
+    for (name, rect) in [
+        ("active tab", active_tab),
+        ("more tabs", more_tabs),
+        ("scale", scale),
+        ("more actions", more_actions),
+        ("delete", delete),
+    ] {
+        assert!(
+            owner.contains_rect(rect),
+            "{name} {rect:?} escapes detail {owner:?}"
+        );
+    }
+    window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Events")
+        .click();
+    harness.run_steps(2);
+    let active_tab = match &detail_window(harness.state().shell.workspace()).content {
+        WindowContent::Detail(detail) => detail.active_tab,
+        WindowContent::Resource(_) | WindowContent::Services(_) => unreachable!(),
+    };
+    assert_eq!(active_tab, WorkspaceDetailTab::Events);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Restart…")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::Restart {
+            window: window_id,
+            target,
+        }]
+    );
+}
+
+#[test]
+fn narrow_integrated_detail_budgets_intrinsic_tab_and_action_controls() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .with_step_dt(0.3)
+        .build_ui_state(render, Fixture::default());
+    let mut detail = typed_deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    detail.capabilities.can_scale = true;
+    detail.capabilities.can_delete = true;
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(detail.identity.clone(), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    let window_id =
+        workload_window_id(harness.state().shell.workspace(), WorkloadKind::Deployments);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [32.0, 32.0],
+                size: [440.0, 560.0],
+                collapsed: false,
+            },
+        ));
+    common::workload_window(&harness, "Deployments")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = common::workload_window(&harness, "Deployments");
+    let tabs_row = window.get_by_label("Detail tabs row").rect();
+    let actions_row = window.get_by_label("Detail actions row").rect();
+    let active = window
+        .get_by_role_and_label(Role::Button, "Tab Overview")
+        .rect();
+    let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
+    let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
+    let more_tabs = window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .rect();
+    let more_actions = window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .rect();
+    assert!(tabs_row.width() >= active.width() + more_tabs.width() + 8.0);
+    assert!(actions_row.width() >= scale.width() + more_actions.width() + delete.width() + 16.0);
+    let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 900.0));
+    for (name, rect) in [
+        ("more tabs", more_tabs),
+        ("scale", scale),
+        ("more actions", more_actions),
+        ("delete", delete),
+    ] {
+        assert!(
+            canvas.contains_rect(rect),
+            "{name} {rect:?} escapes visible canvas {canvas:?}"
+        );
+    }
 }
 
 #[test]

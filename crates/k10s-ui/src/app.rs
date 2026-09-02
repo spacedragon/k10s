@@ -121,6 +121,7 @@ pub struct K10sApp {
     traffic_subscription: Option<LiveSubscription>,
     traffic_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
+    aggregate_log_sessions: BTreeMap<(WindowId, String, String, String, String), StreamSession>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
     log_sources: BTreeMap<WindowId, LogSource>,
     log_session_sources: BTreeMap<WindowId, LogSource>,
@@ -204,6 +205,7 @@ struct PendingStreamTicket {
     window: WindowId,
     log_source: Option<LogSource>,
     log_generation: Option<u64>,
+    aggregate_target: Option<StreamTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +358,7 @@ impl K10sApp {
             traffic_subscription: None,
             traffic_context: None,
             stream_sessions: BTreeMap::new(),
+            aggregate_log_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             log_sources: BTreeMap::new(),
             log_session_sources: BTreeMap::new(),
@@ -1475,6 +1478,18 @@ impl K10sApp {
                                                 != self.log_generations.get(&entry.window).copied()
                                     });
                                 if stale_log_attempt {
+                                    return Ok(());
+                                }
+                                if entry.aggregate_target.is_some() {
+                                    if self.aggregate_log_sources_exhausted(entry.window)
+                                        && let Some(view) = self
+                                            .shell
+                                            .stream_stores_mut()
+                                            .logs
+                                            .get_mut(entry.window)
+                                    {
+                                        view.fail(&reason);
+                                    }
                                     return Ok(());
                                 }
                                 match entry.route {
@@ -3720,6 +3735,9 @@ impl K10sApp {
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
             session.disconnect();
         }
+        for (_, mut session) in std::mem::take(&mut self.aggregate_log_sessions) {
+            session.disconnect();
+        }
         for window in exec_windows {
             for event in self
                 .shell
@@ -3847,6 +3865,7 @@ impl K10sApp {
                     window,
                     log_source: Some(source),
                     log_generation: Some(generation),
+                    aggregate_target: None,
                 },
             );
         }
@@ -3934,6 +3953,7 @@ impl K10sApp {
     /// live sessions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
         let log_actions = self.shell.drain_log_actions();
+        self.reconcile_aggregate_log_sessions()?;
         if log_actions.is_empty() {
             self.reconcile_log_sources(BTreeMap::new())?;
         }
@@ -3943,7 +3963,19 @@ impl K10sApp {
                 since_seconds,
                 previous,
                 ..
-            } = action;
+            } = action
+            else {
+                let crate::ui::tools::LogsAction::OpenAggregateLogs {
+                    targets,
+                    since_seconds,
+                    ..
+                } = action
+                else {
+                    unreachable!()
+                };
+                self.start_aggregate_log_streams(window, targets, since_seconds)?;
+                continue;
+            };
             let source = LogSource {
                 target: target.clone(),
                 since_seconds,
@@ -4000,6 +4032,7 @@ impl K10sApp {
                     window,
                     log_source: Some(source),
                     log_generation: Some(generation),
+                    aggregate_target: None,
                 },
             );
         }
@@ -4023,6 +4056,7 @@ impl K10sApp {
                     window,
                     log_source: None,
                     log_generation: None,
+                    aggregate_target: None,
                 },
             );
         }
@@ -4054,6 +4088,121 @@ impl K10sApp {
         }
     }
 
+    fn start_aggregate_log_streams(
+        &mut self,
+        window: WindowId,
+        targets: Vec<StreamTarget>,
+        since_seconds: Option<i64>,
+    ) -> Result<(), ClientError> {
+        let stale_requests = self
+            .pending_stream_tickets
+            .iter()
+            .filter(|(_, entry)| entry.window == window && entry.aggregate_target.is_some())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in stale_requests {
+            if let Some(entry) = self.pending_stream_tickets.remove(&id) {
+                self.client.cancel(&entry.request)?;
+            }
+        }
+        let stale_sessions = self
+            .aggregate_log_sessions
+            .keys()
+            .filter(|key| key.0 == window)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale_sessions {
+            if let Some(mut session) = self.aggregate_log_sessions.remove(&key) {
+                session.disconnect();
+            }
+        }
+        if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window) {
+            view.connect();
+        }
+        for target in targets {
+            let request = self.client.begin(Query::StreamTicket {
+                target: target.clone(),
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+                since_seconds,
+                previous: false,
+            })?;
+            self.pending_stream_tickets.insert(
+                request.id().clone(),
+                PendingStreamTicket {
+                    request,
+                    route: StreamRoute::Logs,
+                    window,
+                    log_source: None,
+                    log_generation: None,
+                    aggregate_target: Some(target),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn reconcile_aggregate_log_sessions(&mut self) -> Result<(), ClientError> {
+        let stale_requests = self
+            .pending_stream_tickets
+            .iter()
+            .filter(|(_, entry)| {
+                entry.aggregate_target.as_ref().is_some_and(|target| {
+                    !self.aggregate_log_target_is_current(entry.window, target)
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in stale_requests {
+            if let Some(entry) = self.pending_stream_tickets.remove(&id) {
+                self.client.cancel(&entry.request)?;
+            }
+        }
+        let stale_sessions = self
+            .aggregate_log_sessions
+            .iter()
+            .filter(|(key, session)| !self.aggregate_log_target_is_current(key.0, session.target()))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in stale_sessions {
+            if let Some(mut session) = self.aggregate_log_sessions.remove(&key) {
+                session.disconnect();
+            }
+        }
+        Ok(())
+    }
+
+    fn aggregate_log_target_is_current(&self, window: WindowId, target: &StreamTarget) -> bool {
+        let active = self
+            .shell
+            .workspace()
+            .window(window)
+            .and_then(|window| match &window.content {
+                crate::workspace::WindowContent::Detail(detail) => Some(detail),
+                crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
+                crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
+            })
+            .is_some_and(|detail| detail.active_tab == crate::workspace::DetailTab::Logs);
+        active
+            && self
+                .shell
+                .stream_stores()
+                .logs
+                .aggregate_targets(window)
+                .is_some_and(|targets| targets.contains(target))
+    }
+
+    fn aggregate_log_sources_exhausted(&self, window: WindowId) -> bool {
+        !self
+            .pending_stream_tickets
+            .values()
+            .any(|entry| entry.window == window && entry.aggregate_target.is_some())
+            && !self
+                .aggregate_log_sessions
+                .keys()
+                .any(|key| key.0 == window)
+    }
+
     /// Complete in-flight stream ticket requests and open their sockets.
     fn finish_stream_tickets(&mut self) {
         while let Some(id) = self
@@ -4071,7 +4220,45 @@ impl K10sApp {
                 window,
                 log_source,
                 log_generation,
+                aggregate_target,
             } = entry;
+            if let Some(target) = aggregate_target {
+                let still_current = self
+                    .shell
+                    .stream_stores()
+                    .logs
+                    .aggregate_targets(window)
+                    .is_some_and(|targets| targets.contains(&target));
+                if !still_current {
+                    let _ = self.client.take(request);
+                    continue;
+                }
+                if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request) {
+                    let mut session =
+                        StreamSession::new(StreamRoute::Logs, granted.target.clone(), false);
+                    match session.open_with_ticket(
+                        &self.connection_url,
+                        &self.access_token,
+                        &granted.ticket_id,
+                    ) {
+                        Ok(()) => {
+                            self.aggregate_log_sessions
+                                .insert(aggregate_session_key(window, &granted.target), session);
+                        }
+                        Err(error) => {
+                            if self.aggregate_log_sources_exhausted(window)
+                                && let Some(view) =
+                                    self.shell.stream_stores_mut().logs.get_mut(window)
+                            {
+                                view.fail(&format!(
+                                    "could not open any related log stream: {error}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let source_current = log_source.as_ref().is_none_or(|source| {
                 self.log_sources.get(&window) == Some(source)
                     && log_generation == self.log_generations.get(&window).copied()
@@ -4119,6 +4306,7 @@ impl K10sApp {
             return;
         }
         self.finish_stream_tickets();
+        self.poll_aggregate_log_sessions();
         self.reconcile_sessions();
         let keys: Vec<(WindowId, StreamRoute)> = self.stream_sessions.keys().copied().collect();
         for key in keys {
@@ -4232,6 +4420,53 @@ impl K10sApp {
             }
         }
     }
+
+    fn poll_aggregate_log_sessions(&mut self) {
+        let keys = self
+            .aggregate_log_sessions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(session) = self.aggregate_log_sessions.get_mut(&key) else {
+                continue;
+            };
+            let target = session.target().clone();
+            let signals = session.poll();
+            let mut rejected = false;
+            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(key.0) {
+                for signal in signals {
+                    match signal {
+                        StreamSignal::Ready { .. } => view.attach(),
+                        StreamSignal::Output(text) => {
+                            for line in text.lines() {
+                                view.append(&format!(
+                                    "[{}/{}] {line}",
+                                    target.pod, target.container
+                                ));
+                            }
+                        }
+                        StreamSignal::Rejected(reason) => {
+                            view.append(&format!(
+                                "[{}/{}] stream unavailable: {reason}",
+                                target.pod, target.container
+                            ));
+                            rejected = true;
+                        }
+                        StreamSignal::Status(_) | StreamSignal::Exited(_) => {}
+                    }
+                }
+            }
+            if rejected {
+                self.aggregate_log_sessions.remove(&key);
+                if self.aggregate_log_sources_exhausted(key.0)
+                    && let Some(view) = self.shell.stream_stores_mut().logs.get_mut(key.0)
+                {
+                    view.fail("all related log streams disconnected");
+                }
+            }
+        }
+    }
 }
 
 /// Extract the immutable identity/revision carried by a resource delta. The
@@ -4320,6 +4555,19 @@ fn session_open(
     session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
+}
+
+fn aggregate_session_key(
+    window: WindowId,
+    target: &StreamTarget,
+) -> (WindowId, String, String, String, String) {
+    (
+        window,
+        target.namespace.clone(),
+        target.pod.clone(),
+        target.uid.clone(),
+        target.container.clone(),
+    )
 }
 
 /// Return one failed dedicated-socket open to the tool that requested it.
@@ -9320,12 +9568,16 @@ mod tests {
     /// One Deployment list window with two rows, rendered through the
     /// reference-design toolbar.
     fn toolbar_test_harness(app: K10sApp) -> Harness<'static, K10sApp> {
+        toolbar_test_harness_with_size(app, egui::vec2(1_280.0, 800.0))
+    }
+
+    fn toolbar_test_harness_with_size(app: K10sApp, size: egui::Vec2) -> Harness<'static, K10sApp> {
         fn render(ui: &mut egui::Ui, app: &mut K10sApp) {
             app.render_ui(ui);
         }
 
         let mut harness = Harness::builder()
-            .with_size(egui::vec2(1_280.0, 800.0))
+            .with_size(size)
             .build_ui_state(render, app);
         for _ in 0..4 {
             harness.step();
@@ -9361,6 +9613,60 @@ mod tests {
     }
 
     #[test]
+    fn compact_deployment_toolbar_contains_primary_controls_at_640_points() {
+        let (mut app, _) = deployment_list_app();
+        let mut snapshot = app.workspace_snapshot();
+        snapshot.free_window_resizing = true;
+        let deployment = snapshot
+            .windows
+            .iter_mut()
+            .find(|window| window.title == "Deployments")
+            .expect("deployment window is persisted");
+        deployment.geometry.size[0] = 640.0;
+        app.restore_workspace_snapshot(snapshot);
+
+        let mut harness = toolbar_test_harness_with_size(app, egui::vec2(640.0, 800.0));
+        {
+            let window = harness.get_by_role_and_label(
+                egui::accesskit::Role::Window,
+                "Deployments · all namespaces",
+            );
+
+            let search = window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
+            let namespace = window.get_by_role_and_label(
+                egui::accesskit::Role::ComboBox,
+                "Namespace: All namespaces",
+            );
+            let status =
+                window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
+            let live = window.get_by_label("Live; synced just now");
+            assert!(window.query_by_label("Columns ▾").is_none());
+            assert!(window.query_by_label("↻").is_none());
+            let more =
+                window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
+            for (index, control) in [&search, &namespace, &status, &more, &live]
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    control.rect().right() <= 640.0,
+                    "primary control {index} must remain inside the visible canvas: {:?}",
+                    control.rect(),
+                );
+                assert!(
+                    (control.rect().center().y - search.rect().center().y).abs() < 1.0,
+                    "primary control {index} must remain on one toolbar line"
+                );
+            }
+            more.click();
+        }
+        harness.step();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾ ⏵");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Refresh list");
+    }
+
+    #[test]
     fn deployment_toolbar_matches_reference_layout_and_title() {
         let (app, _) = deployment_list_app();
         let harness = toolbar_test_harness(app);
@@ -9369,31 +9675,17 @@ mod tests {
             "Deployments · all namespaces",
         );
 
-        // One compact toolbar row: search, namespace, status, columns,
-        // refresh, and the live/freshness chip.
+        // A constrained local list keeps primary controls reachable through
+        // one accessible overflow menu.
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-        assert_eq!(
-            harness
-                .get_by_value("Namespace: All namespaces")
-                .accesskit_node()
-                .role(),
-            egui::accesskit::Role::ComboBox,
-            "the namespace selector carries its label inside the control"
-        );
-        assert_eq!(
-            harness.get_by_value("Status: all").accesskit_node().role(),
-            egui::accesskit::Role::ComboBox,
-            "the status filter carries its label inside the control"
-        );
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
-        window.get_by_label("● Live · just now");
+        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: All namespaces");
+        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
+        window.get_by_label("Live; synced just now");
 
         // The match line reports the result count and the age affordance.
         // With no filters active, the Reset control stays hidden.
         window.get_by_label("2 deployments");
-        window.get_by_label("Age shown as relative (");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to absolute");
         assert!(
             window.query_by_label("Reset").is_none(),
             "Reset only appears while filters are active"
@@ -9408,7 +9700,7 @@ mod tests {
                 } else {
                     accesskit_node.label()
                 };
-                text.is_some_and(|text| text.starts_with("● Live ·"))
+                text.is_some_and(|text| text.starts_with("Live; synced "))
             }),
             "live status belongs only in the toolbar chip"
         );
@@ -9445,14 +9737,37 @@ mod tests {
                 ascending: true,
             }),
         ));
+        let mut snapshot = app.workspace_snapshot();
+        snapshot.free_window_resizing = true;
+        snapshot
+            .windows
+            .iter_mut()
+            .find(|persisted| persisted.title == "Deployments")
+            .expect("deployment window is persisted")
+            .geometry
+            .size[0] = 460.0;
+        app.restore_workspace_snapshot(snapshot);
+        app.web_select_resource(window, alpha);
+        app.shell.apply_workspace_command(WorkspaceCommand::SetSort(
+            window,
+            Some(crate::workspace::SortSpec {
+                column: "namespace".into(),
+                ascending: true,
+            }),
+        ));
 
-        let harness = toolbar_test_harness(app);
+        let mut harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
             "Deployments · all namespaces",
         );
         list_window.get_by_label("2 deployments · 1 selected");
-        list_window.get_by_label("sorted by Namespace ▲ · ");
+        list_window
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
+            .click();
+        harness.step();
+        harness.get_by_label("sorted by Namespace ▲ · ");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "switch to absolute");
 
         // Absolute mode renders raw timestamps in the Age column and flips
         // the match-line affordance.
@@ -9462,13 +9777,17 @@ mod tests {
                 window,
                 crate::workspace::AgeMode::Absolute,
             ));
-        let harness = toolbar_test_harness(app);
+        let mut harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
             "Deployments · all namespaces",
         );
-        list_window.get_by_label("Age shown as absolute (");
-        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to relative");
+        list_window
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
+            .click();
+        harness.step();
+        harness.get_by_label("Age shown as absolute (");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "switch to relative");
     }
 
     #[test]
@@ -9508,16 +9827,13 @@ mod tests {
             "the status filter must exclude non-matching rows"
         );
         list_window.get_by_label("1 deployments");
-        // An active filter exposes the Reset affordance.
-        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "Reset");
+        // An active filter keeps Reset reachable through the same menu.
+        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
         let selector = harness
             .query_all_by_role(egui::accesskit::Role::ComboBox)
-            .find(|node| {
-                node.value()
-                    .is_some_and(|value| value.starts_with("Status: "))
-            })
+            .find(|node| node.value().as_deref() == Some("Status"))
             .expect("the toolbar Status combobox");
-        assert_eq!(selector.value().as_deref(), Some("Status: Ready"));
+        assert_eq!(selector.value().as_deref(), Some("Status"));
 
         // Reset clears the filter and restores every row.
         let mut app = harness.into_state();

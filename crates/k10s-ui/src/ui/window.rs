@@ -11,6 +11,8 @@ use super::{
 };
 
 const WINDOW_CHROME_SIZE: Vec2 = Vec2::new(24.0, 48.0);
+const DEPLOYMENT_DETAIL_BODY_MIN_WIDTH: f32 = 760.0;
+const WIDE_DEPLOYMENT_CANVAS_MIN_WIDTH: f32 = DEPLOYMENT_DETAIL_BODY_MIN_WIDTH + 28.0;
 
 pub(super) fn layer_id(id: WindowId) -> LayerId {
     LayerId::new(Order::Middle, Id::new(("k10s.window", id.0)))
@@ -131,12 +133,47 @@ where
     I: resource_window::RowIdentity,
 {
     let mut open = true;
+    let id = layer_id(state.id).id;
+    let first_open_decision_id = id.with("first_open_decision");
+    let first_open_render = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(first_open_decision_id))
+        .is_none();
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(first_open_decision_id, true));
+    let first_render_geometry_id = id.with("first_deployment_render_geometry");
+    let first_render_geometry = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<WindowGeom>(first_render_geometry_id));
+    let canvas_size_id = id.with("canvas_size");
+    let previous_canvas_size = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<Vec2>(canvas_size_id));
+    let canvas_reflow = first_render_geometry.is_some()
+        && previous_canvas_size.is_some_and(|size| size != canvas.size());
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(canvas_size_id, canvas.size()));
+    // A first Deployment window needs enough horizontal room for its
+    // integrated Detail body on browser-sized canvases. This is deliberately
+    // render-local: workspace geometry remains the normal persisted default.
+    let default_geometry_overflows_canvas =
+        state.geometry.position[0] + state.geometry.size[0] > canvas.width();
+    let first_deployment_render = first_open_render
+        && canvas.width() >= WIDE_DEPLOYMENT_CANVAS_MIN_WIDTH
+        && default_geometry_overflows_canvas
+        && state.initial_geometry
+        && state.layout_revision == 0
+        && state.kind == WindowKind::Workload(crate::workspace::WorkloadKind::Deployments);
     let position = Pos2::new(
-        canvas.min.x + state.geometry.position[0],
+        if first_deployment_render {
+            canvas.min.x
+        } else {
+            canvas.min.x + state.geometry.position[0]
+        },
         canvas.min.y + state.geometry.position[1],
     );
+    let first_render_size = [canvas.width(), state.geometry.size[1]];
     let min_size = Vec2::from(state.kind.min_size());
-    let id = layer_id(state.id).id;
     let layout_revision_id = id.with("layout_revision");
     let applied_layout_revision = ui
         .ctx()
@@ -175,7 +212,11 @@ where
         .collapsible(true)
         .default_open(!state.geometry.collapsed)
         .current_pos(position)
-        .default_size(state.geometry.size)
+        .default_size(if first_deployment_render {
+            first_render_size
+        } else {
+            state.geometry.size
+        })
         .frame(super::theme::window_frame(focused));
     window = if free_window_resizing {
         // Detail owns its finite body scroll region. Let it resize freely
@@ -359,10 +400,19 @@ where
         },
         collapsed,
     };
+    if first_deployment_render || canvas_reflow {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(first_render_geometry_id, geometry));
+    }
     // A layout resize updates egui's persisted area/resize state during this
     // frame. Do not let the response from that transition frame overwrite
     // the command's target geometry before egui presents it next frame.
-    if geometry != state.geometry && !apply_layout_size {
+    if geometry != state.geometry
+        && !apply_layout_size
+        && !first_deployment_render
+        && !canvas_reflow
+        && first_render_geometry != Some(geometry)
+    {
         queued.push(WorkspaceCommand::SetGeometry(state.id, geometry));
     }
     response.inner.unwrap_or(false)

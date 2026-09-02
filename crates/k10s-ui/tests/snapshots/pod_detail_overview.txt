@@ -187,24 +187,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 pods · 1 selected"
                   TextRun value="1 pods · 1 selected"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -212,36 +202,28 @@ Window
                       GenericContainer
                         GenericContainer
                           GenericContainer
-                            GenericContainer
-                              Label value="Namespace"
-                                TextRun value="Namespace"
-                              Button label="Sort pods by namespace"
+                            Label value="NAMESPACE"
+                            Button label="Sort pods by namespace"
                           GenericContainer
-                            GenericContainer
-                              Label value="Name"
-                                TextRun value="Name"
-                              Button label="Sort pods by name"
+                            Label value="NAME"
+                            Button label="Sort pods by name"
                           GenericContainer
-                            Label value="Ready"
-                              TextRun value="Ready"
+                            Label value="READY"
+                              TextRun value="READY"
                           GenericContainer
-                            GenericContainer
-                              Label value="Status"
-                                TextRun value="Status"
-                              Button label="Sort pods by status"
+                            Label value="STATUS"
+                            Button label="Sort pods by status"
                           GenericContainer
-                            Label value="Restarts"
-                              TextRun value="Restarts"
+                            Label value="RESTARTS"
+                              TextRun value="RESTARTS"
                           GenericContainer
-                            GenericContainer
-                              Label value="Age"
-                                TextRun value="Age"
-                              Button label="Sort pods by created"
+                            Label value="AGE"
+                            Button label="Sort pods by created"
                           GenericContainer
                             Label value="default"
                               TextRun value="default"
                           GenericContainer
-                            Button label="Clear selection for resource db-postgres-0"
+                            Label value="db-postgres-0"
                           GenericContainer
                             GenericContainer
                               Label value="—"
@@ -256,6 +238,7 @@ Window
                           GenericContainer
                             Label value="Resource age"
                               TextRun value="11d"
+                          Button label="Clear selection for resource db-postgres-0"
               Unknown label="Detail split grip"
               GenericContainer
                 GenericContainer
@@ -265,48 +248,34 @@ Window
                     TextRun value=" default / "
                   Label value="db-postgres-0"
                     TextRun value="db-postgres-0"
-                  Label value="Freshness · unavailable"
-                    TextRun value="Freshness · unavailable"
                   GenericContainer
                     Button label="Clear selection"
                     Button label="Maximize"
                     Button label="Pop out ↗"
+                    Label value="Freshness · unavailable"
+                      TextRun value="⟳ unavail."
                 GenericContainer label="Detail identity row"
                 Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Label value="Status ● —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Ready · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Restarts · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Age · —"
-                        GenericContainer
-                          GenericContainer
-                        Button label="Show more Pod vitals"
+                    Label value="Status ● —"
+                    Label value="Ready · —"
+                    Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Tab Overview"
-                        Button label="Tab Events"
-                        Button label="Tab YAML"
-                        Button label="Tab Logs"
-                        Button label="Tab Shell"
+                    Button label="Tab Overview"
+                    Button label="Tab Events"
+                    Button label="Tab YAML"
+                    Button label="Tab Logs"
+                    Button label="Tab Shell"
+                Unknown label="Detail tabs row"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Delete…"
-                        Button label="Actions"
+                    Button label="Delete…"
+                    Button label="Actions"
+                Unknown label="Detail actions row"
                 ScrollView label="Detail body"
                   GenericContainer
                     GenericContainer
