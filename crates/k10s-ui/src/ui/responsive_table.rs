@@ -187,7 +187,15 @@ pub(super) fn sized_cell(
     ui.allocate_ui_with_layout(
         egui::vec2(width, ui.spacing().interact_size.y),
         layout,
-        add_contents,
+        |ui| {
+            // `allocate_ui_with_layout` constrains the child UI's maximum
+            // size, but an egui Grid sizes its column from the child's used
+            // minimum rectangle. Keep both bounds exact so short labels do
+            // not collapse resolved columns or let adjacent text overlap.
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            add_contents(ui);
+        },
     );
 }
 

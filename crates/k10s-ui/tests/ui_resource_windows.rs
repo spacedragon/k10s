@@ -470,7 +470,22 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
             .is_none()
         );
     }
-    assert!(wide.get_by_label("2/2").rect().right() > wide.get_by_label("Ready").rect().center().x);
+    let ready_value = wide.get_by_label("2/2").rect();
+    let status_value = wide.get_by_label("2/2 ready").rect();
+    assert!(ready_value.right() > wide.get_by_label("Ready").rect().center().x);
+    let age_right = wide
+        .get_all_by_label("Resource age")
+        .map(|node| node.rect().right())
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        wide.rect().right() - age_right <= 40.0,
+        "the final table column must reach the window edge so its scrollbar stays at the edge: window={:?}, age_right={age_right}",
+        wide.rect()
+    );
+    assert!(
+        ready_value.right() <= status_value.left(),
+        "wide Ready and Status values must not overlap: ready={ready_value:?}, status={status_value:?}"
+    );
     wide.get_by_label("ghcr.io/containers/kubernetes-mcp:v0.3.1")
         .hover();
     harness.run_steps(15);
