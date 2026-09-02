@@ -1,6 +1,6 @@
 //! Typed, feed-independent Pod Overview presentation.
 
-use egui::{Grid, RichText, ScrollArea, accesskit::Role};
+use egui::{RichText, WidgetInfo, WidgetType, accesskit::Role};
 use k10s_protocol::{
     ContainerStateProjection, ContainerTerminationProjection, EventsCondition, MetricsAvailability,
     OwnerReference, PodContainerPort, PodProjection, ResourceDetailResponse, ResourceIdentity,
@@ -198,7 +198,6 @@ impl PodDetailProjection {
                     |ready| if ready { "Yes" } else { "No" }.into(),
                 ),
                 restarts: number(container.restart_count),
-                last_exit: termination(container.last_termination.as_ref()),
                 metrics: container_metrics(input, &container.name),
             })
             .collect();
@@ -228,7 +227,10 @@ impl PodDetailProjection {
                     status: present(&condition.status),
                     reason: optional(condition.reason.as_deref()),
                     message: optional(condition.message.as_deref()),
-                    last_transition: optional(condition.last_transition_time.as_deref()),
+                    last_transition: super::presentation::format_age(
+                        condition.last_transition_time.as_deref(),
+                        input.now,
+                    ),
                 })
                 .collect(),
             events_condition: view.events_condition,
@@ -287,7 +289,6 @@ struct ContainerProjection {
     state: String,
     ready: String,
     restarts: String,
-    last_exit: String,
     metrics: String,
 }
 
@@ -390,19 +391,6 @@ fn container_state(state: Option<&ContainerStateProjection>) -> String {
     }
 }
 
-fn termination(termination: Option<&ContainerTerminationProjection>) -> String {
-    termination.map_or_else(
-        || UNAVAILABLE.into(),
-        |termination| {
-            format!(
-                "{} · {}",
-                termination.exit_code,
-                optional(termination.reason.as_deref())
-            )
-        },
-    )
-}
-
 fn container_metrics(input: &DetailPresentationInput<'_>, name: &str) -> String {
     let Some(response) = input
         .resource_metrics
@@ -459,56 +447,102 @@ fn show_operational<I: RowIdentity>(
     }
 
     section(ui, &format!("CONTAINERS · {}", pod.containers.len()));
-    horizontal_table(ui, window_id, "containers", "Pod containers table", |ui| {
-        Grid::new(("k10s.detail.pod.containers", window_id.0))
-            .striped(true)
-            .show(ui, |ui| {
-                for heading in [
-                    "NAME",
-                    "IMAGE",
-                    "STATE",
-                    "READY",
-                    "RESTARTS",
-                    "LAST EXIT",
-                    "CPU / MEM",
-                ] {
-                    ui.label(RichText::new(heading).weak());
-                }
-                ui.end_row();
-                for container in &pod.containers {
-                    ui.label(&container.name);
-                    super::overview::long_value_cell(ui, 220.0, "Image", Some(&container.image));
-                    ui.label(&container.state);
-                    ui.label(&container.ready);
-                    ui.label(&container.restarts);
-                    ui.label(&container.last_exit);
-                    ui.label(&container.metrics);
-                    ui.end_row();
-                }
+    table_region(ui, window_id, "containers", "Pod containers table", |ui| {
+        let available = (ui.available_width() - ui.spacing().item_spacing.x * 5.0).max(1.0);
+        let widths = [0.15, 0.31, 0.20, 0.08, 0.11, 0.15].map(|part| available * part);
+        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.horizontal(|ui| {
+            for (heading, width) in ["NAME", "IMAGE", "STATE", "READY", "RESTARTS", "CPU / MEM"]
+                .into_iter()
+                .zip(widths)
+            {
+                table_cell(ui, width, heading, None, None);
+            }
+        });
+        ui.separator();
+        for container in &pod.containers {
+            ui.horizontal(|ui| {
+                table_cell(ui, widths[0], &container.name, None, None);
+                table_cell(
+                    ui,
+                    widths[1],
+                    &container.image,
+                    Some(format!("Image: {}", container.image)),
+                    Some(crate::ui::theme::MUTED_TEXT),
+                );
+                let state_color = if container.state == "Running" {
+                    crate::ui::theme::HEALTHY
+                } else if container.state.starts_with("Terminated") {
+                    crate::ui::theme::MUTED_TEXT
+                } else {
+                    crate::ui::theme::WARNING
+                };
+                table_cell(
+                    ui,
+                    widths[2],
+                    &format!("● {}", container.state),
+                    Some(container.state.clone()),
+                    Some(state_color),
+                );
+                let ready = match container.ready.as_str() {
+                    "Yes" => "✓",
+                    "No" => "⨯",
+                    _ => UNAVAILABLE,
+                };
+                table_cell(ui, widths[3], ready, Some(container.ready.clone()), None);
+                table_cell(ui, widths[4], &container.restarts, None, None);
+                table_cell(
+                    ui,
+                    widths[5],
+                    &container.metrics,
+                    None,
+                    Some(crate::ui::theme::MUTED_TEXT),
+                );
             });
+        }
     });
 
     section(ui, "CONDITIONS");
     if pod.conditions.is_empty() {
         ui.label("No conditions reported");
     } else {
-        horizontal_table(ui, window_id, "conditions", "Pod conditions table", |ui| {
-            Grid::new(("k10s.detail.pod.conditions", window_id.0))
-                .striped(true)
-                .show(ui, |ui| {
-                    for heading in ["TYPE", "STATUS", "REASON", "MESSAGE", "LAST TRANSITION"] {
-                        ui.label(RichText::new(heading).weak());
-                    }
-                    ui.end_row();
-                    for condition in &pod.conditions {
-                        ui.label(&condition.condition_type);
-                        ui.label(&condition.status);
-                        ui.label(&condition.reason);
-                        ui.label(&condition.message);
-                        ui.label(&condition.last_transition);
-                        ui.end_row();
-                    }
+        table_region(ui, window_id, "conditions", "Pod conditions table", |ui| {
+            for condition in &pod.conditions {
+                let tone = if condition.status == "True" {
+                    crate::ui::theme::HEALTHY
+                } else {
+                    crate::ui::theme::DANGER
+                };
+                let available = ui.available_width() - ui.spacing().item_spacing.x * 2.0;
+                let row = ui.horizontal(|ui| {
+                    table_cell(
+                        ui,
+                        (available - 160.0).max(180.0),
+                        &format!("● {}", condition.condition_type),
+                        Some(condition.condition_type.clone()),
+                        Some(tone),
+                    );
+                    table_cell(
+                        ui,
+                        70.0,
+                        &condition.reason,
+                        None,
+                        Some(crate::ui::theme::MUTED_TEXT),
+                    )
+                    .on_hover_text(&condition.message);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(&condition.last_transition).weak());
+                    });
                 });
+                row.response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Label,
+                        true,
+                        format!("{}: {}", condition.condition_type, condition.status),
+                    )
+                });
+                ui.separator();
+            }
         });
     }
 
@@ -522,28 +556,61 @@ fn show_operational<I: RowIdentity>(
         }
         EventsCondition::Available => {
             for event in &pod.events {
-                ui.label(format!(
+                let full = format!(
                     "{} · {} · ×{} · {}",
                     event.reason, event.message, event.count, event.last_seen
-                ));
+                );
+                let row = ui.horizontal(|ui| {
+                    ui.label(RichText::new("●").color(crate::ui::theme::HEALTHY));
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&event.message).strong());
+                        ui.label(
+                            RichText::new(format!("{} · ×{}", event.reason, event.count)).weak(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        ui.label(RichText::new(&event.last_seen).weak());
+                    });
+                });
+                row.response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full.clone()));
+                ui.separator();
             }
         }
     }
 }
 
-fn horizontal_table(
+fn table_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    value: &str,
+    accessible: Option<String>,
+    color: Option<egui::Color32>,
+) -> egui::Response {
+    let text = color.map_or_else(
+        || RichText::new(value),
+        |color| RichText::new(value).color(color),
+    );
+    let response = ui.add_sized(
+        [width, ui.spacing().interact_size.y],
+        egui::Label::new(text).truncate().halign(egui::Align::Min),
+    );
+    if let Some(accessible) = accessible {
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
+        response.on_hover_text(value)
+    } else {
+        response
+    }
+}
+
+fn table_region(
     ui: &mut egui::Ui,
     window_id: WindowId,
     name: &'static str,
     accessible_label: &'static str,
     content: impl FnOnce(&mut egui::Ui),
 ) {
-    let table = ui.push_id(("k10s.detail.pod.table", name, window_id.0), |ui| {
-        ScrollArea::horizontal()
-            .id_salt(("k10s.detail.pod.table.scroll", name, window_id.0))
-            .auto_shrink([false, true])
-            .show(ui, content);
-    });
+    let table = ui.push_id(("k10s.detail.pod.table", name, window_id.0), content);
     let rect = table.response.rect;
     ui.ctx().accesskit_node_builder(table.response.id, |node| {
         node.set_role(Role::Table);
@@ -570,12 +637,19 @@ fn show_metadata<I: RowIdentity>(
             "Open owner {}/{}/{}",
             owner.gvk.kind, pod.namespace, owner.name
         );
-        if ui.button(owner_label).clicked() {
+        let owner_link = ui
+            .add(
+                egui::Button::new(RichText::new(&owner_label).color(crate::ui::theme::ACCENT))
+                    .frame(false),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(&owner_label);
+        if owner_link.clicked() {
             queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
                 &owner_identity(frame.identity, owner),
             )));
         }
-        ui.label(format!("this Pod · {}/{}", pod.namespace, pod.name));
+        ui.label(RichText::new(format!("this Pod · {}/{}", pod.namespace, pod.name)).weak());
     }
 
     section(ui, "PLACEMENT");
@@ -608,25 +682,9 @@ fn show_metadata<I: RowIdentity>(
     );
 
     if !pod.labels.is_empty() || !pod.annotations.is_empty() {
-        if pod.labels.is_empty() {
-            super::overview::section_separator(ui);
-        } else {
-            section(ui, &format!("LABELS · {}", pod.labels.len()));
-        }
-        let identity = frame.identity;
-        super::overview::metadata_labels_and_annotations(
+        ui.add_space(10.0);
+        super::overview::metadata_sections(
             ui,
-            (
-                "k10s.detail.pod.annotations",
-                window_id.0,
-                identity.context.as_str(),
-                identity.gvk.group.as_str(),
-                identity.gvk.version.as_str(),
-                identity.gvk.kind.as_str(),
-                identity.namespace.as_deref(),
-                identity.name.as_str(),
-                identity.uid.as_str(),
-            ),
             pod.labels
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -650,9 +708,9 @@ fn show_metadata<I: RowIdentity>(
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(ui.spacing().item_spacing.y);
-    ui.label(RichText::new(title).strong());
-    ui.separator();
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).size(11.0).strong().weak());
+    super::overview::section_separator(ui);
 }
 
 fn metadata_grid(
@@ -660,11 +718,26 @@ fn metadata_grid(
     id: impl std::hash::Hash + std::fmt::Debug,
     rows: &[(&str, &String)],
 ) {
-    Grid::new(id).show(ui, |ui| {
+    ui.push_id(id, |ui| {
         for (label, value) in rows {
-            ui.label(RichText::new(*label).weak());
-            ui.label(value.as_str());
-            ui.end_row();
+            ui.horizontal(|ui| {
+                ui.add_space(34.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(160.0, 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label(RichText::new(*label).weak());
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(egui::Label::new(value.as_str()).truncate())
+                            .on_hover_text(value.as_str());
+                    },
+                );
+            });
         }
     });
 }

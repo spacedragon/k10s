@@ -11,27 +11,15 @@ Window label="Deployment · payments / checkout"
             Unknown label="Detail vital strip"
             GenericContainer
               GenericContainer
-                Label value="Rollout ● NewReplicaSetAvailable"
-                GenericContainer
-                  GenericContainer
+                Label value="Rollout ● Complete"
                 Label value="Ready · 3/3"
-                GenericContainer
-                  GenericContainer
                 Label value="Up-to-date · 3"
-                GenericContainer
-                  GenericContainer
                 Label value="Available · 3"
-                GenericContainer
-                  GenericContainer
                 Label value="Strategy · RollingUpdate"
-                GenericContainer
-                  GenericContainer
                 Label value="Age · 31d"
-                GenericContainer
-                  GenericContainer
             GenericContainer
               Label value="Freshness · live (just now)"
-                TextRun value="Freshness · live (just now)"
+                TextRun value="● Live"
             GenericContainer
               GenericContainer
                 Button label="Tab Overview"
@@ -54,32 +42,34 @@ Window label="Deployment · payments / checkout"
                     GenericContainer
                       Unknown label="Operational detail column"
                       Label value="PODS · 1"
-                        TextRun value="PODS · 1"
+                      GenericContainer
+                        Button label="Open Pods tab →"
                       Table label="Deployment Pods table"
                         GenericContainer
                           GenericContainer
                             GenericContainer
                               GenericContainer
                                 Label value="Name"
-                                  TextRun value="Name"
+                                  TextRun value="NAME"
                               GenericContainer
                                 Label value="Ready"
-                                  TextRun value="Ready"
+                                  TextRun value="READY"
                               GenericContainer
                                 Label value="Status"
-                                  TextRun value="Status"
+                                  TextRun value="STATUS"
                               GenericContainer
                                 Label value="Restarts"
-                                  TextRun value="Restarts"
+                                  TextRun value="RESTARTS"
                               GenericContainer
                                 Label value="Node"
-                                  TextRun value="Node"
+                                  TextRun value="NODE"
                               GenericContainer
                                 Label value="Age"
-                                  TextRun value="Age"
+                                  TextRun value="AGE"
                             GenericContainer
                               GenericContainer
-                                Button label="Pod · checkout-4-x7k9p"
+                                Label value="checkout-4-x7k9p"
+                                  TextRun value="checkout-4-x7k9p"
                               GenericContainer
                                 Label value="1/1"
                                   TextRun value="1/1"
@@ -95,24 +85,24 @@ Window label="Deployment · payments / checkout"
                               GenericContainer
                                 Label value="—"
                                   TextRun value="—"
-                      Label value="ROLLOUT HISTORY"
-                        TextRun value="ROLLOUT HISTORY"
+                            Button label="Pod · checkout-4-x7k9p"
+                      Label value="ROLLOUT HISTORY · 1 revision"
                       Table label="Deployment rollout history table"
                         GenericContainer
                           GenericContainer
                             GenericContainer
                               GenericContainer
                                 Label value="Rev"
-                                  TextRun value="Rev"
+                                  TextRun value="REV"
                               GenericContainer
                                 Label value="ReplicaSet"
-                                  TextRun value="ReplicaSet"
+                                  TextRun value="REPLICASET"
                               GenericContainer
                                 Label value="Image tag"
-                                  TextRun value="Image tag"
+                                  TextRun value="IMAGE TAG"
                               GenericContainer
                                 Label value="When"
-                                  TextRun value="When"
+                                  TextRun value="WHEN"
                             GenericContainer
                               GenericContainer
                                 Label value="4 current"
@@ -127,94 +117,83 @@ Window label="Deployment · payments / checkout"
                                 Label value="1d 22h"
                                   TextRun value="1d 22h"
                       Label value="RECENT ROLLOUT EVENTS"
-                        TextRun value="RECENT ROLLOUT EVENTS"
                       Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
                         TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · "
                         TextRun value="2026-08-30T10:01:00Z"
                     GenericContainer
                       Unknown label="Configuration detail column"
-                      Label value="TEMPLATE"
-                        TextRun value="TEMPLATE"
                       GenericContainer
+                        Label value="TEMPLATE"
+                        GenericContainer
+                          Label value="Image (api)"
+                            TextRun value="Image (api)"
+                          GenericContainer
+                            GenericContainer
+                              Label value="Image (api): ghcr.io/acme/checkout:v4"
+                                TextRun value="ghcr.io/acme/checkout:v4"
+                            GenericContainer
+                              Button label="Copy Image (api)"
                         GenericContainer
                           GenericContainer
-                            Label value="Image (api)"
-                              TextRun value="Image (api)"
-                            GenericContainer
-                              GenericContainer
-                                Label value="Image (api): ghcr.io/acme/checkout:v4"
-                                  TextRun value="ghcr.io/acme/checkout:v4"
-                              GenericContainer
-                                Button label="Copy Image (api)"
-                          Label value="Replicas · 3/3 available"
-                            TextRun value="Replicas · 3/3 available"
-                          Label value="Max surge · 25%"
-                            TextRun value="Max surge · 25%"
-                          Label value="Max unavailable · 1"
-                            TextRun value="Max unavailable · 1"
-                          GenericContainer
-                            Label value="Selector"
-                              TextRun value="Selector"
-                            GenericContainer
-                              GenericContainer
-                                Label value="Selector: app=checkout"
-                                  TextRun value="app=checkout"
-                              GenericContainer
-                                Button label="Copy Selector"
-                          Label value="Template labels · app=checkout"
-                            TextRun value="Template labels · app=checkout"
-                          Label value="Template annotations · checksum/config=abc123"
-                            TextRun value="Template annotations · checksum/config=abc123"
-                      Label value="MANAGED BY"
-                        TextRun value="MANAGED BY"
-                      GenericContainer
+                            Label value="Replicas · 3 desired · 3 available"
+                              TextRun value="3 desired · 3 available"
                         GenericContainer
-                          Label value="Manager · Helm"
-                            TextRun value="Manager · Helm"
-                          Label value="Helm release · checkout-prod"
-                            TextRun value="Helm release · checkout-prod"
-                          Label value="Helm namespace · payments"
-                            TextRun value="Helm namespace · payments"
-                      Label value="LABELS · 6"
-                        TextRun value="LABELS · 6"
-                      GenericContainer
+                          GenericContainer
+                            Label value="Rolling update · surge 25% · unavailable 1"
+                              TextRun value="surge 25% · unavailable 1"
+                        GenericContainer
+                          Label value="Selector"
+                            TextRun value="Selector"
+                          GenericContainer
+                            GenericContainer
+                              Label value="Selector: app=checkout"
+                                TextRun value="app=checkout"
+                            GenericContainer
+                              Button label="Copy Selector"
+                        GenericContainer
+                          Label value="Template annotations"
+                            TextRun value="Template annotations"
+                          GenericContainer
+                            GenericContainer
+                              Label value="Template annotations: checksum/config=abc123"
+                                TextRun value="checksum/config=abc123"
+                            GenericContainer
+                              Button label="Copy Template annotations"
+                        Label value="LABELS · 6"
                         GenericContainer
                           Label value="app.kubernetes.io/instance: checkout-prod"
-                            TextRun value="app.kubernetes.io/instance: checkout…"
                         GenericContainer
                           Label value="app.kubernetes.io/managed-by: Helm"
-                            TextRun value="app.kubernetes.io/managed-by: H…"
                         GenericContainer
                           Label value="app.kubernetes.io/name: checkout"
-                            TextRun value="app.kubernetes.io/name: check…"
                         GenericContainer
                           Label value="app.kubernetes.io/part-of: shop"
-                            TextRun value="app.kubernetes.io/part-of:…"
-                        GenericContainer
                           Label value="team: payments"
-                            TextRun value="team: payments"
                         GenericContainer
                           Label value="tier: backend"
-                            TextRun value="tier: back…"
-                        Button label="Annotations 2 ▾"
-                      Label value="IDENTITY"
-                        TextRun value="IDENTITY"
-                      GenericContainer
+                        Label value="ANNOTATIONS · 2"
                         GenericContainer
-                          Label value="Name · checkout"
-                            TextRun value="Name · checkout"
-                          Label value="Namespace · payments"
-                            TextRun value="Namespace · payments"
-                          Label value="Created · 2026-08-01T08:00:00Z"
-                            TextRun value="Created · 2026-08-01T08:00:00Z"
-                          Label value="UID · uid-deployment-checkout"
-                            TextRun value="UID · uid-deployment-checkout"
-                          Label value="Context · deployment-test"
-                            TextRun value="Context · deployment-test"
-              ScrollBar
+                          Label value="meta.helm.sh/release-name: checkout-prod"
+                        GenericContainer
+                          Label value="meta.helm.sh/release-namespace: payments"
+                        Label value="IDENTITY"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Created · 2026-08-01 08:00 · 31d ago"
+                              TextRun value="2026-08-01 08:00 · 31d ago"
+                        GenericContainer
+                          GenericContainer
+                            Label value="UID · uid-deployment-checkout"
+                              TextRun value="uid-depl…kout"
+                          GenericContainer
+                            Button label="Copy UID"
+                        GenericContainer
+                          GenericContainer
+                            Label value="Managed by · Helm · release checkout-prod (payments)"
+                              TextRun value="Helm · release che…ut-prod (payments)"
             GenericContainer
-              Label value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
-                TextRun value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
+              Label value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
+                TextRun value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
   Splitter
   Splitter
   Splitter

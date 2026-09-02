@@ -463,7 +463,7 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
     );
     forbidden.get_by_role_and_label(Role::Button, "Copy auth can-i command");
     common::workload_window(&harness, "DaemonSets")
-        .get_by_label("✕ Failed · watch ended unexpectedly");
+        .get_by_label("⨯ Failed · watch ended unexpectedly");
     let ready_empty = common::workload_window(&harness, "Jobs");
     ready_empty.get_by_label("◇ Ready · no resources");
     ready_empty.get_by_role_and_label(Role::Button, "More list controls");

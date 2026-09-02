@@ -39,6 +39,9 @@ pub(crate) struct DetailVital {
     pub value: String,
     pub tone: DetailVitalTone,
     pub shape: Option<DetailVitalShape>,
+    /// Secondary detail (a condition reason or message) surfaced on hover
+    /// instead of widening the chip.
+    pub hint: Option<String>,
 }
 
 impl DetailVital {
@@ -48,6 +51,7 @@ impl DetailVital {
             value: value.into(),
             tone: DetailVitalTone::default(),
             shape: None,
+            hint: None,
         }
     }
 }
@@ -77,7 +81,10 @@ impl DetailVitalShape {
         match self {
             Self::Dot => "●",
             Self::Triangle => "▲",
-            Self::Cross => "✕",
+            // `✕` (U+2715), the design glyph, is absent from every bundled
+            // font and paints as a missing-glyph box; `⨯` is the widest
+            // available cross at the same monospace advance.
+            Self::Cross => "⨯",
         }
     }
 }
@@ -104,6 +111,12 @@ pub(crate) struct DetailFrameProjection<'a> {
     pub visible_vitals: Vec<DetailVital>,
     pub overflow_vitals: Vec<DetailVital>,
     pub vital_expansion_label: Option<&'static str>,
+    /// Related-Pod count for the `Pods` tab badge, when the relation feed
+    /// has resolved it. `None` renders the tab with no badge rather than a
+    /// speculative zero.
+    pub pod_count: Option<usize>,
+    /// Whether the footer may advertise `Ctrl+D delete`.
+    pub delete_shortcut: bool,
     pub expansion: DetailExpansionState,
 }
 
@@ -229,6 +242,8 @@ impl<'a> DetailPresentationInput<'a> {
             visible_vitals,
             overflow_vitals,
             vital_expansion_label,
+            pod_count: None,
+            delete_shortcut: super::delete_shortcut_available(self),
             expansion,
         }
     }

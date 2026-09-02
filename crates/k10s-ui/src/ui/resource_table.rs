@@ -218,13 +218,22 @@ where
                 .show(ui, |ui| {
                     if range.start < header_rows {
                         for column in &columns.visible {
-                            super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                            let numeric = matches!(column.key, "ready" | "restarts" | "created");
+                            super::responsive_table::sized_cell(ui, column.width, numeric, |ui| {
                                 let visible = column_title(column.key);
                                 if matches!(column.key, "namespace" | "name" | "status" | "created")
                                 {
-                                    sort_header(ui, title, visible, column.key, sort, &mut actions);
+                                    sort_header(
+                                        ui,
+                                        window_id,
+                                        title,
+                                        visible,
+                                        column.key,
+                                        sort,
+                                        &mut actions,
+                                    );
                                 } else {
-                                    ui.label(visible);
+                                    ui.label(header_text(visible));
                                 }
                             });
                         }
@@ -239,74 +248,82 @@ where
                         // cells so they render on top. No per-cell highlight
                         // and no disclosure marker.
                         let row_min = ui.cursor().min;
-                        if selected {
-                            let row_rect = egui::Rect::from_min_max(
-                                row_min,
-                                row_min + egui::vec2(table_width, row_height),
-                            );
-                            let painter = ui.painter();
-                            painter.rect_filled(row_rect, 0.0, super::theme::SELECTED_ROW);
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::pos2(row_min.x, row_min.y),
-                                    egui::pos2(row_min.x + 3.0, row_min.y + row_height),
-                                ),
-                                0.0,
-                                super::theme::ACCENT,
-                            );
-                        }
+                        let row_rect = egui::Rect::from_min_max(
+                            row_min,
+                            row_min + egui::vec2(table_width, row_height),
+                        );
+                        // The row ground is reserved before the cells and
+                        // resolved after them, so hover and selection paint
+                        // behind the text rather than over it.
+                        let background = ui.painter().add(egui::Shape::Noop);
                         for column in &columns.visible {
                             let numeric = matches!(column.key, "ready" | "restarts" | "created");
                             super::responsive_table::sized_cell(ui, column.width, numeric, |ui| {
                                 match column.key {
                                     "namespace" => {
-                                        ui.label(row.identity.namespace.as_deref().unwrap_or("—"));
+                                        // Fixed-width cells clip, never wrap:
+                                        // a wrapped namespace would grow the
+                                        // row past the height the row
+                                        // background is painted at.
+                                        ui.add(
+                                            egui::Label::new(
+                                                row.identity
+                                                    .namespace
+                                                    .as_deref()
+                                                    .unwrap_or("\u{2014}"),
+                                            )
+                                            .truncate(),
+                                        );
                                     }
                                     "name" => {
-                                        let name_button = ui.add(
-                                            egui::Button::new(&row.identity.name).frame(false),
+                                        // Plain, truncating text. A Button
+                                        // sized to its full label widened
+                                        // the flex Name column past the
+                                        // resolved width and pushed Age off
+                                        // the right edge of the viewport.
+                                        ui.add(
+                                            egui::Label::new(&row.identity.name)
+                                                .truncate()
+                                                .selectable(false),
                                         );
-                                        let label = super::responsive_table::row_action_label(
-                                            "resource",
-                                            &row.identity.name,
-                                            selected,
-                                        );
-                                        name_button.widget_info(move || {
-                                            WidgetInfo::selected(
-                                                WidgetType::Button,
-                                                true,
-                                                selected,
-                                                label.clone(),
-                                            )
-                                        });
-                                        let popped_out = super::responsive_table::row_interaction(
-                                            &name_button,
-                                            gesture_table_id,
-                                            identity_of(row),
-                                            selected,
-                                        );
-                                        if popped_out.is_some() {
-                                            actions.popped_out = popped_out;
-                                        }
-                                        name_button.context_menu(|ui| {
-                                            if ui.button("Open dedicated window").clicked() {
-                                                actions.popped_out = Some(identity_of(row));
-                                                ui.close();
-                                            }
-                                        });
                                     }
                                     "status" => {
-                                        status_label(ui, resource_status(row).as_ref());
+                                        status_label(
+                                            ui,
+                                            resource_status(row).as_ref(),
+                                            resource_status_detail(row),
+                                        );
                                     }
                                     "ready" => {
                                         ready_label(ui, row);
                                     }
                                     "image" => {
-                                        super::responsive_table::elided_label(
-                                            ui,
-                                            resource_image(row),
-                                            28,
+                                        let image = resource_image(row);
+                                        let shown = image_cell_text(&image, 28);
+                                        // Fixed-width cells clip, never
+                                        // overflow into their neighbour.
+                                        let response = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&shown)
+                                                    .color(super::theme::MUTED_TEXT),
+                                            )
+                                            .truncate()
+                                            // The tooltip below carries the
+                                            // untruncated image reference.
+                                            .show_tooltip_when_elided(false),
                                         );
+                                        let response = if shown == image {
+                                            response
+                                        } else {
+                                            response.on_hover_text(&image)
+                                        };
+                                        response.widget_info(|| {
+                                            WidgetInfo::labeled(
+                                                WidgetType::Label,
+                                                true,
+                                                image.clone(),
+                                            )
+                                        });
                                     }
                                     "restarts" => {
                                         right_label(ui, resource_restarts(row));
@@ -343,6 +360,74 @@ where
                                 }
                             });
                         }
+                        // The row itself is the affordance: one click target
+                        // spanning every column, registered after the cells
+                        // so it owns the whole row's pointer input. No
+                        // per-cell button and no disclosure marker.
+                        let row_response = ui.interact(
+                            row_rect,
+                            egui::Id::new((
+                                "k10s.resource.table.row",
+                                window_id.0,
+                                &row.identity.name,
+                                &row.identity.uid,
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let row_label = super::responsive_table::row_action_label(
+                            "resource",
+                            &row.identity.name,
+                            selected,
+                        );
+                        row_response.widget_info(move || {
+                            WidgetInfo::selected(
+                                WidgetType::Button,
+                                true,
+                                selected,
+                                row_label.clone(),
+                            )
+                        });
+                        let popped_out = super::responsive_table::row_interaction(
+                            &row_response,
+                            gesture_table_id,
+                            identity_of(row),
+                            selected,
+                        );
+                        if popped_out.is_some() {
+                            actions.popped_out = popped_out;
+                        }
+                        row_response.context_menu(|ui| {
+                            if ui.button("Open dedicated window").clicked() {
+                                actions.popped_out = Some(identity_of(row));
+                                ui.close();
+                            }
+                        });
+                        if selected {
+                            // A full-row accent fill plus a 3px left bar.
+                            ui.painter().set(
+                                background,
+                                egui::Shape::Vec(vec![
+                                    egui::Shape::rect_filled(
+                                        row_rect,
+                                        0.0,
+                                        super::theme::SELECTED_ROW,
+                                    ),
+                                    egui::Shape::rect_filled(
+                                        egui::Rect::from_min_max(
+                                            row_min,
+                                            egui::pos2(row_min.x + 3.0, row_rect.bottom()),
+                                        ),
+                                        0.0,
+                                        super::theme::ACCENT,
+                                    ),
+                                ]),
+                            );
+                        } else if row_response.hovered() {
+                            ui.painter().set(
+                                background,
+                                egui::Shape::rect_filled(row_rect, 0.0, super::theme::HOVER_ROW),
+                            );
+                        }
                         ui.end_row();
                     }
                 });
@@ -370,8 +455,47 @@ pub(super) fn resource_status(row: &ResourceListRow) -> Cow<'_, str> {
             .as_deref()
             .map(Cow::Borrowed)
             .unwrap_or(Cow::Borrowed("—")),
+        // A wall of `1/1 ready` summaries is unscannable, and the ready
+        // count already has its own column. The Status column carries the
+        // rollout state instead; the raw summary stays on hover.
+        Some(ResourceProjection::Deployment(p)) => Cow::Borrowed(deployment_rollout_state(p)),
         _ => Cow::Borrowed(&row.summary),
     }
+}
+
+/// `Available` / `Progressing` / `Failed` from the typed conditions, with
+/// the replica counts as the fallback authority.
+fn deployment_rollout_state(deployment: &k10s_protocol::DeploymentProjection) -> &'static str {
+    let condition = |name: &str, status: &str| {
+        deployment
+            .conditions
+            .iter()
+            .any(|condition| condition.condition_type == name && condition.status == status)
+    };
+    if condition("Progressing", "False") || condition("ReplicaFailure", "True") {
+        return "Failed";
+    }
+    let complete = matches!(
+        (
+            deployment.desired_replicas,
+            deployment.ready_replicas,
+            deployment.updated_replicas,
+            deployment.available_replicas,
+        ),
+        (Some(desired), Some(ready), Some(updated), Some(available))
+            if ready == desired && updated == desired && available == desired
+    );
+    if condition("Available", "False") || !complete {
+        return "Progressing";
+    }
+    "Available"
+}
+
+/// The unabridged status summary, kept for the Status cell's tooltip so
+/// shortening the visible state never loses the backend's reason.
+fn resource_status_detail(row: &ResourceListRow) -> Option<&str> {
+    let state = resource_status(row);
+    (!row.summary.is_empty() && row.summary != state).then_some(row.summary.as_str())
 }
 fn ready_pair(ready: Option<u32>, desired: Option<u32>) -> String {
     match (ready, desired) {
@@ -389,6 +513,24 @@ fn resource_image(row: &ResourceListRow) -> String {
             .join(", "),
         _ => "—".into(),
     }
+}
+
+/// `…/kubernetes-mcp:v0.3.1`: the registry and org path are the same for
+/// every row, so they are dropped first and the image name plus tag — the
+/// part that differs — survives.
+fn image_cell_text(image: &str, max_chars: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    if image.graphemes(true).count() <= max_chars {
+        return image.to_owned();
+    }
+    if let Some((_, tail)) = image.rsplit_once('/') {
+        let short = format!("…/{tail}");
+        if short.graphemes(true).count() <= max_chars {
+            return short;
+        }
+        return super::responsive_table::middle_elide(&short, max_chars);
+    }
+    super::responsive_table::middle_elide(image, max_chars)
 }
 fn resource_restarts(row: &ResourceListRow) -> String {
     match row.projection.as_ref() {
@@ -421,7 +563,7 @@ fn status_tone(status: &str) -> (char, egui::Color32) {
         || lowered.contains("backoff")
         || lowered.contains("terminating")
     {
-        ('\u{2715}', super::theme::DANGER)
+        ('\u{2a2f}', super::theme::DANGER)
     } else if lowered.contains("progress")
         || lowered.contains("pending")
         || lowered.contains("partial")
@@ -469,14 +611,14 @@ fn is_degraded_ready_status(lowered: &str) -> bool {
 
 /// Render the status cell with its tone glyph and color, keeping the full
 /// text accessible and on the hover tooltip.
-fn status_label(ui: &mut egui::Ui, status: &str) {
+fn status_label(ui: &mut egui::Ui, status: &str, detail: Option<&str>) {
     let (glyph, color) = status_tone(status);
     let text = format!("{} {}", glyph, status);
     let response = ui.colored_label(color, text);
     // The glyph is purely visual; the accessible label stays the clean status
     // text so semantic queries and screen readers never see the shape.
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, status.to_owned()));
-    response.on_hover_text(status);
+    response.on_hover_text(detail.unwrap_or(status));
 }
 
 /// Render the ready/desired count, turning yellow when ready is below its
@@ -507,17 +649,44 @@ fn ready_label(ui: &mut egui::Ui, row: &ResourceListRow) {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::ready_pair;
+    use super::{image_cell_text, ready_pair};
     #[test]
     fn partial_deployment_and_pod_readiness_never_fabricate_zeroes() {
         assert_eq!(ready_pair(Some(1), None), "—");
         assert_eq!(ready_pair(None, Some(2)), "—");
         assert_eq!(ready_pair(Some(1), Some(2)), "1/2");
     }
+
+    #[test]
+    fn image_cells_drop_the_registry_prefix_before_the_name_and_tag() {
+        let image = "ghcr.io/agentconnect/kubernetes-mcp:v1.51.0";
+        assert_eq!(image_cell_text(image, 60), image, "short images stay whole");
+        let shown = image_cell_text(image, 28);
+        assert_eq!(shown, "…/kubernetes-mcp:v1.51.0");
+        // Even when the tail alone is too long, the tag survives.
+        let shown = image_cell_text(image, 14);
+        assert!(
+            shown.ends_with(":v1.51.0"),
+            "the tag is the part that differs between rows: {shown}"
+        );
+        assert!(
+            !shown.starts_with("ghcr"),
+            "the registry goes first: {shown}"
+        );
+    }
+}
+
+/// Column headers are small uppercase muted text, so they read as the
+/// table's frame rather than as another row of values.
+fn header_text(visible: &str) -> egui::RichText {
+    egui::RichText::new(visible.to_uppercase())
+        .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+        .color(super::theme::MUTED_TEXT)
 }
 
 fn sort_header<I>(
     ui: &mut egui::Ui,
+    window_id: WindowId,
     title: &str,
     visible: &str,
     key: &str,
@@ -526,16 +695,27 @@ fn sort_header<I>(
 ) {
     let active = sort.is_some_and(|spec| spec.column == key);
     let ascending = sort.map(|spec| spec.ascending).unwrap_or(true);
-    let arrow = if !active {
-        "↕"
-    } else if ascending {
-        "↑"
+    // Only the active column carries a direction marker; a row of `↕` on
+    // every header is noise that says nothing about the current sort.
+    let heading = if active {
+        format!(
+            "{} {}",
+            visible.to_uppercase(),
+            if ascending { "▲" } else { "▼" }
+        )
     } else {
-        "↓"
+        visible.to_uppercase()
     };
-    ui.horizontal(|ui| {
-        ui.label(visible);
-        let button = ui.small_button(arrow);
+    // The whole header cell is the sort control, so the title stays a plain
+    // label and the click target is the cell itself.
+    let cell = ui.max_rect();
+    ui.add(egui::Label::new(header_text(&heading)).selectable(false));
+    let button = ui.interact(
+        cell,
+        egui::Id::new(("k10s.resource.table.sort", window_id.0, title, key)),
+        egui::Sense::click(),
+    );
+    {
         let label = format!("Sort {} by {key}", title.to_lowercase());
         button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
         if button.clicked() {
@@ -551,5 +731,5 @@ fn sort_header<I>(
                 }
             });
         }
-    });
+    }
 }

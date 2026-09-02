@@ -232,15 +232,11 @@ Window
               GenericContainer
                 GenericContainer
                   Label value="Status ● —"
-                  GenericContainer
-                    GenericContainer
                   Label value="Ready · —"
-                  GenericContainer
-                    GenericContainer
                   Button label="Show more Pod vitals"
               GenericContainer
                 Label value="Freshness · loading"
-                  TextRun value="Loading"
+                  TextRun value="● Loading"
               GenericContainer
                 GenericContainer
                   Button label="Tab Overview"

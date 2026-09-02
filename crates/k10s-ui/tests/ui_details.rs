@@ -373,7 +373,7 @@ fn compact_frame_chrome_has_disjoint_contained_hitboxes_and_reserved_footer() {
         "compact tab hitbox {tab:?} overlaps action hitbox {action:?}"
     );
     let footer = detail
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     let body = detail
         .get_by_role_and_label(Role::ScrollView, "Detail body")
@@ -564,7 +564,7 @@ fn kind_configurators_run_before_shared_vital_accessibility_paint() {
     deployment_harness.run_steps(4);
     deployment_harness
         .get_by_role_and_label(Role::Window, "Deployment · default / web-frontend")
-        .get_by_label("Rollout ● NewReplicaSetAvailable");
+        .get_by_label("Rollout ● Complete");
 }
 
 #[test]
@@ -596,7 +596,7 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    for label in ["Rollout ● NewReplicaSetAvailable", "Ready · 18/20"] {
+    for label in ["Rollout ● Complete", "Ready · 18/20"] {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Strategy · RollingUpdate").is_none());
@@ -2456,7 +2456,7 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     harness.run_steps(4);
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    window.get_by_label("Rollout ● NewReplicaSetAvailable");
+    window.get_by_label("Rollout ● Complete");
     window.get_by_label("Ready · 18/20");
     window.get_by_role_and_label(Role::Button, "Show more Deployment vitals");
     window.get_by_role_and_label(Role::Button, "Tab YAML");
@@ -2464,9 +2464,7 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     window.get_by_role_and_label(Role::Button, "Delete…");
     let owner = window.rect();
     let strip = window.get_by_label("Detail vital strip").rect();
-    let rollout = window
-        .get_by_label("Rollout ● NewReplicaSetAvailable")
-        .rect();
+    let rollout = window.get_by_label("Rollout ● Complete").rect();
     let ready = window.get_by_label("Ready · 18/20").rect();
     let more_vitals = window
         .get_by_role_and_label(Role::Button, "Show more Deployment vitals")

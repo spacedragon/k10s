@@ -534,20 +534,19 @@ fn deployment_projection_complete_uses_typed_fields_only() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     for label in [
-        "Rollout ● NewReplicaSetAvailable",
+        "Rollout ● Complete",
         "PODS · 1",
-        "ROLLOUT HISTORY",
+        "ROLLOUT HISTORY · 1 revision",
         "4 current",
         "v4",
         "TEMPLATE",
         "Image (api): ghcr.io/acme/checkout:v4",
         "Selector: app=checkout",
-        "MANAGED BY",
-        "Manager · Helm",
-        "Helm release · checkout-prod",
+        "Replicas · 3 desired · 3 available",
+        "Rolling update · surge 25% · unavailable 1",
         "LABELS · 6",
         "IDENTITY",
-        "Context · deployment-test",
+        "Managed by · Helm · release checkout-prod (payments)",
     ] {
         window.get_by_label(label);
     }
@@ -589,7 +588,7 @@ fn deployment_projection_progressing_failed_and_missing_are_semantic() {
                 "False",
                 Some("ProgressDeadlineExceeded"),
             )])),
-            "Rollout ✕ ProgressDeadlineExceeded",
+            "Rollout ⨯ ProgressDeadlineExceeded",
             false,
         ),
         (None, "Rollout · —", true),
@@ -653,7 +652,9 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
     ] {
         window.get_by_label(label);
     }
+    window.get_by_label("Managed by · —");
     assert!(window.query_by_label("MANAGED BY").is_none());
+    assert!(window.query_by_label("Rolling update · —").is_none());
     assert!(window.query_by_label("LABELS · 0").is_none());
     assert!(window.query_by_label("ANNOTATIONS · 0").is_none());
 }
@@ -712,7 +713,7 @@ fn related_pod_status_prefers_typed_container_failure_over_running_phase() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     window.get_by_label("▲ CrashLoopBackOff");
-    window.get_by_label("✕ Exit 137");
+    window.get_by_label("⨯ Exit 137");
     assert!(window.query_by_label("● Running").is_none());
 }
 
@@ -820,8 +821,8 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
 }
 
 /// Regression guard for the Overview geometry: at the 1000x700 wide viewport
-/// the operational/configuration columns keep the 1.35:1 ratio and label chips
-/// never overlap the expand buttons; at the 640x700 narrow viewport the
+/// the operational/configuration columns remain separated by a draggable panel
+/// and label chips never overlap the expand buttons; at the 640x700 narrow viewport the
 /// metadata column collapses behind its disclosure button.
 #[test]
 fn deployment_overview_verification_geometries_and_no_overlap() {
@@ -832,13 +833,8 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     let window = integrated_deployment_window(&wide);
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
-    assert!(
-        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
-        "wide 1.35:1 ratio drifted: {operational:?} {configuration:?}"
-    );
-    let annot_button = window
-        .get_by_role_and_label(Role::Button, "Annotations 2 ▾")
-        .rect();
+    assert!(operational.right() < configuration.left());
+    assert!(window.query_all_by_role(Role::Splitter).next().is_some());
     for control in [
         "Tab Overview",
         "Tab YAML",
@@ -872,10 +868,9 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         chip_tops.len() >= 2,
         "constrained metadata labels must wrap"
     );
-    // Annotations button must be present and reachable (not pushed below the
-    // fold), which is guaranteed when the chips wrap within the column width.
-    window.get_by_role_and_label(Role::Button, "Annotations 2 ▾");
-    let _ = annot_button;
+    // The ANNOTATIONS section follows LABELS as its own section of chips.
+    window.get_by_label("ANNOTATIONS · 2");
+    window.get_by_label("meta.helm.sh/release-name: checkout-prod");
     let actions = window.get_by_role_and_label(Role::Button, "Actions");
     assert!(!actions.accesskit_node().is_disabled());
     actions.click();
@@ -928,10 +923,8 @@ fn deployment_actual_1000_640_resize_preserves_identity_and_expansion() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
-    assert!(
-        (operational.width() / configuration.width() - 1.35).abs() < 0.02,
-        "{operational:?} {configuration:?}"
-    );
+    assert!(operational.right() < configuration.left());
+    assert!(window.query_all_by_role(Role::Splitter).next().is_some());
 
     harness
         .state_mut()
@@ -1089,9 +1082,10 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
             .rect()
     };
 
-    let ready_header = text_run("Ready");
+    // Table headers are small uppercase muted text per the reference.
+    let ready_header = text_run("READY");
     let ready = text_run("1/1");
-    let restarts_header = text_run("Restarts");
+    let restarts_header = text_run("RESTARTS");
     table.get_by_role_and_label(Role::Label, "4294967295");
     let restarts = table
         .query_all_by_role(Role::TextRun)
@@ -1101,7 +1095,7 @@ fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
         })
         .expect("elided oversized Restarts TextRun")
         .rect();
-    let age_header = text_run("Age");
+    let age_header = text_run("AGE");
     let age = table
         .query_all_by_role(Role::TextRun)
         .filter(|node| node.value().as_deref() == Some("—"))
@@ -1192,13 +1186,13 @@ fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     assert_eq!(window.query_all_by_role(Role::ScrollView).count(), 1);
     let footer = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(window.rect().contains_rect(footer));
 }
 
 #[test]
-fn deployment_metadata_accessibility_expands_annotations_without_rollback() {
+fn deployment_metadata_renders_annotations_section_without_rollback() {
     let mut harness = harness(egui::vec2(1_240.0, 820.0));
     let detail = detail_with(Some(projection(Vec::new())));
     let identity = detail.identity.clone();
@@ -1220,26 +1214,16 @@ fn deployment_metadata_accessibility_expands_annotations_without_rollback() {
         window.get_by_label(label);
     }
     assert!(window.query_by_label("Show 2 more labels").is_none());
-    let disclosure = window.get_by_role_and_label(Role::Button, "Annotations 2 ▾");
-    assert_eq!(
-        disclosure.accesskit_node().data().is_expanded(),
-        Some(false)
-    );
-    disclosure.click();
-    harness.run_steps(2);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    // Labels render as chips; the chip exposes `key: value` as its accessible
-    // name even though the visible text drops the colon.
-    window.get_by_label("team: payments");
+    // Annotations are a sibling section of chips, not a disclosure: every
+    // chip exposes `key: value` as its accessible name even though the
+    // visible text tones the key down.
+    window.get_by_label("LABELS · 6");
+    window.get_by_label("ANNOTATIONS · 2");
     window.get_by_label("meta.helm.sh/release-name: checkout-prod");
-    let disclosure = window.get_by_role_and_label(Role::Button, "Annotations 2 ▴");
-    assert_eq!(disclosure.accesskit_node().data().is_expanded(), Some(true));
-    disclosure.click();
-    harness.run_steps(2);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    window.get_by_label("meta.helm.sh/release-namespace: payments");
     assert!(
         window
-            .query_by_label("meta.helm.sh/release-name: checkout-prod")
+            .query_by_role_and_label(Role::Button, "Annotations 2 ▾")
             .is_none()
     );
     assert!(window.query_by_label("Roll back…").is_none());
@@ -1278,7 +1262,9 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
         .click();
     harness.run_steps(1);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window.get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection");
+    window.get_by_label(
+        "p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection",
+    );
     assert!(window.query_by_label("Roll back…").is_none());
 
     harness.state_mut().feed.detail_authority.insert(
@@ -1434,7 +1420,7 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
 
     // The footer is fixed at the bottom of the detail window.
     let footer_before = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(
         footer_before.top() > window.rect().bottom() - footer_before.height() - 12.0,
@@ -1465,7 +1451,7 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     let footer_after = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
         .rect();
     assert!(
         (footer_after.center() - footer_before.center()).length() <= 1.0,

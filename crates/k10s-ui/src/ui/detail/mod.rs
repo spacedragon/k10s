@@ -92,11 +92,25 @@ enum DetailShortcut {
     Tab(DetailTab),
     CopyName,
     OpenOwner,
+    /// `Ctrl+D`: open the delete confirmation dialog.
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DetailRuntimeAction {
     PreviousLogs { window: WindowId, container: String },
+}
+
+/// Whether this detail may advertise and honor `Ctrl+D`: the backend
+/// reports the resource as deletable and the window is live.
+pub(super) fn delete_shortcut_available(
+    presentation: &presentation::DetailPresentationInput<'_>,
+) -> bool {
+    presentation.mutations_allowed
+        && matches!(
+            presentation.primary,
+            presentation::DetailPrimary::Loaded(view) if view.capabilities.can_delete
+        )
 }
 
 fn shortcut_for_key(
@@ -190,6 +204,14 @@ pub(super) fn show<I>(
         let tabs = tabs_for_kind(&detail_identity_gvk(detail));
         let verified_owner = presentation.verified_owner();
         let shortcut = ui.input(|input| {
+            // `Ctrl+D` only opens the delete confirmation dialog, so the
+            // keyboard can never destroy a resource on its own.
+            if delete_shortcut_available(presentation)
+                && input.modifiers.command_only()
+                && input.key_pressed(egui::Key::D)
+            {
+                return Some(DetailShortcut::Delete);
+            }
             [
                 egui::Key::L,
                 egui::Key::P,
@@ -209,6 +231,9 @@ pub(super) fn show<I>(
             }
             Some(DetailShortcut::CopyName) => {
                 ui.ctx().copy_text(presentation.identity.name.clone());
+            }
+            Some(DetailShortcut::Delete) => {
+                dialogs.open_delete(window_id, presentation.identity.clone());
             }
             Some(DetailShortcut::OpenOwner) => {
                 if let Some(owner) = verified_owner {

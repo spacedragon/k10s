@@ -678,7 +678,12 @@ pub(crate) fn show(
         if view.take_scroll_reset() {
             egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
         }
-        let scroll_output = ScrollArea::vertical()
+        let log_scroll = if view.wraps() {
+            ScrollArea::vertical()
+        } else {
+            ScrollArea::both()
+        };
+        let scroll_output = log_scroll
             .id_salt(("logs.stream", window_id.0))
             .stick_to_bottom(was_following)
             .show(ui, |ui| {
@@ -839,7 +844,12 @@ pub(crate) fn show_aggregate(
                 ui.ctx().copy_text(view.export_text());
             }
         });
-        ScrollArea::vertical()
+        let log_scroll = if view.wraps() {
+            ScrollArea::vertical()
+        } else {
+            ScrollArea::both()
+        };
+        log_scroll
             .id_salt(("logs.aggregate.stream", window_id.0))
             .stick_to_bottom(view.follows())
             .show(ui, |ui| {

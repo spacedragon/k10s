@@ -204,7 +204,15 @@ pub(super) fn sized_cell(
 pub(super) fn elided_label(ui: &mut egui::Ui, value: String, max_chars: usize) {
     let compact = middle_elide(&value, max_chars);
     let changed = compact != value;
-    let response = ui.label(compact);
+    // Cells clip rather than wrap: a wrapped value would grow the row past
+    // the height its background is painted at.
+    let response = ui.add(
+        egui::Label::new(compact)
+            .truncate()
+            // The tooltip below shows the full value, not the compacted
+            // text egui would otherwise repeat.
+            .show_tooltip_when_elided(false),
+    );
     let response = if changed {
         response.on_hover_text(&value)
     } else {
