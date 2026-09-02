@@ -47,14 +47,14 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
             DetailTab::Logs,
             DetailTab::Shell,
         ],
-        Some(
-            WorkloadKind::Deployment
-            | WorkloadKind::ReplicaSet
-            | WorkloadKind::StatefulSet
-            | WorkloadKind::DaemonSet
-            | WorkloadKind::Job
-            | WorkloadKind::CronJob,
-        ) => &[
+        Some(WorkloadKind::Deployment | WorkloadKind::ReplicaSet | WorkloadKind::StatefulSet) => &[
+            DetailTab::Overview,
+            DetailTab::Pods,
+            DetailTab::Events,
+            DetailTab::Yaml,
+            DetailTab::Logs,
+        ],
+        Some(WorkloadKind::DaemonSet | WorkloadKind::Job | WorkloadKind::CronJob) => &[
             DetailTab::Overview,
             DetailTab::Pods,
             DetailTab::Events,
@@ -126,8 +126,15 @@ fn shortcut_labels_for(
         "c copy name",
         "o owner",
     ];
-    const CONTROLLER: &[&str] = &["p pods", "y yaml", "e events", "c copy name"];
-    const CONTROLLER_OWNER: &[&str] = &["p pods", "y yaml", "e events", "c copy name", "o owner"];
+    const CONTROLLER: &[&str] = &["p pods", "l logs", "y yaml", "e events", "c copy name"];
+    const CONTROLLER_OWNER: &[&str] = &[
+        "p pods",
+        "l logs",
+        "y yaml",
+        "e events",
+        "c copy name",
+        "o owner",
+    ];
     const GENERIC: &[&str] = &["y yaml", "e events", "c copy name"];
     const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
 
@@ -434,19 +441,25 @@ fn show_generic_body<I: RowIdentity>(
             }
         }
         DetailTab::Logs => {
-            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
-            else {
-                ui.label("Pod runtime details unavailable");
-                return;
-            };
-            tools::logs::show(
-                ui,
-                window_id,
-                &mut streams.logs,
-                stream_target(detail, runtime.default_container()),
-                runtime.containers(),
-                runtime.default_previous(),
-            );
+            if WorkloadKind::from_gvk(&presentation.identity.gvk) == Some(WorkloadKind::Pod) {
+                let Some(runtime) =
+                    pod::PodRuntimeProjection::from_view(presentation.identity, view)
+                else {
+                    ui.label("Pod runtime details unavailable");
+                    return;
+                };
+                tools::logs::show(
+                    ui,
+                    window_id,
+                    &mut streams.logs,
+                    stream_target(detail, runtime.default_container()),
+                    runtime.containers(),
+                    runtime.default_previous(),
+                );
+            } else {
+                let targets = aggregate_log_targets(presentation.identity, presentation.relations);
+                tools::logs::show_aggregate(ui, window_id, &mut streams.logs, &targets);
+            }
         }
         DetailTab::Shell => {
             let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
@@ -462,6 +475,54 @@ fn show_generic_body<I: RowIdentity>(
             );
         }
     }
+}
+
+fn aggregate_log_targets(
+    owner: &k10s_protocol::ResourceIdentity,
+    relations: Option<&crate::ui::RelationState>,
+) -> Vec<k10s_protocol::StreamTarget> {
+    let Some(crate::ui::RelationState::Loaded { response, .. }) = relations else {
+        return Vec::new();
+    };
+    let mut targets = response
+        .groups
+        .iter()
+        .filter(|group| {
+            group.gvk.group.is_empty() && group.gvk.version == "v1" && group.gvk.kind == "Pod"
+        })
+        .flat_map(|group| &group.rows)
+        .flat_map(|row| {
+            let containers = match &row.projection {
+                Some(k10s_protocol::ResourceProjection::Pod(pod)) => pod
+                    .containers
+                    .iter()
+                    .map(|container| container.name.as_str())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            containers
+                .into_iter()
+                .map(move |container| k10s_protocol::StreamTarget {
+                    context: owner.context.clone(),
+                    namespace: row
+                        .identity
+                        .namespace
+                        .clone()
+                        .unwrap_or_else(|| "default".to_owned()),
+                    pod: row.identity.name.clone(),
+                    uid: row.identity.uid.clone(),
+                    container: container.to_owned(),
+                })
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| {
+        (&left.namespace, &left.pod, &left.container).cmp(&(
+            &right.namespace,
+            &right.pod,
+            &right.container,
+        ))
+    });
+    targets
 }
 
 /// The destructive `Delete…` button, rendered rightmost in the reference
@@ -599,8 +660,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DetailShortcut, shortcut_for_key, shortcut_tab};
+    use super::{DetailShortcut, shortcut_for_key, shortcut_tab, tabs_for_kind};
     use crate::workspace::DetailTab;
+    use k10s_protocol::GroupVersionKind;
+
+    fn apps(kind: &str) -> GroupVersionKind {
+        GroupVersionKind {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: kind.into(),
+        }
+    }
+
+    #[test]
+    fn aggregate_logs_are_limited_to_requested_controller_kinds() {
+        for kind in ["Deployment", "ReplicaSet", "StatefulSet"] {
+            assert!(
+                tabs_for_kind(&apps(kind)).contains(&DetailTab::Logs),
+                "{kind}"
+            );
+        }
+        assert!(!tabs_for_kind(&apps("DaemonSet")).contains(&DetailTab::Logs));
+    }
 
     #[test]
     fn detail_shortcuts_map_to_investigation_tabs() {

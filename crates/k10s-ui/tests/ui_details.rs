@@ -284,7 +284,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
             harness.get_by_role_and_label(Role::Window, "StatefulSet · default / database");
         assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
         let footer = detail
-            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+            .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
             .rect();
         assert!(detail.rect().contains_rect(footer));
         assert!(
@@ -311,7 +311,7 @@ fn frame_body_has_one_finite_scroll_owner_and_keeps_footer_visible_at_min_height
     assert_eq!(
         footer_before,
         detail
-            .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection",)
+            .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection",)
             .rect()
     );
 }
@@ -373,7 +373,7 @@ fn compact_frame_chrome_has_disjoint_contained_hitboxes_and_reserved_footer() {
         "compact tab hitbox {tab:?} overlaps action hitbox {action:?}"
     );
     let footer = detail
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection")
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection")
         .rect();
     let body = detail
         .get_by_role_and_label(Role::ScrollView, "Detail body")
@@ -680,7 +680,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     deployment_harness.run_steps(3);
     common::workload_window(&deployment_harness, "Deployments")
-        .get_by_label("p pods · y yaml · e events · c copy name · Esc clear selection");
+        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Esc clear selection");
 
     let mut generic_harness = harness();
     let node = ResourceIdentity {
@@ -1809,17 +1809,21 @@ fn tabs_and_actions_are_exact_per_kind() {
     harness.run_steps(4);
 
     let window = common::workload_window(&harness, "Deployments");
-    for tab in ["Tab Overview", "Tab Pods", "Tab Events", "Tab YAML"] {
+    for tab in [
+        "Tab Overview",
+        "Tab Pods",
+        "Tab Events",
+        "Tab YAML",
+        "Tab Logs",
+    ] {
         window.get_by_role_and_label(Role::Button, tab);
     }
-    for absent in ["Tab Logs", "Tab Shell"] {
-        assert!(
-            window
-                .query_by_role_and_label(Role::Button, absent)
-                .is_none(),
-            "{absent} must not be offered on a deployment"
-        );
-    }
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Tab Shell")
+            .is_none(),
+        "Tab Shell must not be offered on a deployment"
+    );
     window.get_by_role_and_label(Role::Button, "Scale…");
     window.get_by_role_and_label(Role::Button, "Delete…");
     assert!(window.query_by_label("Exec shell").is_none());
