@@ -114,8 +114,8 @@ Window label="Deployment · payments / checkout"
                   Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
                     TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
             GenericContainer
-              Label value="p pods · y yaml · e events · c copy name · Esc clear selection"
-                TextRun value="p pods · y yaml · e events · c copy name · Esc clear selection"
+              Label value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
+                TextRun value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
   Splitter
   Splitter
   Splitter
