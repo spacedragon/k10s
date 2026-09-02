@@ -1468,6 +1468,18 @@ impl K10sApp {
                                 if stale_log_attempt {
                                     return Ok(());
                                 }
+                                if entry.aggregate_target.is_some() {
+                                    if self.aggregate_log_sources_exhausted(entry.window)
+                                        && let Some(view) = self
+                                            .shell
+                                            .stream_stores_mut()
+                                            .logs
+                                            .get_mut(entry.window)
+                                    {
+                                        view.fail(&reason);
+                                    }
+                                    return Ok(());
+                                }
                                 match entry.route {
                                     StreamRoute::Logs => {
                                         if let Some(view) = self
@@ -4150,6 +4162,17 @@ impl K10sApp {
                 .is_some_and(|targets| targets.contains(target))
     }
 
+    fn aggregate_log_sources_exhausted(&self, window: WindowId) -> bool {
+        !self
+            .pending_stream_tickets
+            .values()
+            .any(|entry| entry.window == window && entry.aggregate_target.is_some())
+            && !self
+                .aggregate_log_sessions
+                .keys()
+                .any(|key| key.0 == window)
+    }
+
     /// Complete in-flight stream ticket requests and open their sockets.
     fn finish_stream_tickets(&mut self) {
         while let Some(id) = self
@@ -4193,11 +4216,12 @@ impl K10sApp {
                                 .insert(aggregate_session_key(window, &granted.target), session);
                         }
                         Err(error) => {
-                            if let Some(view) = self.shell.stream_stores_mut().logs.get_mut(window)
+                            if self.aggregate_log_sources_exhausted(window)
+                                && let Some(view) =
+                                    self.shell.stream_stores_mut().logs.get_mut(window)
                             {
-                                view.append(&format!(
-                                    "[{} / {}] stream unavailable: {error}",
-                                    granted.target.pod, granted.target.container
+                                view.fail(&format!(
+                                    "could not open any related log stream: {error}"
                                 ));
                             }
                         }
@@ -4405,6 +4429,11 @@ impl K10sApp {
             }
             if rejected {
                 self.aggregate_log_sessions.remove(&key);
+                if self.aggregate_log_sources_exhausted(key.0)
+                    && let Some(view) = self.shell.stream_stores_mut().logs.get_mut(key.0)
+                {
+                    view.fail("all related log streams disconnected");
+                }
             }
         }
     }
