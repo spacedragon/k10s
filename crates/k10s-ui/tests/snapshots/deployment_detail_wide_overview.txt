@@ -196,7 +196,7 @@ Window label="Deployment · payments / checkout"
                         GenericContainer
                           Label value="tier: backend"
                             TextRun value="tier: back…"
-                      Button label="Annotations 2 ▾"
+                        Button label="Annotations 2 ▾"
                       Label value="IDENTITY"
                         TextRun value="IDENTITY"
                       GenericContainer
