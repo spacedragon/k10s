@@ -753,12 +753,12 @@ fn freshness_text(freshness: DetailFreshness<'_>) -> String {
 fn compact_freshness_text(freshness: DetailFreshness<'_>) -> &'static str {
     match freshness {
         DetailFreshness::Loading => "Loading",
-        DetailFreshness::Unavailable => "Unavailable",
+        DetailFreshness::Unavailable => "Unavail.",
         DetailFreshness::Gone => "Gone",
         DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => "Live",
         DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Stale",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconnecting",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Forbidden",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconn.",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Denied",
         DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => "Failed",
         DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => "Ready",
     }
@@ -912,6 +912,37 @@ mod tests {
             },)),
             "Freshness · stale"
         );
+    }
+
+    #[test]
+    fn compact_long_freshness_labels_fit_the_reserved_narrow_budget() {
+        use crate::ui::WindowFreshness;
+
+        let states = [
+            DetailFreshness::Unavailable,
+            DetailFreshness::Source(&WindowFreshness::Reconnecting {
+                last_sync_age: "8s".into(),
+                attempt: 2,
+                retry_in: "1s".into(),
+            }),
+            DetailFreshness::Source(&WindowFreshness::Forbidden {
+                user: "alice".into(),
+                verb: "get".into(),
+                resource: "pods".into(),
+                scope: "default".into(),
+            }),
+        ];
+        for state in states {
+            let painted = super::compact_freshness_text(state);
+            assert!(
+                painted.chars().count() <= 8,
+                "compact freshness {painted:?} exceeds the 64px text budget"
+            );
+            assert!(
+                super::freshness_text(state).starts_with("Freshness · "),
+                "full accessible freshness must remain stable"
+            );
+        }
     }
 
     #[test]
