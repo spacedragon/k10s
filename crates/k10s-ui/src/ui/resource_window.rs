@@ -399,7 +399,7 @@ pub(super) fn show_namespace_combobox<I>(
         // floating next to it.
         ComboBox::from_id_salt(("namespace", window_id.0))
             .selected_text(format!("Namespace: {selected_text}"))
-            .width(150.0)
+            .width(120.0)
             .show_ui(ui, |ui| {
                 let search = scratch.namespace_search.entry(window_id).or_default();
                 let response = ui.add(
@@ -477,7 +477,7 @@ fn show_status_combobox<I>(
     let selected = status_filter.as_deref().unwrap_or("all");
     ComboBox::from_id_salt(("status", window_id.0))
         .selected_text(format!("Status: {selected}"))
-        .width(140.0)
+        .width(100.0)
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(status_filter.is_none(), "all")
@@ -822,12 +822,15 @@ pub(super) fn show<I>(
             shows_freshness,
         );
     ui.horizontal_wrapped(|ui| {
+        if compact_controls {
+            ui.spacing_mut().item_spacing.x = 0.0;
+        }
         let search_hint = format!("Search {title_lower}");
         let mut search = state.search.clone();
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
                 .hint_text(search_hint.clone())
-                .desired_width(if compact_controls { 100.0 } else { 200.0 }),
+                .desired_width(if compact_controls { 50.0 } else { 200.0 }),
         );
         search_edit.widget_info(move || {
             WidgetInfo::labeled(WidgetType::TextEdit, true, search_hint.clone())
@@ -850,7 +853,7 @@ pub(super) fn show<I>(
         show_status_combobox(ui, window_id, &state.status_filter, rows, queued);
 
         if compact_controls {
-            ui.menu_button("More list controls", |ui| {
+            ui.menu_button(RichText::new("More list controls").size(10.0), |ui| {
                 show_match_details(ui, window_id, state, queued);
                 ui.separator();
                 show_secondary_controls(

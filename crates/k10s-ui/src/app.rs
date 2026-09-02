@@ -9331,7 +9331,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_deployment_toolbar_overflows_secondary_controls() {
+    fn compact_deployment_toolbar_contains_primary_controls_at_640_points() {
         let (mut app, _) = deployment_list_app();
         let mut snapshot = app.workspace_snapshot();
         snapshot.free_window_resizing = true;
@@ -9340,7 +9340,7 @@ mod tests {
             .iter_mut()
             .find(|window| window.title == "Deployments")
             .expect("deployment window is persisted");
-        deployment.geometry.size[0] = 460.0;
+        deployment.geometry.size[0] = 640.0;
         app.restore_workspace_snapshot(snapshot);
 
         let mut harness = toolbar_test_harness(app);
@@ -9350,24 +9350,34 @@ mod tests {
                 "Deployments · all namespaces",
             );
 
-            window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
+            let search = window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
+            let namespace = window.get_by_value("Namespace: All namespaces");
             assert_eq!(
-                window
-                    .get_by_value("Namespace: All namespaces")
-                    .accesskit_node()
-                    .role(),
+                namespace.accesskit_node().role(),
                 egui::accesskit::Role::ComboBox,
             );
+            let status = window.get_by_value("Status: all");
             assert_eq!(
-                window.get_by_value("Status: all").accesskit_node().role(),
+                status.accesskit_node().role(),
                 egui::accesskit::Role::ComboBox,
             );
-            window.get_by_label("● Live · just now");
+            let live = window.get_by_label("● Live · just now");
             assert!(window.query_by_label("Columns ▾").is_none());
             assert!(window.query_by_label("↻").is_none());
-            window
-                .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
-                .click();
+            let more =
+                window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
+            for control in [&search, &namespace, &status, &more, &live] {
+                assert!(
+                    control.rect().right() <= window.rect().right(),
+                    "primary control must remain inside the list window"
+                );
+                assert!(
+                    (control.rect().center().y - search.rect().center().y).abs() < 1.0,
+                    "primary controls must remain on one toolbar line"
+                );
+            }
+            more.click();
         }
         harness.step();
         harness.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾ ⏵");
