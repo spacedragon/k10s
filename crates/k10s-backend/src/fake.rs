@@ -1788,6 +1788,31 @@ impl KubernetesAccess for FakeKubernetes {
                         receiver,
                     ))
                 }
+                Subscribe::Traffic { context } => {
+                    let state = self.lock();
+                    if !state
+                        .contexts
+                        .iter()
+                        .any(|candidate| candidate.name == context)
+                    {
+                        return Err(BackendError::NotFound);
+                    }
+                    drop(state);
+                    let (sender, receiver) = broadcast::channel(crate::watch::WATCH_CAPACITY);
+                    let _ = sender.send(crate::port::BackendEvent::Traffic(
+                        k10s_protocol::TrafficSample {
+                            context,
+                            captured_at_ms: 0,
+                            upload_bytes_per_second: 0,
+                            download_bytes_per_second: 0,
+                            uploaded_bytes_total: 0,
+                            downloaded_bytes_total: 0,
+                            requests_total: 0,
+                            active_requests: 0,
+                        },
+                    ));
+                    Ok(SubscriptionHandle::with_events("traffic-watch", receiver))
+                }
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     let mut state = self.lock();
                     let revision = state.current_revision();

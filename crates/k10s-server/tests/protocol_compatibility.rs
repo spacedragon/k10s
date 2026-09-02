@@ -402,8 +402,8 @@ fn checksum(values: &[Value]) -> String {
 }
 
 #[tokio::test]
-async fn current_protocol_reports_minor_four_and_still_negotiates_older_minors() {
-    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 4);
+async fn current_protocol_reports_minor_five_and_still_negotiates_older_minors() {
+    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 5);
     let (server, _fake) = spawn_server().await;
 
     let (_v12, welcome12) = connect_with_minor(&server, 2).await;

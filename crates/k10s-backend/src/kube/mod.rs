@@ -23,6 +23,7 @@ mod owners;
 mod permissions;
 mod port_forward;
 mod read;
+mod traffic;
 mod validation;
 mod watch;
 
@@ -132,6 +133,8 @@ pub struct KubeAdapter {
     /// [`Self::with_cluster_clients`], otherwise built on first use from the
     /// stored kubeconfig and cached here for reuse.
     clients: Arc<tokio::sync::Mutex<HashMap<String, kube::Client>>>,
+    /// Per-context counters shared by transport layers and telemetry subscribers.
+    traffic: traffic::TrafficRegistry,
     /// Coalesces lazy client construction so concurrent first use executes a
     /// credential plugin at most once.
     client_build_locks: ClientBuildLocks,
@@ -204,6 +207,7 @@ impl KubeAdapter {
         Ok(Self {
             registry: Arc::new(StdMutex::new(ContextRegistry::prepare(prepared)?)),
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            traffic: traffic::TrafficRegistry::default(),
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: Some(kubeconfig),
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -260,6 +264,7 @@ impl KubeAdapter {
         Ok(Self {
             registry: Arc::new(StdMutex::new(registry)),
             clients: Arc::new(tokio::sync::Mutex::new(client_map)),
+            traffic: traffic::TrafficRegistry::default(),
             client_build_locks: ClientBuildLocks::default(),
             kubeconfig_source: None,
             catalogs: StdMutex::new(CatalogCache::new()),
@@ -431,6 +436,7 @@ impl KubernetesAccess for KubeAdapter {
                 Subscribe::Infrastructure { context } => {
                     self.infrastructure_subscription(context).await
                 }
+                Subscribe::Traffic { context } => self.traffic_subscription(context).await,
                 Subscribe::StreamRedeem { ticket_id, route } => {
                     self.redeem_stream_ticket(ticket_id, route).await
                 }
@@ -452,6 +458,53 @@ impl KubernetesAccess for KubeAdapter {
 }
 
 impl KubeAdapter {
+    async fn traffic_subscription(
+        &self,
+        context: String,
+    ) -> Result<SubscriptionHandle, BackendError> {
+        if !self.knows_context(&context) {
+            return Err(BackendError::NotFound);
+        }
+        // Ensure the instrumented client exists before exposing its counters.
+        let _ = self.cluster_client(&context).await?;
+        let counters = self.traffic.counters(&context);
+        let (sender, receiver) = tokio::sync::broadcast::channel(crate::watch::WATCH_CAPACITY);
+        let subscription_id = format!("traffic:{context}");
+        tokio::spawn(async move {
+            let mut previous = counters.totals();
+            let mut previous_at = std::time::Instant::now();
+            let initial =
+                previous.sample(context.clone(), previous, std::time::Duration::from_secs(1));
+            if sender
+                .send(crate::port::BackendEvent::Traffic(initial))
+                .is_err()
+            {
+                return;
+            }
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if sender.receiver_count() == 0 {
+                    break;
+                }
+                let now = std::time::Instant::now();
+                let current = counters.totals();
+                let sample =
+                    current.sample(context.clone(), previous, now.duration_since(previous_at));
+                previous = current;
+                previous_at = now;
+                if sender
+                    .send(crate::port::BackendEvent::Traffic(sample))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(SubscriptionHandle::with_events(subscription_id, receiver))
+    }
+
     /// Assemble the desktop overview from fresh normalized resource lists.
     /// Missing API kinds are skipped (clusters legitimately differ), while
     /// authorization and transport failures remain visible to the caller.
@@ -1235,6 +1288,8 @@ impl KubeAdapter {
             }
         };
 
+        let builder =
+            builder.with_layer(&traffic::TrafficLayer::new(self.traffic.counters(context)));
         let client = builder.build();
         // Commit: share the built client with later queries of this context.
         {

@@ -16,6 +16,11 @@ Window
                   Button label="Cascade"
                   Button label="Focus"
                 GenericContainer
+                  Unknown label="Cluster traffic: waiting"
+                    Label value="●"
+                      TextRun value="●"
+                    Label value="↓ 0 B/s   ↑ 0 B/s"
+                      TextRun value="↓ 0 B/s   ↑ 0 B/s"
                   GenericContainer
                     GenericContainer
                       GenericContainer

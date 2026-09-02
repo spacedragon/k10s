@@ -23,6 +23,7 @@ pub mod resource;
 pub mod route;
 pub mod stream;
 pub mod subscription;
+pub mod traffic;
 
 pub use bootstrap::{BootstrapResponse, Context, ContextAvailability, ProtocolVersion, ServerInfo};
 pub use context::{
@@ -84,6 +85,7 @@ pub use subscription::{
     ResourceSnapshotPage, ResourceTypeEntry, ResourceTypesRequest, ResourceTypesResponse,
     ResourceWatchIdentity, ResourceWatchSpec, SubscriptionSelector,
 };
+pub use traffic::{TRAFFIC_EVENT_UPDATED, TrafficSample, TrafficWatchSpec};
 
 /// Major protocol version.
 pub const PROTOCOL_MAJOR: u16 = 1;
@@ -93,4 +95,5 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// lifecycle payloads. v1.3 added Pod, Deployment, and ReplicaSet
 /// projections, per-container metrics, and restart capability metadata.
 /// v1.4 added exact-identity resource watches for dedicated Detail authority.
-pub const PROTOCOL_MINOR: u16 = 4;
+/// v1.5 added context-scoped Kubernetes API transport traffic telemetry.
+pub const PROTOCOL_MINOR: u16 = 5;

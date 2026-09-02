@@ -118,6 +118,8 @@ pub struct K10sApp {
     infrastructure_load: InfrastructureLoad,
     infrastructure_subscription: Option<LiveSubscription>,
     infrastructure_context: Option<String>,
+    traffic_subscription: Option<LiveSubscription>,
+    traffic_context: Option<String>,
     stream_sessions: BTreeMap<(WindowId, StreamRoute), StreamSession>,
     pending_stream_tickets: BTreeMap<RequestId, PendingStreamTicket>,
     log_sources: BTreeMap<WindowId, LogSource>,
@@ -351,6 +353,8 @@ impl K10sApp {
             infrastructure_load: InfrastructureLoad::Loading,
             infrastructure_subscription: None,
             infrastructure_context: None,
+            traffic_subscription: None,
+            traffic_context: None,
             stream_sessions: BTreeMap::new(),
             pending_stream_tickets: BTreeMap::new(),
             log_sources: BTreeMap::new(),
@@ -535,6 +539,14 @@ impl K10sApp {
             .as_deref()
             .and_then(|context| self.client.infrastructure(context))
             .cloned();
+        self.shell.set_traffic_history(
+            selected_before
+                .as_deref()
+                .and_then(|context| self.client.traffic(context))
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
         let mut feed = self.build_resource_feed();
         feed.render_time = response
             .as_ref()
@@ -1695,6 +1707,8 @@ impl K10sApp {
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.select_infrastructure_context(&context)
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                        self.select_traffic_context(&context)
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                     }
                 }
                 self.flush_outbound()
@@ -1783,6 +1797,8 @@ impl K10sApp {
                     .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                 self.select_infrastructure_context(&current)
                     .map_err(|error| AppEventError::Terminal(error.to_string()))?;
+                self.select_traffic_context(&current)
+                    .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                 Ok(())
             }
             Some(other) => Err(AppEventError::Terminal(format!(
@@ -1856,6 +1872,20 @@ impl K10sApp {
             self.infrastructure_context = Some(context.to_owned());
         }
         self.refresh_infrastructure(context)
+    }
+
+    fn select_traffic_context(&mut self, context: &str) -> Result<(), ClientError> {
+        if !self.client.traffic_available() {
+            return Ok(());
+        }
+        if self.traffic_context.as_deref() != Some(context) {
+            if let Some(subscription) = self.traffic_subscription.take() {
+                self.client.unsubscribe(&subscription)?;
+            }
+            self.traffic_subscription = Some(self.client.subscribe_traffic(context.to_owned())?);
+            self.traffic_context = Some(context.to_owned());
+        }
+        Ok(())
     }
 
     fn refresh_infrastructure(&mut self, context: &str) -> Result<(), ClientError> {

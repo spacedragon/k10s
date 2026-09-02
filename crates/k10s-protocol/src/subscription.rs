@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::metrics::InfrastructureWatchSpec;
 use crate::resource::{BackendRevision, GroupVersionKind, ResourceIdentity, ResourceListRow};
+use crate::traffic::TrafficWatchSpec;
 
 /// Envelope event kind carrying a [`ResourceChanged`] delta.
 pub const RESOURCE_EVENT_CHANGED: &str = "resource.changed";
@@ -25,6 +26,8 @@ pub enum SubscriptionSelector {
     Resource(ResourceWatchSpec),
     /// Watch Overview, Nodes, Storage, and metrics for one context.
     Infrastructure(InfrastructureWatchSpec),
+    /// Watch Kubernetes API transport traffic for one context.
+    Traffic(TrafficWatchSpec),
     /// Bounded session-status stream for port-forward sessions. Events carry
     /// complete [`crate::PortForwardSession`] snapshots with monotonic
     /// revisions so they can be coalesced and replayed safely.

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 # Test-only surface for integration tests that record Kubernetes API traffic at the tower Service layer.
-testkit = ["dep:http-body-util", "dep:bytes"]
+testkit = ["dep:http-body-util"]
 
 [dependencies]
 k10s-protocol = { path = "../k10s-protocol" }
@@ -31,8 +31,9 @@ tracing = "0.1.44"
 uuid = { version = "1.24.1", features = ["v4"] }
 # Test-only transport dependencies, enabled exclusively through the `testkit` feature.
 tower = "0.5.3"
+bytes = "1.12.1"
+http-body = "1.0"
 http-body-util = { version = "0.1.5", optional = true }
-bytes = { version = "1.12.1", optional = true }
 http = "1.5.0"
 
 [dev-dependencies]
@@ -41,6 +42,7 @@ k10s-backend = { path = ".", features = ["testkit"] }
 # Discovery refresh tests drive tokio's mock clock (pause/advance).
 tokio = { version = "1.49.0", features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 rustls-pemfile = "2.2.0"
+http-body-util = "0.1.5"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 
 [[bench]]

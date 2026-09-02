@@ -72,6 +72,7 @@ enum ActiveSubscriptionKind {
     BootstrapStatus,
     Resource,
     PortForward,
+    Traffic,
 }
 
 impl WatchRecovery {
@@ -915,6 +916,25 @@ pub(crate) async fn serve_socket(
                             }
                         }
                     }
+                    Ok(SubscriptionSelector::Traffic(spec)) => {
+                        active_kind = Some(ActiveSubscriptionKind::Traffic);
+                        if negotiated_protocol.minor < 5 {
+                            Err((
+                                ErrorCode::UnsupportedMessage,
+                                "traffic telemetry requires protocol minor 5".to_owned(),
+                            ))
+                        } else {
+                            match kernel
+                                .subscribe(BackendSubscribe::Traffic {
+                                    context: spec.context,
+                                })
+                                .await
+                            {
+                                Ok(handle) => Ok(Some(handle)),
+                                Err(error) => Err(backend_rejection(&error)),
+                            }
+                        }
+                    }
                     Ok(SubscriptionSelector::PortForwardSessions) => {
                         match &state_port_forward {
                             Some(manager) => {
@@ -1043,6 +1063,7 @@ pub(crate) async fn serve_socket(
                                 "bootstrapStatus"
                                     | "resource"
                                     | "infrastructure"
+                                    | "traffic"
                                     | "portForwardSessions"
                             )
                         ) =>
@@ -1957,6 +1978,24 @@ async fn stream_backend_events(
                     }
                 }
             }
+            Ok(BackendEvent::Traffic(sample)) => {
+                let context = sample.context.clone();
+                match enqueue_telemetry(
+                    outbound,
+                    subscription_id,
+                    &context,
+                    k10s_protocol::TRAFFIC_EVENT_UPDATED,
+                    sample.captured_at_ms,
+                    &sample,
+                    sequence_counter,
+                ) {
+                    Ok(()) | Err(EnqueueError::Coalesced) => {}
+                    Err(EnqueueError::Overloaded) => {
+                        overload_close(outbound);
+                        break;
+                    }
+                }
+            }
             Ok(BackendEvent::Stream(_)) => {
                 // Stream chunks never ride the control scheduler; they are
                 // forwarded by the dedicated logs/exec sockets only.
@@ -2128,6 +2167,26 @@ fn enqueue_infrastructure(
     payload: &impl serde::Serialize,
     sequence_counter: &AtomicU64,
 ) -> Result<(), EnqueueError> {
+    enqueue_telemetry(
+        outbound,
+        subscription_id,
+        context,
+        k10s_protocol::INFRASTRUCTURE_EVENT_UPDATED,
+        revision,
+        payload,
+        sequence_counter,
+    )
+}
+
+fn enqueue_telemetry(
+    outbound: &Scheduler,
+    subscription_id: &SubscriptionId,
+    context: &str,
+    event_kind: &str,
+    revision: u64,
+    payload: &impl serde::Serialize,
+    sequence_counter: &AtomicU64,
+) -> Result<(), EnqueueError> {
     outbound.enqueue_p2_sequenced(subscription_id.as_str(), context, |queued_sequence| {
         let sequence = match queued_sequence {
             Some(sequence) => sequence,
@@ -2139,7 +2198,7 @@ fn enqueue_infrastructure(
             subscription_id: Some(subscription_id.clone()),
             sequence: Some(sequence),
             payload: serde_json::json!({
-                "kind": k10s_protocol::INFRASTRUCTURE_EVENT_UPDATED,
+                "kind": event_kind,
                 "revision": revision.to_string(),
                 "payload": payload,
             }),

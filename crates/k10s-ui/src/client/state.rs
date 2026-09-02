@@ -15,8 +15,9 @@ use k10s_protocol::{
     ResourceListRow, ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse,
     ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
     ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, StreamType, Subscribe, SubscriptionId, SubscriptionSelector, Unsubscribe,
-    YamlApplyRequest, YamlOutcome, YamlValidateRequest,
+    StreamTicketResponse, StreamType, Subscribe, SubscriptionId, SubscriptionSelector,
+    TRAFFIC_EVENT_UPDATED, TrafficSample, TrafficWatchSpec, Unsubscribe, YamlApplyRequest,
+    YamlOutcome, YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -757,6 +758,7 @@ pub struct ClientState {
     /// Retries stay blocked until its answer arrives.
     operation_refresh: Option<RequestId>,
     infrastructure: HashMap<String, InfrastructureResponse>,
+    traffic: HashMap<String, VecDeque<TrafficSample>>,
     server_bootstrap: Option<BootstrapResponse>,
     /// Authoritative port-forward sessions keyed by session ID, applied from
     /// complete snapshots on the bounded `portForwardSessions` stream and
@@ -847,6 +849,7 @@ impl ClientState {
             key_order: VecDeque::new(),
             operation_refresh: None,
             infrastructure: HashMap::new(),
+            traffic: HashMap::new(),
             server_bootstrap: None,
             port_forward_sessions: BTreeMap::new(),
             port_forward_revision: 0,
@@ -870,6 +873,13 @@ impl ClientState {
     pub fn exact_resource_watches_available(&self) -> bool {
         self.negotiated_protocol_minor
             .is_some_and(|minor| minor >= 4)
+    }
+
+    /// Whether the negotiated server supports Kubernetes API traffic telemetry.
+    #[must_use]
+    pub fn traffic_available(&self) -> bool {
+        self.negotiated_protocol_minor
+            .is_some_and(|minor| minor >= 5)
     }
 
     /// Start a fresh connection and queue the credential-bearing `Hello` frame.
@@ -1239,6 +1249,30 @@ impl ClientState {
         Ok(LiveSubscription { id })
     }
 
+    /// Subscribe to one context's server-side Kubernetes transport counters.
+    pub fn subscribe_traffic(
+        &mut self,
+        context: impl Into<String>,
+    ) -> Result<LiveSubscription, ClientError> {
+        if self.phase != ClientPhase::Ready {
+            return Err(ClientError::InvalidState("client is not ready"));
+        }
+        let limit = self.live_subscription_limit();
+        if self.live_subscriptions.len() >= limit {
+            return Err(ClientError::LiveSubscriptionLimit { limit });
+        }
+        let id = SubscriptionId::new(format!("traffic-{}", self.next_subscription_id));
+        self.next_subscription_id = self.next_subscription_id.saturating_add(1);
+        let selector = serde_json::to_value(SubscriptionSelector::Traffic(TrafficWatchSpec::new(
+            context,
+        )))
+        .map_err(|error| ClientError::Protocol(format!("could not encode selector: {error}")))?;
+        self.queue_subscribe(id.clone(), selector.clone())?;
+        self.live_subscriptions.insert(id.clone(), selector);
+        self.refresh_server_validity();
+        Ok(LiveSubscription { id })
+    }
+
     /// Stop retaining and recovering one desired subscription.
     pub fn unsubscribe(&mut self, subscription: &LiveSubscription) -> Result<bool, ClientError> {
         if !self.live_subscriptions.contains_key(subscription.id()) {
@@ -1282,6 +1316,12 @@ impl ClientState {
     #[must_use]
     pub fn infrastructure(&self, context: &str) -> Option<&InfrastructureResponse> {
         self.infrastructure.get(context)
+    }
+
+    /// Up to sixty most recent one-second traffic samples for a context.
+    #[must_use]
+    pub fn traffic(&self, context: &str) -> Option<&VecDeque<TrafficSample>> {
+        self.traffic.get(context)
     }
 
     /// Take the completed snapshot reassembled for one subscription.
@@ -2071,6 +2111,27 @@ impl ClientState {
                         if replace {
                             self.infrastructure
                                 .insert(response.context.clone(), response);
+                        }
+                    }
+                    Ok(())
+                }
+                TRAFFIC_EVENT_UPDATED => {
+                    let sample: TrafficSample = serde_json::from_value(event.payload)
+                        .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    let owned = self.owned_subscription(&frame).is_some_and(|id| {
+                        self.live_subscriptions.get(&id).is_some_and(|selector| {
+                            serde_json::from_value::<SubscriptionSelector>(selector.clone())
+                                .is_ok_and(|selector| matches!(
+                                    selector,
+                                    SubscriptionSelector::Traffic(spec) if spec.context == sample.context
+                                ))
+                        })
+                    });
+                    if owned {
+                        let history = self.traffic.entry(sample.context.clone()).or_default();
+                        history.push_back(sample);
+                        while history.len() > 60 {
+                            history.pop_front();
                         }
                     }
                     Ok(())

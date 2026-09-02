@@ -55,6 +55,7 @@ impl KubernetesAccess for ClosingWatchKubernetes {
                 Subscribe::Infrastructure { .. } => {
                     Err(BackendError::unsupported("infrastructure.watch"))
                 }
+                Subscribe::Traffic { .. } => Err(BackendError::unsupported("traffic.watch")),
                 Subscribe::StreamRedeem { .. } => Err(BackendError::unsupported("stream.redeem")),
                 Subscribe::Operations => Err(BackendError::unsupported("operations")),
             }

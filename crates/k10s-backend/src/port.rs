@@ -342,6 +342,8 @@ pub enum Subscribe {
     },
     /// Watch coalescible infrastructure telemetry for one context.
     Infrastructure { context: String },
+    /// Watch Kubernetes API transport traffic for one context.
+    Traffic { context: String },
     /// Redeem a single-use stream ticket in the kernel-owned Stream Hub.
     /// Returns a bounded receiver of stream chunks; the ticket is consumed
     /// exactly once.
@@ -909,6 +911,8 @@ pub enum BackendEvent {
     /// A complete infrastructure telemetry projection. The server coalesces
     /// these by context on its bounded P2 scheduler.
     Infrastructure(CatalogSnapshot),
+    /// One context-scoped Kubernetes API transport sample.
+    Traffic(k10s_protocol::TrafficSample),
     /// One chunk of a redeemed stream session. `exit_code` terminates it.
     Stream(crate::stream::StreamChunk),
     /// One background operation changed state.
