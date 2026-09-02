@@ -245,6 +245,7 @@ where
             window_id,
             &state.namespace_scope,
             &feed.namespace_catalog,
+            compact_controls,
             queued,
         );
 

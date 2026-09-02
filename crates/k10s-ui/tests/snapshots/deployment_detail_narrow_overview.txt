@@ -11,44 +11,31 @@ Window label="Deployment · payments / checkout"
             Unknown label="Detail vital strip"
             GenericContainer
               GenericContainer
+                Label value="Rollout ▲ ReplicaSetUpdated"
                 GenericContainer
                   GenericContainer
-                    Label value="Rollout ▲ ReplicaSetUpdated"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Ready · 3/3"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Up-to-date · 3"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Available · 3"
-                    GenericContainer
-                      GenericContainer
-                    Button label="Show more Deployment vitals"
+                Label value="Ready · 3/3"
+                GenericContainer
+                  GenericContainer
+                Button label="Show more Deployment vitals"
             GenericContainer
               Label value="Freshness · live (just now)"
-                TextRun value="Freshness · live (just now)"
+                TextRun value="Live"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Tab Overview"
-                    Button label="Tab Pods"
-                    Button label="Tab Events"
-                    Button label="Tab YAML"
-                    Button label="Tab Logs"
+                Button label="Tab Overview"
+                Button label="More detail tabs"
+            Unknown label="Detail tabs row"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Delete…"
-                    Button label="Actions"
-                    Button label="Restart…"
-                    Button label="Scale…"
+                Button label="Delete…"
+                Button label="More detail actions"
+                Button label="Scale…"
+            Unknown label="Detail actions row"
             ScrollView label="Detail body"
               GenericContainer
                 GenericContainer
+                  Button label="Show Deployment metadata"
                   Label value="PODS · 1"
                     TextRun value="PODS · 1"
                   Table label="Deployment Pods table"
@@ -126,7 +113,6 @@ Window label="Deployment · payments / checkout"
                     TextRun value="RECENT ROLLOUT EVENTS"
                   Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
                     TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
-                  Button label="Show Deployment metadata"
             GenericContainer
               Label value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
                 TextRun value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"

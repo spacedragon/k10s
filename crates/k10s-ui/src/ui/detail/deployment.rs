@@ -116,6 +116,20 @@ pub(super) fn show_with_actions<I: RowIdentity>(
     ) {
         // Both responsive columns were painted by the shared 1.35:1 layout.
     } else {
+        // Keep the narrow-mode disclosure in the initially visible control
+        // region. Operational tables can be taller than the viewport; placing
+        // this after them made the only route to metadata start below the
+        // window clip at browser-sized viewports.
+        let metadata_expanded = frame.expansion.metadata;
+        let disclosure_clicked = if metadata_expanded {
+            ui.button("Hide Deployment metadata").clicked()
+        } else {
+            ui.button("Show Deployment metadata").clicked()
+        };
+        if disclosure_clicked {
+            frame.expansion.metadata = !metadata_expanded;
+        }
+        ui.separator();
         operational_column(
             ui,
             window_id,
@@ -125,14 +139,9 @@ pub(super) fn show_with_actions<I: RowIdentity>(
             resource_actions,
             queued,
         );
-        ui.separator();
         if frame.expansion.metadata {
-            if ui.button("Hide Deployment metadata").clicked() {
-                frame.expansion.metadata = false;
-            }
+            ui.separator();
             metadata_column(ui, window_id, input.identity, &projection, frame);
-        } else if ui.button("Show Deployment metadata").clicked() {
-            frame.expansion.metadata = true;
         }
     }
 }

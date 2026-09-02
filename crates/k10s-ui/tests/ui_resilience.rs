@@ -315,14 +315,19 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         "a filter miss must not claim the namespace is empty"
     );
 
-    window.get_by_role_and_label(Role::Button, "Reset").click();
+    window
+        .get_by_role_and_label(Role::Button, "More list controls")
+        .click();
+    harness.step();
+    harness.get_by_role_and_label(Role::Button, "Reset").click();
     harness.run_steps(4);
     let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");
     assert!(
         window
             .query_by_label("No resources match these filters")
-            .is_none()
+            .is_none(),
+        "Reset clears the search and restores the list"
     );
 }
 
@@ -446,7 +451,7 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .get_by_role_and_label(Role::Button, "Retry now")
         .click();
     let live = common::workload_window(&harness, "Pods");
-    live.get_by_label("● Live · 4s ago");
+    live.get_by_label("Live; synced 4s ago");
     live.get_by_label("Select resource cached-pod");
 
     let forbidden = common::workload_window(&harness, "StatefulSets");
@@ -461,7 +466,7 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .get_by_label("✕ Failed · watch ended unexpectedly");
     let ready_empty = common::workload_window(&harness, "Jobs");
     ready_empty.get_by_label("◇ Ready · no resources");
-    ready_empty.get_by_role_and_label(Role::Button, "↻");
+    ready_empty.get_by_role_and_label(Role::Button, "More list controls");
 }
 
 #[test]

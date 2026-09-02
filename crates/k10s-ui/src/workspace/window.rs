@@ -241,6 +241,9 @@ pub struct Window<I> {
     pub kind: WindowKind,
     pub title: String,
     pub geometry: WindowGeom,
+    /// True only until the freshly-created geometry is explicitly replaced.
+    /// This is runtime-only: restored snapshots always retain their geometry.
+    pub initial_geometry: bool,
     /// Incremented when a layout command must override egui's remembered size.
     pub layout_revision: u64,
     /// Z-order; higher means raised. Focus and opening bump this counter.

@@ -182,24 +182,14 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 pods · 1 selected"
                   TextRun value="1 pods · 1 selected"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod"
@@ -218,38 +208,28 @@ Window
                 Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
+                    Label value="Status ● —"
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Ready · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Restarts · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Age · —"
-                        GenericContainer
-                          GenericContainer
-                        Button label="Show more Pod vitals"
+                    Label value="Ready · —"
+                    GenericContainer
+                      GenericContainer
+                    Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Tab Overview"
-                        Button label="Tab Events"
-                        Button label="Tab YAML"
-                        Button label="Tab Logs"
-                        Button label="Tab Shell"
+                    Button label="Tab Overview"
+                    Button label="Tab Events"
+                    Button label="Tab YAML"
+                    Button label="Tab Logs"
+                    Button label="Tab Shell"
+                Unknown label="Detail tabs row"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Delete…"
-                        Button label="Actions"
+                    Button label="Delete…"
+                    Button label="Actions"
+                Unknown label="Detail actions row"
                 GenericContainer
                   Label value="log stream disconnected"
                     TextRun value="log stream disconnected"

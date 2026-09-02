@@ -33,7 +33,12 @@ test('captures issue 193 redesigned list + detail at the reference wide geometry
   await page.waitForTimeout(250);
   await page.screenshot({
     animations: 'disabled',
+    fullPage: true,
     path: 'docs/screenshots/issue-193/after-list-detail-1000x700.png',
+  });
+  await expect(page).toHaveScreenshot('list-detail-1000x700.png', {
+    animations: 'disabled',
+    fullPage: true,
   });
 });
 
@@ -45,6 +50,11 @@ test('captures issue 193 one-column overview breakpoint at 640x700', async ({ pa
   await page.waitForTimeout(250);
   await page.screenshot({
     animations: 'disabled',
+    fullPage: true,
     path: 'docs/screenshots/issue-193/after-list-detail-640x700.png',
+  });
+  await expect(page).toHaveScreenshot('list-detail-640x700.png', {
+    animations: 'disabled',
+    fullPage: true,
   });
 });

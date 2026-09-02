@@ -343,6 +343,7 @@ where
             WorkspaceCommand::SetGeometry(id, geometry) => {
                 if let Some(window) = self.window_mut(id) {
                     window.geometry = geometry;
+                    window.initial_geometry = false;
                 }
                 Vec::new()
             }
@@ -684,6 +685,7 @@ where
             kind,
             title,
             geometry,
+            initial_geometry: true,
             layout_revision: 0,
             z,
             content,

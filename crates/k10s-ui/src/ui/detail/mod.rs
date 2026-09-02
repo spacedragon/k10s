@@ -279,15 +279,16 @@ pub(super) fn show<I>(
                         frame::DetailActionSegment::Delete => {
                             show_delete_action(ui, window_id, presentation, frame, view, dialogs)
                         }
-                        frame::DetailActionSegment::Primary => show_primary_actions(
+                        frame::DetailActionSegment::Restart => show_restart_action(
                             ui,
                             window_id,
                             presentation,
                             frame,
-                            view,
-                            dialogs,
                             resource_actions,
                         ),
+                        frame::DetailActionSegment::Scale => {
+                            show_scale_action(ui, window_id, presentation, frame, view, dialogs)
+                        }
                     }
                 }
                 return;
@@ -549,15 +550,11 @@ fn show_delete_action(
     }
 }
 
-/// `Restart…` and `Scale…`, rendered left of the `Actions` overflow
-/// menu (Restart then Scale in the right-to-left action layout).
-fn show_primary_actions(
+fn show_restart_action(
     ui: &mut egui::Ui,
     window_id: WindowId,
     presentation: &presentation::DetailPresentationInput<'_>,
     frame: &presentation::DetailFrameProjection<'_>,
-    view: &ResourceDetailResponse,
-    dialogs: &mut dialogs::OperationDialogs,
     resource_actions: &mut Vec<crate::ui::ResourceAction>,
 ) {
     if frame.actions.can_restart {
@@ -574,6 +571,16 @@ fn show_primary_actions(
             });
         }
     }
+}
+
+fn show_scale_action(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    frame: &presentation::DetailFrameProjection<'_>,
+    view: &ResourceDetailResponse,
+    dialogs: &mut dialogs::OperationDialogs,
+) {
     if frame.actions.can_scale {
         let scale = ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Scale…"));
         scale.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Scale…"));

@@ -10,44 +10,43 @@ Window label="Deployment · payments / checkout"
           GenericContainer
             Unknown label="Detail vital strip"
             GenericContainer
-              Label value="Rollout ● NewReplicaSetAvailable"
               GenericContainer
+                Label value="Rollout ● NewReplicaSetAvailable"
                 GenericContainer
-              Label value="Ready · 3/3"
-              GenericContainer
+                  GenericContainer
+                Label value="Ready · 3/3"
                 GenericContainer
-              Label value="Up-to-date · 3"
-              GenericContainer
+                  GenericContainer
+                Label value="Up-to-date · 3"
                 GenericContainer
-              Label value="Available · 3"
-              GenericContainer
+                  GenericContainer
+                Label value="Available · 3"
                 GenericContainer
-              Label value="Strategy · RollingUpdate"
-              GenericContainer
+                  GenericContainer
+                Label value="Strategy · RollingUpdate"
                 GenericContainer
-              Label value="Age · 31d"
-              GenericContainer
+                  GenericContainer
+                Label value="Age · 31d"
                 GenericContainer
+                  GenericContainer
             GenericContainer
               Label value="Freshness · live (just now)"
                 TextRun value="Freshness · live (just now)"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Tab Overview"
-                    Button label="Tab Pods"
-                    Button label="Tab Events"
-                    Button label="Tab YAML"
-                    Button label="Tab Logs"
+                Button label="Tab Overview"
+                Button label="Tab Pods"
+                Button label="Tab Events"
+                Button label="Tab YAML"
+                Button label="Tab Logs"
+            Unknown label="Detail tabs row"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Delete…"
-                    Button label="Actions"
-                    Button label="Restart…"
-                    Button label="Scale…"
+                Button label="Delete…"
+                Button label="Actions"
+                Button label="Restart…"
+                Button label="Scale…"
+            Unknown label="Detail actions row"
             ScrollView label="Detail body"
               GenericContainer
                 GenericContainer

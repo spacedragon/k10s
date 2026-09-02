@@ -1,7 +1,6 @@
 //! Fixed shared detail chrome: identity, vitals, controls, tabs, one body
 //! scroll region, and a footer. Kind modules only supply the body content.
 
-use egui::containers::scroll_area::ScrollBarVisibility;
 use egui::{
     Align, Layout, RichText, ScrollArea, Sense, UiBuilder, WidgetInfo, WidgetText, WidgetType,
 };
@@ -22,8 +21,10 @@ use crate::ui::resource_window::RowIdentity;
 pub(crate) enum DetailActionSegment {
     /// The destructive `Delete…` button, rightmost and danger-styled.
     Delete,
-    /// `Restart…` and `Scale…`, left of the overflow menu.
-    Primary,
+    /// The `Restart…` command.
+    Restart,
+    /// The `Scale…` command.
+    Scale,
 }
 
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
@@ -162,19 +163,10 @@ pub(super) fn show<I: RowIdentity>(
     let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
     let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
         + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
-    if wide && wide_minimum <= vitals_width {
-        show_vital_strip(&mut vitals_ui, &mut projection, true);
-    } else {
-        ScrollArea::horizontal()
-            .id_salt(("k10s.detail.vitals.scroll", window_id.0))
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-            .stick_to_right(true)
-            .show(&mut vitals_ui, |ui| {
-                ui.horizontal(|ui| {
-                    popup_rects = show_vital_strip(ui, &mut projection, wide);
-                });
-            });
-    }
+    let show_all_vitals = wide && wide_minimum <= vitals_width;
+    vitals_ui.horizontal(|ui| {
+        popup_rects = show_vital_strip(ui, &mut projection, show_all_vitals);
+    });
     if let Some((button_rect, popup_rect)) = popup_rects {
         let escape =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -200,21 +192,116 @@ pub(super) fn show<I: RowIdentity>(
             .wrap(),
         );
     }
-    let (tab_row, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        Sense::hover(),
-    );
+    let row_width = ui.available_width();
+    let visible_row_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let row_height = ui.spacing().interact_size.y;
     let gap = ui.spacing().item_spacing.x;
-    let usable_width = (tab_row.width() - gap).max(0.0);
-    let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
-    let tab_width = usable_width - action_width;
-    let tabs_region =
-        egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
-    let freshness_width = if integrated {
-        0.0
+    let usable_width = (visible_row_width - gap).max(0.0);
+    let full_freshness_width = if integrated { 0.0 } else { 152.0 };
+    let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
+    let action_count = usize::from(projection.actions.can_scale)
+        + usize::from(projection.actions.can_restart)
+        + usize::from(projection.actions.can_delete)
+        + 1;
+    let wide_action_width = menu_button_width(ui, "Actions")
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_restart {
+            button_width(ui, "Restart…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
+        + gap * action_count.saturating_sub(1) as f32;
+    let compact_action_count =
+        usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
+    let compact_action_width = menu_button_width(ui, "More")
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
+        + gap * compact_action_count.saturating_sub(1) as f32;
+    let wide_tabs_width = tabs
+        .iter()
+        .map(|tab| button_width(ui, super::tab_label(*tab)))
+        .sum::<f32>()
+        + gap * tabs.len().saturating_sub(1) as f32
+        + full_freshness_width;
+    let compact_tabs_width = button_width(ui, super::tab_label(detail.active_tab))
+        + menu_button_width(ui, "More")
+        + gap
+        + compact_freshness_width;
+    let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
+    let stacked_chrome =
+        compact_chrome && compact_tabs_width + gap + compact_action_width > usable_width;
+    let chrome_height = if stacked_chrome {
+        row_height * 2.0 + gap
     } else {
-        tabs_region.width().min(152.0)
+        row_height
     };
+    let (chrome_rect, _) =
+        ui.allocate_exact_size(egui::vec2(row_width, chrome_height), Sense::hover());
+    let visible_chrome_rect = chrome_rect.intersect(ui.clip_rect());
+    let (tabs_region, actions_rect) = if stacked_chrome {
+        (
+            egui::Rect::from_min_size(
+                visible_chrome_rect.min,
+                egui::vec2(visible_chrome_rect.width(), row_height),
+            ),
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    visible_chrome_rect.left(),
+                    visible_chrome_rect.top() + row_height + gap,
+                ),
+                egui::vec2(visible_chrome_rect.width(), row_height),
+            ),
+        )
+    } else {
+        let desired_action_width = if compact_chrome {
+            compact_action_width
+        } else {
+            wide_action_width
+        };
+        let reserved_tabs_width = if compact_chrome {
+            compact_tabs_width
+        } else {
+            wide_tabs_width
+        };
+        let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
+        let tab_width = usable_width - action_width;
+        (
+            egui::Rect::from_min_size(visible_chrome_rect.min, egui::vec2(tab_width, row_height)),
+            egui::Rect::from_min_max(
+                egui::pos2(
+                    visible_chrome_rect.left() + tab_width + gap,
+                    visible_chrome_rect.top(),
+                ),
+                visible_chrome_rect.max,
+            ),
+        )
+    };
+    let freshness_width = if compact_chrome {
+        compact_freshness_width
+    } else {
+        full_freshness_width
+    }
+    .min(tabs_region.width());
     let tabs_rect = egui::Rect::from_min_max(
         tabs_region.min,
         egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
@@ -230,12 +317,16 @@ pub(super) fn show<I: RowIdentity>(
                 .layout(Layout::right_to_left(Align::Center)),
         );
         freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
-        freshness_ui.label(freshness_text(projection.freshness));
+        let full_freshness = freshness_text(projection.freshness);
+        let freshness_display = if compact_chrome {
+            compact_freshness_text(projection.freshness).to_owned()
+        } else {
+            full_freshness.clone()
+        };
+        let freshness = freshness_ui.label(freshness_display);
+        freshness
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone()));
     }
-    let actions_rect = egui::Rect::from_min_max(
-        egui::pos2(tabs_region.right() + gap, tab_row.top()),
-        tab_row.max,
-    );
     let mut tabs_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.tabs", window_id.0))
@@ -243,12 +334,36 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.tabs.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .show(&mut tabs_ui, |ui| {
-            ui.horizontal(|ui| {
+    let tabs_semantics = ui.interact(
+        tabs_rect,
+        ui.id().with(("k10s.detail.tabs.row", window_id.0)),
+        Sense::hover(),
+    );
+    tabs_semantics.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail tabs row"));
+    tabs_ui.horizontal(|ui| {
+        let compact = compact_chrome;
+        for tab in tabs {
+            if !compact || *tab == detail.active_tab {
+                let active = *tab == detail.active_tab;
+                let response = ui.selectable_label(active, super::tab_label(*tab));
+                response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        true,
+                        format!("Tab {}", super::tab_label(*tab)),
+                    )
+                });
+                if response.clicked() && !active {
+                    queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                }
+            }
+        }
+        if compact && tabs.len() > 1 {
+            let menu = ui.menu_button("More", |ui| {
                 for tab in tabs {
+                    if *tab == detail.active_tab {
+                        continue;
+                    }
                     let active = *tab == detail.active_tab;
                     let response = ui.selectable_label(active, super::tab_label(*tab));
                     response.widget_info(|| {
@@ -260,10 +375,14 @@ pub(super) fn show<I: RowIdentity>(
                     });
                     if response.clicked() && !active {
                         queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                        ui.close();
                     }
                 }
             });
-        });
+            menu.response
+                .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "More detail tabs"));
+        }
+    });
     let owner = projection.actions.verified_owner;
     let mut actions_ui = ui.new_child(
         UiBuilder::new()
@@ -272,57 +391,81 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::right_to_left(Align::Center)),
     );
     actions_ui.set_clip_rect(actions_ui.clip_rect().intersect(actions_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.actions.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .stick_to_right(true)
-        .show(&mut actions_ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                // Reference order (left to right): Scale, Restart, Actions,
-                // Delete. Right-to-left rendering therefore paints Delete
-                // first (rightmost), the overflow menu, then the primary
-                // segment.
+    let actions_semantics = ui.interact(
+        actions_rect,
+        ui.id().with(("k10s.detail.actions.row", window_id.0)),
+        Sense::hover(),
+    );
+    actions_semantics
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail actions row"));
+    actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Reference order (left to right): Scale, Restart, Actions,
+        // Delete. Right-to-left rendering therefore paints Delete
+        // first (rightmost), the overflow menu, then the primary
+        // segment.
+        content(
+            ui,
+            input.primary,
+            Some(DetailActionSegment::Delete),
+            &mut projection,
+        );
+        let compact = compact_chrome;
+        let namespace = projection.identity.namespace.as_deref();
+        let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
+        let action_menu = ui.menu_button(if compact { "More" } else { "Actions" }, |ui| {
+            if compact {
                 content(
                     ui,
                     input.primary,
-                    Some(DetailActionSegment::Delete),
+                    Some(DetailActionSegment::Restart),
                     &mut projection,
                 );
-                let namespace = projection.identity.namespace.as_deref();
-                let uid = (!projection.identity.uid.is_empty())
-                    .then_some(projection.identity.uid.as_str());
-                ui.menu_button("Actions", |ui| {
-                    // Copy name moved out of the action row into the
-                    // overflow menu per the reference design.
-                    copy(ui, "Copy name", &projection.identity.name);
-                    if let Some(owner) = owner {
-                        let label = format!("Open owner {}", owner.name);
-                        if ui.button(&label).clicked() {
-                            queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                                I::from_row_identity(&super::presentation::owner_identity(
-                                    projection.identity,
-                                    owner,
-                                )),
-                            ));
-                            ui.close();
-                        }
-                    }
-                    if let Some(namespace) = namespace {
-                        copy(ui, "Copy namespace", namespace);
-                    }
-                    if let Some(uid) = uid {
-                        copy(ui, "Copy UID", uid);
-                    }
-                });
-                content(
-                    ui,
-                    input.primary,
-                    Some(DetailActionSegment::Primary),
-                    &mut projection,
-                );
-            });
+                ui.separator();
+            }
+            // Copy name moved out of the action row into the
+            // overflow menu per the reference design.
+            copy(ui, "Copy name", &projection.identity.name);
+            if let Some(owner) = owner {
+                let label = format!("Open owner {}", owner.name);
+                if ui.button(&label).clicked() {
+                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                        &super::presentation::owner_identity(projection.identity, owner),
+                    )));
+                    ui.close();
+                }
+            }
+            if let Some(namespace) = namespace {
+                copy(ui, "Copy namespace", namespace);
+            }
+            if let Some(uid) = uid {
+                copy(ui, "Copy UID", uid);
+            }
         });
+        if compact {
+            action_menu.response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, true, "More detail actions")
+            });
+        }
+        content(
+            ui,
+            input.primary,
+            Some(if compact {
+                DetailActionSegment::Scale
+            } else {
+                DetailActionSegment::Restart
+            }),
+            &mut projection,
+        );
+        if !compact {
+            content(
+                ui,
+                input.primary,
+                Some(DetailActionSegment::Scale),
+                &mut projection,
+            );
+        }
+    });
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
     let footer_text = RichText::new(format!(
@@ -512,7 +655,13 @@ fn show_vital_strip(
     wide: bool,
 ) -> Option<(egui::Rect, egui::Rect)> {
     normalize_vital_expansion(wide, &mut projection.expansion);
-    let count = projection.visible_vitals.len()
+    let narrow_visible_count = projection.visible_vitals.len().min(2);
+    let visible_count = if wide {
+        projection.visible_vitals.len()
+    } else {
+        narrow_visible_count
+    };
+    let count = visible_count
         + if wide {
             projection.overflow_vitals.len()
         } else {
@@ -521,10 +670,29 @@ fn show_vital_strip(
     let gaps = ui.spacing().item_spacing.x * count.saturating_sub(1) as f32;
     let max_width = if wide && count > 0 {
         ((ui.available_width() - gaps) / count as f32).min(VITAL_CHIP_MAX_WIDTH)
+    } else if count > 0 {
+        let overflow_label = projection
+            .vital_expansion_label
+            .map(|kind| format!("Show more {kind} vitals"));
+        let overflow_width = overflow_label.as_deref().map_or(0.0, |label| {
+            WidgetText::from(label)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+                .size()
+                .x
+                + ui.spacing().button_padding.x * 2.0
+                + ui.spacing().item_spacing.x
+        });
+        ((ui.available_width() - overflow_width - gaps) / count as f32)
+            .clamp(VITAL_CHIP_SANE_MIN_WIDTH, VITAL_CHIP_MAX_WIDTH)
     } else {
         VITAL_CHIP_MAX_WIDTH
     };
-    for metric in &projection.visible_vitals {
+    for metric in projection.visible_vitals.iter().take(visible_count) {
         vital(ui, metric, max_width);
     }
     if wide {
@@ -532,7 +700,8 @@ fn show_vital_strip(
             vital(ui, metric, max_width);
         }
     } else if let Some(kind) = projection.vital_expansion_label
-        && !projection.overflow_vitals.is_empty()
+        && (projection.visible_vitals.len() > narrow_visible_count
+            || !projection.overflow_vitals.is_empty())
     {
         let response = ui.button(if projection.expansion.more_vitals {
             format!("Hide more {kind} vitals")
@@ -549,6 +718,11 @@ fn show_vital_strip(
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.vertical(|ui| {
+                            for metric in
+                                projection.visible_vitals.iter().skip(narrow_visible_count)
+                            {
+                                vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
+                            }
                             for metric in &projection.overflow_vitals {
                                 vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
                             }
@@ -608,6 +782,20 @@ fn freshness_text(freshness: DetailFreshness<'_>) -> String {
     }
 }
 
+fn compact_freshness_text(freshness: DetailFreshness<'_>) -> &'static str {
+    match freshness {
+        DetailFreshness::Loading => "Loading",
+        DetailFreshness::Unavailable => "Unavail.",
+        DetailFreshness::Gone => "Gone",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => "Live",
+        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Stale",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconn.",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Denied",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => "Failed",
+        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => "Ready",
+    }
+}
+
 const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
     matches!(tab, DetailTab::Overview | DetailTab::Events)
 }
@@ -627,6 +815,23 @@ fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
     if response.clicked() {
         ui.ctx().copy_text(value.to_owned());
     }
+}
+
+fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    WidgetText::from(label)
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        )
+        .size()
+        .x
+        + ui.spacing().button_padding.x * 2.0
+}
+
+fn menu_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    button_width(ui, label) + ui.spacing().icon_width + ui.spacing().icon_spacing
 }
 
 #[cfg(test)]
@@ -739,6 +944,37 @@ mod tests {
             },)),
             "Freshness · stale"
         );
+    }
+
+    #[test]
+    fn compact_long_freshness_labels_fit_the_reserved_narrow_budget() {
+        use crate::ui::WindowFreshness;
+
+        let states = [
+            DetailFreshness::Unavailable,
+            DetailFreshness::Source(&WindowFreshness::Reconnecting {
+                last_sync_age: "8s".into(),
+                attempt: 2,
+                retry_in: "1s".into(),
+            }),
+            DetailFreshness::Source(&WindowFreshness::Forbidden {
+                user: "alice".into(),
+                verb: "get".into(),
+                resource: "pods".into(),
+                scope: "default".into(),
+            }),
+        ];
+        for state in states {
+            let painted = super::compact_freshness_text(state);
+            assert!(
+                painted.chars().count() <= 8,
+                "compact freshness {painted:?} exceeds the 64px text budget"
+            );
+            assert!(
+                super::freshness_text(state).starts_with("Freshness · "),
+                "full accessible freshness must remain stable"
+            );
+        }
     }
 
     #[test]
