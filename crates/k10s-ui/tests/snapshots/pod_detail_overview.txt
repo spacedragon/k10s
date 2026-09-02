@@ -260,38 +260,32 @@ Window
                 Unknown label="Detail vital strip"
                 GenericContainer
                   GenericContainer
+                    Label value="Status ● —"
                     GenericContainer
                       GenericContainer
-                        Label value="Status ● —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Ready · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Restarts · —"
-                        GenericContainer
-                          GenericContainer
-                        Label value="Age · —"
-                        GenericContainer
-                          GenericContainer
-                        Button label="Show more Pod vitals"
+                    Label value="Ready · —"
+                    GenericContainer
+                      GenericContainer
+                    Label value="Restarts · —"
+                    GenericContainer
+                      GenericContainer
+                    Label value="Age · —"
+                    GenericContainer
+                      GenericContainer
+                    Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Tab Overview"
-                        Button label="Tab Events"
-                        Button label="Tab YAML"
-                        Button label="Tab Logs"
-                        Button label="Tab Shell"
+                    Button label="Tab Overview"
+                    Button label="Tab Events"
+                    Button label="Tab YAML"
+                    Button label="Tab Logs"
+                    Button label="Tab Shell"
                 GenericContainer
                   GenericContainer
-                    GenericContainer
-                      GenericContainer
-                        Button label="Delete…"
-                        Button label="Actions"
+                    Button label="Delete…"
+                    Button label="Actions"
                 ScrollView label="Detail body"
                   GenericContainer
                     GenericContainer

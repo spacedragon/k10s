@@ -985,7 +985,7 @@ fn dedicated_cluster_scoped_title_and_copy_actions_use_pinned_identity() {
             .is_none()
     );
     detail
-        .get_by_role_and_label(Role::Button, "Actions")
+        .get_by_role_and_label(Role::Button, "More detail actions")
         .click();
     harness.run_steps(1);
     harness.get_by_role_and_label(Role::Button, "Copy name");
@@ -1066,8 +1066,12 @@ fn dedicated_detail_uses_identity_bound_authority_not_arbitrary_source_windows()
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     detail.get_by_label("Freshness · stale");
+    detail
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
     assert!(
-        detail
+        harness
             .get_by_role_and_label(Role::Button, "Restart…")
             .accesskit_node()
             .is_disabled()
@@ -1124,8 +1128,12 @@ fn dedicated_detail_without_identity_bound_authority_fails_closed() {
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     detail.get_by_label("Freshness · unavailable");
+    detail
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
     assert!(
-        detail
+        harness
             .get_by_role_and_label(Role::Button, "Restart…")
             .accesskit_node()
             .is_disabled()
@@ -2222,7 +2230,7 @@ fn popout_is_pinned_and_never_follows_later_selection() {
         let dedicated =
             harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
         dedicated
-            .get_by_role_and_label(Role::Button, "Actions")
+            .get_by_role_and_label(Role::Button, "More detail actions")
             .click();
         assert!(
             dedicated
@@ -2400,6 +2408,92 @@ fn detail_action_row_orders_scale_restart_actions_delete_left_to_right() {
         .click();
     harness.run_steps(1);
     harness.get_by_role_and_label(Role::Button, "Copy name");
+}
+
+#[test]
+fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() {
+    let mut harness = harness();
+    let mut detail = typed_deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    detail.capabilities.can_scale = true;
+    detail.capabilities.can_delete = true;
+    let target = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(target.clone(), detail);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(target.clone()));
+    let window_id = detail_window(harness.state().shell.workspace()).id;
+    harness.state_mut().feed.detail_authority.insert(
+        target.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetActiveTab(
+            window_id,
+            WorkspaceDetailTab::Yaml,
+        ));
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [32.0, 32.0],
+                size: [440.0, 560.0],
+                collapsed: false,
+            },
+        ));
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    window.get_by_label("Rollout ● NewReplicaSetAvailable");
+    window.get_by_label("Ready · 18/20");
+    window.get_by_role_and_label(Role::Button, "Show more Deployment vitals");
+    window.get_by_role_and_label(Role::Button, "Tab YAML");
+    window.get_by_role_and_label(Role::Button, "Scale…");
+    window.get_by_role_and_label(Role::Button, "Delete…");
+    window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Events")
+        .click();
+    harness.run_steps(2);
+    let active_tab = match &detail_window(harness.state().shell.workspace()).content {
+        WindowContent::Detail(detail) => detail.active_tab,
+        WindowContent::Resource(_) | WindowContent::Services(_) => unreachable!(),
+    };
+    assert_eq!(active_tab, WorkspaceDetailTab::Events);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
+    window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Restart…")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![ResourceAction::Restart {
+            window: window_id,
+            target,
+        }]
+    );
 }
 
 #[test]

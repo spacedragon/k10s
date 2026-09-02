@@ -11,40 +11,31 @@ Window label="Deployment · payments / checkout"
             Unknown label="Detail vital strip"
             GenericContainer
               GenericContainer
+                Label value="Rollout ▲ ReplicaSetUpdated"
                 GenericContainer
                   GenericContainer
-                    Label value="Rollout ▲ ReplicaSetUpdated"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Ready · 3/3"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Up-to-date · 3"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Available · 3"
-                    GenericContainer
-                      GenericContainer
-                    Button label="Show more Deployment vitals"
+                Label value="Ready · 3/3"
+                GenericContainer
+                  GenericContainer
+                Label value="Up-to-date · 3"
+                GenericContainer
+                  GenericContainer
+                Label value="Available · 3"
+                GenericContainer
+                  GenericContainer
+                Button label="Show more Deployment vitals"
             GenericContainer
               Label value="Freshness · live (just now)"
                 TextRun value="Freshness · live (just now)"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Tab Overview"
-                    Button label="Tab Pods"
-                    Button label="Tab Events"
-                    Button label="Tab YAML"
+                Button label="Tab Overview"
+                Button label="More detail tabs"
             GenericContainer
               GenericContainer
-                GenericContainer
-                  GenericContainer
-                    Button label="Delete…"
-                    Button label="Actions"
-                    Button label="Restart…"
-                    Button label="Scale…"
+                Button label="Delete…"
+                Button label="More detail actions"
+                Button label="Scale…"
             ScrollView label="Detail body"
               GenericContainer
                 GenericContainer

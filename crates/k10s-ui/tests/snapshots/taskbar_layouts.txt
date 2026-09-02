@@ -231,38 +231,29 @@ Window
               Unknown label="Detail vital strip"
               GenericContainer
                 GenericContainer
+                  Label value="Status ● —"
                   GenericContainer
                     GenericContainer
-                      Label value="Status ● —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Ready · —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Restarts · —"
-                      GenericContainer
-                        GenericContainer
-                      Label value="Age · —"
-                      GenericContainer
-                        GenericContainer
-                      Button label="Show more Pod vitals"
+                  Label value="Ready · —"
+                  GenericContainer
+                    GenericContainer
+                  Label value="Restarts · —"
+                  GenericContainer
+                    GenericContainer
+                  Label value="Age · —"
+                  GenericContainer
+                    GenericContainer
+                  Button label="Show more Pod vitals"
               GenericContainer
                 Label value="Freshness · loading"
                   TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Button label="Tab Overview"
-                      Button label="Tab Events"
-                      Button label="Tab YAML"
-                      Button label="Tab Logs"
-                      Button label="Tab Shell"
+                  Button label="Tab Overview"
+                  Button label="More detail tabs"
               GenericContainer
                 GenericContainer
-                  GenericContainer
-                    GenericContainer
-                      Button label="Actions"
+                  Button label="More detail actions"
               ScrollView label="Detail body"
                 GenericContainer
                   GenericContainer

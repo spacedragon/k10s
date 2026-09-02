@@ -1,7 +1,6 @@
 //! Fixed shared detail chrome: identity, vitals, controls, tabs, one body
 //! scroll region, and a footer. Kind modules only supply the body content.
 
-use egui::containers::scroll_area::ScrollBarVisibility;
 use egui::{
     Align, Layout, RichText, ScrollArea, Sense, UiBuilder, WidgetInfo, WidgetText, WidgetType,
 };
@@ -22,8 +21,10 @@ use crate::ui::resource_window::RowIdentity;
 pub(crate) enum DetailActionSegment {
     /// The destructive `Delete…` button, rightmost and danger-styled.
     Delete,
-    /// `Restart…` and `Scale…`, left of the overflow menu.
-    Primary,
+    /// The `Restart…` command.
+    Restart,
+    /// The `Scale…` command.
+    Scale,
 }
 
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
@@ -162,19 +163,10 @@ pub(super) fn show<I: RowIdentity>(
     let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
     let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
         + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
-    if wide && wide_minimum <= vitals_width {
-        show_vital_strip(&mut vitals_ui, &mut projection, true);
-    } else {
-        ScrollArea::horizontal()
-            .id_salt(("k10s.detail.vitals.scroll", window_id.0))
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-            .stick_to_right(true)
-            .show(&mut vitals_ui, |ui| {
-                ui.horizontal(|ui| {
-                    popup_rects = show_vital_strip(ui, &mut projection, wide);
-                });
-            });
-    }
+    let show_all_vitals = wide && wide_minimum <= vitals_width;
+    vitals_ui.horizontal(|ui| {
+        popup_rects = show_vital_strip(ui, &mut projection, show_all_vitals);
+    });
     if let Some((button_rect, popup_rect)) = popup_rects {
         let escape =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -243,12 +235,30 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.tabs.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .show(&mut tabs_ui, |ui| {
-            ui.horizontal(|ui| {
+    tabs_ui.horizontal(|ui| {
+        let compact = tabs_rect.width() < 300.0;
+        for tab in tabs {
+            if !compact || *tab == detail.active_tab {
+                let active = *tab == detail.active_tab;
+                let response = ui.selectable_label(active, super::tab_label(*tab));
+                response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        true,
+                        format!("Tab {}", super::tab_label(*tab)),
+                    )
+                });
+                if response.clicked() && !active {
+                    queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                }
+            }
+        }
+        if compact && tabs.len() > 1 {
+            ui.menu_button("More detail tabs", |ui| {
                 for tab in tabs {
+                    if *tab == detail.active_tab {
+                        continue;
+                    }
                     let active = *tab == detail.active_tab;
                     let response = ui.selectable_label(active, super::tab_label(*tab));
                     response.widget_info(|| {
@@ -260,10 +270,12 @@ pub(super) fn show<I: RowIdentity>(
                     });
                     if response.clicked() && !active {
                         queued.push(WorkspaceCommand::SetActiveTab(window_id, *tab));
+                        ui.close();
                     }
                 }
             });
-        });
+        }
+    });
     let owner = projection.actions.verified_owner;
     let mut actions_ui = ui.new_child(
         UiBuilder::new()
@@ -272,57 +284,76 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::right_to_left(Align::Center)),
     );
     actions_ui.set_clip_rect(actions_ui.clip_rect().intersect(actions_rect));
-    ScrollArea::horizontal()
-        .id_salt(("k10s.detail.actions.scroll", window_id.0))
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .stick_to_right(true)
-        .show(&mut actions_ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                // Reference order (left to right): Scale, Restart, Actions,
-                // Delete. Right-to-left rendering therefore paints Delete
-                // first (rightmost), the overflow menu, then the primary
-                // segment.
-                content(
-                    ui,
-                    input.primary,
-                    Some(DetailActionSegment::Delete),
-                    &mut projection,
-                );
-                let namespace = projection.identity.namespace.as_deref();
-                let uid = (!projection.identity.uid.is_empty())
-                    .then_some(projection.identity.uid.as_str());
-                ui.menu_button("Actions", |ui| {
-                    // Copy name moved out of the action row into the
-                    // overflow menu per the reference design.
-                    copy(ui, "Copy name", &projection.identity.name);
-                    if let Some(owner) = owner {
-                        let label = format!("Open owner {}", owner.name);
-                        if ui.button(&label).clicked() {
-                            queued.push(WorkspaceCommand::OpenDedicatedDetail(
-                                I::from_row_identity(&super::presentation::owner_identity(
-                                    projection.identity,
-                                    owner,
-                                )),
-                            ));
-                            ui.close();
-                        }
+    actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Reference order (left to right): Scale, Restart, Actions,
+        // Delete. Right-to-left rendering therefore paints Delete
+        // first (rightmost), the overflow menu, then the primary
+        // segment.
+        content(
+            ui,
+            input.primary,
+            Some(DetailActionSegment::Delete),
+            &mut projection,
+        );
+        let compact = actions_rect.width() < if integrated { 300.0 } else { 340.0 };
+        let namespace = projection.identity.namespace.as_deref();
+        let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
+        ui.menu_button(
+            if compact {
+                "More detail actions"
+            } else {
+                "Actions"
+            },
+            |ui| {
+                if compact {
+                    content(
+                        ui,
+                        input.primary,
+                        Some(DetailActionSegment::Restart),
+                        &mut projection,
+                    );
+                    ui.separator();
+                }
+                // Copy name moved out of the action row into the
+                // overflow menu per the reference design.
+                copy(ui, "Copy name", &projection.identity.name);
+                if let Some(owner) = owner {
+                    let label = format!("Open owner {}", owner.name);
+                    if ui.button(&label).clicked() {
+                        queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                            &super::presentation::owner_identity(projection.identity, owner),
+                        )));
+                        ui.close();
                     }
-                    if let Some(namespace) = namespace {
-                        copy(ui, "Copy namespace", namespace);
-                    }
-                    if let Some(uid) = uid {
-                        copy(ui, "Copy UID", uid);
-                    }
-                });
-                content(
-                    ui,
-                    input.primary,
-                    Some(DetailActionSegment::Primary),
-                    &mut projection,
-                );
-            });
-        });
+                }
+                if let Some(namespace) = namespace {
+                    copy(ui, "Copy namespace", namespace);
+                }
+                if let Some(uid) = uid {
+                    copy(ui, "Copy UID", uid);
+                }
+            },
+        );
+        content(
+            ui,
+            input.primary,
+            Some(if compact {
+                DetailActionSegment::Scale
+            } else {
+                DetailActionSegment::Restart
+            }),
+            &mut projection,
+        );
+        if !compact {
+            content(
+                ui,
+                input.primary,
+                Some(DetailActionSegment::Scale),
+                &mut projection,
+            );
+        }
+    });
     ui.separator();
     let remaining = ui.available_rect_before_wrap();
     let footer_text = RichText::new(format!(
