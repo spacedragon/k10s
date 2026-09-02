@@ -19,8 +19,8 @@ use super::responsive_table::ColumnSpec;
 // flex Name, so the remaining width goes to Image (the column people reach
 // for when checking which revision is still running).
 const DEPLOYMENT_COLUMNS: [ColumnSpec; 6] = [
-    ColumnSpec::required("namespace", 150.0),
-    ColumnSpec::elastic("name", 180.0),
+    ColumnSpec::required("namespace", 112.0),
+    ColumnSpec::elastic("name", 150.0),
     ColumnSpec::required("ready", 60.0),
     ColumnSpec::hideable("status", 104.0, 1),
     ColumnSpec::hideable("image", 230.0, 0),
@@ -186,10 +186,15 @@ where
         })
         .collect();
     let column_spacing = ui.spacing().item_spacing.x;
-    let table_width = ui
+    // Resolve against the content viewport, not the outer ScrollArea width:
+    // a solid vertical scrollbar is allocated inside that outer width and
+    // would otherwise clip the required final column at compact sizes.
+    let table_width = (ui
         .available_rect_before_wrap()
         .intersect(ui.clip_rect())
-        .width();
+        .width()
+        - ui.spacing().scroll.allocated_width())
+    .max(0.0);
     let columns = super::responsive_table::resolve_columns(
         &specs,
         table_width,

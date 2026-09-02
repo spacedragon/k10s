@@ -527,6 +527,12 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
         "compact Age values must fit the resolved 56-point column"
     );
     assert!(
+        compact.get_all_by_label("Resource age").all(|node| node
+            .children()
+            .any(|child| child.accesskit_node().role() == Role::TextRun)),
+        "compact Age values must remain visibly painted inside the table clip"
+    );
+    assert!(
         compact.get_by_label("2/2").rect().right() <= first_age_value_left,
         "compact Ready values must not overlap the adjacent Age column"
     );
@@ -543,6 +549,34 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
     let restored = workload_window(&harness, "Deployments");
     restored.get_by_label("Image");
     restored.get_by_label("Status");
+}
+
+#[test]
+fn compact_deployment_keeps_age_text_inside_scrollbar_clip() {
+    let mut fixture = Fixture::default();
+    fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 480.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+
+    let window = workload_window(&harness, "Deployments");
+    assert!(
+        window.get_all_by_label("Resource age").all(|age| age
+            .children()
+            .any(|child| child.accesskit_node().role() == Role::TextRun)),
+        "compact Age values must paint TextRuns inside their local table clip: window={:?}, namespace={:?}, name={:?}, ready={:?}, age={:?}",
+        window.rect(),
+        window.get_by_label("Namespace").rect(),
+        window.get_by_label("Name").rect(),
+        window.get_by_label("Ready").rect(),
+        window.get_by_label("Age").rect(),
+    );
 }
 
 #[test]
