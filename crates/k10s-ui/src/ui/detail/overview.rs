@@ -233,10 +233,13 @@ pub(super) fn metadata_annotations<'a>(
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 let key_width = (width * 0.34).max(1.0);
-                ui.add_sized(
+                let key_response = ui.add_sized(
                     [key_width, 0.0],
                     egui::Label::new(RichText::new(key).weak()).truncate(),
                 );
+                key_response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, key.to_owned()));
+                key_response.on_hover_text(key);
                 let value_width = ui.available_width().max(1.0);
                 let full = format!("{key}: {value}");
                 let response = ui.add_sized([value_width, 0.0], egui::Label::new(value).truncate());
@@ -403,6 +406,35 @@ mod responsive_contract_tests {
             disclosure.accesskit_node().data().is_expanded(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn long_common_prefix_annotation_keys_are_individually_hover_recoverable() {
+        let first = "example.io/very-long-common-prefix/first-distinct-key";
+        let second = "example.io/very-long-common-prefix/second-distinct-key";
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(280.0, 180.0))
+            .build_ui(move |ui| {
+                super::metadata_annotations(
+                    ui,
+                    ("annotations", "resource-a"),
+                    [(first, "one"), (second, "two")],
+                );
+            });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Annotations 2 ▾")
+            .click();
+        harness.run_steps(2);
+
+        for key in [first, second] {
+            harness.get_by_label(key).hover();
+            harness.run_steps(15);
+            assert!(
+                harness.get_all_by_label(key).count() >= 2,
+                "truncated key must expose its full distinct value in a tooltip: {key}"
+            );
+        }
     }
 
     #[test]
