@@ -838,22 +838,25 @@ fn metadata_column(
             ConfigurationSection::LabelsAnnotations => {
                 if !deployment.labels.is_empty() {
                     ui.heading(format!("LABELS · {}", deployment.labels.len()));
-                    super::overview::metadata_labels(
-                        ui,
-                        deployment
-                            .labels
-                            .iter()
-                            .map(|(key, value)| (key.as_str(), value.as_str())),
-                        ": ",
-                    );
                 }
-                super::overview::metadata_annotations(
+                super::overview::metadata_labels_and_annotations(
                     ui,
                     (
                         "k10s.detail.deployment.annotations",
                         window_id.0,
+                        identity.context.as_str(),
+                        identity.gvk.group.as_str(),
+                        identity.gvk.version.as_str(),
+                        identity.gvk.kind.as_str(),
+                        identity.namespace.as_deref(),
+                        identity.name.as_str(),
                         identity.uid.as_str(),
                     ),
+                    deployment
+                        .labels
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                    ": ",
                     deployment
                         .annotations
                         .iter()

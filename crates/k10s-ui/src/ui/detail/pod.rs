@@ -612,21 +612,25 @@ fn show_metadata<I: RowIdentity>(
             super::overview::section_separator(ui);
         } else {
             section(ui, &format!("LABELS · {}", pod.labels.len()));
-            super::overview::metadata_labels(
-                ui,
-                pod.labels
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-                "=",
-            );
         }
-        super::overview::metadata_annotations(
+        let identity = frame.identity;
+        super::overview::metadata_labels_and_annotations(
             ui,
             (
                 "k10s.detail.pod.annotations",
                 window_id.0,
-                frame.identity.uid.as_str(),
+                identity.context.as_str(),
+                identity.gvk.group.as_str(),
+                identity.gvk.version.as_str(),
+                identity.gvk.kind.as_str(),
+                identity.namespace.as_deref(),
+                identity.name.as_str(),
+                identity.uid.as_str(),
             ),
+            pod.labels
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+            "=",
             pod.annotations
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),

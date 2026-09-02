@@ -730,6 +730,60 @@ fn pod_metadata_annotations_only_omits_empty_labels_heading() {
 }
 
 #[test]
+fn pod_narrow_metadata_bounds_long_annotations_compactly() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.annotations = [
+        (
+            "example.io/very-long-unbroken-annotation-key-alpha".into(),
+            "a".repeat(240),
+        ),
+        (
+            "example.io/very-long-unbroken-annotation-key-bravo".into(),
+            "b".repeat(240),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut harness = harness(700.0, response);
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Show Pod metadata")
+        .click();
+    harness.run_steps(3);
+    pod_window(&harness)
+        .get_by_role_and_label(Role::Button, "Annotations 2 ▾")
+        .click();
+    harness.run_steps(3);
+    let detail = pod_window(&harness);
+    let rows = [
+        detail
+            .get_by_label(&format!(
+                "{}: {}",
+                "example.io/very-long-unbroken-annotation-key-alpha",
+                "a".repeat(240)
+            ))
+            .rect(),
+        detail
+            .get_by_label(&format!(
+                "{}: {}",
+                "example.io/very-long-unbroken-annotation-key-bravo",
+                "b".repeat(240)
+            ))
+            .rect(),
+    ];
+    assert!(
+        rows.iter()
+            .all(|row| row.right() <= detail.rect().right() + 1.0)
+    );
+    assert!(
+        rows[1].top() - rows[0].top() <= 28.0,
+        "annotation rows must remain Body-dense: {rows:?}"
+    );
+}
+
+#[test]
 fn pod_multi_container_images_stay_in_one_aligned_grid_cell() {
     let harness = harness(1_100.0, healthy_detail());
     let detail = pod_window(&harness);

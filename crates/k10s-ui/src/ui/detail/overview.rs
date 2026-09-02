@@ -148,21 +148,33 @@ pub(super) fn long_value_cell(ui: &mut egui::Ui, width: f32, label: &str, value:
     ui.vertical(|ui| long_value(ui, width, label, value));
 }
 
-/// Render every metadata label as a bounded chip in the local metadata width.
-pub(super) fn metadata_labels<'a>(
+/// Render label chips and the annotation disclosure in one wrapping flow.
+pub(super) fn metadata_labels_and_annotations<'a>(
     ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
     labels: impl IntoIterator<Item = (&'a str, &'a str)>,
     separator: &str,
+    annotations: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) {
+    let labels = labels.into_iter().collect::<Vec<_>>();
+    let annotations = annotations.into_iter().collect::<Vec<_>>();
+    if labels.is_empty() && annotations.is_empty() {
+        return;
+    }
     let width = ui
         .available_rect_before_wrap()
         .intersect(ui.clip_rect())
         .width()
         .max(1.0);
+    let expansion_id = egui::Id::new(id);
+    let mut open = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(expansion_id))
+        .unwrap_or(false);
+    let mut disclosure = None;
     ui.horizontal_wrapped(|ui| {
         for (key, value) in labels {
             let full = format!("{key}{separator}{value}");
-            let inner = (width - 18.0).max(1.0);
             let desired = ui
                 .painter()
                 .layout_no_wrap(
@@ -171,8 +183,7 @@ pub(super) fn metadata_labels<'a>(
                     ui.visuals().text_color(),
                 )
                 .size()
-                .x
-                .min(inner);
+                .x;
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2((desired + 16.0).min(width), ui.spacing().interact_size.y),
                 egui::Sense::hover(),
@@ -191,29 +202,15 @@ pub(super) fn metadata_labels<'a>(
             response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full.clone()));
             response.on_hover_text(&full);
         }
+        if !annotations.is_empty() {
+            let arrow = if open { '▴' } else { '▾' };
+            let response = ui.button(format!("Annotations {} {arrow}", annotations.len()));
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+            disclosure = Some(response);
+        }
     });
-}
-
-/// Compact, explicitly accessible annotation disclosure shared by typed details.
-pub(super) fn metadata_annotations<'a>(
-    ui: &mut egui::Ui,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    annotations: impl IntoIterator<Item = (&'a str, &'a str)>,
-) {
-    let annotations = annotations.into_iter().collect::<Vec<_>>();
-    if annotations.is_empty() {
-        return;
-    }
-    let expansion_id = egui::Id::new(id);
-    let mut open = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<bool>(expansion_id))
-        .unwrap_or(false);
-    let arrow = if open { '▴' } else { '▾' };
-    let response = ui.button(format!("Annotations {} {arrow}", annotations.len()));
-    ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
-    if response.clicked() {
+    if disclosure.is_some_and(|response| response.clicked()) {
         open = !open;
     }
     ui.ctx()
@@ -221,28 +218,23 @@ pub(super) fn metadata_annotations<'a>(
     if !open {
         return;
     }
-
-    let width = ui
-        .available_rect_before_wrap()
-        .intersect(ui.clip_rect())
-        .width()
-        .max(1.0);
     for (key, value) in annotations {
         ui.allocate_ui_with_layout(
             egui::vec2(width, 0.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                let key_width = (width * 0.34).max(1.0);
                 let key_response = ui.add_sized(
-                    [key_width, 0.0],
+                    [(width * 0.34).max(1.0), 0.0],
                     egui::Label::new(RichText::new(key).weak()).truncate(),
                 );
                 key_response
                     .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, key.to_owned()));
                 key_response.on_hover_text(key);
-                let value_width = ui.available_width().max(1.0);
                 let full = format!("{key}: {value}");
-                let response = ui.add_sized([value_width, 0.0], egui::Label::new(value).truncate());
+                let response = ui.add_sized(
+                    [ui.available_width().max(1.0), 0.0],
+                    egui::Label::new(value).truncate(),
+                );
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full.clone()));
                 response.on_hover_text(value);
             },
@@ -390,7 +382,13 @@ mod responsive_contract_tests {
         let render_selected = selected.clone();
         let mut harness = Harness::new_ui(move |ui| {
             let identity = *render_selected.lock().unwrap();
-            super::metadata_annotations(ui, ("annotations", 7_u64, identity), [("key", "value")]);
+            super::metadata_labels_and_annotations(
+                ui,
+                ("annotations", 7_u64, identity),
+                [],
+                "=",
+                [("key", "value")],
+            );
         });
         harness.run();
         harness
@@ -415,9 +413,11 @@ mod responsive_contract_tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(280.0, 180.0))
             .build_ui(move |ui| {
-                super::metadata_annotations(
+                super::metadata_labels_and_annotations(
                     ui,
                     ("annotations", "resource-a"),
+                    [],
+                    "=",
                     [(first, "one"), (second, "two")],
                 );
             });
@@ -435,6 +435,67 @@ mod responsive_contract_tests {
                 "truncated key must expose its full distinct value in a tooltip: {key}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_disclosure_shares_or_wraps_the_chip_flow_by_available_width() {
+        let render = |width| {
+            Harness::builder()
+                .with_size(egui::vec2(width, 180.0))
+                .build_ui(move |ui| {
+                    super::metadata_labels_and_annotations(
+                        ui,
+                        ("annotations", width.to_bits()),
+                        [("app", "web")],
+                        "=",
+                        [("note", "value")],
+                    );
+                })
+        };
+        let mut wide = render(520.0);
+        wide.run();
+        let chip = wide.get_by_label("app=web").rect();
+        let disclosure = wide
+            .get_by_role_and_label(Role::Button, "Annotations 1 ▾")
+            .rect();
+        assert!((chip.top() - disclosure.top()).abs() < 1.0);
+
+        let mut narrow = render(150.0);
+        narrow.run();
+        let chip = narrow.get_by_label("app=web").rect();
+        let disclosure = narrow
+            .get_by_role_and_label(Role::Button, "Annotations 1 ▾")
+            .rect();
+        assert!(disclosure.top() > chip.top() + 1.0);
+    }
+
+    #[test]
+    fn uid_empty_resource_identity_tuples_do_not_alias_annotation_state() {
+        let selected = std::sync::Arc::new(std::sync::Mutex::new("pod-a"));
+        let render_selected = selected.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            let name = *render_selected.lock().unwrap();
+            super::metadata_labels_and_annotations(
+                ui,
+                ("ctx", "", "v1", "Pod", "default", name, ""),
+                [],
+                "=",
+                [("note", "value")],
+            );
+        });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Annotations 1 ▾")
+            .click();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(Role::Button, "Annotations 1 ▴");
+        *selected.lock().unwrap() = "pod-b";
+        harness.run_steps(2);
+        let disclosure = harness.get_by_role_and_label(Role::Button, "Annotations 1 ▾");
+        assert_eq!(
+            disclosure.accesskit_node().data().is_expanded(),
+            Some(false)
+        );
     }
 
     #[test]
