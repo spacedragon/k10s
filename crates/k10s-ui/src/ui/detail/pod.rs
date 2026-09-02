@@ -607,21 +607,31 @@ fn show_metadata<I: RowIdentity>(
         ],
     );
 
-    section(ui, &format!("LABELS · {}", pod.labels.len()));
-    super::overview::metadata_labels(
-        ui,
-        pod.labels
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-        "=",
-    );
-    super::overview::metadata_annotations(
-        ui,
-        ("k10s.detail.pod.annotations", window_id.0),
-        pod.annotations
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
+    if !pod.labels.is_empty() || !pod.annotations.is_empty() {
+        if pod.labels.is_empty() {
+            super::overview::section_separator(ui);
+        } else {
+            section(ui, &format!("LABELS · {}", pod.labels.len()));
+            super::overview::metadata_labels(
+                ui,
+                pod.labels
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+                "=",
+            );
+        }
+        super::overview::metadata_annotations(
+            ui,
+            (
+                "k10s.detail.pod.annotations",
+                window_id.0,
+                frame.identity.uid.as_str(),
+            ),
+            pod.annotations
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    }
 
     section(ui, "IDENTITY");
     metadata_grid(

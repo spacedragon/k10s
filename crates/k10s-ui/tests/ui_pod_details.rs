@@ -699,6 +699,37 @@ fn pod_metadata_expands_annotations_accessibly() {
 }
 
 #[test]
+fn pod_metadata_omits_empty_combined_region() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.labels.clear();
+    pod.annotations.clear();
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    assert!(detail.query_by_label("LABELS · 0").is_none());
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Annotations 0 ▾")
+            .is_none()
+    );
+}
+
+#[test]
+fn pod_metadata_annotations_only_omits_empty_labels_heading() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!()
+    };
+    pod.labels.clear();
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+    assert!(detail.query_by_label("LABELS · 0").is_none());
+    detail.get_by_role_and_label(Role::Button, "Annotations 1 ▾");
+}
+
+#[test]
 fn pod_multi_container_images_stay_in_one_aligned_grid_cell() {
     let harness = harness(1_100.0, healthy_detail());
     let detail = pod_window(&harness);

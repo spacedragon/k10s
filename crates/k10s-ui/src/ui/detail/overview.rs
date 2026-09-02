@@ -252,7 +252,10 @@ pub(super) fn metadata_annotations<'a>(
 mod responsive_contract_tests {
     use super::{detail_columns, long_value_text};
     use egui::accesskit::Role;
-    use egui_kittest::{Harness, kittest::Queryable as _};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT as _, Queryable as _},
+    };
 
     #[test]
     fn detail_section_separator_spans_local_width() {
@@ -375,6 +378,30 @@ mod responsive_contract_tests {
             harness
                 .query_by_role_and_label(Role::Button, "Copy Image")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn annotation_disclosure_state_is_scoped_to_resource_identity() {
+        let selected = std::sync::Arc::new(std::sync::Mutex::new("pod-a"));
+        let render_selected = selected.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            let identity = *render_selected.lock().unwrap();
+            super::metadata_annotations(ui, ("annotations", 7_u64, identity), [("key", "value")]);
+        });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Annotations 1 ▾")
+            .click();
+        harness.run_steps(2);
+        harness.get_by_role_and_label(Role::Button, "Annotations 1 ▴");
+
+        *selected.lock().unwrap() = "pod-b";
+        harness.run_steps(2);
+        let disclosure = harness.get_by_role_and_label(Role::Button, "Annotations 1 ▾");
+        assert_eq!(
+            disclosure.accesskit_node().data().is_expanded(),
+            Some(false)
         );
     }
 

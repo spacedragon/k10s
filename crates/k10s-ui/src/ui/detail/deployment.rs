@@ -849,7 +849,11 @@ fn metadata_column(
                 }
                 super::overview::metadata_annotations(
                     ui,
-                    ("k10s.detail.deployment.annotations", window_id.0),
+                    (
+                        "k10s.detail.deployment.annotations",
+                        window_id.0,
+                        identity.uid.as_str(),
+                    ),
                     deployment
                         .annotations
                         .iter()
