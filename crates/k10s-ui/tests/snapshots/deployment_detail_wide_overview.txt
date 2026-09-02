@@ -180,21 +180,23 @@ Window label="Deployment · payments / checkout"
                       GenericContainer
                         GenericContainer
                           Label value="app.kubernetes.io/instance: checkout-prod"
-                            TextRun value="ap…: checkout-prod"
+                            TextRun value="app.kubernetes.io/instance: checkout…"
                         GenericContainer
                           Label value="app.kubernetes.io/managed-by: Helm"
-                            TextRun value="app.kuberne…: Helm"
+                            TextRun value="app.kubernetes.io/managed-by: H…"
                         GenericContainer
                           Label value="app.kubernetes.io/name: checkout"
-                            TextRun value="app.kub…: checkout"
-                      GenericContainer
+                            TextRun value="app.kubernetes.io/name: check…"
                         GenericContainer
                           Label value="app.kubernetes.io/part-of: shop"
-                            TextRun value="app.kuberne…: shop"
-                      Button label="Show 2 more labels"
-                      Label value="ANNOTATIONS · 2"
-                        TextRun value="ANNOTATIONS · 2"
-                      Button label="Show 2 annotations"
+                            TextRun value="app.kubernetes.io/part-of:…"
+                        GenericContainer
+                          Label value="team: payments"
+                            TextRun value="team: payments"
+                        GenericContainer
+                          Label value="tier: backend"
+                            TextRun value="tier: back…"
+                      Button label="Annotations 2 ▾"
                       Label value="IDENTITY"
                         TextRun value="IDENTITY"
                       GenericContainer
@@ -208,6 +210,7 @@ Window label="Deployment · payments / checkout"
                           Label value="UID · uid-deployment-checkout"
                             TextRun value="UID · uid-deployment-checkout"
                           Label value="Context · deployment-test"
+                            TextRun value="Context · deployment-test"
               ScrollBar
             GenericContainer
               Label value="p pods · l logs · y yaml · e events · c copy name · Esc clear selection"
