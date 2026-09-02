@@ -2106,6 +2106,129 @@ fn sub_1000_viewport_keeps_the_first_deployment_detail_compact() {
 }
 
 #[test]
+fn above_1000_viewport_uses_the_wide_first_deployment_detail() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployments window opens");
+    let row = fixture.feed.lists[&WorkspaceWorkload::Deployments][0]
+        .identity
+        .clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_000.5, 700.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SelectRow(id, row));
+    harness.run_steps(4);
+
+    assert!(
+        workload_window(&harness, "Deployments")
+            .get_by_role_and_label(Role::ScrollView, "Detail body")
+            .rect()
+            .width()
+            >= 760.0,
+        "a canvas that fits the wide first Deployment layout must use it"
+    );
+}
+
+#[test]
+fn sub_1000_first_deployment_does_not_expand_after_a_viewport_resize() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployments window opens");
+    let row = fixture.feed.lists[&WorkspaceWorkload::Deployments][0]
+        .identity
+        .clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(999.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness.set_size(egui::vec2(1_000.0, 700.0));
+    harness.run_steps(4);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SelectRow(id, row));
+    harness.run_steps(4);
+
+    assert!(
+        workload_window(&harness, "Deployments")
+            .get_by_role_and_label(Role::ScrollView, "Detail body")
+            .rect()
+            .width()
+            < 760.0,
+        "the first-open decision must not be retroactively widened by a viewport resize"
+    );
+}
+
+#[test]
+fn viewport_shrink_does_not_persist_the_temporary_wide_deployment_geometry() {
+    let mut fixture = Fixture::default();
+    let id = fixture
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkspaceWorkload::Deployments),
+        ))
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .expect("Deployments window opens");
+    let saved_geometry = fixture
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.id == id)
+        .expect("Deployments window is persisted")
+        .geometry;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1_000.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(render, fixture);
+    harness.run_steps(4);
+    harness.set_size(egui::vec2(640.0, 700.0));
+    harness.run_steps(4);
+
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.id == id)
+            .expect("Deployments window remains persisted")
+            .geometry,
+        saved_geometry,
+        "canvas constraints after a viewport resize must not overwrite saved geometry"
+    );
+}
+
+#[test]
 fn integrated_detail_transitions_preserve_shared_workload_window_geometry() {
     for kind in [WorkspaceWorkload::Deployments, WorkspaceWorkload::Pods] {
         for size in [[700.0, 500.0], [640.0, 420.0]] {
