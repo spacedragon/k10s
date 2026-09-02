@@ -26,8 +26,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
-        UiShell, WindowFreshness,
+        ConnectionState, DetailAuthority, DetailLifecycle, ExternalShellAvailability,
+        PrimaryDetailState, ResourceFeed, UiShell, WindowFreshness,
     },
     workspace::{LauncherItem, WindowGeom, WindowId, WorkloadKind as W, WorkspaceCommand},
 };
@@ -457,6 +457,89 @@ fn pod_detail_overview_with_resolved_response() {
         .insert(identity, pod_detail("db-postgres-0"));
     run_steps(&mut harness);
     snapshot_tree(&harness, "pod_detail_overview");
+}
+
+#[test]
+fn external_shell_capability_gates_pod_action() {
+    let mut harness = harness();
+    harness.state_mut().feed.lists.insert(
+        W::Pods,
+        vec![list_row("", "v1", "Pod", "db-postgres-0", "Running")],
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(W::Pods),
+        ));
+    run_steps(&mut harness);
+    let id = workload_id(harness.state(), W::Pods);
+    common::workload_window(&harness, "Pods")
+        .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
+        .click();
+    run_steps(&mut harness);
+    let identity = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(id)
+        .and_then(|state| state.selection.clone())
+        .expect("selection");
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), pod_runtime_detail("db-postgres-0"));
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness.state_mut().feed.window_freshness.insert(
+        id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
+    run_steps(&mut harness);
+    assert!(
+        common::workload_window(&harness, "Pods")
+            .query_by_label("Open shell")
+            .is_none()
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .set_external_shell_availability(ExternalShellAvailability::Available { generation: 7 });
+    run_steps(&mut harness);
+    let button =
+        common::workload_window(&harness, "Pods").get_by_role_and_label(Role::Button, "Open shell");
+    button.hover();
+    run_steps(&mut harness);
+    harness.get_by_label("Open an interactive kubectl shell in your system terminal");
+    common::workload_window(&harness, "Pods")
+        .get_by_role_and_label(Role::Button, "Open shell")
+        .click();
+    run_steps(&mut harness);
+    assert_eq!(
+        harness.state_mut().shell.drain_resource_actions(),
+        vec![k10s_ui::ui::ResourceAction::OpenExternalShell {
+            window: id,
+            target: k10s_ui::ui::ExternalShellTarget {
+                generation: 7,
+                namespace: "default".into(),
+                pod: "db-postgres-0".into(),
+                uid: format!("uid-{CONTEXT}-pod-default-db-postgres-0"),
+                container: "app".into(),
+                program: "/bin/sh".into(),
+            },
+        }]
+    );
 }
 
 #[test]

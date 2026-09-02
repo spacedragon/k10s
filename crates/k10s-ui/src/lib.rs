@@ -3,7 +3,7 @@
 mod app;
 mod connection;
 
-pub use app::{AppView, K10sApp};
+pub use app::{AppView, K10sApp, K10sAppEvent};
 pub use connection::{ConnectionGate, PersistedSettings, derive_control_url};
 
 /// Target-neutral protocol client.

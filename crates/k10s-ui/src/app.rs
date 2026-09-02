@@ -191,10 +191,17 @@ pub struct K10sApp {
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
+    external_shell_requests: Vec<crate::ui::ExternalShellTarget>,
+    app_events: Vec<K10sAppEvent>,
     /// Restorable window layouts not currently active, keyed by kube context.
     workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
     clock_started: Instant,
     jitter_counter: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum K10sAppEvent {
+    CommittedContextChanged { context: String },
 }
 
 /// A window's in-flight dedicated-stream ticket request.
@@ -398,6 +405,8 @@ impl K10sApp {
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
+            external_shell_requests: Vec::new(),
+            app_events: Vec::new(),
             workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
@@ -485,6 +494,12 @@ impl K10sApp {
 
     fn commit_context_layout(&mut self, to: String) {
         let from = self.shell.workspace().context().to_owned();
+        if from != to {
+            self.revoke_external_shell();
+            self.app_events.push(K10sAppEvent::CommittedContextChanged {
+                context: to.clone(),
+            });
+        }
         if !from.is_empty() && from != to {
             self.workspace_layouts
                 .insert(from, self.workspace_snapshot());
@@ -519,6 +534,33 @@ impl K10sApp {
     #[must_use]
     pub fn port_forward_available(&self) -> bool {
         self.client.port_forward_available()
+    }
+
+    pub fn set_external_shell_availability(
+        &mut self,
+        availability: crate::ui::ExternalShellAvailability,
+    ) {
+        self.shell.set_external_shell_availability(availability);
+        if matches!(
+            availability,
+            crate::ui::ExternalShellAvailability::Unavailable
+        ) {
+            self.external_shell_requests.clear();
+        }
+    }
+
+    pub fn drain_external_shell_requests(&mut self) -> Vec<crate::ui::ExternalShellTarget> {
+        std::mem::take(&mut self.external_shell_requests)
+    }
+
+    pub fn drain_app_events(&mut self) -> Vec<K10sAppEvent> {
+        std::mem::take(&mut self.app_events)
+    }
+
+    fn revoke_external_shell(&mut self) {
+        self.shell
+            .set_external_shell_availability(crate::ui::ExternalShellAvailability::Unavailable);
+        self.external_shell_requests.clear();
     }
 
     /// Current authoritative session snapshots used by native hosts/tests.
@@ -1950,6 +1992,7 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        self.revoke_external_shell();
         for (window, key) in &self.window_subscriptions {
             if let Some(rows) = self
                 .resource_subscriptions
@@ -2823,6 +2866,40 @@ impl K10sApp {
 
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
+            ResourceAction::OpenExternalShell { window, target } => {
+                let available = matches!(
+                    self.shell.external_shell_availability(),
+                    crate::ui::ExternalShellAvailability::Available { generation }
+                        if generation == target.generation
+                );
+                let valid = self
+                    .workspace_stream_target(window)
+                    .is_some_and(|candidate| {
+                        candidate.namespace == target.namespace
+                            && candidate.pod == target.pod
+                            && candidate.uid == target.uid
+                            && target.program == "/bin/sh"
+                            && !target.container.is_empty()
+                            && self.details.values().any(|view| {
+                                view.identity.context == candidate.context
+                                    && view.identity.gvk.group.is_empty()
+                                    && view.identity.gvk.version == "v1"
+                                    && view.identity.gvk.kind == "Pod"
+                                    && view.identity.namespace.as_deref() == Some(&target.namespace)
+                                    && view.identity.name == target.pod
+                                    && view.identity.uid == target.uid
+                                    && self.mutation_authority_allows(&view.identity)
+                                    && crate::ui::PodRuntimeProjection::from_view(
+                                        &view.identity,
+                                        view,
+                                    )
+                                    .is_some_and(|runtime| runtime.contains(&target.container))
+                            })
+                    });
+                if available && valid && self.external_shell_requests.is_empty() {
+                    self.external_shell_requests.push(target);
+                }
+            }
             ResourceAction::Restart { window, target } => {
                 if !self.mutation_authority_allows(&target) {
                     return;
@@ -3609,6 +3686,7 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        self.revoke_external_shell();
         self.teardown_stream_sessions();
         self.view = AppView::Failed { message };
     }
@@ -6328,6 +6406,58 @@ mod tests {
             name: name.into(),
             uid: format!("uid-{name}"),
         }
+    }
+
+    #[test]
+    fn committed_context_change_revokes_external_shell_and_clears_requests() {
+        let (mut app, _) = ready_app();
+        app.drain_app_events();
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 9 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 9,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
+
+        app.commit_context_layout("other".into());
+
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.drain_external_shell_requests().is_empty());
+        assert_eq!(
+            app.drain_app_events(),
+            vec![super::K10sAppEvent::CommittedContextChanged {
+                context: "other".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn delayed_external_shell_generation_is_rejected() {
+        let (mut app, _) = ready_app();
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 10 },
+        );
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window: WindowId(999),
+            target: crate::ui::ExternalShellTarget {
+                generation: 9,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            },
+        });
+        assert!(app.drain_external_shell_requests().is_empty());
     }
 
     fn pin_pod_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
