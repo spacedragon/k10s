@@ -58,10 +58,12 @@ pub(super) fn two_column(
 /// Paint a local-width section boundary without adding an accessibility node.
 pub(super) fn section_separator(ui: &mut egui::Ui) -> egui::Response {
     let height = ui.spacing().item_spacing.y;
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
+    let visible_width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(visible_width, height), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let y = ui.painter().round_to_pixel_center(rect.center().y);
         ui.painter().hline(
@@ -162,9 +164,20 @@ mod responsive_contract_tests {
                     egui::vec2(280.0, 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        let local_width = ui.available_width();
+                        let available = ui.available_rect_before_wrap();
+                        let clipped = egui::Rect::from_min_max(
+                            available.min,
+                            egui::pos2(available.left() + 180.0, available.bottom()),
+                        );
+                        ui.set_clip_rect(clipped);
                         let response = super::section_separator(ui);
-                        assert!((response.rect.width() - local_width).abs() <= 1.0);
+                        assert!((response.rect.width() - clipped.width()).abs() <= 1.0);
+                        assert!(
+                            response.rect.right() <= clipped.right() + 1.0,
+                            "separator must stay within the local clip: {:?} vs {:?}",
+                            response.rect,
+                            clipped
+                        );
                         assert!(
                             response.rect.height() <= ui.spacing().item_spacing.y + 1.0,
                             "separator must fit within one standard item spacing: {:?}",
