@@ -186,20 +186,11 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
+                Button label="More list controls"
               GenericContainer
                 Label value="1 pods · 1 selected"
                   TextRun value="1 pods · 1 selected"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
+                Button label="More list details"
               GenericContainer
                 GenericContainer
                   GenericContainer

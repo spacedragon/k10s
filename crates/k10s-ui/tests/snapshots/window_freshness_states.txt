@@ -211,9 +211,8 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
-                  Label value="● Live · 4s ago"
-                    TextRun value="● Live · 4s ago"
+                Label value="● Live · 4s ago"
+                  TextRun value="● Live · 4s ago"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
@@ -305,7 +304,6 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
               GenericContainer
                 Label value="1 pods"
                   TextRun value="1 pods"
@@ -411,7 +409,6 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
               GenericContainer
                 Label value="0 statefulsets"
                   TextRun value="0 statefulsets"
@@ -465,7 +462,6 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
               GenericContainer
                 Label value="0 daemonsets"
                   TextRun value="0 daemonsets"
@@ -515,9 +511,8 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
-                  Label value="◇ Ready · no resources"
-                    TextRun value="◇ Ready · no resources"
+                Label value="◇ Ready · no resources"
+                  TextRun value="◇ Ready · no resources"
               GenericContainer
                 Label value="0 jobs"
                   TextRun value="0 jobs"
@@ -562,7 +557,6 @@ Window
                 GenericContainer
                   Button label="Columns ▾"
                 Button label="↻"
-                GenericContainer
               GenericContainer
                 Label value="1 cronjobs"
                   TextRun value="1 cronjobs"
@@ -649,7 +643,6 @@ Window
                   Button label="Columns ▾"
                 Button label="↻"
                 Button label="Reset"
-                GenericContainer
               GenericContainer
                 Label value="0 configmaps"
                   TextRun value="0 configmaps"

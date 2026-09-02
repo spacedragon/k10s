@@ -9331,6 +9331,49 @@ mod tests {
     }
 
     #[test]
+    fn narrow_deployment_toolbar_overflows_secondary_controls() {
+        let (mut app, _) = deployment_list_app();
+        let mut snapshot = app.workspace_snapshot();
+        let deployment = snapshot
+            .windows
+            .iter_mut()
+            .find(|window| window.title == "Deployments")
+            .expect("deployment window is persisted");
+        deployment.geometry.size[0] = 460.0;
+        app.restore_workspace_snapshot(snapshot);
+
+        let mut harness = toolbar_test_harness(app);
+        {
+            let window = harness.get_by_role_and_label(
+                egui::accesskit::Role::Window,
+                "Deployments · all namespaces",
+            );
+
+            window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
+            assert_eq!(
+                window
+                    .get_by_value("Namespace: All namespaces")
+                    .accesskit_node()
+                    .role(),
+                egui::accesskit::Role::ComboBox,
+            );
+            assert_eq!(
+                window.get_by_value("Status: all").accesskit_node().role(),
+                egui::accesskit::Role::ComboBox,
+            );
+            window.get_by_label("● Live · just now");
+            assert!(window.query_by_label("Columns ▾").is_none());
+            assert!(window.query_by_label("↻").is_none());
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
+                .click();
+        }
+        harness.step();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾ ⏵");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Refresh list");
+    }
+
+    #[test]
     fn deployment_toolbar_matches_reference_layout_and_title() {
         let (app, _) = deployment_list_app();
         let harness = toolbar_test_harness(app);
@@ -9339,8 +9382,8 @@ mod tests {
             "Deployments · all namespaces",
         );
 
-        // One compact toolbar row: search, namespace, status, columns,
-        // refresh, and the live/freshness chip.
+        // Local list width keeps the primary controls reachable and puts
+        // secondary actions in an accessible overflow menu.
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
         assert_eq!(
             harness
@@ -9355,15 +9398,13 @@ mod tests {
             egui::accesskit::Role::ComboBox,
             "the status filter carries its label inside the control"
         );
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
         window.get_by_label("● Live · just now");
 
         // The match line reports the result count and the age affordance.
         // With no filters active, the Reset control stays hidden.
         window.get_by_label("2 deployments");
-        window.get_by_label("Age shown as relative (");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to absolute");
+        window.get_by_role_and_label(egui::accesskit::Role::Button, "More list details");
         assert!(
             window.query_by_label("Reset").is_none(),
             "Reset only appears while filters are active"
@@ -9416,13 +9457,18 @@ mod tests {
             }),
         ));
 
-        let harness = toolbar_test_harness(app);
+        let mut harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
             "Deployments · all namespaces",
         );
         list_window.get_by_label("2 deployments · 1 selected");
-        list_window.get_by_label("sorted by Namespace ▲ · ");
+        list_window
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list details")
+            .click();
+        harness.step();
+        harness.get_by_label("sorted by Namespace ▲ · ");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "switch to absolute");
 
         // Absolute mode renders raw timestamps in the Age column and flips
         // the match-line affordance.
@@ -9432,13 +9478,17 @@ mod tests {
                 window,
                 crate::workspace::AgeMode::Absolute,
             ));
-        let harness = toolbar_test_harness(app);
+        let mut harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
             "Deployments · all namespaces",
         );
-        list_window.get_by_label("Age shown as absolute (");
-        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "switch to relative");
+        list_window
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list details")
+            .click();
+        harness.step();
+        harness.get_by_label("Age shown as absolute (");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "switch to relative");
     }
 
     #[test]
@@ -9478,8 +9528,8 @@ mod tests {
             "the status filter must exclude non-matching rows"
         );
         list_window.get_by_label("1 deployments");
-        // An active filter exposes the Reset affordance.
-        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "Reset");
+        // An active filter keeps Reset reachable through the same menu.
+        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
         let selector = harness
             .query_all_by_role(egui::accesskit::Role::ComboBox)
             .find(|node| {

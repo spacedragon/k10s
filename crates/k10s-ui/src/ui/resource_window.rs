@@ -684,10 +684,10 @@ pub(super) fn show<I>(
         super::resource_table::sort_rows(&mut sorted, sort);
     }
 
-    let compact_controls = ui.ctx().content_rect().width() < 700.0;
-    // One compact toolbar row: search, namespace, status, columns, refresh,
-    // and the live-freshness chip on the far right — never a separate row.
-    ui.horizontal(|ui| {
+    // A window can be much narrower than the app canvas, so use this list's
+    // local control budget rather than the global content width.
+    let compact_controls = ui.available_width() < 700.0;
+    ui.horizontal_wrapped(|ui| {
         let search_hint = format!("Search {title_lower}");
         let mut search = state.search.clone();
         let search_edit = ui.add(
@@ -715,64 +715,66 @@ pub(super) fn show<I>(
 
         show_status_combobox(ui, window_id, &state.status_filter, rows, queued);
 
-        if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked() {
-            queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
-        }
-
-        show_columns_menu(
-            ui,
-            window_id,
-            kind,
-            namespaced,
-            &state.hidden_columns,
-            queued,
-        );
-
-        let refresh = ui.button("↻");
-        if refresh.on_hover_text("Refresh list").clicked() {
-            resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
-        }
-
         let filters_active = !state.search.is_empty()
             || (namespaced
                 && state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces)
             || state.status_filter.is_some();
-        // The reference design's Reset control: one action clears search,
-        // namespace, and status filters together.
-        if filters_active && ui.button("Reset").clicked() {
-            queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-            if namespaced {
-                queued.push(WorkspaceCommand::SetNamespaceScope(
-                    window_id,
-                    crate::workspace::NamespaceScope::AllNamespaces,
-                ));
+        let mut secondary_controls = |ui: &mut egui::Ui| {
+            if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked()
+            {
+                queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
             }
-            queued.push(WorkspaceCommand::SetStatusFilter(window_id, None));
+            show_columns_menu(
+                ui,
+                window_id,
+                kind,
+                namespaced,
+                &state.hidden_columns,
+                queued,
+            );
+            let refresh = if compact_controls {
+                ui.button("Refresh list")
+            } else {
+                ui.button("↻").on_hover_text("Refresh list")
+            };
+            if refresh.clicked() {
+                resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+            }
+            if filters_active && ui.button("Reset").clicked() {
+                queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
+                if namespaced {
+                    queued.push(WorkspaceCommand::SetNamespaceScope(
+                        window_id,
+                        crate::workspace::NamespaceScope::AllNamespaces,
+                    ));
+                }
+                queued.push(WorkspaceCommand::SetStatusFilter(window_id, None));
+            }
+        };
+        if compact_controls {
+            ui.menu_button("More list controls", |ui| secondary_controls(ui));
+        } else {
+            secondary_controls(ui);
         }
 
-        // Live freshness lives at the right end of the toolbar row instead
-        // of owning its own line.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(freshness) = effective_freshness {
-                match freshness {
-                    WindowFreshness::Live { last_sync_age } => {
-                        ui.label(
-                            RichText::new(format!("● Live · {last_sync_age}"))
-                                .color(theme::HEALTHY),
-                        );
-                    }
-                    WindowFreshness::ReadyEmpty => {
-                        ui.label(RichText::new("◇ Ready · no resources").weak());
-                    }
-                    _ => {}
+        if let Some(freshness) = effective_freshness {
+            match freshness {
+                WindowFreshness::Live { last_sync_age } => {
+                    ui.label(
+                        RichText::new(format!("● Live · {last_sync_age}")).color(theme::HEALTHY),
+                    );
                 }
+                WindowFreshness::ReadyEmpty => {
+                    ui.label(RichText::new("◇ Ready · no resources").weak());
+                }
+                _ => {}
             }
-        });
+        }
     });
 
     // Compact match line: result count, selection, active sort, and the
     // relative/absolute age affordance.
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let count = sorted.len();
         ui.label(
             RichText::new(format!(
@@ -785,46 +787,53 @@ pub(super) fn show<I>(
             ))
             .color(theme::MUTED_TEXT),
         );
-        // The whole right-hand group keeps natural left-to-right reading
-        // order while staying anchored to the toolbar's right edge.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                if let Some(sort) = state.sort.as_ref() {
-                    let arrow = if sort.ascending { "▲" } else { "▼" };
-                    ui.label(
-                        RichText::new(format!(
-                            "sorted by {} {arrow} · ",
-                            super::resource_table::column_title(&sort.column)
-                        ))
-                        .color(theme::MUTED_TEXT),
-                    );
-                }
-                let (age_text, switch_label, next_mode) = match state.age_mode {
-                    crate::workspace::AgeMode::Relative => (
-                        "Age shown as relative",
-                        "switch to absolute",
-                        crate::workspace::AgeMode::Absolute,
-                    ),
-                    crate::workspace::AgeMode::Absolute => (
-                        "Age shown as absolute",
-                        "switch to relative",
-                        crate::workspace::AgeMode::Relative,
-                    ),
-                };
-                ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(switch_label).color(theme::ACCENT))
-                            .frame(false)
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                    )
-                    .clicked()
-                {
-                    queued.push(WorkspaceCommand::SetAgeMode(window_id, next_mode));
-                }
-                ui.label(RichText::new(")").color(theme::MUTED_TEXT));
+        let mut match_details = |ui: &mut egui::Ui| {
+            if let Some(sort) = state.sort.as_ref() {
+                let arrow = if sort.ascending { "▲" } else { "▼" };
+                ui.label(
+                    RichText::new(format!(
+                        "sorted by {} {arrow} · ",
+                        super::resource_table::column_title(&sort.column)
+                    ))
+                    .color(theme::MUTED_TEXT),
+                );
+            }
+            let (age_text, switch_label, next_mode) = match state.age_mode {
+                crate::workspace::AgeMode::Relative => (
+                    "Age shown as relative",
+                    "switch to absolute",
+                    crate::workspace::AgeMode::Absolute,
+                ),
+                crate::workspace::AgeMode::Absolute => (
+                    "Age shown as absolute",
+                    "switch to relative",
+                    crate::workspace::AgeMode::Relative,
+                ),
+            };
+            ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(switch_label).color(theme::ACCENT))
+                        .frame(false)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                )
+                .clicked()
+            {
+                queued.push(WorkspaceCommand::SetAgeMode(window_id, next_mode));
+            }
+            ui.label(RichText::new(")").color(theme::MUTED_TEXT));
+        };
+        if compact_controls {
+            ui.menu_button("More list details", |ui| match_details(ui));
+        } else {
+            // The whole right-hand group keeps natural left-to-right reading
+            // order while staying anchored to the toolbar's right edge.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    match_details(ui);
+                });
             });
-        });
+        }
     });
 
     if namespaced {

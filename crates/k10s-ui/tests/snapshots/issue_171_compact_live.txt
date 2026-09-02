@@ -179,21 +179,14 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                GenericContainer
-                  Label value="● Live · 4s ago"
+                Button label="More list controls"
+                Label value="● Live · 4s ago"
+                  TextRun value="● "
+                  TextRun value="Live · 4s ago"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
+                Button label="More list details"
               GenericContainer
                 GenericContainer
                   GenericContainer
