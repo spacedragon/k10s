@@ -20,7 +20,7 @@ Window label="Deployment · payments / checkout"
                 Button label="Show more Deployment vitals"
             GenericContainer
               Label value="Freshness · live (just now)"
-                TextRun value="Freshness · live (just now)"
+                TextRun value="Live"
             GenericContainer
               GenericContainer
                 Button label="Tab Overview"

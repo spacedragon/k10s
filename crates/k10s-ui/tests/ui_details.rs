@@ -2502,6 +2502,22 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
             "{name} {rect:?} escapes row {row:?}"
         );
     }
+    let gap = 8.0;
+    assert!(
+        tabs_row.width() >= active_tab.width() + more_tabs.width() + gap,
+        "tabs row {:?} cannot paint intrinsic controls {:?} + {:?}",
+        tabs_row,
+        active_tab,
+        more_tabs
+    );
+    assert!(
+        actions_row.width() >= scale.width() + more_actions.width() + delete.width() + gap * 2.0,
+        "actions row {:?} cannot paint intrinsic controls {:?} + {:?} + {:?}",
+        actions_row,
+        scale,
+        more_actions,
+        delete
+    );
     for pair in [
         (rollout, ready),
         (ready, more_vitals),
@@ -2556,6 +2572,82 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
             target,
         }]
     );
+}
+
+#[test]
+fn narrow_integrated_detail_budgets_intrinsic_tab_and_action_controls() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(700.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .with_step_dt(0.3)
+        .build_ui_state(render, Fixture::default());
+    let mut detail = typed_deployment_detail("web-frontend");
+    detail.capabilities.can_restart = true;
+    detail.capabilities.can_scale = true;
+    detail.capabilities.can_delete = true;
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(detail.identity.clone(), detail);
+    open(
+        &mut harness,
+        LauncherItem::Workload(WorkloadKind::Deployments),
+    );
+    let window_id =
+        workload_window_id(harness.state().shell.workspace(), WorkloadKind::Deployments);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetGeometry(
+            window_id,
+            WindowGeom {
+                position: [32.0, 32.0],
+                size: [440.0, 560.0],
+                collapsed: false,
+            },
+        ));
+    common::workload_window(&harness, "Deployments")
+        .get_by_role_and_label(Role::Button, "Select resource web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let window = common::workload_window(&harness, "Deployments");
+    let tabs_row = window.get_by_label("Detail tabs row").rect();
+    let actions_row = window.get_by_label("Detail actions row").rect();
+    let active = window
+        .get_by_role_and_label(Role::Button, "Tab Overview")
+        .rect();
+    let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
+    let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
+    if let Some(more_tabs) = window.query_by_role_and_label(Role::Button, "More detail tabs") {
+        assert!(tabs_row.width() >= active.width() + more_tabs.rect().width() + 8.0);
+        let more_actions = window
+            .get_by_role_and_label(Role::Button, "More detail actions")
+            .rect();
+        assert!(
+            actions_row.width() >= scale.width() + more_actions.width() + delete.width() + 16.0
+        );
+    } else {
+        let tabs_width = ["Tab Overview", "Tab Pods", "Tab Events", "Tab YAML"]
+            .iter()
+            .map(|label| {
+                window
+                    .get_by_role_and_label(Role::Button, label)
+                    .rect()
+                    .width()
+            })
+            .sum::<f32>();
+        let restart = window
+            .get_by_role_and_label(Role::Button, "Restart…")
+            .rect();
+        let actions = window.get_by_role_and_label(Role::Button, "Actions").rect();
+        assert!(tabs_row.width() >= tabs_width + 24.0);
+        assert!(
+            actions_row.width()
+                >= scale.width() + restart.width() + actions.width() + delete.width() + 24.0
+        );
+    }
 }
 
 #[test]

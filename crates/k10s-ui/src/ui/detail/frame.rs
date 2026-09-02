@@ -198,12 +198,13 @@ pub(super) fn show<I: RowIdentity>(
     );
     let gap = ui.spacing().item_spacing.x;
     let usable_width = (tab_row.width() - gap).max(0.0);
-    let freshness_width = if integrated { 0.0 } else { 152.0 };
+    let full_freshness_width = if integrated { 0.0 } else { 152.0 };
+    let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
     let action_count = usize::from(projection.actions.can_scale)
         + usize::from(projection.actions.can_restart)
         + usize::from(projection.actions.can_delete)
         + 1;
-    let wide_action_width = button_width(ui, "Actions")
+    let wide_action_width = menu_button_width(ui, "Actions")
         + projection
             .actions
             .can_scale
@@ -222,7 +223,7 @@ pub(super) fn show<I: RowIdentity>(
         + gap * action_count.saturating_sub(1) as f32;
     let compact_action_count =
         usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
-    let compact_action_width = button_width(ui, "More detail actions")
+    let compact_action_width = menu_button_width(ui, "More")
         + projection
             .actions
             .can_scale
@@ -239,11 +240,11 @@ pub(super) fn show<I: RowIdentity>(
         .map(|tab| button_width(ui, super::tab_label(*tab)))
         .sum::<f32>()
         + gap * tabs.len().saturating_sub(1) as f32
-        + freshness_width;
+        + full_freshness_width;
     let compact_tabs_width = button_width(ui, super::tab_label(detail.active_tab))
-        + button_width(ui, "More detail tabs")
+        + menu_button_width(ui, "More")
         + gap
-        + freshness_width;
+        + compact_freshness_width;
     let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
     let desired_action_width = if compact_chrome {
         compact_action_width
@@ -259,7 +260,12 @@ pub(super) fn show<I: RowIdentity>(
     let tab_width = usable_width - action_width;
     let tabs_region =
         egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
-    let freshness_width = freshness_width.min(tabs_region.width());
+    let freshness_width = if compact_chrome {
+        compact_freshness_width
+    } else {
+        full_freshness_width
+    }
+    .min(tabs_region.width());
     let tabs_rect = egui::Rect::from_min_max(
         tabs_region.min,
         egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
@@ -275,7 +281,15 @@ pub(super) fn show<I: RowIdentity>(
                 .layout(Layout::right_to_left(Align::Center)),
         );
         freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
-        freshness_ui.label(freshness_text(projection.freshness));
+        let full_freshness = freshness_text(projection.freshness);
+        let freshness_display = if compact_chrome {
+            compact_freshness_text(projection.freshness).to_owned()
+        } else {
+            full_freshness.clone()
+        };
+        let freshness = freshness_ui.label(freshness_display);
+        freshness
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone()));
     }
     let actions_rect = egui::Rect::from_min_max(
         egui::pos2(tabs_region.right() + gap, tab_row.top()),
@@ -313,7 +327,7 @@ pub(super) fn show<I: RowIdentity>(
             }
         }
         if compact && tabs.len() > 1 {
-            ui.menu_button("More detail tabs", |ui| {
+            let menu = ui.menu_button("More", |ui| {
                 for tab in tabs {
                     if *tab == detail.active_tab {
                         continue;
@@ -333,6 +347,8 @@ pub(super) fn show<I: RowIdentity>(
                     }
                 }
             });
+            menu.response
+                .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "More detail tabs"));
         }
     });
     let owner = projection.actions.verified_owner;
@@ -365,42 +381,40 @@ pub(super) fn show<I: RowIdentity>(
         let compact = compact_chrome;
         let namespace = projection.identity.namespace.as_deref();
         let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
-        ui.menu_button(
+        let action_menu = ui.menu_button(if compact { "More" } else { "Actions" }, |ui| {
             if compact {
-                "More detail actions"
-            } else {
-                "Actions"
-            },
-            |ui| {
-                if compact {
-                    content(
-                        ui,
-                        input.primary,
-                        Some(DetailActionSegment::Restart),
-                        &mut projection,
-                    );
-                    ui.separator();
+                content(
+                    ui,
+                    input.primary,
+                    Some(DetailActionSegment::Restart),
+                    &mut projection,
+                );
+                ui.separator();
+            }
+            // Copy name moved out of the action row into the
+            // overflow menu per the reference design.
+            copy(ui, "Copy name", &projection.identity.name);
+            if let Some(owner) = owner {
+                let label = format!("Open owner {}", owner.name);
+                if ui.button(&label).clicked() {
+                    queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
+                        &super::presentation::owner_identity(projection.identity, owner),
+                    )));
+                    ui.close();
                 }
-                // Copy name moved out of the action row into the
-                // overflow menu per the reference design.
-                copy(ui, "Copy name", &projection.identity.name);
-                if let Some(owner) = owner {
-                    let label = format!("Open owner {}", owner.name);
-                    if ui.button(&label).clicked() {
-                        queued.push(WorkspaceCommand::OpenDedicatedDetail(I::from_row_identity(
-                            &super::presentation::owner_identity(projection.identity, owner),
-                        )));
-                        ui.close();
-                    }
-                }
-                if let Some(namespace) = namespace {
-                    copy(ui, "Copy namespace", namespace);
-                }
-                if let Some(uid) = uid {
-                    copy(ui, "Copy UID", uid);
-                }
-            },
-        );
+            }
+            if let Some(namespace) = namespace {
+                copy(ui, "Copy namespace", namespace);
+            }
+            if let Some(uid) = uid {
+                copy(ui, "Copy UID", uid);
+            }
+        });
+        if compact {
+            action_menu.response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, true, "More detail actions")
+            });
+        }
         content(
             ui,
             input.primary,
@@ -736,6 +750,20 @@ fn freshness_text(freshness: DetailFreshness<'_>) -> String {
     }
 }
 
+fn compact_freshness_text(freshness: DetailFreshness<'_>) -> &'static str {
+    match freshness {
+        DetailFreshness::Loading => "Loading",
+        DetailFreshness::Unavailable => "Unavailable",
+        DetailFreshness::Gone => "Gone",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => "Live",
+        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Stale",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconnecting",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Forbidden",
+        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => "Failed",
+        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => "Ready",
+    }
+}
+
 const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
     matches!(tab, DetailTab::Overview | DetailTab::Events)
 }
@@ -768,6 +796,10 @@ fn button_width(ui: &egui::Ui, label: &str) -> f32 {
         .size()
         .x
         + ui.spacing().button_padding.x * 2.0
+}
+
+fn menu_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    button_width(ui, label) + ui.spacing().icon_width + ui.spacing().icon_spacing
 }
 
 #[cfg(test)]
