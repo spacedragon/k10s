@@ -21,7 +21,7 @@ use k10s_ui::{
         ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, RelationState,
         ResourceFeed, SafeUiError, UiShell, WindowFreshness,
     },
-    workspace::{WindowGeom, WindowKind, WorkspaceCommand},
+    workspace::{LauncherItem, WindowGeom, WindowKind, WorkloadKind, WorkspaceCommand},
 };
 
 const CONTEXT: &str = "deployment-test";
@@ -113,6 +113,68 @@ fn deployment_identity(name: &str) -> ResourceIdentity {
         name: name.into(),
         uid: format!("uid-deployment-{name}"),
     }
+}
+
+fn deployment_row(name: &str) -> ResourceListRow {
+    ResourceListRow {
+        identity: deployment_identity(name),
+        revision: BackendRevision::new(44),
+        labels: BTreeMap::new(),
+        summary: "3/3 ready".into(),
+        created_at: "2026-08-01T08:00:00Z".into(),
+        projection: Some(ResourceProjection::Deployment(projection(Vec::new()))),
+    }
+}
+
+fn open_integrated_deployment(
+    harness: &mut Harness<'static, Fixture>,
+    detail: ResourceDetailResponse,
+) {
+    let identity = detail.identity.clone();
+    harness
+        .state_mut()
+        .feed
+        .lists
+        .insert(WorkloadKind::Deployments, vec![deployment_row(NAME)]);
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), detail);
+    harness
+        .state_mut()
+        .feed
+        .relations
+        .insert(identity.clone(), exact_relations(&identity));
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+            LauncherItem::Workload(WorkloadKind::Deployments),
+        ));
+    harness.run_steps(4);
+    integrated_deployment_window(harness)
+        .get_by_role_and_label(Role::Button, "Select resource checkout")
+        .click();
+    harness.run_steps(5);
+}
+
+fn integrated_deployment_window<'a>(
+    harness: &'a Harness<'static, Fixture>,
+) -> egui_kittest::Node<'a> {
+    harness
+        .query_all_by_label_contains("Deployments ·")
+        .find(|node| node.accesskit_node().role() == Role::Window)
+        .expect("integrated Deployment workload window")
 }
 
 fn condition(
@@ -695,17 +757,11 @@ fn deployment_layout_narrow_prioritizes_operations_and_collapses_metadata() {
 /// metadata column collapses behind its disclosure button.
 #[test]
 fn deployment_overview_verification_geometries_and_no_overlap() {
-    // Wide 1000x700: ratio holds and chips stay above the expand buttons.
-    let mut wide = harness(egui::vec2(1_240.0, 820.0));
-    let detail = detail_with(Some(projection(Vec::new())));
-    let identity = detail.identity.clone();
-    open_detail(
-        &mut wide,
-        detail,
-        Some(exact_relations(&identity)),
-        [1_000.0, 700.0],
-    );
-    let window = wide.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    // Wide 1000x700: select from the real Deployment list and verify the
+    // integrated detail pane, rather than manufacturing a dedicated window.
+    let mut wide = harness(egui::vec2(1_000.0, 700.0));
+    open_integrated_deployment(&mut wide, detail_with(Some(projection(Vec::new()))));
+    let window = integrated_deployment_window(&wide);
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
     assert!(
@@ -718,6 +774,22 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     let annot_button = window
         .get_by_role_and_label(Role::Button, "Show 2 annotations")
         .rect();
+    for control in [
+        "Tab Overview",
+        "Tab YAML",
+        "Tab Events",
+        "Scale…",
+        "Restart…",
+        "Delete…",
+        "Actions",
+    ] {
+        let rect = window.get_by_role_and_label(Role::Button, control).rect();
+        assert!(
+            window.rect().contains_rect(rect),
+            "wide control {control:?} escapes the integrated window: {rect:?} vs {:?}",
+            window.rect()
+        );
+    }
     for node in window.query_all_by_role(Role::Label) {
         let Some(value) = node.value() else { continue };
         if !value.contains(':') || !value.contains('.') {
@@ -735,21 +807,44 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     // fold), which is guaranteed when the chips wrap within the column width.
     window.get_by_role_and_label(Role::Button, "Show 2 annotations");
     let _ = annot_button;
-
-    // Narrow 640x700: metadata collapses behind the disclosure button.
-    let mut narrow = harness(egui::vec2(1_020.0, 800.0));
-    let detail = detail_with(Some(projection(Vec::new())));
-    let identity = detail.identity.clone();
-    open_detail(
-        &mut narrow,
-        detail,
-        Some(exact_relations(&identity)),
-        [640.0, 700.0],
+    window
+        .get_by_role_and_label(Role::Button, "Actions")
+        .click();
+    wide.run_steps(1);
+    let copy_name = wide.get_by_role_and_label(Role::Button, "Copy name").rect();
+    assert!(
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1_000.0, 700.0))
+            .contains_rect(copy_name),
+        "Actions menu escapes the 1000x700 viewport: {copy_name:?}"
     );
-    let window = narrow.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+
+    // Narrow 640x700: the same integrated selection collapses metadata.
+    let mut narrow = harness(egui::vec2(640.0, 700.0));
+    open_integrated_deployment(&mut narrow, detail_with(Some(projection(Vec::new()))));
+    let window = integrated_deployment_window(&narrow);
     window.get_by_label("PODS · 1");
     assert!(window.query_by_label("TEMPLATE").is_none());
-    window.get_by_role_and_label(Role::Button, "Show Deployment metadata");
+    for control in [
+        "Tab Overview",
+        "Tab YAML",
+        "Tab Events",
+        "Actions",
+        "Show Deployment metadata",
+    ] {
+        let rect = window.get_by_role_and_label(Role::Button, control).rect();
+        assert!(
+            window.rect().contains_rect(rect),
+            "narrow control {control:?} escapes the integrated window: {rect:?} vs {:?}",
+            window.rect()
+        );
+    }
+    window
+        .get_by_role_and_label(Role::Button, "Show Deployment metadata")
+        .click();
+    narrow.run_steps(2);
+    let window = integrated_deployment_window(&narrow);
+    window.get_by_label("TEMPLATE");
+    window.get_by_role_and_label(Role::Button, "Hide Deployment metadata");
 }
 
 #[test]
