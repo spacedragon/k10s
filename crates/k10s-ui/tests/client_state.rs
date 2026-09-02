@@ -4,7 +4,7 @@ use k10s_protocol::{
     InfrastructureResponse, MetricsAvailability, MetricsCondition, MetricsStatus, PodMetrics,
     ProtocolVersion, RequestId, ResourceIdentity, ResourceMetricsResponse, ResourceRefRequest,
     ResourceRelationsResponse, ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId,
-    StorageInventory, Subscribed, SubscriptionId, Welcome,
+    StorageInventory, Subscribed, SubscriptionId, TRAFFIC_EVENT_UPDATED, TrafficSample, Welcome,
 };
 use k10s_ui::client::{
     ClientConfig, ClientError, ClientPhase, ClientState, ConnectTarget, Query, QueryResult,
@@ -33,6 +33,63 @@ fn disconnected_authenticating_ready() {
 
     client.apply(welcome()).unwrap();
     assert_eq!(client.phase(), ClientPhase::Ready);
+}
+
+#[test]
+fn traffic_events_are_context_scoped_and_history_is_bounded() {
+    let mut client = ClientState::new(ClientConfig::default());
+    client
+        .connect(ConnectTarget::new(
+            "ws://localhost/api/v1/control",
+            "secret",
+        ))
+        .unwrap();
+    let _hello = client.take_outbound();
+    let mut current = welcome();
+    current.payload = serde_json::to_value(Welcome {
+        protocol: ProtocolVersion { major: 1, minor: 5 },
+        capabilities: vec![],
+        session_id: SessionId::new("traffic-session"),
+        server_instance_id: "server-1".into(),
+        resume_status: ResumeStatus::Fresh,
+    })
+    .unwrap();
+    client.apply(current).unwrap();
+
+    let live = client.subscribe_traffic("dev").unwrap();
+    let _subscribe = client.take_outbound().unwrap();
+    client.apply(subscribed(live.id(), 1)).unwrap();
+    for index in 0..61_u64 {
+        client
+            .apply(ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(live.id().clone()),
+                sequence: Some(index + 2),
+                payload: serde_json::to_value(Event {
+                    event_kind: TRAFFIC_EVENT_UPDATED.into(),
+                    revision: Some(index.to_string()),
+                    payload: serde_json::to_value(TrafficSample {
+                        context: "dev".into(),
+                        captured_at_ms: index,
+                        upload_bytes_per_second: index,
+                        download_bytes_per_second: index * 2,
+                        uploaded_bytes_total: index,
+                        downloaded_bytes_total: index * 2,
+                        requests_total: index,
+                        active_requests: 0,
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            })
+            .unwrap();
+        let _ack = client.take_outbound();
+    }
+    let history = client.traffic("dev").unwrap();
+    assert_eq!(history.len(), 60);
+    assert_eq!(history.front().unwrap().captured_at_ms, 1);
+    assert!(client.traffic("other").is_none());
 }
 
 #[test]

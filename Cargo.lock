@@ -1674,6 +1674,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "http-body",
  "http-body-util",
  "k10s-backend",
  "k10s-protocol",

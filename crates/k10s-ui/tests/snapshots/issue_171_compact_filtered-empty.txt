@@ -16,6 +16,11 @@ Window
                   Button label="Stack"
                   Button label="Focus"
                 GenericContainer
+                  Unknown label="Cluster traffic: waiting"
+                    Label value="●"
+                      TextRun value="●"
+                    Label value="↓0B ↑0B"
+                      TextRun value="↓0B ↑0B"
                   GenericContainer
                     GenericContainer
                       GenericContainer

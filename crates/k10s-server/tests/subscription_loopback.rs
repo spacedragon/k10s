@@ -16,8 +16,8 @@ use k10s_backend::{
     SubscriptionHandle,
 };
 use k10s_protocol::{
-    ClientFrame, ClientKind, ClientPayload, GroupVersionKind, ServerFrame, ServerKind,
-    SnapshotBegin, SnapshotChunk,
+    ClientFrame, ClientKind, ClientPayload, Event, GroupVersionKind, ServerFrame, ServerKind,
+    SnapshotBegin, SnapshotChunk, TRAFFIC_EVENT_UPDATED,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use k10s_ui::client::{ClientConfig, ClientPhase, ClientState, ConnectTarget};
@@ -186,6 +186,34 @@ async fn ready_client(server: &k10s_server::ServerHandle) -> (Ws, ClientState) {
     .await;
     assert_eq!(client.phase(), ClientPhase::Ready);
     (ws, client)
+}
+
+#[tokio::test]
+async fn traffic_subscription_streams_a_typed_context_sample() {
+    let (server, _fake) = spawn_server().await;
+    let (mut ws, mut client) = ready_client(&server).await;
+    assert!(client.traffic_available());
+
+    let subscription = client.subscribe_traffic("dev-local").unwrap();
+    flush_outbound(&mut ws, &mut client).await;
+    pump_until(&mut ws, &mut client, |frame| {
+        frame.kind == ServerKind::Event
+            && frame.decode_payload().ok().is_some_and(|payload| {
+                matches!(
+                    payload,
+                    k10s_protocol::ServerPayload::Event(Event { ref event_kind, .. })
+                        if event_kind == TRAFFIC_EVENT_UPDATED
+                )
+            })
+    })
+    .await;
+
+    let history = client.traffic("dev-local").expect("traffic history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].context, "dev-local");
+    assert_eq!(history[0].download_bytes_per_second, 0);
+    assert!(client.unsubscribe(&subscription).unwrap());
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]

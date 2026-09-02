@@ -27,6 +27,7 @@ pub(super) fn show(
     contexts: &[Context],
     selected_context: Option<&str>,
     free_window_resizing: bool,
+    traffic: &[k10s_protocol::TrafficSample],
 ) -> TopBarAction {
     let mut context_change = None;
     let mut refresh = false;
@@ -121,6 +122,8 @@ pub(super) fn show(
         });
 
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            show_traffic(ui, connection, traffic, compact);
+
             ui.push_id("k10s.top_bar.context", |ui| {
                 ui.add_enabled_ui(!contexts.is_empty(), |ui| {
                     let selected_text = selected_context.unwrap_or("No contexts");
@@ -224,5 +227,148 @@ pub(super) fn show(
         refresh,
         toggle_free_window_resizing,
         layout,
+    }
+}
+
+fn show_traffic(
+    ui: &mut egui::Ui,
+    connection: ConnectionState,
+    history: &[k10s_protocol::TrafficSample],
+    compact: bool,
+) {
+    let latest = history.last();
+    let (down, up) = latest
+        .map(|sample| {
+            (
+                sample.download_bytes_per_second,
+                sample.upload_bytes_per_second,
+            )
+        })
+        .unwrap_or_default();
+    let label = if compact {
+        format!("↓{} ↑{}", format_rate(down), format_rate(up))
+    } else {
+        format!("↓ {}/s   ↑ {}/s", format_bytes(down), format_bytes(up))
+    };
+    let status = if connection != ConnectionState::Connected {
+        "stale"
+    } else if latest.is_none() {
+        "waiting"
+    } else if down == 0 && up == 0 {
+        "idle"
+    } else {
+        "live"
+    };
+    let response = ui
+        .horizontal(|ui| {
+            let color = match status {
+                "live" => theme::HEALTHY,
+                "waiting" => theme::CONNECTING,
+                _ => ui.visuals().weak_text_color(),
+            };
+            ui.label(RichText::new("●").color(color));
+            ui.label(RichText::new(label).monospace());
+            if !compact && history.len() > 1 {
+                sparkline(ui, history);
+            }
+        })
+        .response;
+    response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::Other,
+            true,
+            format!("Cluster traffic: {status}"),
+        )
+    });
+    let detail = latest.map_or_else(
+        || "Waiting for the first Kubernetes API traffic sample".to_owned(),
+        |sample| format!(
+            "Kubernetes API traffic ({status})\nDownloaded: {}\nUploaded: {}\nRequests: {}\nActive requests: {}\nCounts traffic between this server and the selected cluster; payload content is never recorded.",
+            format_bytes(sample.downloaded_bytes_total),
+            format_bytes(sample.uploaded_bytes_total),
+            sample.requests_total,
+            sample.active_requests,
+        ),
+    );
+    response.on_hover_text(detail);
+}
+
+fn sparkline(ui: &mut egui::Ui, history: &[k10s_protocol::TrafficSample]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(68.0, 20.0), Sense::hover());
+    let max = history
+        .iter()
+        .flat_map(|sample| {
+            [
+                sample.download_bytes_per_second,
+                sample.upload_bytes_per_second,
+            ]
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let draw = |values: Vec<u64>, color: egui::Color32| {
+        let count = values.len().max(2);
+        let points = values.into_iter().enumerate().map(|(index, value)| {
+            let x = rect.left() + rect.width() * index as f32 / (count - 1) as f32;
+            let y = rect.bottom() - rect.height() * value as f32 / max;
+            egui::pos2(x, y)
+        });
+        ui.painter().add(egui::Shape::line(
+            points.collect(),
+            egui::Stroke::new(1.25, color),
+        ));
+    };
+    draw(
+        history
+            .iter()
+            .map(|sample| sample.download_bytes_per_second)
+            .collect(),
+        theme::HEALTHY,
+    );
+    draw(
+        history
+            .iter()
+            .map(|sample| sample.upload_bytes_per_second)
+            .collect(),
+        theme::CONNECTING,
+    );
+}
+
+fn format_rate(bytes: u64) -> String {
+    if bytes < 1_000 {
+        format!("{bytes}B")
+    } else if bytes < 1_000_000 {
+        format!("{:.0}K", bytes as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", bytes as f64 / 1_000_000.0)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1_000.0 && unit < UNITS.len() - 1 {
+        value /= 1_000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_bytes, format_rate};
+
+    #[test]
+    fn traffic_units_stay_compact_and_readable() {
+        assert_eq!(format_rate(999), "999B");
+        assert_eq!(format_rate(1_250), "1K");
+        assert_eq!(format_rate(1_250_000), "1.2M");
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1_500_000), "1.5 MB");
     }
 }

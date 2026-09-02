@@ -6,8 +6,8 @@ token is carried only in the first `hello` frame.
 
 ## Compatibility
 
-The current protocol is major `1`, minor `4`. Supported negotiation is major
-`1` with peer minor `0..=4`; the negotiated minor is the lower value. A major
+The current protocol is major `1`, minor `5`. Supported negotiation is major
+`1` with peer minor `0..=5`; the negotiated minor is the lower value. A major
 mismatch is rejected. Unknown message kinds return a structured
 `unsupportedMessage` error instead of being ignored or crashing a peer.
 
@@ -61,3 +61,9 @@ Added in minor `4`: resource-watch selectors may carry an exact `name` and
 `uid` alongside their context, GVK, and namespace. Dedicated Pod and Deployment
 Detail windows use this selector as their independent lifecycle and mutation
 authority; peers negotiated below minor `4` must keep that authority unavailable.
+
+Added in minor `5`: a `traffic` subscription selects one kubeconfig context.
+`traffic.updated` events report one-second application-payload upload/download
+rates, cumulative byte counts, total requests, and active requests measured at
+the server-side kube-rs transport. The telemetry contains no request paths,
+headers, credentials, or payload content and may be coalesced under pressure.

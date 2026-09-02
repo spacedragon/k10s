@@ -97,6 +97,7 @@ pub struct UiShell<I> {
     port_forward_actions: Vec<PortForwardAction<I>>,
     resource_actions: Vec<ResourceAction>,
     launcher: launcher::LauncherState,
+    traffic_history: Vec<k10s_protocol::TrafficSample>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,12 +150,22 @@ where
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
             launcher: launcher::LauncherState::default(),
+            traffic_history: Vec::new(),
         }
     }
 
     /// Inspect the persistent workspace rendered by this shell.
     pub fn workspace(&self) -> &WorkspaceState<I> {
         &self.workspace
+    }
+
+    /// Replace the selected context's bounded transport history for rendering.
+    pub fn set_traffic_history(
+        &mut self,
+        history: impl IntoIterator<Item = k10s_protocol::TrafficSample>,
+    ) {
+        self.traffic_history.clear();
+        self.traffic_history.extend(history);
     }
 
     /// Whether palette search currently needs its cross-resource projections.
@@ -444,6 +455,7 @@ where
                     contexts,
                     selected.as_deref(),
                     self.workspace.free_window_resizing(),
+                    &self.traffic_history,
                 );
                 context_change = action.context_change;
                 refresh_requested |= action.refresh;
