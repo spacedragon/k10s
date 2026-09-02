@@ -148,6 +148,105 @@ pub(super) fn long_value_cell(ui: &mut egui::Ui, width: f32, label: &str, value:
     ui.vertical(|ui| long_value(ui, width, label, value));
 }
 
+/// Render every metadata label as a bounded chip in the local metadata width.
+pub(super) fn metadata_labels<'a>(
+    ui: &mut egui::Ui,
+    labels: impl IntoIterator<Item = (&'a str, &'a str)>,
+    separator: &str,
+) {
+    let width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width()
+        .max(1.0);
+    ui.horizontal_wrapped(|ui| {
+        for (key, value) in labels {
+            let full = format!("{key}{separator}{value}");
+            let inner = (width - 18.0).max(1.0);
+            let desired = ui
+                .painter()
+                .layout_no_wrap(
+                    full.clone(),
+                    egui::FontId::default(),
+                    ui.visuals().text_color(),
+                )
+                .size()
+                .x
+                .min(inner);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2((desired + 16.0).min(width), ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect(
+                rect,
+                10.0,
+                ui.visuals().faint_bg_color,
+                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            let response = ui.put(
+                rect.shrink2(egui::vec2(7.0, 2.0)),
+                egui::Label::new(&full).truncate(),
+            );
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full.clone()));
+            response.on_hover_text(&full);
+        }
+    });
+}
+
+/// Compact, explicitly accessible annotation disclosure shared by typed details.
+pub(super) fn metadata_annotations<'a>(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    annotations: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    let annotations = annotations.into_iter().collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return;
+    }
+    let expansion_id = egui::Id::new(id);
+    let mut open = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(expansion_id))
+        .unwrap_or(false);
+    let arrow = if open { '▴' } else { '▾' };
+    let response = ui.button(format!("Annotations {} {arrow}", annotations.len()));
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+    if response.clicked() {
+        open = !open;
+    }
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(expansion_id, open));
+    if !open {
+        return;
+    }
+
+    let width = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width()
+        .max(1.0);
+    for (key, value) in annotations {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let key_width = (width * 0.34).max(1.0);
+                ui.add_sized(
+                    [key_width, 0.0],
+                    egui::Label::new(RichText::new(key).weak()).truncate(),
+                );
+                let value_width = ui.available_width().max(1.0);
+                let full = format!("{key}: {value}");
+                let response = ui.add_sized([value_width, 0.0], egui::Label::new(value).truncate());
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full.clone()));
+                response.on_hover_text(value);
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod responsive_contract_tests {

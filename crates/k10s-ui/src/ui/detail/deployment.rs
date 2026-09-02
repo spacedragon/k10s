@@ -810,7 +810,7 @@ fn metadata_column(
     window_id: WindowId,
     identity: &ResourceIdentity,
     projection: &DeploymentDetailProjection<'_>,
-    frame: &mut DetailFrameProjection<'_>,
+    _frame: &mut DetailFrameProjection<'_>,
 ) {
     let deployment = projection.deployment;
     let has_managed_by = deployment
@@ -837,11 +837,24 @@ fn metadata_column(
             ConfigurationSection::ManagedBy => managed_by(ui, window_id, deployment),
             ConfigurationSection::LabelsAnnotations => {
                 if !deployment.labels.is_empty() {
-                    labels(ui, deployment, frame);
+                    ui.heading(format!("LABELS · {}", deployment.labels.len()));
+                    super::overview::metadata_labels(
+                        ui,
+                        deployment
+                            .labels
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str())),
+                        ": ",
+                    );
                 }
-                if !deployment.annotations.is_empty() {
-                    annotations(ui, window_id, deployment);
-                }
+                super::overview::metadata_annotations(
+                    ui,
+                    ("k10s.detail.deployment.annotations", window_id.0),
+                    deployment
+                        .annotations
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                );
             }
             ConfigurationSection::Identity => identity_section(ui, window_id, identity, deployment),
         }
@@ -924,138 +937,6 @@ fn managed_by(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentPro
                 row(ui, "Chart", chart);
             }
         });
-}
-
-/// A single label chip: key + value with a bounded, tinted fill, matching the
-/// reference `.chip`. The inner label carries the `key: value` accessible name
-/// so the chip stays queryable even though the visible text omits the colon.
-fn label_chip(ui: &mut egui::Ui, key: &str, value: &str) -> egui::Response {
-    // Truncate visible text so wide k8s keys don't overflow the wrap row;
-    // the full `key: value` stays the accessible name and hover text.
-    let full = format!("{}: {}", key, value);
-    let text = crate::ui::responsive_table::middle_elide(&full, 18);
-    let accessible = full.clone();
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(35, 35, 35))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(59, 59, 59)))
-        .corner_radius(11.0)
-        .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            let response = ui.label(RichText::new(text).small());
-            let response = response.on_hover_text(&accessible);
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, accessible.clone())
-            });
-            response
-        })
-        .inner
-}
-
-/// Estimate a label chip's painted width (text + padding + border) without
-/// rendering it, so chips can be grouped into rows that respect the column
-/// width.
-fn label_chip_width(ui: &mut egui::Ui, key: &str, value: &str) -> f32 {
-    let full = format!("{}: {}", key, value);
-    let text = crate::ui::responsive_table::middle_elide(&full, 18);
-    let text_width = ui
-        .painter()
-        .layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE)
-        .size()
-        .x;
-    // inner_margin symmetric(8,2) => 16px horizontal padding, +2px border
-    text_width + 16.0 + 2.0
-}
-
-/// Render label chips in manually-wrapped rows. egui's built-in wrap only
-/// triggers when a single chip exceeds the full row width, so with many long
-/// k8s keys chips would overflow instead of wrapping; this groups them by width.
-fn render_label_chips(ui: &mut egui::Ui, deployment: &DeploymentProjection, visible: usize) {
-    let available = ui.available_width();
-    let spacing = ui.spacing().item_spacing.x;
-    let chips: Vec<(String, String)> = deployment
-        .labels
-        .iter()
-        .take(visible)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let mut rows: Vec<Vec<(String, String)>> = Vec::new();
-    let mut current: Vec<(String, String)> = Vec::new();
-    let mut row_width = 0.0;
-    for chip in &chips {
-        let chip_width = label_chip_width(ui, &chip.0, &chip.1);
-        let needed = if current.is_empty() { 0.0 } else { spacing } + chip_width;
-        if !current.is_empty() && row_width + needed > available {
-            rows.push(std::mem::take(&mut current));
-            row_width = 0.0;
-        }
-        row_width += needed;
-        current.push((chip.0.clone(), chip.1.clone()));
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
-    for row in rows {
-        ui.horizontal(|ui| {
-            for (key, value) in row {
-                label_chip(ui, &key, &value);
-            }
-        });
-    }
-}
-
-fn labels(
-    ui: &mut egui::Ui,
-    deployment: &DeploymentProjection,
-    frame: &mut DetailFrameProjection<'_>,
-) {
-    ui.heading(format!("LABELS · {}", deployment.labels.len()));
-    let total = deployment.labels.len();
-    let visible = if frame.expansion.labels {
-        total
-    } else {
-        total.min(4)
-    };
-    // egui's horizontal_wrapped only wraps when an item is wider than the whole
-    // available width, not when it would overflow the current row. With long k8s
-    // keys, chips accumulate past the row width without wrapping and get
-    // stretched vertically, pushing later controls below the fold. So we wrap
-    // manually: start a new row once adding the next chip would overflow.
-    render_label_chips(ui, deployment, visible);
-    let hidden = total.saturating_sub(visible);
-    if !frame.expansion.labels && hidden > 0 {
-        if ui.button(format!("Show {hidden} more labels")).clicked() {
-            frame.expansion.labels = true;
-        }
-    } else if frame.expansion.labels && total > 4 {
-        let extra = total - 4;
-        if ui.button(format!("Hide {extra} labels")).clicked() {
-            frame.expansion.labels = false;
-        }
-    }
-}
-
-fn annotations(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProjection) {
-    let expansion_id = egui::Id::new(("k10s.detail.deployment.annotations", window_id.0));
-    let mut expanded = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<bool>(expansion_id))
-        .unwrap_or(false);
-    ui.heading(format!("ANNOTATIONS · {}", deployment.annotations.len()));
-    if expanded {
-        for (key, value) in &deployment.annotations {
-            super::overview::long_value(ui, ui.available_width(), key, Some(value));
-        }
-        if ui.button("Hide annotations").clicked() {
-            expanded = false;
-        }
-    } else if ui
-        .button(format!("Show {} annotations", deployment.annotations.len()))
-        .clicked()
-    {
-        expanded = true;
-    }
-    ui.ctx()
-        .data_mut(|data| data.insert_temp(expansion_id, expanded));
 }
 
 fn identity_section(

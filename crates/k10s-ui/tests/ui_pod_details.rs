@@ -63,7 +63,7 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         "PLACEMENT",
         "NETWORK",
         "LABELS · 6",
-        "ANNOTATIONS · 1",
+        "Annotations 1 ▾",
         "IDENTITY",
         "Image: ghcr.io/example/web:1.2.3",
         "125m / 64Mi",
@@ -73,6 +73,28 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("WHY IT'S FAILING").is_none());
+    let chips = [
+        "alpha=first",
+        "bravo=second",
+        "charlie=third",
+        "delta=fourth",
+        "echo=fifth",
+        "foxtrot=sixth",
+    ]
+    .map(|label| detail.get_by_label(label).rect());
+    let metadata_right = detail
+        .get_by_label("Configuration detail column")
+        .rect()
+        .right();
+    assert!(
+        chips
+            .iter()
+            .all(|rect| rect.right() <= metadata_right + 1.0)
+    );
+    let mut tops = chips.map(|rect| rect.top()).to_vec();
+    tops.sort_by(f32::total_cmp);
+    tops.dedup_by(|left, right| (*left - *right).abs() < 1.0);
+    assert!(tops.len() >= 2, "constrained metadata labels must wrap");
     assert!(detail.query_by_label("SENTINEL SUMMARY").is_none());
     assert!(detail.query_by_label("SENTINEL MANIFEST").is_none());
 }
@@ -417,9 +439,9 @@ fn projection_owner_labels_and_events_remain_exact_and_deterministic() {
     ] {
         detail.get_by_label(label);
     }
-    detail.get_by_role_and_label(Role::Button, "Show 2 more labels");
-    assert!(detail.query_by_label("echo=fifth").is_none());
-    assert!(detail.query_by_label("foxtrot=sixth").is_none());
+    detail.get_by_label("echo=fifth");
+    detail.get_by_label("foxtrot=sixth");
+    assert!(detail.query_by_label("Show 2 more labels").is_none());
     assert!(detail.query_by_label("not-controller").is_none());
     assert!(detail.query_by_label("Deployment/web").is_none());
     assert!(detail.query_by_label("Warning").is_none());
@@ -533,7 +555,7 @@ fn pod_layout_760_is_two_columns_with_all_vitals_and_collapsed_annotations() {
     );
     detail.get_by_label("Node · worker-a");
     detail.get_by_label("Pod IP · 10.244.0.9");
-    detail.get_by_role_and_label(Role::Button, "ANNOTATIONS · 1");
+    detail.get_by_role_and_label(Role::Button, "Annotations 1 ▾");
     assert!(detail.query_by_label("checksum/config").is_none());
     assert!(detail.query_by_label("Show Pod metadata").is_none());
     assert!(detail.query_by_label("Show more Pod vitals").is_none());
@@ -649,24 +671,31 @@ fn pod_tables_at_760_keep_wide_columns_reachable_via_horizontal_regions() {
 }
 
 #[test]
-fn pod_interaction_expands_labels_and_annotations_accessibly() {
+fn pod_metadata_expands_annotations_accessibly() {
     let mut harness = harness(1_100.0, healthy_detail());
-    pod_window(&harness)
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .click();
-    harness.run_steps(3);
     let detail = pod_window(&harness);
     detail.get_by_label("echo=fifth");
     detail.get_by_label("foxtrot=sixth");
-    detail.get_by_role_and_label(Role::Button, "Show fewer labels");
-
-    detail
-        .get_by_role_and_label(Role::Button, "ANNOTATIONS · 1")
-        .click();
+    assert!(detail.query_by_label("Show 2 more labels").is_none());
+    let disclosure = detail.get_by_role_and_label(Role::Button, "Annotations 1 ▾");
+    assert_eq!(
+        disclosure.accesskit_node().data().is_expanded(),
+        Some(false)
+    );
+    disclosure.click();
     harness.run_steps(3);
     let detail = pod_window(&harness);
     detail.get_by_label("checksum/config");
     detail.get_by_label("checksum/config: abcdef");
+    let disclosure = detail.get_by_role_and_label(Role::Button, "Annotations 1 ▴");
+    assert_eq!(disclosure.accesskit_node().data().is_expanded(), Some(true));
+    disclosure.click();
+    harness.run_steps(3);
+    assert!(
+        pod_window(&harness)
+            .query_by_label("checksum/config: abcdef")
+            .is_none()
+    );
 }
 
 #[test]

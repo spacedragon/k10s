@@ -1,6 +1,6 @@
 //! Typed, feed-independent Pod Overview presentation.
 
-use egui::{Grid, RichText, ScrollArea, Stroke, accesskit::Role};
+use egui::{Grid, RichText, ScrollArea, accesskit::Role};
 use k10s_protocol::{
     ContainerStateProjection, ContainerTerminationProjection, EventsCondition, MetricsAvailability,
     OwnerReference, PodContainerPort, PodProjection, ResourceDetailResponse, ResourceIdentity,
@@ -608,42 +608,20 @@ fn show_metadata<I: RowIdentity>(
     );
 
     section(ui, &format!("LABELS · {}", pod.labels.len()));
-    let visible_labels = if frame.expansion.labels {
-        pod.labels.len()
-    } else {
-        pod.labels.len().min(4)
-    };
-    ui.horizontal_wrapped(|ui| {
-        for (key, value) in pod.labels.iter().take(visible_labels) {
-            chip(ui, &format!("{key}={value}"));
-        }
-    });
-    if visible_labels < pod.labels.len() {
-        if ui
-            .button(format!(
-                "Show {} more labels",
-                pod.labels.len() - visible_labels
-            ))
-            .clicked()
-        {
-            frame.expansion.labels = true;
-        }
-    } else if pod.labels.len() > 4 && ui.button("Show fewer labels").clicked() {
-        frame.expansion.labels = false;
-    }
-
-    egui::CollapsingHeader::new(format!("ANNOTATIONS · {}", pod.annotations.len()))
-        .id_salt(("k10s.detail.pod.annotations", window_id.0))
-        .default_open(false)
-        .show(ui, |ui| {
-            if pod.annotations.is_empty() {
-                ui.label("No annotations");
-            } else {
-                for (key, value) in &pod.annotations {
-                    super::overview::long_value(ui, ui.available_width(), key, Some(value));
-                }
-            }
-        });
+    super::overview::metadata_labels(
+        ui,
+        pod.labels
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+        "=",
+    );
+    super::overview::metadata_annotations(
+        ui,
+        ("k10s.detail.pod.annotations", window_id.0),
+        pod.annotations
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
 
     section(ui, "IDENTITY");
     metadata_grid(
@@ -675,20 +653,6 @@ fn metadata_grid(
             ui.end_row();
         }
     });
-}
-
-fn chip(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::symmetric(7, 2))
-        .show(ui, |ui| {
-            ui.label(text);
-        });
 }
 
 fn format_port(port: &PodContainerPort) -> String {

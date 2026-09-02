@@ -836,11 +836,8 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         (operational.width() / configuration.width() - 1.35).abs() < 0.02,
         "wide 1.35:1 ratio drifted: {operational:?} {configuration:?}"
     );
-    let show_more = window
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .rect();
     let annot_button = window
-        .get_by_role_and_label(Role::Button, "Show 2 annotations")
+        .get_by_role_and_label(Role::Button, "Annotations 2 ▾")
         .rect();
     for control in [
         "Tab Overview",
@@ -854,6 +851,7 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         let rect = window.get_by_role_and_label(Role::Button, control).rect();
         assert_rect_within(window.rect(), rect, 1.0, control);
     }
+    let mut chip_tops = Vec::new();
     for node in window.query_all_by_role(Role::Label) {
         let Some(value) = node.value() else { continue };
         if !value.contains(':') || !value.contains('.') {
@@ -862,14 +860,21 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         // A rendered label chip is `key: value`; it must sit above the
         // buttons rather than overlap them.
         let chip = node.rect();
+        chip_tops.push(chip.top());
         assert!(
-            chip.bottom() <= show_more.top() + 0.5,
-            "chip '{value}' overlaps the show-more button: {chip:?} vs {show_more:?}"
+            chip.right() <= configuration.right() + 1.0,
+            "chip '{value}' escapes metadata right edge: {chip:?} vs {configuration:?}"
         );
     }
+    chip_tops.sort_by(f32::total_cmp);
+    chip_tops.dedup_by(|left, right| (*left - *right).abs() < 1.0);
+    assert!(
+        chip_tops.len() >= 2,
+        "constrained metadata labels must wrap"
+    );
     // Annotations button must be present and reachable (not pushed below the
     // fold), which is guaranteed when the chips wrap within the column width.
-    window.get_by_role_and_label(Role::Button, "Show 2 annotations");
+    window.get_by_role_and_label(Role::Button, "Annotations 2 ▾");
     let _ = annot_button;
     let actions = window.get_by_role_and_label(Role::Button, "Actions");
     assert!(!actions.accesskit_node().is_disabled());
@@ -1193,7 +1198,7 @@ fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
 }
 
 #[test]
-fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
+fn deployment_metadata_accessibility_expands_annotations_without_rollback() {
     let mut harness = harness(egui::vec2(1_240.0, 820.0));
     let detail = detail_with(Some(projection(Vec::new())));
     let identity = detail.identity.clone();
@@ -1204,23 +1209,39 @@ fn deployment_accessibility_expands_labels_and_annotations_without_rollback() {
         [1_050.0, 700.0],
     );
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    assert!(window.query_by_label("team: payments").is_none());
-    window
-        .get_by_role_and_label(Role::Button, "Show 2 more labels")
-        .click();
-    harness.run_steps(2);
-    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window
-        .get_by_role_and_label(Role::Button, "Show 2 annotations")
-        .click();
+    for label in [
+        "app.kubernetes.io/instance: checkout-prod",
+        "app.kubernetes.io/managed-by: Helm",
+        "app.kubernetes.io/name: checkout",
+        "app.kubernetes.io/part-of: shop",
+        "team: payments",
+        "tier: backend",
+    ] {
+        window.get_by_label(label);
+    }
+    assert!(window.query_by_label("Show 2 more labels").is_none());
+    let disclosure = window.get_by_role_and_label(Role::Button, "Annotations 2 ▾");
+    assert_eq!(
+        disclosure.accesskit_node().data().is_expanded(),
+        Some(false)
+    );
+    disclosure.click();
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     // Labels render as chips; the chip exposes `key: value` as its accessible
     // name even though the visible text drops the colon.
     window.get_by_label("team: payments");
     window.get_by_label("meta.helm.sh/release-name: checkout-prod");
-    window.get_by_role_and_label(Role::Button, "Hide 2 labels");
-    window.get_by_role_and_label(Role::Button, "Hide annotations");
+    let disclosure = window.get_by_role_and_label(Role::Button, "Annotations 2 ▴");
+    assert_eq!(disclosure.accesskit_node().data().is_expanded(), Some(true));
+    disclosure.click();
+    harness.run_steps(2);
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    assert!(
+        window
+            .query_by_label("meta.helm.sh/release-name: checkout-prod")
+            .is_none()
+    );
     assert!(window.query_by_label("Roll back…").is_none());
 }
 
