@@ -192,12 +192,10 @@ pub(super) fn show<I: RowIdentity>(
             .wrap(),
         );
     }
-    let (tab_row, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        Sense::hover(),
-    );
+    let row_width = ui.available_width();
+    let row_height = ui.spacing().interact_size.y;
     let gap = ui.spacing().item_spacing.x;
-    let usable_width = (tab_row.width() - gap).max(0.0);
+    let usable_width = (row_width - gap).max(0.0);
     let full_freshness_width = if integrated { 0.0 } else { 152.0 };
     let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
     let action_count = usize::from(projection.actions.can_scale)
@@ -205,35 +203,35 @@ pub(super) fn show<I: RowIdentity>(
         + usize::from(projection.actions.can_delete)
         + 1;
     let wide_action_width = menu_button_width(ui, "Actions")
-        + projection
-            .actions
-            .can_scale
-            .then(|| button_width(ui, "Scale…"))
-            .unwrap_or(0.0)
-        + projection
-            .actions
-            .can_restart
-            .then(|| button_width(ui, "Restart…"))
-            .unwrap_or(0.0)
-        + projection
-            .actions
-            .can_delete
-            .then(|| button_width(ui, "Delete…"))
-            .unwrap_or(0.0)
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_restart {
+            button_width(ui, "Restart…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
         + gap * action_count.saturating_sub(1) as f32;
     let compact_action_count =
         usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
     let compact_action_width = menu_button_width(ui, "More")
-        + projection
-            .actions
-            .can_scale
-            .then(|| button_width(ui, "Scale…"))
-            .unwrap_or(0.0)
-        + projection
-            .actions
-            .can_delete
-            .then(|| button_width(ui, "Delete…"))
-            .unwrap_or(0.0)
+        + if projection.actions.can_scale {
+            button_width(ui, "Scale…")
+        } else {
+            0.0
+        }
+        + if projection.actions.can_delete {
+            button_width(ui, "Delete…")
+        } else {
+            0.0
+        }
         + gap * compact_action_count.saturating_sub(1) as f32;
     let wide_tabs_width = tabs
         .iter()
@@ -246,20 +244,44 @@ pub(super) fn show<I: RowIdentity>(
         + gap
         + compact_freshness_width;
     let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
-    let desired_action_width = if compact_chrome {
-        compact_action_width
+    let stacked_chrome =
+        compact_chrome && compact_tabs_width + gap + compact_action_width > usable_width;
+    let chrome_height = if stacked_chrome {
+        row_height * 2.0 + gap
     } else {
-        wide_action_width
+        row_height
     };
-    let reserved_tabs_width = if compact_chrome {
-        compact_tabs_width
+    let (chrome_rect, _) =
+        ui.allocate_exact_size(egui::vec2(row_width, chrome_height), Sense::hover());
+    let (tabs_region, actions_rect) = if stacked_chrome {
+        (
+            egui::Rect::from_min_size(chrome_rect.min, egui::vec2(row_width, row_height)),
+            egui::Rect::from_min_size(
+                egui::pos2(chrome_rect.left(), chrome_rect.top() + row_height + gap),
+                egui::vec2(row_width, row_height),
+            ),
+        )
     } else {
-        wide_tabs_width
+        let desired_action_width = if compact_chrome {
+            compact_action_width
+        } else {
+            wide_action_width
+        };
+        let reserved_tabs_width = if compact_chrome {
+            compact_tabs_width
+        } else {
+            wide_tabs_width
+        };
+        let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
+        let tab_width = usable_width - action_width;
+        (
+            egui::Rect::from_min_size(chrome_rect.min, egui::vec2(tab_width, row_height)),
+            egui::Rect::from_min_max(
+                egui::pos2(chrome_rect.left() + tab_width + gap, chrome_rect.top()),
+                chrome_rect.max,
+            ),
+        )
     };
-    let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
-    let tab_width = usable_width - action_width;
-    let tabs_region =
-        egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
     let freshness_width = if compact_chrome {
         compact_freshness_width
     } else {
@@ -291,10 +313,6 @@ pub(super) fn show<I: RowIdentity>(
         freshness
             .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone()));
     }
-    let actions_rect = egui::Rect::from_min_max(
-        egui::pos2(tabs_region.right() + gap, tab_row.top()),
-        tab_row.max,
-    );
     let mut tabs_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.tabs", window_id.0))

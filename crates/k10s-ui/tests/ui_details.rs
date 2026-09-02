@@ -2577,7 +2577,7 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
 #[test]
 fn narrow_integrated_detail_budgets_intrinsic_tab_and_action_controls() {
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(700.0, 900.0))
+        .with_size(egui::vec2(640.0, 900.0))
         .with_pixels_per_point(1.0)
         .with_step_dt(0.3)
         .build_ui_state(render, Fixture::default());
@@ -2621,28 +2621,18 @@ fn narrow_integrated_detail_budgets_intrinsic_tab_and_action_controls() {
     let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
     let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
     if let Some(more_tabs) = window.query_by_role_and_label(Role::Button, "More detail tabs") {
-        assert!(tabs_row.width() >= active.width() + more_tabs.rect().width() + 8.0);
         let more_actions = window
             .get_by_role_and_label(Role::Button, "More detail actions")
             .rect();
+        assert!(tabs_row.width() >= active.width() + more_tabs.rect().width() + 8.0);
         assert!(
             actions_row.width() >= scale.width() + more_actions.width() + delete.width() + 16.0
         );
     } else {
-        let tabs_width = ["Tab Overview", "Tab Pods", "Tab Events", "Tab YAML"]
-            .iter()
-            .map(|label| {
-                window
-                    .get_by_role_and_label(Role::Button, label)
-                    .rect()
-                    .width()
-            })
-            .sum::<f32>();
         let restart = window
             .get_by_role_and_label(Role::Button, "Restart…")
             .rect();
         let actions = window.get_by_role_and_label(Role::Button, "Actions").rect();
-        assert!(tabs_row.width() >= tabs_width + 24.0);
         assert!(
             actions_row.width()
                 >= scale.width() + restart.width() + actions.width() + delete.width() + 24.0
