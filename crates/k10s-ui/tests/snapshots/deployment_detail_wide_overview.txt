@@ -38,12 +38,14 @@ Window label="Deployment · payments / checkout"
                 Button label="Tab Pods"
                 Button label="Tab Events"
                 Button label="Tab YAML"
+            Unknown label="Detail tabs row"
             GenericContainer
               GenericContainer
                 Button label="Delete…"
                 Button label="Actions"
                 Button label="Restart…"
                 Button label="Scale…"
+            Unknown label="Detail actions row"
             ScrollView label="Detail body"
               GenericContainer
                 GenericContainer

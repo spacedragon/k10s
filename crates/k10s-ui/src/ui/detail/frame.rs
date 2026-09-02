@@ -198,15 +198,68 @@ pub(super) fn show<I: RowIdentity>(
     );
     let gap = ui.spacing().item_spacing.x;
     let usable_width = (tab_row.width() - gap).max(0.0);
-    let action_width = (usable_width * 0.5).clamp(96.0, 360.0).min(usable_width);
+    let freshness_width = if integrated { 0.0 } else { 152.0 };
+    let action_count = usize::from(projection.actions.can_scale)
+        + usize::from(projection.actions.can_restart)
+        + usize::from(projection.actions.can_delete)
+        + 1;
+    let wide_action_width = button_width(ui, "Actions")
+        + projection
+            .actions
+            .can_scale
+            .then(|| button_width(ui, "Scale…"))
+            .unwrap_or(0.0)
+        + projection
+            .actions
+            .can_restart
+            .then(|| button_width(ui, "Restart…"))
+            .unwrap_or(0.0)
+        + projection
+            .actions
+            .can_delete
+            .then(|| button_width(ui, "Delete…"))
+            .unwrap_or(0.0)
+        + gap * action_count.saturating_sub(1) as f32;
+    let compact_action_count =
+        usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
+    let compact_action_width = button_width(ui, "More detail actions")
+        + projection
+            .actions
+            .can_scale
+            .then(|| button_width(ui, "Scale…"))
+            .unwrap_or(0.0)
+        + projection
+            .actions
+            .can_delete
+            .then(|| button_width(ui, "Delete…"))
+            .unwrap_or(0.0)
+        + gap * compact_action_count.saturating_sub(1) as f32;
+    let wide_tabs_width = tabs
+        .iter()
+        .map(|tab| button_width(ui, super::tab_label(*tab)))
+        .sum::<f32>()
+        + gap * tabs.len().saturating_sub(1) as f32
+        + freshness_width;
+    let compact_tabs_width = button_width(ui, super::tab_label(detail.active_tab))
+        + button_width(ui, "More detail tabs")
+        + gap
+        + freshness_width;
+    let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
+    let desired_action_width = if compact_chrome {
+        compact_action_width
+    } else {
+        wide_action_width
+    };
+    let reserved_tabs_width = if compact_chrome {
+        compact_tabs_width
+    } else {
+        wide_tabs_width
+    };
+    let action_width = desired_action_width.min((usable_width - reserved_tabs_width).max(0.0));
     let tab_width = usable_width - action_width;
     let tabs_region =
         egui::Rect::from_min_size(tab_row.min, egui::vec2(tab_width, tab_row.height()));
-    let freshness_width = if integrated {
-        0.0
-    } else {
-        tabs_region.width().min(152.0)
-    };
+    let freshness_width = freshness_width.min(tabs_region.width());
     let tabs_rect = egui::Rect::from_min_max(
         tabs_region.min,
         egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
@@ -235,8 +288,14 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
+    let tabs_semantics = ui.interact(
+        tabs_rect,
+        ui.id().with(("k10s.detail.tabs.row", window_id.0)),
+        Sense::hover(),
+    );
+    tabs_semantics.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail tabs row"));
     tabs_ui.horizontal(|ui| {
-        let compact = tabs_rect.width() < 300.0;
+        let compact = compact_chrome;
         for tab in tabs {
             if !compact || *tab == detail.active_tab {
                 let active = *tab == detail.active_tab;
@@ -284,6 +343,13 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::right_to_left(Align::Center)),
     );
     actions_ui.set_clip_rect(actions_ui.clip_rect().intersect(actions_rect));
+    let actions_semantics = ui.interact(
+        actions_rect,
+        ui.id().with(("k10s.detail.actions.row", window_id.0)),
+        Sense::hover(),
+    );
+    actions_semantics
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail actions row"));
     actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         // Reference order (left to right): Scale, Restart, Actions,
@@ -296,7 +362,7 @@ pub(super) fn show<I: RowIdentity>(
             Some(DetailActionSegment::Delete),
             &mut projection,
         );
-        let compact = actions_rect.width() < if integrated { 300.0 } else { 340.0 };
+        let compact = compact_chrome;
         let namespace = projection.identity.namespace.as_deref();
         let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
         ui.menu_button(
@@ -543,7 +609,13 @@ fn show_vital_strip(
     wide: bool,
 ) -> Option<(egui::Rect, egui::Rect)> {
     normalize_vital_expansion(wide, &mut projection.expansion);
-    let count = projection.visible_vitals.len()
+    let narrow_visible_count = projection.visible_vitals.len().min(2);
+    let visible_count = if wide {
+        projection.visible_vitals.len()
+    } else {
+        narrow_visible_count
+    };
+    let count = visible_count
         + if wide {
             projection.overflow_vitals.len()
         } else {
@@ -552,10 +624,29 @@ fn show_vital_strip(
     let gaps = ui.spacing().item_spacing.x * count.saturating_sub(1) as f32;
     let max_width = if wide && count > 0 {
         ((ui.available_width() - gaps) / count as f32).min(VITAL_CHIP_MAX_WIDTH)
+    } else if count > 0 {
+        let overflow_label = projection
+            .vital_expansion_label
+            .map(|kind| format!("Show more {kind} vitals"));
+        let overflow_width = overflow_label.as_deref().map_or(0.0, |label| {
+            WidgetText::from(label)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+                .size()
+                .x
+                + ui.spacing().button_padding.x * 2.0
+                + ui.spacing().item_spacing.x
+        });
+        ((ui.available_width() - overflow_width - gaps) / count as f32)
+            .clamp(VITAL_CHIP_SANE_MIN_WIDTH, VITAL_CHIP_MAX_WIDTH)
     } else {
         VITAL_CHIP_MAX_WIDTH
     };
-    for metric in &projection.visible_vitals {
+    for metric in projection.visible_vitals.iter().take(visible_count) {
         vital(ui, metric, max_width);
     }
     if wide {
@@ -563,7 +654,8 @@ fn show_vital_strip(
             vital(ui, metric, max_width);
         }
     } else if let Some(kind) = projection.vital_expansion_label
-        && !projection.overflow_vitals.is_empty()
+        && (projection.visible_vitals.len() > narrow_visible_count
+            || !projection.overflow_vitals.is_empty())
     {
         let response = ui.button(if projection.expansion.more_vitals {
             format!("Hide more {kind} vitals")
@@ -580,6 +672,11 @@ fn show_vital_strip(
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.vertical(|ui| {
+                            for metric in
+                                projection.visible_vitals.iter().skip(narrow_visible_count)
+                            {
+                                vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
+                            }
                             for metric in &projection.overflow_vitals {
                                 vital(ui, metric, VITAL_CHIP_MAX_WIDTH);
                             }
@@ -658,6 +755,19 @@ fn copy(ui: &mut egui::Ui, label: &str, value: &str) {
     if response.clicked() {
         ui.ctx().copy_text(value.to_owned());
     }
+}
+
+fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    WidgetText::from(label)
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        )
+        .size()
+        .x
+        + ui.spacing().button_padding.x * 2.0
 }
 
 #[cfg(test)]

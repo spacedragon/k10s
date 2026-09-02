@@ -17,12 +17,6 @@ Window label="Deployment · payments / checkout"
                 Label value="Ready · 3/3"
                 GenericContainer
                   GenericContainer
-                Label value="Up-to-date · 3"
-                GenericContainer
-                  GenericContainer
-                Label value="Available · 3"
-                GenericContainer
-                  GenericContainer
                 Button label="Show more Deployment vitals"
             GenericContainer
               Label value="Freshness · live (just now)"
@@ -31,11 +25,13 @@ Window label="Deployment · payments / checkout"
               GenericContainer
                 Button label="Tab Overview"
                 Button label="More detail tabs"
+            Unknown label="Detail tabs row"
             GenericContainer
               GenericContainer
                 Button label="Delete…"
                 Button label="More detail actions"
                 Button label="Scale…"
+            Unknown label="Detail actions row"
             ScrollView label="Detail body"
               GenericContainer
                 GenericContainer

@@ -510,12 +510,7 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
-    for label in [
-        "Status ● Running",
-        "Ready · 1/1",
-        "Restarts · 2",
-        "Age · 2h",
-    ] {
+    for label in ["Status ● Running", "Ready · 1/1"] {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Node · worker-a").is_none());
@@ -523,6 +518,8 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
         .get_by_role_and_label(Role::Button, "Show more Pod vitals")
         .click();
     harness.run_steps(2);
+    harness.get_by_label("Restarts · 2");
+    harness.get_by_label("Age · 2h");
     harness.get_by_label("Node · worker-a");
     harness.get_by_label("Pod IP · 10.244.0.9");
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
@@ -599,12 +596,7 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    for label in [
-        "Rollout ● NewReplicaSetAvailable",
-        "Ready · 18/20",
-        "Up-to-date · 19",
-        "Available · 17",
-    ] {
+    for label in ["Rollout ● NewReplicaSetAvailable", "Ready · 18/20"] {
         detail.get_by_label(label);
     }
     assert!(detail.query_by_label("Strategy · RollingUpdate").is_none());
@@ -612,6 +604,8 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
         .get_by_role_and_label(Role::Button, "Show more Deployment vitals")
         .click();
     harness.run_steps(2);
+    harness.get_by_label("Up-to-date · 19");
+    harness.get_by_label("Available · 17");
     harness.get_by_label("Strategy · RollingUpdate");
     harness.get_by_label("Age · 3d");
 }
@@ -985,7 +979,7 @@ fn dedicated_cluster_scoped_title_and_copy_actions_use_pinned_identity() {
             .is_none()
     );
     detail
-        .get_by_role_and_label(Role::Button, "More detail actions")
+        .get_by_role_and_label(Role::Button, "Actions")
         .click();
     harness.run_steps(1);
     harness.get_by_role_and_label(Role::Button, "Copy name");
@@ -2230,7 +2224,7 @@ fn popout_is_pinned_and_never_follows_later_selection() {
         let dedicated =
             harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
         dedicated
-            .get_by_role_and_label(Role::Button, "More detail actions")
+            .get_by_role_and_label(Role::Button, "Actions")
             .click();
         assert!(
             dedicated
@@ -2464,6 +2458,74 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     window.get_by_role_and_label(Role::Button, "Tab YAML");
     window.get_by_role_and_label(Role::Button, "Scale…");
     window.get_by_role_and_label(Role::Button, "Delete…");
+    let owner = window.rect();
+    let strip = window.get_by_label("Detail vital strip").rect();
+    let rollout = window
+        .get_by_label("Rollout ● NewReplicaSetAvailable")
+        .rect();
+    let ready = window.get_by_label("Ready · 18/20").rect();
+    let more_vitals = window
+        .get_by_role_and_label(Role::Button, "Show more Deployment vitals")
+        .rect();
+    let active_tab = window
+        .get_by_role_and_label(Role::Button, "Tab YAML")
+        .rect();
+    let more_tabs = window
+        .get_by_role_and_label(Role::Button, "More detail tabs")
+        .rect();
+    let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
+    let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
+    let more_actions = window
+        .get_by_role_and_label(Role::Button, "More detail actions")
+        .rect();
+    let tabs_row = window.get_by_label("Detail tabs row").rect();
+    let actions_row = window.get_by_label("Detail actions row").rect();
+    for (name, rect) in [
+        ("rollout", rollout),
+        ("ready", ready),
+        ("more vitals", more_vitals),
+    ] {
+        assert!(
+            strip.contains_rect(rect),
+            "{name} {rect:?} escapes vital strip {strip:?}"
+        );
+    }
+    for (name, row, rect) in [
+        ("active tab", tabs_row, active_tab),
+        ("more tabs", tabs_row, more_tabs),
+        ("scale", actions_row, scale),
+        ("more actions", actions_row, more_actions),
+        ("delete", actions_row, delete),
+    ] {
+        assert!(
+            row.contains_rect(rect),
+            "{name} {rect:?} escapes row {row:?}"
+        );
+    }
+    for pair in [
+        (rollout, ready),
+        (ready, more_vitals),
+        (active_tab, more_tabs),
+        (scale, more_actions),
+        (more_actions, delete),
+    ] {
+        assert!(
+            !pair.0.intersects(pair.1),
+            "narrow controls overlap: {pair:?}"
+        );
+    }
+    for (name, rect) in [
+        ("active tab", active_tab),
+        ("more tabs", more_tabs),
+        ("scale", scale),
+        ("more actions", more_actions),
+        ("delete", delete),
+    ] {
+        assert!(
+            owner.contains_rect(rect),
+            "{name} {rect:?} escapes detail {owner:?}"
+        );
+    }
     window
         .get_by_role_and_label(Role::Button, "More detail tabs")
         .click();

@@ -214,12 +214,6 @@ Window
                     Label value="Ready · —"
                     GenericContainer
                       GenericContainer
-                    Label value="Restarts · —"
-                    GenericContainer
-                      GenericContainer
-                    Label value="Age · —"
-                    GenericContainer
-                      GenericContainer
                     Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
@@ -230,10 +224,12 @@ Window
                     Button label="Tab YAML"
                     Button label="Tab Logs"
                     Button label="Tab Shell"
+                Unknown label="Detail tabs row"
                 GenericContainer
                   GenericContainer
                     Button label="Delete…"
                     Button label="Actions"
+                Unknown label="Detail actions row"
                 GenericContainer
                   Label value="log stream disconnected"
                     TextRun value="log stream disconnected"

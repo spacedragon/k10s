@@ -237,23 +237,21 @@ Window
                   Label value="Ready · —"
                   GenericContainer
                     GenericContainer
-                  Label value="Restarts · —"
-                  GenericContainer
-                    GenericContainer
-                  Label value="Age · —"
-                  GenericContainer
-                    GenericContainer
                   Button label="Show more Pod vitals"
               GenericContainer
                 Label value="Freshness · loading"
-                  TextRun value="Freshness · loading"
               GenericContainer
                 GenericContainer
                   Button label="Tab Overview"
-                  Button label="More detail tabs"
+                  Button label="Tab Events"
+                  Button label="Tab YAML"
+                  Button label="Tab Logs"
+                  Button label="Tab Shell"
+              Unknown label="Detail tabs row"
               GenericContainer
                 GenericContainer
-                  Button label="More detail actions"
+                  Button label="Actions"
+              Unknown label="Detail actions row"
               ScrollView label="Detail body"
                 GenericContainer
                   GenericContainer
