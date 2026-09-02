@@ -190,7 +190,6 @@ Window
               GenericContainer
                 Label value="1 pods · 1 selected"
                   TextRun value="1 pods · 1 selected"
-                Button label="More list details"
               GenericContainer
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod"

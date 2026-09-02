@@ -501,6 +501,122 @@ fn show_status_combobox<I>(
         });
 }
 
+fn show_match_details<I>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    state: &ResourceWindowState<I>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    if let Some(sort) = state.sort.as_ref() {
+        let arrow = if sort.ascending { "▲" } else { "▼" };
+        ui.label(
+            RichText::new(format!(
+                "sorted by {} {arrow} · ",
+                super::resource_table::column_title(&sort.column)
+            ))
+            .color(theme::MUTED_TEXT),
+        );
+    }
+    let (age_text, switch_label, next_mode) = match state.age_mode {
+        crate::workspace::AgeMode::Relative => (
+            "Age shown as relative",
+            "switch to absolute",
+            crate::workspace::AgeMode::Absolute,
+        ),
+        crate::workspace::AgeMode::Absolute => (
+            "Age shown as absolute",
+            "switch to relative",
+            crate::workspace::AgeMode::Relative,
+        ),
+    };
+    ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
+    if ui
+        .add(
+            egui::Button::new(RichText::new(switch_label).color(theme::ACCENT))
+                .frame(false)
+                .wrap_mode(egui::TextWrapMode::Extend),
+        )
+        .clicked()
+    {
+        queued.push(WorkspaceCommand::SetAgeMode(window_id, next_mode));
+    }
+    ui.label(RichText::new(")").color(theme::MUTED_TEXT));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_secondary_controls<I>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    kind: WorkloadKind,
+    namespaced: bool,
+    hidden_columns: &std::collections::BTreeSet<String>,
+    filters_active: bool,
+    compact_controls: bool,
+    resource_actions: &mut Vec<super::ResourceAction>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked() {
+        queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
+    }
+    show_columns_menu(ui, window_id, kind, namespaced, hidden_columns, queued);
+    let refresh = if compact_controls {
+        ui.button("Refresh list")
+    } else {
+        ui.button("↻").on_hover_text("Refresh list")
+    };
+    if refresh.clicked() {
+        resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
+    }
+    if filters_active && ui.button("Reset").clicked() {
+        queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
+        if namespaced {
+            queued.push(WorkspaceCommand::SetNamespaceScope(
+                window_id,
+                crate::workspace::NamespaceScope::AllNamespaces,
+            ));
+        }
+        queued.push(WorkspaceCommand::SetStatusFilter(window_id, None));
+    }
+}
+
+fn direct_toolbar_width(
+    available_width: f32,
+    namespaced: bool,
+    custom_resource: bool,
+    filters_active: bool,
+    shows_freshness: bool,
+) -> f32 {
+    let search = if available_width < 760.0 {
+        100.0
+    } else {
+        200.0
+    };
+    let namespace = if namespaced { 150.0 } else { 0.0 };
+    let custom_type = if custom_resource { 150.0 } else { 0.0 };
+    let reset = if filters_active { 48.0 } else { 0.0 };
+    let freshness = if shows_freshness { 108.0 } else { 0.0 };
+    // Search, namespace, status, custom type, columns, refresh, reset, and
+    // freshness, plus one standard inter-control gap for each visible item.
+    let controls = 1
+        + usize::from(namespaced)
+        + 1
+        + usize::from(custom_resource)
+        + 2
+        + usize::from(filters_active)
+        + usize::from(shows_freshness);
+    search
+        + namespace
+        + 140.0
+        + custom_type
+        + 78.0
+        + 32.0
+        + reset
+        + freshness
+        + (controls.saturating_sub(1) as f32 * 8.0)
+        // egui adds frame, icon, and menu-affordance padding around controls.
+        + 320.0
+}
+
 /// Toolbar menu that hides and restores the table's hideable columns.
 fn show_columns_menu<I>(
     ui: &mut egui::Ui,
@@ -685,8 +801,26 @@ pub(super) fn show<I>(
     }
 
     // A window can be much narrower than the app canvas, so use this list's
-    // local control budget rather than the global content width.
-    let compact_controls = ui.available_width() < 700.0;
+    // local control budget rather than the global content width or a fixed
+    // breakpoint. Secondary controls overflow before they would wrap/clip.
+    let filters_active = !state.search.is_empty()
+        || (namespaced && state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces)
+        || state.status_filter.is_some();
+    let shows_freshness = effective_freshness.is_some_and(|freshness| {
+        matches!(
+            freshness,
+            WindowFreshness::Live { .. } | WindowFreshness::ReadyEmpty
+        )
+    });
+    let available_width = ui.available_width();
+    let compact_controls = available_width
+        < direct_toolbar_width(
+            available_width,
+            namespaced,
+            kind == WorkloadKind::CustomResources,
+            filters_active,
+            shows_freshness,
+        );
     ui.horizontal_wrapped(|ui| {
         let search_hint = format!("Search {title_lower}");
         let mut search = state.search.clone();
@@ -715,46 +849,34 @@ pub(super) fn show<I>(
 
         show_status_combobox(ui, window_id, &state.status_filter, rows, queued);
 
-        let filters_active = !state.search.is_empty()
-            || (namespaced
-                && state.namespace_scope != crate::workspace::NamespaceScope::AllNamespaces)
-            || state.status_filter.is_some();
-        let mut secondary_controls = |ui: &mut egui::Ui| {
-            if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked()
-            {
-                queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
-            }
-            show_columns_menu(
+        if compact_controls {
+            ui.menu_button("More list controls", |ui| {
+                show_match_details(ui, window_id, state, queued);
+                ui.separator();
+                show_secondary_controls(
+                    ui,
+                    window_id,
+                    kind,
+                    namespaced,
+                    &state.hidden_columns,
+                    filters_active,
+                    compact_controls,
+                    resource_actions,
+                    queued,
+                );
+            });
+        } else {
+            show_secondary_controls(
                 ui,
                 window_id,
                 kind,
                 namespaced,
                 &state.hidden_columns,
+                filters_active,
+                compact_controls,
+                resource_actions,
                 queued,
             );
-            let refresh = if compact_controls {
-                ui.button("Refresh list")
-            } else {
-                ui.button("↻").on_hover_text("Refresh list")
-            };
-            if refresh.clicked() {
-                resource_actions.push(super::ResourceAction::FullResyncWindow(window_id));
-            }
-            if filters_active && ui.button("Reset").clicked() {
-                queued.push(WorkspaceCommand::SetSearch(window_id, String::new()));
-                if namespaced {
-                    queued.push(WorkspaceCommand::SetNamespaceScope(
-                        window_id,
-                        crate::workspace::NamespaceScope::AllNamespaces,
-                    ));
-                }
-                queued.push(WorkspaceCommand::SetStatusFilter(window_id, None));
-            }
-        };
-        if compact_controls {
-            ui.menu_button("More list controls", |ui| secondary_controls(ui));
-        } else {
-            secondary_controls(ui);
         }
 
         if let Some(freshness) = effective_freshness {
@@ -787,50 +909,14 @@ pub(super) fn show<I>(
             ))
             .color(theme::MUTED_TEXT),
         );
-        let mut match_details = |ui: &mut egui::Ui| {
-            if let Some(sort) = state.sort.as_ref() {
-                let arrow = if sort.ascending { "▲" } else { "▼" };
-                ui.label(
-                    RichText::new(format!(
-                        "sorted by {} {arrow} · ",
-                        super::resource_table::column_title(&sort.column)
-                    ))
-                    .color(theme::MUTED_TEXT),
-                );
-            }
-            let (age_text, switch_label, next_mode) = match state.age_mode {
-                crate::workspace::AgeMode::Relative => (
-                    "Age shown as relative",
-                    "switch to absolute",
-                    crate::workspace::AgeMode::Absolute,
-                ),
-                crate::workspace::AgeMode::Absolute => (
-                    "Age shown as absolute",
-                    "switch to relative",
-                    crate::workspace::AgeMode::Relative,
-                ),
-            };
-            ui.label(RichText::new(format!("{age_text} (")).color(theme::MUTED_TEXT));
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(switch_label).color(theme::ACCENT))
-                        .frame(false)
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                )
-                .clicked()
-            {
-                queued.push(WorkspaceCommand::SetAgeMode(window_id, next_mode));
-            }
-            ui.label(RichText::new(")").color(theme::MUTED_TEXT));
-        };
         if compact_controls {
-            ui.menu_button("More list details", |ui| match_details(ui));
+            // Sort and age are available from the toolbar overflow.
         } else {
             // The whole right-hand group keeps natural left-to-right reading
             // order while staying anchored to the toolbar's right edge.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    match_details(ui);
+                    show_match_details(ui, window_id, state, queued);
                 });
             });
         }
@@ -1151,5 +1237,18 @@ mod taxonomy_tests {
             );
             assert_eq!(kind.namespaced(), namespaced);
         }
+    }
+
+    #[test]
+    fn toolbar_budget_can_overflow_secondary_controls_above_the_old_breakpoint() {
+        let required = direct_toolbar_width(700.0, true, true, true, true);
+        assert!(
+            required > 700.0,
+            "a namespaced custom list with active filters needs overflow even at 700 points"
+        );
+        assert!(
+            required < 1_400.0,
+            "the same controls return directly once their measured budget fits"
+        );
     }
 }

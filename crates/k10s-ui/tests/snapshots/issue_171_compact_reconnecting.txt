@@ -183,7 +183,6 @@ Window
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                Button label="More list details"
               Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
                 TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."

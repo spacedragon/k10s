@@ -183,7 +183,6 @@ Window
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                Button label="More list details"
               Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
                 TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
               Label value="Mutations disabled while this window is stale"

@@ -183,7 +183,6 @@ Window
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                Button label="More list details"
               Label value="✕ Failed · watch ended unexpectedly"
                 TextRun value="✕ Failed · watch ended unexpectedly"
               GenericContainer

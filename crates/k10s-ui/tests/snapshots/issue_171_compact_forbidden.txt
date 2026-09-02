@@ -183,7 +183,6 @@ Window
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                Button label="More list details"
               Label value="■ Forbidden · user alice@example.com cannot list deployments.apps in --namespace=payments"
                 TextRun value="■ Forbidden · user alice@example.com cannot list deployments.apps in --namespace=payments"
               Label value="Ask a cluster administrator to grant this permission, then retry."

@@ -9334,6 +9334,7 @@ mod tests {
     fn narrow_deployment_toolbar_overflows_secondary_controls() {
         let (mut app, _) = deployment_list_app();
         let mut snapshot = app.workspace_snapshot();
+        snapshot.free_window_resizing = true;
         let deployment = snapshot
             .windows
             .iter_mut()
@@ -9382,8 +9383,8 @@ mod tests {
             "Deployments · all namespaces",
         );
 
-        // Local list width keeps the primary controls reachable and puts
-        // secondary actions in an accessible overflow menu.
+        // A constrained local list keeps primary controls reachable through
+        // one accessible overflow menu.
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
         assert_eq!(
             harness
@@ -9404,7 +9405,6 @@ mod tests {
         // The match line reports the result count and the age affordance.
         // With no filters active, the Reset control stays hidden.
         window.get_by_label("2 deployments");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "More list details");
         assert!(
             window.query_by_label("Reset").is_none(),
             "Reset only appears while filters are active"
@@ -9456,6 +9456,24 @@ mod tests {
                 ascending: true,
             }),
         ));
+        let mut snapshot = app.workspace_snapshot();
+        snapshot.free_window_resizing = true;
+        snapshot
+            .windows
+            .iter_mut()
+            .find(|persisted| persisted.title == "Deployments")
+            .expect("deployment window is persisted")
+            .geometry
+            .size[0] = 460.0;
+        app.restore_workspace_snapshot(snapshot);
+        app.web_select_resource(window, alpha);
+        app.shell.apply_workspace_command(WorkspaceCommand::SetSort(
+            window,
+            Some(crate::workspace::SortSpec {
+                column: "namespace".into(),
+                ascending: true,
+            }),
+        ));
 
         let mut harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
@@ -9464,7 +9482,7 @@ mod tests {
         );
         list_window.get_by_label("2 deployments · 1 selected");
         list_window
-            .get_by_role_and_label(egui::accesskit::Role::Button, "More list details")
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
             .click();
         harness.step();
         harness.get_by_label("sorted by Namespace ▲ · ");
@@ -9484,7 +9502,7 @@ mod tests {
             "Deployments · all namespaces",
         );
         list_window
-            .get_by_role_and_label(egui::accesskit::Role::Button, "More list details")
+            .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
             .click();
         harness.step();
         harness.get_by_label("Age shown as absolute (");

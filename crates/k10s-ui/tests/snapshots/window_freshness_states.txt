@@ -208,21 +208,12 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
                 Label value="● Live · 4s ago"
                   TextRun value="● Live · 4s ago"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -301,19 +292,10 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 pods"
                   TextRun value="1 pods"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
                 TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
               Label value="Mutations disabled while this window is stale"
@@ -406,19 +388,10 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 statefulsets"
                   TextRun value="0 statefulsets"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
                 TextRun value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
               Label value="Ask a cluster administrator to grant this permission, then retry."
@@ -459,19 +432,10 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 daemonsets"
                   TextRun value="0 daemonsets"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="✕ Failed · watch ended unexpectedly"
                 TextRun value="✕ Failed · watch ended unexpectedly"
               GenericContainer
@@ -508,21 +472,12 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
                 Label value="◇ Ready · no resources"
                   TextRun value="◇ Ready · no resources"
               GenericContainer
                 Label value="0 jobs"
                   TextRun value="0 jobs"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 Label value="No Jobs in this view"
                   TextRun value="No Jobs in this view"
@@ -554,19 +509,10 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
+                Button label="More list controls"
               GenericContainer
                 Label value="1 cronjobs"
                   TextRun value="1 cronjobs"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
                 TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."
@@ -639,20 +585,10 @@ Window
                 GenericContainer
                   GenericContainer
                     ComboBox value="Status: all"
-                GenericContainer
-                  Button label="Columns ▾"
-                Button label="↻"
-                Button label="Reset"
+                Button label="More list controls"
               GenericContainer
                 Label value="0 configmaps"
                   TextRun value="0 configmaps"
-                GenericContainer
-                  GenericContainer
-                    Label value="Age shown as relative ("
-                      TextRun value="Age shown as relative ("
-                    Button label="switch to absolute"
-                    Label value=")"
-                      TextRun value=")"
               GenericContainer
                 GenericContainer
                   Label value="[?]"

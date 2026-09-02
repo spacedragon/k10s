@@ -186,7 +186,6 @@ Window
               GenericContainer
                 Label value="0 deployments"
                   TextRun value="0 deployments"
-                Button label="More list details"
               GenericContainer
                 Label value="No Deployments in this view"
                   TextRun value="No Deployments in this view"
