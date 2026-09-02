@@ -315,7 +315,20 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         "a filter miss must not claim the namespace is empty"
     );
 
-    window.get_by_role_and_label(Role::Button, "More list controls");
+    window
+        .get_by_role_and_label(Role::Button, "More list controls")
+        .click();
+    harness.step();
+    harness.get_by_role_and_label(Role::Button, "Reset").click();
+    harness.run_steps(4);
+    let window = common::workload_window(&harness, "Deployments");
+    window.get_by_label("Select resource api-server");
+    assert!(
+        window
+            .query_by_label("No resources match these filters")
+            .is_none(),
+        "Reset clears the search and restores the list"
+    );
 }
 
 // ---------------------------------------------------------------------------
