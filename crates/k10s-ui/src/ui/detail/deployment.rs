@@ -397,7 +397,11 @@ fn elided_cell(ui: &mut egui::Ui, width: f32, value: &str) {
 
 fn elided_cell_toned(ui: &mut egui::Ui, width: f32, value: &str, color: Option<egui::Color32>) {
     let width = width.max(1.0);
-    let row_height = ui.spacing().interact_size.y;
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
     let color = color.unwrap_or(ui.visuals().text_color());
     let content = ui
         .painter()
@@ -406,7 +410,12 @@ fn elided_cell_toned(ui: &mut egui::Ui, width: f32, value: &str, color: Option<e
         .x;
     let response = ui.add_sized(
         [width, row_height],
-        egui::Label::new(RichText::new(value).color(color)).truncate(),
+        egui::Label::new(
+            RichText::new(value)
+                .text_style(egui::TextStyle::Body)
+                .color(color),
+        )
+        .truncate(),
     );
     if content > width {
         response.on_hover_text(value);
@@ -476,23 +485,38 @@ fn pods_table<I: RowIdentity>(
     const AGE: f32 = 42.0;
     horizontal_table(ui, window_id, "pods", "Deployment Pods table", |ui| {
         let spacing = ui.spacing().item_spacing.x;
-        let available = ui.clip_rect().width().max(200.0);
-        let name_width =
-            (available - READY - STATUS - RESTARTS - NODE - AGE - spacing * 5.0).max(60.0);
+        let semantic_minimum = 60.0 + READY + STATUS + RESTARTS + NODE + AGE + spacing * 5.0;
+        let available = ui.clip_rect().width();
+        let table_width = available.max(semantic_minimum);
+        let name_width = table_width - READY - STATUS - RESTARTS - NODE - AGE - spacing * 5.0;
+        let row_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Body));
         // Header row: fixed columns match the body so values never drift.
         ui.horizontal(|ui| {
-            let mut header = |label: &str, width: f32| {
-                ui.add_sized(
-                    [width, ui.spacing().interact_size.y],
-                    egui::Label::new(RichText::new(label).strong().weak()),
+            let mut header = |label: &str, width: f32, align: egui::Align| {
+                aligned_label_cell(
+                    ui,
+                    width,
+                    row_height,
+                    align,
+                    label,
+                    egui::Label::new(
+                        RichText::new(label)
+                            .text_style(egui::TextStyle::Body)
+                            .strong()
+                            .weak(),
+                    ),
                 );
             };
-            header("Name", name_width);
-            header("Ready", READY);
-            header("Status", STATUS);
-            header("Restarts", RESTARTS);
-            header("Node", NODE);
-            header("Age", AGE);
+            header("Name", name_width, egui::Align::Min);
+            header("Ready", READY, egui::Align::Max);
+            header("Status", STATUS, egui::Align::Min);
+            header("Restarts", RESTARTS, egui::Align::Max);
+            header("Node", NODE, egui::Align::Min);
+            header("Age", AGE, egui::Align::Max);
         });
         ui.separator();
         for row in pods {
@@ -504,8 +528,11 @@ fn pods_table<I: RowIdentity>(
                 let name = row.identity.name.clone();
                 let label = format!("Pod · {}", name);
                 let open = ui.add_sized(
-                    [name_width, ui.spacing().interact_size.y],
-                    egui::Button::new(name.clone()).truncate(),
+                    [name_width, row_height],
+                    egui::Button::new(
+                        RichText::new(name.clone()).text_style(egui::TextStyle::Body),
+                    )
+                    .truncate(),
                 );
                 open.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
                 if open.clicked() {
@@ -513,7 +540,7 @@ fn pods_table<I: RowIdentity>(
                         &row.identity,
                     )));
                 }
-                elided_cell(
+                right_aligned_cell(
                     ui,
                     READY,
                     &pod.and_then(|pod| pair(pod.ready_containers, pod.total_containers))
@@ -522,13 +549,13 @@ fn pods_table<I: RowIdentity>(
                 // Status cell keeps its tone dot; the label stays fixed-width.
                 let (status_text, status_color) = pod_status_text(pod);
                 elided_cell_toned(ui, STATUS, &status_text, Some(status_color));
-                elided_cell(ui, RESTARTS, &number(pod.and_then(|pod| pod.restart_count)));
+                right_aligned_cell(ui, RESTARTS, &number(pod.and_then(|pod| pod.restart_count)));
                 elided_cell(
                     ui,
                     NODE,
                     value(pod.and_then(|pod| pod.node_name.as_deref())),
                 );
-                elided_cell(
+                right_aligned_cell(
                     ui,
                     AGE,
                     &format_age(pod.and_then(|pod| pod.created_at.as_deref()), now),
@@ -536,6 +563,47 @@ fn pods_table<I: RowIdentity>(
             });
         }
     });
+}
+
+fn right_aligned_cell(ui: &mut egui::Ui, width: f32, value: &str) {
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body));
+    aligned_label_cell(
+        ui,
+        width,
+        row_height,
+        egui::Align::Max,
+        value,
+        egui::Label::new(RichText::new(value).text_style(egui::TextStyle::Body)),
+    );
+}
+
+fn aligned_label_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    align: egui::Align,
+    text: &str,
+    label: egui::Label,
+) {
+    let mut label_width = width;
+    if align == egui::Align::Max {
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(
+                text.to_owned(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            )
+            .size()
+            .x;
+        ui.add_space((width - text_width).max(0.0));
+        label_width = text_width;
+    }
+    ui.add_sized([label_width, height], label);
 }
 
 /// The short image tag (after the final ':') for the IMAGE TAG column.
@@ -707,6 +775,30 @@ fn rollout_events(ui: &mut egui::Ui, condition: EventsCondition, events: &[Event
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigurationSection {
+    Template,
+    ManagedBy,
+    LabelsAnnotations,
+    Identity,
+}
+
+fn configuration_section_sequence(
+    has_managed_by: bool,
+    has_labels: bool,
+    has_annotations: bool,
+) -> Vec<ConfigurationSection> {
+    let mut sections = vec![ConfigurationSection::Template];
+    if has_managed_by {
+        sections.push(ConfigurationSection::ManagedBy);
+    }
+    if has_labels || has_annotations {
+        sections.push(ConfigurationSection::LabelsAnnotations);
+    }
+    sections.push(ConfigurationSection::Identity);
+    sections
+}
+
 fn metadata_column(
     ui: &mut egui::Ui,
     window_id: WindowId,
@@ -714,15 +806,40 @@ fn metadata_column(
     projection: &DeploymentDetailProjection<'_>,
     frame: &mut DetailFrameProjection<'_>,
 ) {
-    template(ui, window_id, projection.deployment);
-    ui.separator();
-    managed_by(ui, window_id, projection.deployment);
-    ui.separator();
-    labels(ui, projection.deployment, frame);
-    ui.separator();
-    annotations(ui, window_id, projection.deployment);
-    ui.separator();
-    identity_section(ui, window_id, identity, projection.deployment);
+    let deployment = projection.deployment;
+    let has_managed_by = deployment
+        .labels
+        .contains_key("app.kubernetes.io/managed-by")
+        || deployment.labels.contains_key("helm.sh/chart")
+        || deployment
+            .annotations
+            .contains_key("meta.helm.sh/release-name")
+        || deployment
+            .annotations
+            .contains_key("meta.helm.sh/release-namespace");
+    let sections = configuration_section_sequence(
+        has_managed_by,
+        !deployment.labels.is_empty(),
+        !deployment.annotations.is_empty(),
+    );
+    for (index, section) in sections.into_iter().enumerate() {
+        if index > 0 {
+            super::overview::section_separator(ui);
+        }
+        match section {
+            ConfigurationSection::Template => template(ui, window_id, deployment),
+            ConfigurationSection::ManagedBy => managed_by(ui, window_id, deployment),
+            ConfigurationSection::LabelsAnnotations => {
+                if !deployment.labels.is_empty() {
+                    labels(ui, deployment, frame);
+                }
+                if !deployment.annotations.is_empty() {
+                    annotations(ui, window_id, deployment);
+                }
+            }
+            ConfigurationSection::Identity => identity_section(ui, window_id, identity, deployment),
+        }
+    }
 }
 
 fn template(ui: &mut egui::Ui, window_id: WindowId, deployment: &DeploymentProjection) {
@@ -1016,11 +1133,50 @@ fn map_list(values: &std::collections::BTreeMap<String, String>) -> String {
 #[cfg(test)]
 mod shared_seam_tests {
     use super::super::overview::detail_columns;
+    use super::{ConfigurationSection, configuration_section_sequence};
 
     #[test]
     fn deployment_body_breakpoint_is_exactly_760_points() {
         assert!(detail_columns(759.0, 8.0).is_none());
         assert!(detail_columns(760.0, 8.0).is_some());
+    }
+
+    #[test]
+    fn configuration_sections_include_only_non_empty_rendered_regions() {
+        use ConfigurationSection::{Identity, LabelsAnnotations, ManagedBy, Template};
+
+        let cases = [
+            (
+                true,
+                true,
+                true,
+                vec![Template, ManagedBy, LabelsAnnotations, Identity],
+            ),
+            (
+                false,
+                true,
+                true,
+                vec![Template, LabelsAnnotations, Identity],
+            ),
+            (
+                false,
+                true,
+                false,
+                vec![Template, LabelsAnnotations, Identity],
+            ),
+            (
+                false,
+                false,
+                true,
+                vec![Template, LabelsAnnotations, Identity],
+            ),
+            (false, false, false, vec![Template, Identity]),
+        ];
+        for (managed_by, labels, annotations, expected) in cases {
+            let actual = configuration_section_sequence(managed_by, labels, annotations);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.len().saturating_sub(1), expected.len() - 1);
+        }
     }
 }
 

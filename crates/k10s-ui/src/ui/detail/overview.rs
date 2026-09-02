@@ -55,6 +55,24 @@ pub(super) fn two_column(
     true
 }
 
+/// Paint a local-width section boundary without adding an accessibility node.
+pub(super) fn section_separator(ui: &mut egui::Ui) -> egui::Response {
+    let height = ui.spacing().item_spacing.y;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    if ui.is_rect_visible(rect) {
+        let y = ui.painter().round_to_pixel_center(rect.center().y);
+        ui.painter().hline(
+            rect.x_range(),
+            y,
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
+    }
+    response
+}
+
 pub(super) fn long_value_text(value: &str, max_chars: usize) -> String {
     if value.is_empty() {
         "—".into()
@@ -134,6 +152,29 @@ mod responsive_contract_tests {
     use super::{detail_columns, long_value_text};
     use egui::accesskit::Role;
     use egui_kittest::{Harness, kittest::Queryable as _};
+
+    #[test]
+    fn detail_section_separator_spans_local_width() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(420.0, 120.0))
+            .build_ui(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(280.0, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let local_width = ui.available_width();
+                        let response = super::section_separator(ui);
+                        assert!((response.rect.width() - local_width).abs() <= 1.0);
+                        assert!(
+                            response.rect.height() <= ui.spacing().item_spacing.y + 1.0,
+                            "separator must fit within one standard item spacing: {:?}",
+                            response.rect
+                        );
+                    },
+                );
+            });
+        harness.run();
+    }
 
     #[test]
     fn exact_overview_widths_use_the_shared_breakpoint_and_ratio() {

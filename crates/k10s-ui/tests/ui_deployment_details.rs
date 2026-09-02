@@ -649,11 +649,13 @@ fn deployment_projection_incomplete_typed_fields_render_dashes() {
         "Age · —",
         "Image (api): —",
         "Selector: —",
-        "Manager · —",
         "Created · —",
     ] {
         window.get_by_label(label);
     }
+    assert!(window.query_by_label("MANAGED BY").is_none());
+    assert!(window.query_by_label("LABELS · 0").is_none());
+    assert!(window.query_by_label("ANNOTATIONS · 0").is_none());
 }
 
 #[test]
@@ -1044,6 +1046,89 @@ fn deployment_tables_keep_last_columns_reachable_with_one_vertical_scroll_owner(
             );
         }
     }
+}
+
+#[test]
+fn deployment_pods_use_dense_body_rows_and_aligned_semantic_columns() {
+    let mut harness = harness(egui::vec2(1_120.0, 760.0));
+    let detail = detail_with(Some(projection(Vec::new())));
+    let identity = detail.identity.clone();
+    open_detail(
+        &mut harness,
+        detail,
+        Some(exact_relations(&identity)),
+        [1_024.0, 620.0],
+    );
+    let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
+    let text_run = |value: &str| {
+        window
+            .query_all_by_role(Role::TextRun)
+            .find(|node| node.value().as_deref() == Some(value))
+            .unwrap_or_else(|| {
+                let available = window
+                    .query_all_by_role(Role::TextRun)
+                    .filter_map(|node| node.value())
+                    .collect::<Vec<_>>();
+                panic!("TextRun {value:?}; available: {available:?}")
+            })
+            .rect()
+    };
+
+    let ready_header = text_run("Ready");
+    let ready = text_run("1/1");
+    let restarts_header = text_run("Restarts");
+    let restarts = text_run("2");
+    let age_header = text_run("Age");
+    let age = window
+        .query_all_by_role(Role::TextRun)
+        .filter(|node| node.value().as_deref() == Some("—"))
+        .map(|node| node.rect())
+        .find(|rect| {
+            rect.top() > age_header.bottom() && (rect.right() - age_header.right()).abs() <= 12.0
+        })
+        .unwrap_or_else(|| {
+            let dashes = window
+                .query_all_by_role(Role::TextRun)
+                .filter(|node| node.value().as_deref() == Some("—"))
+                .map(|node| node.rect())
+                .collect::<Vec<_>>();
+            panic!("Pod Age value TextRun beneath {age_header:?}; dashes: {dashes:?}")
+        });
+    let status = text_run("● Running");
+    let node = text_run("worker-a");
+
+    for (header, value, column) in [
+        (ready_header, ready, "Ready"),
+        (restarts_header, restarts, "Restarts"),
+        (age_header, age, "Age"),
+    ] {
+        assert!(
+            (header.right() - value.right()).abs() <= 1.0,
+            "{column} glyphs must share the semantic column's right edge: {header:?} {value:?}"
+        );
+    }
+    for (left, right) in [
+        (ready, status),
+        (status, restarts),
+        (restarts, node),
+        (node, age),
+    ] {
+        assert!(
+            left.right() <= right.left(),
+            "Pod glyphs overlap: {left:?} {right:?}"
+        );
+    }
+
+    let style = harness.ctx.style_of(egui::Theme::Dark);
+    let expected_row_height = style
+        .spacing
+        .interact_size
+        .y
+        .max(style.text_styles[&egui::TextStyle::Body].size);
+    assert!(
+        (ready.top() - ready_header.top()) >= expected_row_height,
+        "header/body baselines must preserve the dense Body row height"
+    );
 }
 
 #[test]
