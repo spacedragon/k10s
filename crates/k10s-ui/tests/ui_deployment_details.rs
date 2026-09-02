@@ -129,6 +129,7 @@ fn deployment_row(name: &str) -> ResourceListRow {
 fn open_integrated_deployment(
     harness: &mut Harness<'static, Fixture>,
     detail: ResourceDetailResponse,
+    verify_list_overflow: bool,
 ) {
     let identity = detail.identity.clone();
     harness
@@ -162,10 +163,69 @@ fn open_integrated_deployment(
             LauncherItem::Workload(WorkloadKind::Deployments),
         ));
     harness.run_steps(4);
+    let window = integrated_deployment_window(harness);
+    window.get_by_role_and_label(Role::TextInput, "Search deployments");
+    assert_eq!(
+        window
+            .query_all_by_role(Role::ComboBox)
+            .filter_map(|node| node.value())
+            .filter(|value| value.starts_with("Namespace: ") || value.starts_with("Status: "))
+            .count(),
+        2,
+        "the integrated list toolbar exposes Namespace and Status controls"
+    );
+    window.get_by_label("1 deployments");
+    if verify_list_overflow {
+        window
+            .get_by_role_and_label(Role::Button, "More list controls")
+            .click();
+        harness.step();
+        let owner = integrated_deployment_window(harness).rect();
+        for item in ["switch to absolute", "Refresh list"] {
+            let rect = harness
+                .root()
+                .children_recursive()
+                .find(|node| {
+                    node.accesskit_node().role() == Role::Button
+                        && node
+                            .accesskit_node()
+                            .label()
+                            .is_some_and(|label| label.contains(item))
+                })
+                .unwrap_or_else(|| panic!("{item} in list overflow"))
+                .rect();
+            assert_rect_within(owner, rect, 1.0, item);
+        }
+        let columns = harness
+            .root()
+            .children_recursive()
+            .find(|node| {
+                node.accesskit_node().role() == Role::Button
+                    && node
+                        .accesskit_node()
+                        .label()
+                        .is_some_and(|label| label.contains("Columns ▾"))
+            })
+            .expect("Columns control in list overflow");
+        assert_rect_within(owner, columns.rect(), 1.0, "Columns menu");
+        harness.get_by_label_contains("Age shown as relative");
+        harness
+            .get_by_role_and_label(Role::Button, "More list controls")
+            .click();
+        harness.run_steps(1);
+    }
     integrated_deployment_window(harness)
         .get_by_role_and_label(Role::Button, "Select resource checkout")
         .click();
     harness.run_steps(5);
+}
+
+fn assert_rect_within(owner: egui::Rect, child: egui::Rect, tolerance: f32, name: &str) {
+    let owner = owner.expand(tolerance);
+    assert!(
+        owner.contains_rect(child),
+        "{name} {child:?} escapes owner {owner:?} (including {tolerance}pt tolerance)"
+    );
 }
 
 fn integrated_deployment_window<'a>(
@@ -760,7 +820,7 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     // Wide 1000x700: select from the real Deployment list and verify the
     // integrated detail pane, rather than manufacturing a dedicated window.
     let mut wide = harness(egui::vec2(1_000.0, 700.0));
-    open_integrated_deployment(&mut wide, detail_with(Some(projection(Vec::new()))));
+    open_integrated_deployment(&mut wide, detail_with(Some(projection(Vec::new()))), true);
     let window = integrated_deployment_window(&wide);
     let operational = window.get_by_label("Operational detail column").rect();
     let configuration = window.get_by_label("Configuration detail column").rect();
@@ -784,11 +844,7 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
         "Actions",
     ] {
         let rect = window.get_by_role_and_label(Role::Button, control).rect();
-        assert!(
-            window.rect().contains_rect(rect),
-            "wide control {control:?} escapes the integrated window: {rect:?} vs {:?}",
-            window.rect()
-        );
+        assert_rect_within(window.rect(), rect, 1.0, control);
     }
     for node in window.query_all_by_role(Role::Label) {
         let Some(value) = node.value() else { continue };
@@ -807,36 +863,34 @@ fn deployment_overview_verification_geometries_and_no_overlap() {
     // fold), which is guaranteed when the chips wrap within the column width.
     window.get_by_role_and_label(Role::Button, "Show 2 annotations");
     let _ = annot_button;
-    window
-        .get_by_role_and_label(Role::Button, "Actions")
-        .click();
+    let actions = window.get_by_role_and_label(Role::Button, "Actions");
+    assert!(!actions.accesskit_node().is_disabled());
+    actions.click();
+    let owner = window.rect();
     wide.run_steps(1);
     let copy_name = wide.get_by_role_and_label(Role::Button, "Copy name").rect();
-    assert!(
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1_000.0, 700.0))
-            .contains_rect(copy_name),
-        "Actions menu escapes the 1000x700 viewport: {copy_name:?}"
-    );
+    assert_rect_within(owner, copy_name, 1.0, "Copy name menu item");
 
     // Narrow 640x700: the same integrated selection collapses metadata.
     let mut narrow = harness(egui::vec2(640.0, 700.0));
-    open_integrated_deployment(&mut narrow, detail_with(Some(projection(Vec::new()))));
+    open_integrated_deployment(
+        &mut narrow,
+        detail_with(Some(projection(Vec::new()))),
+        false,
+    );
     let window = integrated_deployment_window(&narrow);
     window.get_by_label("PODS · 1");
     assert!(window.query_by_label("TEMPLATE").is_none());
     for control in [
         "Tab Overview",
-        "Tab YAML",
-        "Tab Events",
+        "Scale…",
+        "Restart…",
+        "Delete…",
         "Actions",
         "Show Deployment metadata",
     ] {
         let rect = window.get_by_role_and_label(Role::Button, control).rect();
-        assert!(
-            window.rect().contains_rect(rect),
-            "narrow control {control:?} escapes the integrated window: {rect:?} vs {:?}",
-            window.rect()
-        );
+        assert_rect_within(window.rect(), rect, 1.0, control);
     }
     window
         .get_by_role_and_label(Role::Button, "Show Deployment metadata")
