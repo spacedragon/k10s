@@ -186,34 +186,32 @@ where
         })
         .collect();
     let column_spacing = ui.spacing().item_spacing.x;
-    // Resolve against the content viewport, not the outer ScrollArea width:
-    // a solid vertical scrollbar is allocated inside that outer width and
-    // would otherwise clip the required final column at compact sizes.
-    let table_width = (ui
-        .available_rect_before_wrap()
-        .intersect(ui.clip_rect())
-        .width()
-        - ui.spacing().scroll.allocated_width())
-    .max(0.0);
-    let columns = super::responsive_table::resolve_columns(
-        &specs,
-        table_width,
-        column_spacing,
-        hidden_columns,
-    );
-    debug_assert_eq!(
-        columns.horizontal_scroll,
-        columns
-            .visible
-            .iter()
-            .map(|column| column.width)
-            .sum::<f32>()
-            + column_spacing * columns.visible.len().saturating_sub(1) as f32
-            > table_width
-    );
     ScrollArea::both()
         .id_salt(("k10s.resource.list.scroll", window_id.0))
         .show_rows(ui, row_height, rows.len() + header_rows, |ui, range| {
+            // The ScrollArea content UI exposes the actual viewport after its
+            // current scrollbar allocation. Resolve here so absent, present,
+            // and animated scrollbars all use the width egui really clips.
+            let table_width = ui
+                .available_rect_before_wrap()
+                .intersect(ui.clip_rect())
+                .width();
+            let columns = super::responsive_table::resolve_columns(
+                &specs,
+                table_width,
+                column_spacing,
+                hidden_columns,
+            );
+            debug_assert_eq!(
+                columns.horizontal_scroll,
+                columns
+                    .visible
+                    .iter()
+                    .map(|column| column.width)
+                    .sum::<f32>()
+                    + column_spacing * columns.visible.len().saturating_sub(1) as f32
+                    > table_width
+            );
             egui::Grid::new(("k10s.resource.table", window_id.0))
                 .striped(true)
                 .min_col_width(0.0)

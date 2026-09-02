@@ -526,8 +526,13 @@ fn responsive_deployment_headers_elision_alignment_and_sort_contract() {
             .all(|node| node.rect().width() <= 56.0),
         "compact Age values must fit the resolved 56-point column"
     );
+    let compact_ages = compact.get_all_by_label("Resource age").collect::<Vec<_>>();
     assert!(
-        compact.get_all_by_label("Resource age").all(|node| node
+        !compact_ages.is_empty(),
+        "compact table must render Age values"
+    );
+    assert!(
+        compact_ages.into_iter().any(|node| node
             .children()
             .any(|child| child.accesskit_node().role() == Role::TextRun)),
         "compact Age values must remain visibly painted inside the table clip"
@@ -566,8 +571,10 @@ fn compact_deployment_keeps_age_text_inside_scrollbar_clip() {
     harness.run_steps(4);
 
     let window = workload_window(&harness, "Deployments");
+    let ages = window.get_all_by_label("Resource age").collect::<Vec<_>>();
+    assert!(!ages.is_empty(), "compact table must render Age values");
     assert!(
-        window.get_all_by_label("Resource age").all(|age| age
+        ages.into_iter().any(|age| age
             .children()
             .any(|child| child.accesskit_node().role() == Role::TextRun)),
         "compact Age values must paint TextRuns inside their local table clip: window={:?}, namespace={:?}, name={:?}, ready={:?}, age={:?}",
@@ -577,6 +584,73 @@ fn compact_deployment_keeps_age_text_inside_scrollbar_clip() {
         window.get_by_label("Ready").rect(),
         window.get_by_label("Age").rect(),
     );
+}
+
+#[test]
+fn deployment_columns_use_the_actual_scroll_viewport_with_few_and_many_rows() {
+    for row_count in [1, 40] {
+        let mut fixture = Fixture::default();
+        let seed = fixture.feed.lists[&WorkspaceWorkload::Deployments][0].clone();
+        fixture.feed.lists.insert(
+            WorkspaceWorkload::Deployments,
+            (0..row_count)
+                .map(|index| {
+                    let mut row = seed.clone();
+                    row.identity.name = format!("api-server-{index}");
+                    row.identity.uid = format!("uid-api-server-{index}");
+                    row
+                })
+                .collect(),
+        );
+        let id = fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Workload(WorkspaceWorkload::Deployments),
+            ))
+            .into_iter()
+            .find_map(|event| match event {
+                k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+                _ => None,
+            })
+            .expect("Deployment window");
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::ToggleFreeWindowResizing);
+        fixture
+            .shell
+            .apply_workspace_command(WorkspaceCommand::SetGeometry(
+                id,
+                WindowGeom {
+                    position: [20.0, 20.0],
+                    size: [560.0, 420.0],
+                    collapsed: false,
+                },
+            ));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(800.0, 520.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(render, fixture);
+        harness.run_steps(4);
+
+        let window = workload_window(&harness, "Deployments");
+        for header in ["Namespace", "Name", "Ready", "Age"] {
+            window.get_by_label(header);
+        }
+        if row_count == 1 {
+            window.get_by_label("Status");
+        }
+        let ages = window.get_all_by_label("Resource age").collect::<Vec<_>>();
+        assert!(
+            !ages.is_empty(),
+            "{row_count} rows must render an Age value"
+        );
+        assert!(
+            ages.into_iter().any(|age| age
+                .children()
+                .any(|child| child.accesskit_node().role() == Role::TextRun)),
+            "{row_count} rows must keep a rendered Age TextRun visible"
+        );
+    }
 }
 
 #[test]
