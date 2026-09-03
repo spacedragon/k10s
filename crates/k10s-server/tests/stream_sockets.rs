@@ -180,10 +180,10 @@ async fn exec_tombstone_authenticates_but_never_redeems_arbitrary_ticket() {
         recv_json(&mut tombstone).await["code"],
         serde_json::to_value(ErrorCode::UnsupportedMessage).unwrap()
     );
-    assert!(matches!(
-        tombstone.next().await,
-        Some(Ok(Message::Close(_))) | None
-    ));
+    let close = tokio::time::timeout(std::time::Duration::from_secs(1), tombstone.next())
+        .await
+        .expect("the tombstone must close within the bounded deadline");
+    assert!(matches!(close, Some(Ok(Message::Close(_))) | None));
     assert_eq!(counts.queries.load(Ordering::SeqCst), 0);
     assert_eq!(counts.subscriptions.load(Ordering::SeqCst), 0);
     handle.shutdown().await.unwrap();

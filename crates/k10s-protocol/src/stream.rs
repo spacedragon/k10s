@@ -1,13 +1,12 @@
-//! Dedicated logs/exec stream socket contract.
+//! Active log-stream contract plus reserved major-1 exec compatibility shapes.
 //!
-//! Stream sockets are separate WebSocket upgrades on [`crate::route::
-//! LOGS_PATH`] and [`crate::route::EXEC_PATH`]. The mandatory first frame is
-//! a JSON `hello` carrying the shared access token and a single-use stream
-//! ticket; the ticket is redeemed only after the token authenticates. All
-//! handshake and status frames are JSON text frames tagged by `kind`; all
-//! log/exec payloads are binary frames with a versioned one-byte-version +
-//! one-byte-kind header so fragmentation limits can be enforced before any
-//! payload dispatch.
+//! Active log sockets upgrade on [`crate::route::LOGS_PATH`]. Their mandatory
+//! first frame is a JSON `hello` carrying the shared access token and a
+//! single-use log ticket, which is redeemed only after authentication.
+//! [`crate::route::EXEC_PATH`], [`StreamType::Exec`], the exec-only ticket
+//! fields, and exec payload-kind numbers remain decodable for one compatibility
+//! window only. The authenticated exec route is a fail-closed tombstone: it
+//! never issues or redeems a ticket and never dispatches a backend operation.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,25 +20,25 @@ pub const STREAM_PAYLOAD_VERSION: u8 = 1;
 
 /// Payload kinds carried in the binary frame header byte 1.
 pub mod payload_kind {
-    /// Non-TTY exec standard output.
+    /// Active log data. Historically also non-TTY exec stdout.
     pub const STDOUT: u8 = 1;
-    /// Non-TTY exec standard error (a distinct mode from TTY output).
+    /// Reserved legacy non-TTY exec stderr discriminant; never emitted.
     pub const STDERR: u8 = 2;
-    /// TTY merged output: stdin echo, program output, everything in one.
+    /// Reserved legacy TTY-output discriminant; never emitted.
     pub const TTY_OUTPUT: u8 = 3;
-    /// Client-to-server TTY standard input.
+    /// Reserved legacy stdin discriminant; never consumed.
     pub const STDIN: u8 = 4;
-    /// Terminal resize; data is `cols` then `rows` as big-endian `u32`s.
+    /// Reserved legacy terminal-resize discriminant; never consumed.
     pub const RESIZE: u8 = 5;
 }
 
-/// Which stream a ticket opens. Serialized as `"logs"` / `"exec"`.
+/// Active log stream type plus the decodable legacy exec discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamType {
     /// Tail container logs.
     Logs,
-    /// Attach to an exec session.
+    /// Reserved legacy value rejected by the control tombstone.
     Exec,
 }
 
@@ -61,25 +60,22 @@ pub struct StreamTarget {
     pub container: String,
 }
 
-/// Control-socket request payload issuing a single-use stream ticket.
+/// Control-socket request payload issuing a single-use log ticket.
 ///
-/// Issuance is a query: it validates existence, RBAC, and (for exec) binary
-/// availability before any socket exists. The returned ticket binds exactly
-/// this target, stream type, and mode.
+/// Log issuance validates and binds the target and history options. Requests
+/// carrying the legacy exec stream type are decoded only so the server can
+/// return a typed unsupported-message error before backend dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamTicketRequest {
     /// Pod/container to attach to.
     pub target: StreamTarget,
-    /// Whether this opens logs or an exec session.
+    /// `Logs` is active; `Exec` selects the compatibility tombstone.
     pub stream_type: StreamType,
-    /// Exec mode: `true` requests an explicit interactive shell (TTY with
-    /// merged output), `false` the retained non-TTY mode with separated
-    /// stdout/stderr. Ignored for logs.
+    /// Reserved legacy exec mode field. Active log requests set this false.
     pub tty: bool,
-    /// Exact remote command and arguments for exec. Older clients omitted
-    /// this field, so an empty value is normalized to `/bin/sh` by the
-    /// server. Ignored for logs.
+    /// Reserved legacy remote-command shape. It is ignored for logs and never
+    /// executed when a tombstoned exec request is decoded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     /// Maximum historical lines requested for a logs stream.
@@ -110,7 +106,7 @@ pub struct StreamTicketResponse {
     pub target: StreamTarget,
     /// Bound stream type.
     pub stream_type: StreamType,
-    /// Bound exec mode echoed back.
+    /// Reserved wire field; active log grants always set this false.
     pub tty: bool,
 }
 
@@ -126,7 +122,8 @@ pub struct StreamTicketResponse {
 )]
 pub enum StreamClientMessage {
     /// Mandatory first frame: authenticates the token and carries the
-    /// single-use ticket to redeem. Sent before anything else.
+    /// single-use log ticket. On the exec tombstone the ticket is deliberately
+    /// ignored after authentication. Sent before anything else.
     Hello {
         /// Client protocol major version.
         protocol_major: u16,
@@ -145,11 +142,11 @@ pub enum StreamClientMessage {
     rename_all_fields = "camelCase"
 )]
 pub enum StreamServerMessage {
-    /// Ticket redeemed successfully; echoes the bound stream identity.
+    /// Log ticket redeemed successfully; echoes the bound stream identity.
     Ready {
         /// Bound stream type.
         stream_type: StreamType,
-        /// Bound exec mode.
+        /// Reserved wire field; always false for active log streams.
         tty: bool,
         /// Selected container.
         container: String,
@@ -209,7 +206,8 @@ pub fn encode_stream_payload(kind: u8, data: &[u8]) -> Vec<u8> {
 
 /// Decode and validate the versioned header of a binary frame. The whole
 /// assembled message must be at least the header; unknown versions or kinds
-/// are rejected before the data is interpreted anywhere.
+/// are rejected. Legacy exec kinds remain recognized solely to keep their
+/// numeric values reserved and are not consumed by active production paths.
 pub fn decode_stream_payload(frame: &[u8]) -> Result<DecodedStreamPayload<'_>, StreamPayloadError> {
     let (&version, rest) = frame.split_first().ok_or(StreamPayloadError::TooShort)?;
     let (&kind, data) = rest.split_first().ok_or(StreamPayloadError::TooShort)?;
@@ -303,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_ticket_requests_preserve_the_exact_remote_command() {
+    fn legacy_exec_ticket_requests_remain_decodable_for_the_tombstone() {
         let value = serde_json::json!({
             "target": {
                 "context": "dev", "namespace": "default", "pod": "web",
