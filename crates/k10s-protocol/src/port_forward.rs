@@ -84,11 +84,14 @@ impl PortForwardTarget {
             Self::Pod {
                 identity,
                 container_name,
-                ..
+                remote_port,
             } => {
                 validate_identity(identity, "Pod")?;
                 if container_name.is_empty() {
                     return Err("the Pod target must name a container");
+                }
+                if *remote_port == 0 {
+                    return Err("the Pod target remote port must be greater than zero");
                 }
             }
         }

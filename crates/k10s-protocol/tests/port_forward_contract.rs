@@ -519,6 +519,23 @@ fn targets_validate_exact_identity_and_required_target_fields() {
 }
 
 #[test]
+fn zero_pod_remote_port_is_rejected() {
+    let request = PortForwardStartRequest::target(
+        PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "web".into(),
+            remote_port: 0,
+        },
+        0,
+    );
+
+    assert_eq!(
+        request.validate(),
+        Err("the Pod target remote port must be greater than zero")
+    );
+}
+
+#[test]
 fn session_snapshots_are_complete_and_typed() {
     let active = PortForwardSession {
         id: PortForwardSessionId::try_new("pf-1").unwrap(),
