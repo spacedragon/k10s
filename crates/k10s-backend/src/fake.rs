@@ -1184,7 +1184,7 @@ impl Default for FakeKubernetes {
 impl KubernetesAccess for FakeKubernetes {
     fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
         Some(crate::port_forward::PortForwardConnector::new(
-            std::sync::Arc::new(FakePortForwardSeam::new()),
+            std::sync::Arc::new(FakePortForwardSeam::shared(self.state.clone())),
         ))
     }
 
@@ -2926,21 +2926,160 @@ mod tests {
             "a mutation delta preceded the snapshot"
         );
     }
+
+    fn fake_pod_request(container_name: &str, remote_port: u16) -> PortForwardRequest {
+        let name = "web-frontend-7d9f8-00001";
+        PortForwardRequest {
+            context: "dev-local".into(),
+            target: PortForwardTarget::Pod {
+                identity: k10s_protocol::ResourceIdentity {
+                    context: "dev-local".into(),
+                    gvk: k10s_protocol::GroupVersionKind::core("v1", "Pod"),
+                    namespace: Some("default".into()),
+                    name: name.into(),
+                    uid: uid("dev-local", "Pod", Some("default"), name),
+                },
+                container_name: container_name.into(),
+                remote_port,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_port_forward_resolves_from_the_owning_world() {
+        let fake = FakeKubernetes::standard();
+        let connector = fake
+            .port_forward_connector()
+            .expect("the fake exposes port forwarding");
+
+        let resolved = connector
+            .resolve(fake_pod_request("app", 8_080))
+            .await
+            .expect("the seeded declaration resolves");
+
+        assert_eq!(resolved.pod_name, "web-frontend-7d9f8-00001");
+        assert_eq!(resolved.pod_port, 8_080);
+    }
+
+    #[tokio::test]
+    async fn fake_port_forward_observes_deletion_and_recreation() {
+        let fake = FakeKubernetes::standard();
+        let connector = fake
+            .port_forward_connector()
+            .expect("the fake exposes port forwarding");
+        let request = fake_pod_request("app", 8_080);
+        let name = "web-frontend-7d9f8-00001";
+        let original = {
+            let state = fake.lock();
+            state
+                .find_by_name("dev-local", &Gvk::core("v1", "Pod"), Some("default"), name)
+                .expect("the seeded Pod exists")
+                .clone()
+        };
+
+        assert!(fake.delete_resource("dev-local", &Gvk::core("v1", "Pod"), Some("default"), name));
+        let deleted = connector
+            .resolve(request.clone())
+            .await
+            .expect_err("the owning world's deletion is authoritative");
+        assert!(matches!(
+            deleted,
+            BackendError::PortForward {
+                category: RejectionCategory::VanishedResource,
+                ..
+            }
+        ));
+
+        let mut recreated = original;
+        recreated.reference.uid = "uid-recreated-pod".into();
+        fake.lock().records.push(recreated);
+        let stale = connector
+            .resolve(request)
+            .await
+            .expect_err("a recreated Pod rejects the stale UID");
+        assert!(matches!(
+            stale,
+            BackendError::PortForward {
+                category: RejectionCategory::VanishedResource,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fake_port_forward_rejects_wrong_container_and_protocol() {
+        let fake = FakeKubernetes::standard();
+        let connector = fake
+            .port_forward_connector()
+            .expect("the fake exposes port forwarding");
+
+        let wrong_container = connector
+            .resolve(fake_pod_request("sidecar", 8_080))
+            .await
+            .expect_err("container ownership is exact");
+        assert!(matches!(
+            wrong_container,
+            BackendError::PortForward {
+                category: RejectionCategory::UnsupportedPod,
+                ..
+            }
+        ));
+
+        {
+            let mut state = fake.lock();
+            let record = state
+                .records
+                .iter_mut()
+                .find(|record| record.reference.name == "web-frontend-7d9f8-00001")
+                .expect("the seeded Pod exists");
+            let Some(ResourceProjection::Pod(projection)) = record.projection.as_mut() else {
+                panic!("the seeded Pod has a projection")
+            };
+            projection.ports[0].protocol = TransportProtocol::Udp;
+        }
+
+        let wrong_protocol = connector
+            .resolve(fake_pod_request("app", 8_080))
+            .await
+            .expect_err("the owning world's current declaration is authoritative");
+        assert!(matches!(
+            wrong_protocol,
+            BackendError::PortForward {
+                category: RejectionCategory::UnsupportedPod,
+                ..
+            }
+        ));
+    }
 }
 
 /// Deterministic fake port-forward seam over the seeded dataset.
 ///
-/// Resolution validates the Service record and UID, then pins the first
-/// Running Pod in the same namespace (sorted by name). Connections return a
-/// fresh duplex stream so server tests can pump bytes without a cluster.
-#[derive(Debug, Clone, Default)]
-pub struct FakePortForwardSeam;
+/// Resolution uses the owning adapter's shared world, validates exact target
+/// identities and declarations, then pins a deterministic Pod. Connections
+/// return a fresh duplex stream so server tests can pump bytes without a
+/// cluster.
+#[derive(Debug, Clone)]
+pub struct FakePortForwardSeam {
+    state: Arc<Mutex<FakeState>>,
+}
 
 impl FakePortForwardSeam {
-    /// Build the seam; it reads no shared state so clones are free.
+    /// Build a standalone seam over one standard fake world.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            state: FakeKubernetes::standard().state,
+        }
+    }
+
+    fn shared(state: Arc<Mutex<FakeState>>) -> Self {
+        Self { state }
+    }
+}
+
+impl Default for FakePortForwardSeam {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2972,10 +3111,6 @@ impl PortForwardSeam for FakePortForwardSeam {
                 });
             }
 
-            // Reuse the deterministic dataset through a throwaway adapter
-            // only when callers did not inject one; the standard dataset is
-            // process-constant, so this stays stable across calls.
-            let adapter = FakeKubernetes::standard();
             let (identity, port) = match request.target {
                 PortForwardTarget::Service { identity, port } => (identity, port),
                 PortForwardTarget::Pod {
@@ -2986,7 +3121,7 @@ impl PortForwardSeam for FakePortForwardSeam {
                     let namespace = identity
                         .namespace
                         .expect("validated Pod targets have a namespace");
-                    let state = adapter.state.lock().unwrap();
+                    let state = self.state.lock().unwrap();
                     let pod = state.find_record(&ResourceRef {
                         context: request.context.clone(),
                         gvk: Gvk::core("v1", "Pod"),
@@ -3029,7 +3164,7 @@ impl PortForwardSeam for FakePortForwardSeam {
             let namespace = identity
                 .namespace
                 .expect("validated Service targets have a namespace");
-            let state = adapter.state.lock().unwrap();
+            let state = self.state.lock().unwrap();
             let service_ref = state.find_record(&ResourceRef {
                 context: request.context.clone(),
                 gvk: Gvk::core("v1", "Service"),
@@ -3045,7 +3180,7 @@ impl PortForwardSeam for FakePortForwardSeam {
             }
             drop(state);
             let mut pods: Vec<String> = {
-                let state = adapter.state.lock().unwrap();
+                let state = self.state.lock().unwrap();
                 state
                     .records
                     .iter()

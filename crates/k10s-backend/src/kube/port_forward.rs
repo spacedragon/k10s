@@ -449,6 +449,26 @@ impl PortForwardSeam for KubePortForwardSeam {
         Box::pin(async move {
             let client = self.client(&resolved.context).await?;
             let pods: Api<k8s_openapi::api::core::v1::Pod> = pod_api(client, &resolved.namespace);
+            let pod =
+                pods.get(&resolved.pod_name).await.map_err(|error| {
+                    match sanitize_api_error(&error) {
+                        BackendError::NotFound => rejected(
+                            RejectionCategory::VanishedResource,
+                            "the resolved pod no longer exists",
+                        ),
+                        BackendError::Forbidden => rejected(
+                            RejectionCategory::Forbidden,
+                            "revalidating the resolved pod was denied",
+                        ),
+                        other => other,
+                    }
+                })?;
+            if pod.uid().as_deref() != Some(resolved.pod_uid.as_str()) {
+                return Err(rejected(
+                    RejectionCategory::VanishedResource,
+                    "the resolved pod was replaced",
+                ));
+            }
             let mut forwarder = pods
                 .portforward(&resolved.pod_name, &[resolved.pod_port])
                 .await

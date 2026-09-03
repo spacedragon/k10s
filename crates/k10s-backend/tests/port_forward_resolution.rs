@@ -212,6 +212,12 @@ async fn exact_pod_container_and_declared_tcp_port_resolve() {
     assert_eq!(resolved.pod_name, "api");
     assert_eq!(resolved.pod_uid, "pod-uid");
     assert_eq!(resolved.pod_port, 8_080);
+
+    let explicit_tcp = connector
+        .resolve(pod_request("api", 8_443))
+        .await
+        .expect("an explicitly declared TCP port resolves");
+    assert_eq!(explicit_tcp.pod_port, 8_443);
 }
 
 #[tokio::test]
@@ -297,6 +303,28 @@ async fn pod_resolution_rejects_a_missing_namespace_before_api_access() {
 
     assert_eq!(category_of(&error), Some(RejectionCategory::UnsupportedPod));
     assert!(server.request_uris("/api/v1/namespaces/").is_empty());
+}
+
+#[tokio::test]
+async fn target_context_mismatch_is_rejected_before_api_access() {
+    let server = RecordedApiServer::standard();
+    let connector = connector_for(&server);
+    let mut request = pod_request("api", 8_080);
+    let PortForwardTarget::Pod { identity, .. } = &mut request.target else {
+        unreachable!("helper builds Pod targets")
+    };
+    identity.context = "other-context".into();
+
+    let error = connector
+        .resolve(request)
+        .await
+        .expect_err("the target identity must belong to the active context");
+
+    assert_eq!(
+        category_of(&error),
+        Some(RejectionCategory::ContextTransition)
+    );
+    assert!(server.request_uris("/api/").is_empty());
 }
 
 #[tokio::test]
@@ -799,6 +827,40 @@ async fn forbidden_api_calls_surface_sanitized_failures() {
             "{path}: expected a typed forbidden failure"
         );
     }
+}
+
+#[tokio::test]
+async fn connect_rejects_a_pod_replaced_after_resolution() {
+    let server = RecordedApiServer::standard();
+    install_happy_path(&server);
+    let connector = connector_for(&server);
+    let resolved = connector
+        .resolve(request(PortForwardPortSelector::Name {
+            name: "http".into(),
+        }))
+        .await
+        .expect("resolution succeeds");
+
+    server.set_response(
+        &format!("/api/v1/namespaces/{NS}/pods/web-7d9f8-b"),
+        200,
+        &serde_json::json!({
+            "kind": "Pod", "apiVersion": "v1",
+            "metadata": {
+                "name": "web-7d9f8-b", "namespace": NS, "uid": "uid-pod-recreated"
+            }
+        })
+        .to_string(),
+    );
+
+    let error = connector
+        .connect(&resolved)
+        .await
+        .expect_err("a replaced pinned Pod must never receive the stream");
+    assert_eq!(
+        category_of(&error),
+        Some(RejectionCategory::VanishedResource)
+    );
 }
 
 #[tokio::test]
