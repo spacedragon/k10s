@@ -505,6 +505,36 @@ async fn sessions_subscription_streams_snapshots_and_disabled_servers_reject() {
 }
 
 #[tokio::test]
+async fn sessions_subscription_periodically_sends_an_authoritative_snapshot() {
+    let server = spawn(true).await;
+    let mut ws = connect_authenticated(&server).await;
+    ws.send(Message::Text(
+        json!({
+            "kind": "subscribe",
+            "subscriptionId": "pf-reconcile",
+            "payload": SubscriptionSelector::PortForwardSessions,
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
+    let frame = tokio::time::timeout(Duration::from_secs(3), receive_frame(&mut ws))
+        .await
+        .expect("the subscription should reconcile without another lifecycle event");
+    let ServerPayload::Event(event) = frame.decode_payload().unwrap() else {
+        panic!("expected snapshot event");
+    };
+    assert_eq!(event.event_kind, k10s_protocol::PORT_FORWARD_EVENT_SNAPSHOT);
+    let snapshot: PortForwardListResponse = serde_json::from_value(event.payload).unwrap();
+    assert!(snapshot.sessions.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn malformed_and_unvalidated_start_payloads_fail_without_binding() {
     let server = spawn(true).await;
     let mut ws = connect_authenticated(&server).await;

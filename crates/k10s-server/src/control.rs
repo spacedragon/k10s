@@ -1004,6 +1004,16 @@ pub(crate) async fn serve_socket(
                                 let task_capabilities = negotiated_port_forward_capabilities;
                                 let mut events = manager.subscribe().await;
                                 request_tasks.spawn(async move {
+                                    // Lifecycle deltas alone cannot express
+                                    // retention expiry. Periodically publish
+                                    // a complete authoritative cut so a
+                                    // continuously connected client removes
+                                    // terminal rows pruned by list_snapshot.
+                                    let mut reconciliation = tokio::time::interval_at(
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_secs(1),
+                                        std::time::Duration::from_secs(1),
+                                    );
                                     loop {
                                         // Coalescible P2 like every other
                                         // session telemetry; snapshots are
@@ -1011,8 +1021,49 @@ pub(crate) async fn serve_socket(
                                         // next revision.
                                         let event = tokio::select! {
                                             () = cancel.cancelled() => break,
-                                            event = events.recv() => event,
+                                            event = events.recv() => Some(event),
+                                            _ = reconciliation.tick() => None,
                                         };
+                                        if event.is_none() {
+                                            let (revision, sessions) =
+                                                task_manager.list_snapshot().await;
+                                            let mut projected = Vec::with_capacity(sessions.len());
+                                            for session in sessions {
+                                                if !task_capabilities.allows(&session.target) {
+                                                    continue;
+                                                }
+                                                let source_port = task_manager
+                                                    .resolved_source_port(session.id.as_str())
+                                                    .await;
+                                                if let Some(session) = session.wire_value_for_minor(
+                                                    task_protocol_minor,
+                                                    source_port,
+                                                ) {
+                                                    projected.push(session);
+                                                }
+                                            }
+                                            let snapshot = serde_json::json!({
+                                                "revision": revision,
+                                                "sessions": projected,
+                                            });
+                                            match enqueue_delta(
+                                                &task_outbound,
+                                                &task_subscription,
+                                                "__authoritative_snapshot__",
+                                                k10s_protocol::PORT_FORWARD_EVENT_SNAPSHOT,
+                                                revision,
+                                                &snapshot,
+                                                &task_counter,
+                                            ) {
+                                                Ok(()) | Err(DeltaAdmission::Dropped) => {}
+                                                Err(DeltaAdmission::Overloaded) => {
+                                                    overload_close(&task_outbound);
+                                                    break;
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        let event = event.expect("event branch checked above");
                                         let event = match event {
                                             Ok(event) => event,
                                             Err(

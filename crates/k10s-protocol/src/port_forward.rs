@@ -28,6 +28,11 @@ pub const REQUEST_PORT_FORWARD_LIST: &str = "portForward.list";
 
 /// Envelope event kind carrying a [`PortForwardSessionEvent`].
 pub const PORT_FORWARD_EVENT_SESSION: &str = "portForward.session";
+/// Envelope event kind carrying an authoritative [`PortForwardListResponse`].
+///
+/// Periodic snapshots let continuously connected clients observe retained
+/// terminal sessions disappearing after server-side expiry.
+pub const PORT_FORWARD_EVENT_SNAPSHOT: &str = "portForward.snapshot";
 
 /// First protocol minor whose session snapshots use generalized targets.
 pub const GENERALIZED_PORT_FORWARD_MINOR: u16 = 6;
