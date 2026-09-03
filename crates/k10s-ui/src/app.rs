@@ -1744,6 +1744,7 @@ impl K10sApp {
                     self.shell.yaml_editors_mut().connection_lost();
                 }
                 if applied && server_rebuild_requested {
+                    self.reset_port_forward_ui(Some("Server state changed; submit again"));
                     self.enter_resource_recovery();
                     self.recovering = true;
                     self.view = AppView::Connecting;
@@ -6003,6 +6004,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_resync_retires_port_forward_correlations_and_reenables_the_modal() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("pending-start", 7);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "18080".into();
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target, 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(1),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            101,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.pending_port_forwards.is_empty());
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert!(!modal.pending);
+        assert_eq!(modal.local_port_draft, "18080");
+        assert_eq!(
+            modal.error.as_deref(),
+            Some("Server state changed; submit again")
+        );
+    }
+
+    #[test]
     fn after_reconnect_error_advances_backoff_only_once() {
         let error = ErrorFrame::new(
             ErrorCode::Internal,
@@ -6202,6 +6248,73 @@ mod tests {
             .iter()
             .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
             .unwrap();
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some(active.id.as_str())
+        );
+    }
+
+    #[test]
+    fn cancelled_modal_start_success_preserves_reopened_modal_and_focuses_session() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("new-session", 7);
+        let first_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "first", 8_080);
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation: first_generation,
+            },
+        );
+        let accepted = app.pending_port_forwards[0].request.clone();
+
+        app.shell.dismiss_port_forward_start();
+        let reopened_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "second", 9_090);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "19090".into();
+
+        let mut active = source;
+        active.state = PortForwardSessionState::Active;
+        active.failure = None;
+        active.local_addr = "127.0.0.1:18080".into();
+        active.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                accepted.id().clone(),
+                PortForwardStartResponse {
+                    session: active.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert_eq!(modal.generation, reopened_generation);
+        assert_eq!(modal.remote_label, "second");
+        assert_eq!(modal.local_port_draft, "19090");
+        assert!(!modal.pending);
+        assert_eq!(modal.error, None);
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .expect("successful starts activate the port-forward manager");
         assert_eq!(
             app.workspace()
                 .port_forward_state(manager.id)

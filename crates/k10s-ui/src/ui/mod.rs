@@ -312,8 +312,8 @@ where
             .is_some_and(|modal| modal.generation == generation)
         {
             self.port_forward_start_modal = None;
-            self.focus_port_forward_session(session_id);
         }
+        self.focus_port_forward_session(session_id);
     }
 
     /// Open/focus the singleton manager and one authoritative session row.
