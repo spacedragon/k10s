@@ -154,22 +154,12 @@ pub enum StreamServerMessage {
         /// Selected container.
         container: String,
     },
-    /// Informational status, such as a resize acknowledgement.
-    Status {
-        /// Safe human-readable status message.
-        message: String,
-    },
     /// Typed failure; the server closes after sending this.
     Error {
         /// Stable error code.
         code: ErrorCode,
         /// Safe human-readable reason.
         message: String,
-    },
-    /// The exec session ended with the given exit code.
-    Exit {
-        /// Process exit code.
-        exit_code: i32,
     },
 }
 
@@ -237,25 +227,6 @@ pub fn decode_stream_payload(frame: &[u8]) -> Result<DecodedStreamPayload<'_>, S
         return Err(StreamPayloadError::UnknownKind(kind));
     }
     Ok(DecodedStreamPayload { kind, data })
-}
-
-/// Decode resize payload bytes (`cols`, `rows` big-endian `u32` pair).
-pub fn decode_resize_payload(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() != 8 {
-        return None;
-    }
-    let cols = u32::from_be_bytes(data[0..4].try_into().ok()?);
-    let rows = u32::from_be_bytes(data[4..8].try_into().ok()?);
-    Some((cols, rows))
-}
-
-/// Encode resize payload bytes (`cols`, `rows` big-endian `u32` pair).
-#[must_use]
-pub fn encode_resize_payload(cols: u32, rows: u32) -> Vec<u8> {
-    cols.to_be_bytes()
-        .into_iter()
-        .chain(rows.to_be_bytes())
-        .collect()
 }
 
 #[cfg(test)]
@@ -344,12 +315,5 @@ mod tests {
         });
         let request: StreamTicketRequest = serde_json::from_value(value).unwrap();
         assert_eq!(request.command, ["/bin/sh", "-c", "printf exact"]);
-    }
-
-    #[test]
-    fn resize_payload_round_trips() {
-        let encoded = encode_resize_payload(120, 40);
-        assert_eq!(decode_resize_payload(&encoded), Some((120, 40)));
-        assert_eq!(decode_resize_payload(&encoded[..4]), None);
     }
 }

@@ -62,9 +62,7 @@ async fn exact_container_and_log_options_reach_the_dedicated_kubernetes_stream()
     server.set_method_response("GET", LOG, 200, "first\nsecond\n");
     let adapter = adapter(&server);
     let grant = grant(&adapter, request("app")).await;
-    let StreamKind::Logs { uid, .. } = &grant.stream else {
-        unreachable!()
-    };
+    let StreamKind::Logs { uid, .. } = &grant.stream;
     assert_eq!(
         uid, "uid-web",
         "the ticket binds the observed immutable UID"
@@ -122,9 +120,7 @@ async fn issuance_validates_container_and_log_subresource_authorization() {
     );
     let adapter = adapter(&server);
     let mut stale = request("app");
-    let StreamKind::Logs { uid, .. } = &mut stale else {
-        unreachable!()
-    };
+    let StreamKind::Logs { uid, .. } = &mut stale;
     *uid = "uid-stale".into();
     assert!(matches!(
         adapter.query(Query::StreamTicket { stream: stale }).await,
@@ -176,9 +172,7 @@ async fn invalid_history_bounds_and_wrong_routes_do_not_consume_valid_authority(
     server.set_method_response("GET", LOG, 200, "line\n");
     let adapter = adapter(&server);
     let mut invalid = request("app");
-    let StreamKind::Logs { tail_lines, .. } = &mut invalid else {
-        unreachable!()
-    };
+    let StreamKind::Logs { tail_lines, .. } = &mut invalid;
     *tail_lines = Some(-1);
     assert!(matches!(
         adapter.query(Query::StreamTicket { stream: invalid }).await,
@@ -186,15 +180,6 @@ async fn invalid_history_bounds_and_wrong_routes_do_not_consume_valid_authority(
     ));
 
     let grant = grant(&adapter, request("app")).await;
-    assert!(matches!(
-        adapter
-            .subscribe(Subscribe::StreamRedeem {
-                ticket_id: grant.ticket_id.clone(),
-                route: StreamRouteKind::Exec
-            })
-            .await,
-        Err(BackendError::Conflict(_))
-    ));
     adapter
         .subscribe(Subscribe::StreamRedeem {
             ticket_id: grant.ticket_id,

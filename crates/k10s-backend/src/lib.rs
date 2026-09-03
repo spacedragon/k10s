@@ -36,7 +36,7 @@ pub use port::{
     OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, PodContainerPort,
     Query, QueryResult, RecordEvent, RecordEventsCondition, RelatedData, RelatedRecordGroup,
     ResourceListData, ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData,
-    ResourceWatchIdentity, ServicePort, ServiceProjection, StreamGrant, StreamInput, StreamKind,
+    ResourceWatchIdentity, ServicePort, ServiceProjection, StreamGrant, StreamKind,
     StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use port_forward::{

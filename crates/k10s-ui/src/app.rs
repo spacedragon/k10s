@@ -1533,18 +1533,10 @@ impl K10sApp {
                                     }
                                     return Ok(());
                                 }
-                                match entry.route {
-                                    StreamRoute::Logs => {
-                                        if let Some(view) = self
-                                            .shell
-                                            .stream_stores_mut()
-                                            .logs
-                                            .get_mut(entry.window)
-                                        {
-                                            view.fail(&reason);
-                                        }
-                                    }
-                                    StreamRoute::Exec => {}
+                                if let Some(view) =
+                                    self.shell.stream_stores_mut().logs.get_mut(entry.window)
+                                {
+                                    view.fail(&reason);
                                 }
                             }
                         }
@@ -3866,8 +3858,6 @@ impl K10sApp {
             }
             let request = self.client.begin(Query::StreamTicket {
                 target: source.target.clone(),
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds: source.since_seconds,
                 previous: source.previous,
             })?;
@@ -3905,7 +3895,7 @@ impl K10sApp {
             let (window, route) = *key;
             let target_matches =
                 self.current_stream_target(window, route).as_ref() == Some(session.target());
-            if route == StreamRoute::Exec || !target_matches {
+            if !target_matches {
                 stale.push((*key, "the log target changed"));
             }
         }
@@ -3917,13 +3907,8 @@ impl K10sApp {
                 self.log_session_sources.remove(&window);
             }
             let stores = self.shell.stream_stores_mut();
-            match route {
-                StreamRoute::Logs => {
-                    if let Some(view) = stores.logs.get_mut(window) {
-                        view.fail(reason);
-                    }
-                }
-                StreamRoute::Exec => {}
+            if let Some(view) = stores.logs.get_mut(window) {
+                view.fail(reason);
             }
         }
     }
@@ -3984,8 +3969,6 @@ impl K10sApp {
             }
             let request = match self.client.begin(Query::StreamTicket {
                 target,
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds,
                 previous,
             }) {
@@ -4069,8 +4052,6 @@ impl K10sApp {
         for target in targets {
             let request = self.client.begin(Query::StreamTicket {
                 target: target.clone(),
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds,
                 previous: false,
             })?;
@@ -4181,8 +4162,7 @@ impl K10sApp {
                     continue;
                 }
                 if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request) {
-                    let mut session =
-                        StreamSession::new(StreamRoute::Logs, granted.target.clone(), false);
+                    let mut session = StreamSession::new(StreamRoute::Logs, granted.target.clone());
                     match session.open_with_ticket(
                         &self.connection_url,
                         &self.access_token,
@@ -4280,39 +4260,26 @@ impl K10sApp {
             {
                 for signal in signals {
                     match signal {
-                        StreamSignal::Ready { .. } => match route {
-                            StreamRoute::Logs => {
-                                if !target_current {
-                                    continue;
-                                }
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.attach();
-                                }
+                        StreamSignal::Ready { .. } => {
+                            if !target_current {
+                                continue;
                             }
-                            StreamRoute::Exec => {}
-                        },
-                        StreamSignal::Output(text) => match route {
-                            StreamRoute::Logs => {
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.append(&text);
-                                }
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.attach();
                             }
-                            StreamRoute::Exec => {}
-                        },
-                        StreamSignal::Status(_message) => {}
-                        StreamSignal::Exited(_) => {}
-                        StreamSignal::Rejected(reason) => match route {
-                            StreamRoute::Logs => {
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.fail(&reason);
-                                }
-                                self.stream_sessions.remove(&key);
-                                self.log_session_sources.remove(&window);
+                        }
+                        StreamSignal::Output(text) => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.append(&text);
                             }
-                            StreamRoute::Exec => {
-                                self.stream_sessions.remove(&key);
+                        }
+                        StreamSignal::Rejected(reason) => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.fail(&reason);
                             }
-                        },
+                            self.stream_sessions.remove(&key);
+                            self.log_session_sources.remove(&window);
+                        }
                     }
                 }
             }
@@ -4351,7 +4318,6 @@ impl K10sApp {
                             ));
                             rejected = true;
                         }
-                        StreamSignal::Status(_) | StreamSignal::Exited(_) => {}
                     }
                 }
             }
@@ -4449,7 +4415,7 @@ fn session_open(
     connection_url: &str,
     access_token: &str,
 ) -> Result<(), TransportError> {
-    let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
+    let mut session = StreamSession::new(route, granted.target.clone());
     session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
@@ -4476,13 +4442,9 @@ fn fail_stream_tool(
     route: StreamRoute,
     reason: &str,
 ) {
-    match route {
-        StreamRoute::Logs => {
-            if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
-                view.fail(reason);
-            }
-        }
-        StreamRoute::Exec => {}
+    let _ = route;
+    if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
+        view.fail(reason);
     }
 }
 
@@ -10028,7 +9990,6 @@ mod stream_lifecycle_tests {
             self.events.try_recv().ok()
         }
         fn send_text(&mut self, _text: String) {}
-        fn send_binary(&mut self, _bytes: Vec<u8>) {}
     }
 
     fn pod(name: &str) -> ResourceIdentity {
@@ -10274,7 +10235,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, target.clone());
         view.attach();
-        let mut session = StreamSession::new(StreamRoute::Logs, target.clone(), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target.clone());
         session.inject_for_test(ScriptStream { events: rx });
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10328,7 +10289,7 @@ mod stream_lifecycle_tests {
         let target = target_for(&pod.name);
         app.stream_sessions.insert(
             (window, StreamRoute::Logs),
-            StreamSession::new(StreamRoute::Logs, target.clone(), false),
+            StreamSession::new(StreamRoute::Logs, target.clone()),
         );
         app.log_sources.insert(
             window,
@@ -10375,7 +10336,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, target.clone())
             .connect();
-        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target);
         session.inject_for_test(ScriptStream { events: rx });
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10447,7 +10408,7 @@ mod stream_lifecycle_tests {
             Some(selected_target.clone())
         );
 
-        let session = StreamSession::new(StreamRoute::Logs, selected_target, false);
+        let session = StreamSession::new(StreamRoute::Logs, selected_target);
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
         app.reconcile_sessions();
@@ -10479,7 +10440,7 @@ mod stream_lifecycle_tests {
                 .connect();
             app.stream_sessions.insert(
                 (window, StreamRoute::Logs),
-                StreamSession::new(StreamRoute::Logs, target.clone(), false),
+                StreamSession::new(StreamRoute::Logs, target.clone()),
             );
             app.log_session_sources
                 .insert(window, log_source(target, Some(300), false));
@@ -10616,7 +10577,6 @@ mod stream_overflow_tests {
             None
         }
         fn send_text(&mut self, _text: String) {}
-        fn send_binary(&mut self, _bytes: Vec<u8>) {}
         fn overflowed(&self) -> bool {
             true
         }
@@ -10637,7 +10597,7 @@ mod stream_overflow_tests {
             .expect("workload window opens");
 
         // A live logs session whose inbox overflowed.
-        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"));
         session.inject_for_test(OverflowedSocket);
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10656,7 +10616,7 @@ mod stream_overflow_tests {
 
     #[test]
     fn overflow_signal_is_emitted_exactly_once_and_session_goes_non_live() {
-        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"));
         session.inject_for_test(OverflowedSocket);
         assert!(session.is_live());
 

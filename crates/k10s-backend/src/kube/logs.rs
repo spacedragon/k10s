@@ -94,7 +94,6 @@ impl StreamTickets {
         }
         let expected = match &ticket.stream {
             StreamKind::Logs { .. } => StreamRouteKind::Logs,
-            StreamKind::Exec { .. } => StreamRouteKind::Exec,
         };
         if route != expected {
             return Err(BackendError::Conflict(
@@ -112,9 +111,6 @@ impl KubeAdapter {
         &self,
         stream: StreamKind,
     ) -> Result<QueryResult, BackendError> {
-        if matches!(stream, StreamKind::Exec { .. }) {
-            return self.issue_exec_ticket(stream).await;
-        }
         let StreamKind::Logs {
             context,
             namespace,
@@ -126,10 +122,7 @@ impl KubeAdapter {
             previous,
             timestamps,
             follow,
-        } = stream
-        else {
-            unreachable!()
-        };
+        } = stream;
         if tail_lines.is_some_and(|value| !(0..=MAX_TAIL_LINES).contains(&value))
             || since_seconds.is_some_and(|value| !(0..=MAX_SINCE_SECONDS).contains(&value))
         {
@@ -183,9 +176,6 @@ impl KubeAdapter {
         ticket_id: String,
         route: StreamRouteKind,
     ) -> Result<SubscriptionHandle, BackendError> {
-        if route == StreamRouteKind::Exec {
-            return self.redeem_exec_ticket(ticket_id).await;
-        }
         let bound = self.stream_tickets.redeem_for(&ticket_id, route)?;
         let StreamKind::Logs {
             context,
@@ -198,10 +188,7 @@ impl KubeAdapter {
             previous,
             timestamps,
             follow,
-        } = &bound
-        else {
-            unreachable!()
-        };
+        } = &bound;
         let client = self.cluster_client(context).await?;
         let api: Api<Pod> = Api::namespaced(client, namespace);
         let current = api.get(pod).await.map_err(stream_error)?;
@@ -272,7 +259,6 @@ async fn send_with_backpressure(sender: &broadcast::Sender<BackendEvent>, text: 
         .send(BackendEvent::Stream(StreamChunk {
             origin: StreamOrigin::Stdout,
             text,
-            exit_code: None,
         }))
         .is_ok()
 }

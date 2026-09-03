@@ -1,16 +1,14 @@
 //! Dedicated stream-socket sessions for the connected log viewer and
-//! terminal tools.
+//! log viewers.
 //!
-//! A [`StreamSession`] owns one dedicated WebSocket on `LOGS_PATH` or
-//! `EXEC_PATH`. The access token and single-use ticket travel only inside
+//! A [`StreamSession`] owns one dedicated WebSocket on `LOGS_PATH`. The access token and single-use ticket travel only inside
 //! the first `hello` frame — never in any URL. Inbound frames are projected
 //! into [`StreamSignal`]s that the application layer feeds into its
-//! per-window tools; outbound stdin/resize leave as versioned binary
-//! payloads.
+//! per-window tools.
 
 use ewebsock::{Options, WsEvent, WsMessage};
 use k10s_protocol::{
-    EXEC_PATH, LOGS_PATH, PROTOCOL_MAJOR, StreamClientMessage, StreamServerMessage, StreamTarget,
+    LOGS_PATH, PROTOCOL_MAJOR, StreamClientMessage, StreamServerMessage, StreamTarget,
     decode_stream_payload,
 };
 
@@ -21,8 +19,6 @@ use crate::client::transport::{BoundedInbox, TransportError, WebSocketTransport}
 pub enum StreamRoute {
     /// `/api/v1/logs`.
     Logs,
-    /// `/api/v1/exec`.
-    Exec,
 }
 
 impl StreamRoute {
@@ -31,7 +27,6 @@ impl StreamRoute {
     pub fn path(self) -> &'static str {
         match self {
             Self::Logs => LOGS_PATH,
-            Self::Exec => EXEC_PATH,
         }
     }
 }
@@ -68,8 +63,6 @@ pub trait StreamIo {
     fn try_recv(&mut self) -> Option<WsEvent>;
     /// Send one raw text message.
     fn send_text(&mut self, text: String);
-    /// Send one raw binary message (already framed by the caller).
-    fn send_binary(&mut self, bytes: Vec<u8>);
     /// Whether the bounded inbound queue overflowed and closed transport.
     fn overflowed(&self) -> bool {
         false
@@ -83,10 +76,6 @@ impl StreamIo for StreamSocket {
 
     fn send_text(&mut self, text: String) {
         self.transport.send_text(text);
-    }
-
-    fn send_binary(&mut self, bytes: Vec<u8>) {
-        self.transport.send_binary(bytes);
     }
 
     fn overflowed(&self) -> bool {
@@ -118,12 +107,6 @@ impl StreamSocket {
         Ok(())
     }
 
-    /// Send one versioned binary payload frame.
-    pub fn send_payload(&mut self, kind: u8, data: &[u8]) {
-        self.transport
-            .send_binary(k10s_protocol::encode_stream_payload(kind, data));
-    }
-
     /// Try to remove one transport event without blocking.
     pub fn try_recv(&mut self) -> Option<WsEvent> {
         self.inbox.try_recv()
@@ -148,17 +131,11 @@ pub enum StreamSignal {
     Ready {
         /// Bound stream type.
         stream_type: k10s_protocol::StreamType,
-        /// Bound exec mode.
-        tty: bool,
         /// Selected container.
         container: String,
     },
     /// One decoded output chunk (logs data, TTY merged output, stdout).
     Output(String),
-    /// One informational status message (e.g. resize acknowledgement).
-    Status(String),
-    /// The exec session ended with this exit code.
-    Exited(i32),
     /// The server rejected the hello/ticket; the session is over.
     Rejected(String),
 }
@@ -167,7 +144,6 @@ pub enum StreamSignal {
 pub struct StreamSession {
     route: StreamRoute,
     target: StreamTarget,
-    tty: bool,
     socket: Option<Box<dyn StreamIo>>,
     /// The mandatory first frame is retained until `WsEvent::Opened`.
     /// Browser WebSockets reject sends while CONNECTING and ewebsock cannot
@@ -182,7 +158,6 @@ impl std::fmt::Debug for StreamSession {
             .debug_struct("StreamSession")
             .field("route", &self.route)
             .field("target", &self.target)
-            .field("tty", &self.tty)
             .field("socket_live", &self.is_live())
             .finish()
     }
@@ -191,11 +166,10 @@ impl std::fmt::Debug for StreamSession {
 impl StreamSession {
     /// Create a session whose socket still has to be opened with the
     /// granted ticket.
-    pub fn new(route: StreamRoute, target: StreamTarget, tty: bool) -> Self {
+    pub fn new(route: StreamRoute, target: StreamTarget) -> Self {
         Self {
             route,
             target,
-            tty,
             socket: None,
             pending_hello: None,
             ended: false,
@@ -249,7 +223,7 @@ impl StreamSession {
         self.socket = Some(Box::new(socket));
     }
 
-    /// Whether stdin/resize can be sent right now.
+    /// Whether the log stream is live right now.
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.socket.is_some() && !self.ended
@@ -259,27 +233,6 @@ impl StreamSession {
     fn end(&mut self) {
         self.ended = true;
         self.socket = None;
-    }
-
-    /// Send TTY standard input exactly as given; the newline belongs to
-    /// the tool layer so a submitted command is never double-terminated.
-    pub fn send_stdin(&mut self, line: &str) {
-        if let Some(socket) = self.socket.as_mut() {
-            socket.send_binary(k10s_protocol::encode_stream_payload(
-                k10s_protocol::payload_kind::STDIN,
-                line.as_bytes(),
-            ));
-        }
-    }
-
-    /// Queue a terminal resize.
-    pub fn send_resize(&mut self, cols: u32, rows: u32) {
-        if let Some(socket) = self.socket.as_mut() {
-            socket.send_binary(k10s_protocol::encode_stream_payload(
-                k10s_protocol::payload_kind::RESIZE,
-                &k10s_protocol::encode_resize_payload(cols, rows),
-            ));
-        }
     }
 
     /// Drain every available transport event into signals. Inbox overflow
@@ -302,21 +255,14 @@ impl StreamSession {
                     match serde_json::from_str::<StreamServerMessage>(&text) {
                         Ok(StreamServerMessage::Ready {
                             stream_type,
-                            tty,
+                            tty: _,
                             container,
                         }) => signals.push(StreamSignal::Ready {
                             stream_type,
-                            tty,
                             container,
                         }),
-                        Ok(StreamServerMessage::Status { message }) => {
-                            signals.push(StreamSignal::Status(message));
-                        }
                         Ok(StreamServerMessage::Error { message, .. }) => {
                             signals.push(StreamSignal::Rejected(message));
-                        }
-                        Ok(StreamServerMessage::Exit { exit_code }) => {
-                            signals.push(StreamSignal::Exited(exit_code));
                         }
                         Err(_) => signals.push(StreamSignal::Rejected(
                             "undecodable stream status frame".to_owned(),
@@ -370,12 +316,6 @@ impl StreamSession {
     pub fn target(&self) -> &StreamTarget {
         &self.target
     }
-
-    /// Bound exec mode.
-    #[must_use]
-    pub fn tty(&self) -> bool {
-        self.tty
-    }
 }
 
 #[cfg(test)]
@@ -399,8 +339,6 @@ mod tests {
         fn send_text(&mut self, text: String) {
             self.sent.lock().unwrap().push(text);
         }
-
-        fn send_binary(&mut self, _: Vec<u8>) {}
     }
 
     #[test]
@@ -413,7 +351,7 @@ mod tests {
             container: "app".into(),
         };
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target);
         session
             .install_opening_socket(
                 Box::new(OpeningSocket {

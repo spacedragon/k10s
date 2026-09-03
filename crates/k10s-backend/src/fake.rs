@@ -24,7 +24,7 @@ use crate::port::{
     PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
     RelatedRecordGroup, ReplicaSetProjection, ResourceConditionProjection, ResourceListData,
     ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
-    ServiceProjection, StreamInput, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
+    ServiceProjection, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
@@ -1167,21 +1167,10 @@ impl FakeKubernetes {
         self.lock().streams.tick(ticket_id);
     }
 
-    /// Terminate a stream session with an explicit exit code.
-    pub fn finish_stream(&self, ticket_id: &str, exit_code: i32) {
-        self.lock().streams.finish(ticket_id, exit_code);
-    }
-
     /// Number of live stream sessions; observability for disconnect tests.
     #[must_use]
     pub fn live_stream_sessions(&self) -> usize {
         self.lock().streams.live_session_count()
-    }
-
-    /// Last recorded terminal resize of a live session.
-    #[must_use]
-    pub fn last_stream_resize(&self, ticket_id: &str) -> Option<(u32, u32)> {
-        self.lock().streams.last_resize(ticket_id)
     }
 }
 
@@ -1304,13 +1293,6 @@ impl KubernetesAccess for FakeKubernetes {
                             container,
                             ..
                         } => (context, namespace, pod, container),
-                        crate::port::StreamKind::Exec {
-                            context,
-                            namespace,
-                            pod,
-                            container,
-                            ..
-                        } => (context, namespace, pod, container),
                     };
                     // Context existence and RBAC policy come first.
                     if !state.contexts.iter().any(|c| c.name == context.as_str()) {
@@ -1333,25 +1315,15 @@ impl KubernetesAccess for FakeKubernetes {
                         return Err(BackendError::NotFound);
                     };
                     // Container fixtures: every pod runs the `app` container;
-                    // `distroless` exists too (so its logs remain readable)
-                    // but carries no executable binary, making exec fail.
-                    // Any other name does not exist. Binary availability is
-                    // an exec-only validation.
+                    // `distroless` exists too (so its logs remain readable).
+                    // Any other name does not exist.
                     match container.as_str() {
                         "app" => {}
-                        "distroless" => {
-                            let exec = matches!(&stream, crate::port::StreamKind::Exec { .. });
-                            if exec {
-                                return Err(BackendError::Conflict(format!(
-                                    "container \"{container}\" has no executable binary"
-                                )));
-                            }
-                        }
+                        "distroless" => {}
                         _ => return Err(BackendError::NotFound),
                     }
                     match &mut stream {
-                        crate::port::StreamKind::Logs { uid, .. }
-                        | crate::port::StreamKind::Exec { uid, .. } => {
+                        crate::port::StreamKind::Logs { uid, .. } => {
                             if !uid.is_empty() && *uid != observed_uid {
                                 return Err(BackendError::Conflict("the pod was replaced".into()));
                             }
@@ -1679,22 +1651,6 @@ impl KubernetesAccess for FakeKubernetes {
                 } => {
                     self.set_cronjob_suspended(target, suspended, idempotency_key)
                         .await
-                }
-            }
-        })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        ticket_id: &'a str,
-        input: StreamInput,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut state = self.lock();
-            match input {
-                StreamInput::Stdin(line) => state.streams.queue_stdin(ticket_id, line),
-                StreamInput::Resize { cols, rows } => {
-                    state.streams.record_resize(ticket_id, cols, rows)
                 }
             }
         })

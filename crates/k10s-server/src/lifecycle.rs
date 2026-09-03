@@ -296,7 +296,7 @@ enum ShutdownStage {
     NotReady,
     ApplicationConnectionsClosed,
     NoticeSentAndGateClosed,
-    WatchesLogsAndExecCancelled,
+    WatchesAndLogsCancelled,
     ForceClosed,
     TasksDrained,
 }
@@ -308,7 +308,7 @@ impl ShutdownStage {
             Self::NotReady => "not-ready",
             Self::ApplicationConnectionsClosed => "application-connections-closed",
             Self::NoticeSentAndGateClosed => "notice-sent-and-gate-closed",
-            Self::WatchesLogsAndExecCancelled => "watches-logs-exec-cancelled",
+            Self::WatchesAndLogsCancelled => "watches-logs-cancelled",
             Self::ForceClosed => "force-closed",
             Self::TasksDrained => "tasks-drained",
         }
@@ -348,8 +348,8 @@ impl ShutdownCoordinator {
         self.advance(ShutdownStage::NoticeSentAndGateClosed);
     }
 
-    fn cancel_watches_logs_and_exec(&mut self) {
-        self.advance(ShutdownStage::WatchesLogsAndExecCancelled);
+    fn cancel_watches_and_logs(&mut self) {
+        self.advance(ShutdownStage::WatchesAndLogsCancelled);
     }
 }
 
@@ -596,7 +596,7 @@ pub async fn run_with_assets(
                 coordinator.mark_not_ready();
                 coordinator.stop_accepting_application_connections();
                 coordinator.send_notice_and_close_mutation_gate(&signals.drain);
-                coordinator.cancel_watches_logs_and_exec();
+                coordinator.cancel_watches_and_logs();
             }
             if let Some(manager) = port_forward_for_shutdown {
                 // Listeners and pumps are cancelled and joined inside the
@@ -767,7 +767,7 @@ fn verify_origin(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     Ok(())
 }
 
-/// Shared upgrade guard for the dedicated logs/exec stream sockets: the Plan
+/// Shared upgrade guard for log sockets and the legacy exec tombstone: the Plan
 /// 1 admission barrier and unauthenticated-connection semaphore apply, with
 /// the stream-specific frame and message limits.
 pub(crate) async fn stream_upgrade(

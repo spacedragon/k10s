@@ -276,8 +276,6 @@ fn client_state_encodes_stream_ticket_queries_safely() {
     let pending = client
         .begin(Query::StreamTicket {
             target: target.clone(),
-            stream_type: StreamType::Exec,
-            tty: true,
             since_seconds: None,
             previous: false,
         })
@@ -290,11 +288,8 @@ fn client_state_encodes_stream_ticket_queries_safely() {
         raw["payload"]["payload"]["target"]["pod"],
         "web-frontend-7d9f8-00001"
     );
-    assert_eq!(raw["payload"]["payload"]["tty"], true);
-    assert_eq!(
-        raw["payload"]["payload"]["command"],
-        serde_json::json!(["/bin/sh"])
-    );
+    assert_eq!(raw["payload"]["payload"]["streamType"], "logs");
+    assert_eq!(raw["payload"]["payload"]["tty"], false);
 
     let response = ServerFrame {
         kind: ServerKind::Response,
@@ -304,8 +299,8 @@ fn client_state_encodes_stream_ticket_queries_safely() {
         payload: serde_json::to_value(StreamTicketResponse {
             ticket_id: "stream-ticket-0001".into(),
             target: target.clone(),
-            stream_type: StreamType::Exec,
-            tty: true,
+            stream_type: StreamType::Logs,
+            tty: false,
         })
         .unwrap(),
     };
@@ -314,8 +309,8 @@ fn client_state_encodes_stream_ticket_queries_safely() {
     match result {
         k10s_ui::client::QueryResult::StreamTicket(granted) => {
             assert_eq!(granted.ticket_id, "stream-ticket-0001");
-            assert_eq!(granted.stream_type, StreamType::Exec);
-            assert!(granted.tty);
+            assert_eq!(granted.stream_type, StreamType::Logs);
+            assert!(!granted.tty);
         }
         other => panic!("expected a stream ticket, got {other:?}"),
     }
@@ -360,14 +355,13 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
     let url = derive_stream_url("ws://127.0.0.1:1/api/v1/control", StreamRoute::Logs).unwrap();
     assert_eq!(url, "ws://127.0.0.1:1/api/v1/logs");
     assert!(!url.contains("secret"));
-    assert!(derive_stream_url("ws://127.0.0.1:1/other", StreamRoute::Exec).is_err());
+    assert!(derive_stream_url("ws://127.0.0.1:1/other", StreamRoute::Logs).is_err());
 
-    // A scripted socket proves hello/stdin framing and signal projection
+    // A scripted socket proves log signal projection
     // without any network.
     #[derive(Debug)]
     struct ScriptedSocket {
         sent_text: Arc<Mutex<Vec<String>>>,
-        sent_binary: Arc<Mutex<Vec<Vec<u8>>>>,
         events: mpsc::Receiver<WsEvent>,
     }
     impl k10s_ui::client::StreamIo for ScriptedSocket {
@@ -377,14 +371,11 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
         fn send_text(&mut self, text: String) {
             self.sent_text.lock().unwrap().push(text);
         }
-        fn send_binary(&mut self, bytes: Vec<u8>) {
-            self.sent_binary.lock().unwrap().push(bytes);
-        }
     }
 
     let (tx, rx) = mpsc::channel();
     let mut session = StreamSession::new(
-        StreamRoute::Exec,
+        StreamRoute::Logs,
         StreamTarget {
             context: "dev-local".into(),
             namespace: "default".into(),
@@ -392,26 +383,23 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
             uid: "uid-db".into(),
             container: "app".into(),
         },
-        true,
     );
 
     // Before open_with_ticket the session cannot be driven; inject the
     // scripted transport directly through the test seam.
     let sent_text = Arc::new(Mutex::new(Vec::new()));
-    let sent_binary = Arc::new(Mutex::new(Vec::new()));
     session.inject_for_test(ScriptedSocket {
         sent_text: Arc::clone(&sent_text),
-        sent_binary: Arc::clone(&sent_binary),
         events: rx,
     });
 
     tx.send(WsEvent::Message(WsMessage::Text(
-        r#"{"kind":"ready","streamType":"exec","tty":true,"container":"app"}"#.to_owned(),
+        r#"{"kind":"ready","streamType":"logs","tty":false,"container":"app"}"#.to_owned(),
     )))
     .unwrap();
     tx.send(WsEvent::Message(WsMessage::Binary(vec![
         k10s_protocol::STREAM_PAYLOAD_VERSION,
-        k10s_protocol::payload_kind::TTY_OUTPUT,
+        k10s_protocol::payload_kind::STDOUT,
         b'$',
         b' ',
         b'o',
@@ -424,22 +412,12 @@ fn stream_sessions_derive_credential_free_urls_and_project_signals() {
         signals,
         vec![
             StreamSignal::Ready {
-                stream_type: StreamType::Exec,
-                tty: true,
+                stream_type: StreamType::Logs,
                 container: "app".into(),
             },
             StreamSignal::Output("$ ok".to_owned()),
         ]
     );
-
-    // The newline comes from the tool's queued action; send_stdin sends
-    // exactly what it is given (no double termination).
-    session.send_stdin("ls\n");
-    let binary = sent_binary.lock().unwrap();
-    assert_eq!(binary.len(), 1);
-    let decoded = k10s_protocol::decode_stream_payload(&binary[0]).unwrap();
-    assert_eq!(decoded.kind, k10s_protocol::payload_kind::STDIN);
-    assert_eq!(decoded.data, b"ls\n");
 }
 
 #[test]

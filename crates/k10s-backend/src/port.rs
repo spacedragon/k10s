@@ -28,7 +28,7 @@ pub enum Query {
     Bootstrap,
     /// Validate a YAML apply without submitting it.
     ValidateApply { context: String, yaml: String },
-    /// Issue a stream ticket for logs or exec.
+    /// Issue a stream ticket for logs.
     StreamTicket { stream: StreamKind },
     /// List one normalized resource type on one context.
     ResourceList {
@@ -215,10 +215,6 @@ pub struct ContextSwitchData {
 }
 
 /// Kind of stream to open.
-///
-/// `Exec` carries the explicit mode: `tty: true` is an interactive shell
-/// with merged output; `tty: false` is the retained non-TTY mode whose
-/// stdout and stderr stay separated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamKind {
     /// Tail logs from a container.
@@ -234,17 +230,6 @@ pub enum StreamKind {
         timestamps: bool,
         follow: bool,
     },
-    /// Attach to an exec session.
-    Exec {
-        context: String,
-        namespace: String,
-        pod: String,
-        uid: String,
-        container: String,
-        /// Exact remote command and arguments; never interpreted locally.
-        command: Vec<String>,
-        tty: bool,
-    },
 }
 
 /// Which dedicated socket route a stream belongs to.
@@ -252,17 +237,6 @@ pub enum StreamKind {
 pub enum StreamRouteKind {
     /// The logs route.
     Logs,
-    /// The exec route.
-    Exec,
-}
-
-/// Inbound data on a live exec session, forwarded by the server.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamInput {
-    /// One line of TTY standard input.
-    Stdin(String),
-    /// Terminal resize.
-    Resize { cols: u32, rows: u32 },
 }
 
 /// A behavior-level command (mutation) to the Kubernetes adapter.
@@ -1192,14 +1166,4 @@ pub trait KubernetesAccess: Send + Sync + std::fmt::Debug {
     fn port_forward_connector(&self) -> Option<crate::port_forward::PortForwardConnector> {
         None
     }
-
-    /// Forward inbound user input into a redeemed stream session.
-    ///
-    /// Sessions are keyed by their (consumed) ticket ID; unknown sessions
-    /// are typed conflicts.
-    fn stream_input<'a>(
-        &'a self,
-        ticket_id: &'a str,
-        input: StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
 }

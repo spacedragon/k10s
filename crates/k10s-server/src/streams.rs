@@ -1,4 +1,4 @@
-//! Shared implementation of the dedicated logs/exec stream sockets.
+//! Dedicated logs implementation plus the authenticated legacy exec tombstone.
 //!
 //! Every upgrade is guarded by the Plan 1 unauthenticated-connection
 //! semaphore and admission barrier. The mandatory first frame is an
@@ -14,13 +14,8 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use k10s_backend::{
-    BackendError, BackendEvent, BackendKernel, StreamInput, Subscribe as BackendSubscribe,
-};
-use k10s_protocol::{
-    ErrorCode, StreamServerMessage, StreamType, decode_resize_payload, decode_stream_payload,
-    encode_stream_payload, payload_kind,
-};
+use k10s_backend::{BackendError, BackendEvent, BackendKernel, Subscribe as BackendSubscribe};
+use k10s_protocol::{ErrorCode, StreamServerMessage, StreamType, encode_stream_payload};
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::config::ServerConfig;
@@ -30,22 +25,15 @@ use crate::config::ServerConfig;
 pub(crate) enum StreamRoute {
     /// `/api/v1/logs`.
     Logs,
-    /// `/api/v1/exec`.
-    Exec,
+    /// Major-1 compatibility tombstone; never dispatched to the backend.
+    LegacyExecTombstone,
 }
 
 impl StreamRoute {
     fn stream_type(self) -> StreamType {
         match self {
             Self::Logs => StreamType::Logs,
-            Self::Exec => StreamType::Exec,
-        }
-    }
-
-    fn backend_route(self) -> k10s_backend::StreamRouteKind {
-        match self {
-            Self::Logs => k10s_backend::StreamRouteKind::Logs,
-            Self::Exec => k10s_backend::StreamRouteKind::Exec,
+            Self::LegacyExecTombstone => StreamType::Exec,
         }
     }
 }
@@ -230,12 +218,26 @@ pub(crate) async fn serve_stream(
         return;
     }
 
+    // Major-version-1 compatibility tombstone. Authentication deliberately
+    // precedes this response, while the arbitrary legacy ticket is never
+    // validated or redeemed and therefore cannot reach Kubernetes.
+    if route == StreamRoute::LegacyExecTombstone {
+        let _ = sink
+            .send(error_message(
+                ErrorCode::UnsupportedMessage,
+                "embedded exec is no longer supported",
+            ))
+            .await;
+        let _ = sink.send(Message::Close(None)).await;
+        return;
+    }
+
     // Redeem the single-use ticket in the kernel-owned Stream Hub behind
     // the backend subscription seam.
     let mut handle = match kernel
         .subscribe(BackendSubscribe::StreamRedeem {
             ticket_id: stream_ticket.clone(),
-            route: route.backend_route(),
+            route: k10s_backend::StreamRouteKind::Logs,
         })
         .await
     {
@@ -256,15 +258,12 @@ pub(crate) async fn serve_stream(
         let _ = sink.send(Message::Close(None)).await;
         return;
     };
-    let (tty, container) = match &bound {
-        k10s_backend::StreamKind::Exec { container, tty, .. } => (*tty, container.clone()),
-        k10s_backend::StreamKind::Logs { container, .. } => (false, container.clone()),
-    };
+    let k10s_backend::StreamKind::Logs { container, .. } = &bound;
     let ready = sink
         .send(text_message(&StreamServerMessage::Ready {
             stream_type: route.stream_type(),
-            tty,
-            container,
+            tty: false,
+            container: container.clone(),
         }))
         .await;
     if ready.is_err() {
@@ -293,13 +292,6 @@ pub(crate) async fn serve_stream(
             }
             event = events.recv() => match event {
                 Ok(BackendEvent::Stream(chunk)) => {
-                    if let Some(exit_code) = chunk.exit_code {
-                        let _ = sink
-                            .send(text_message(&StreamServerMessage::Exit { exit_code }))
-                            .await;
-                        let _ = sink.send(Message::Close(None)).await;
-                        return;
-                    }
                     if !admit_rate(
                         &mut outbound_window_start,
                         &mut outbound_window_bytes,
@@ -353,100 +345,10 @@ pub(crate) async fn serve_stream(
                         .await;
                         return;
                     }
-                    let Ok(payload) = decode_stream_payload(&raw) else {
-                        let _ = sink
-                            .send(error_message(
-                                ErrorCode::InvalidRequest,
-                                "invalid stream payload header",
-                            ))
-                            .await;
-                        let _ = sink.send(Message::Close(None)).await;
-                        return;
-                    };
-                    if route == StreamRoute::Logs {
-                        // The logs route accepts no client payload after the
-                        // hello; anything else closes the socket.
-                        let _ = sink
-                            .send(error_message(
-                                ErrorCode::InvalidRequest,
-                                "the logs route accepts no client payloads",
-                            ))
-                            .await;
-                        let _ = sink.send(Message::Close(None)).await;
-                        return;
-                    }
-                    match payload.kind {
-                        payload_kind::STDIN => {
-                            let Ok(text) = std::str::from_utf8(payload.data) else {
-                                let _ = sink
-                                    .send(error_message(
-                                        ErrorCode::InvalidRequest,
-                                        "stdin must be utf-8 text",
-                                    ))
-                                    .await;
-                                let _ = sink.send(Message::Close(None)).await;
-                                return;
-                            };
-                            if kernel
-                                .stream_input(&stream_ticket, StreamInput::Stdin(text.to_owned()))
-                                .await
-                                .is_err()
-                            {
-                                let _ = sink
-                                    .send(error_message(
-                                        ErrorCode::Conflict,
-                                        "the stream session is not active",
-                                    ))
-                                    .await;
-                                let _ = sink.send(Message::Close(None)).await;
-                                return;
-                            }
-                        }
-                        payload_kind::RESIZE => {
-                            let Some((cols, rows)) = decode_resize_payload(payload.data) else {
-                                let _ = sink
-                                    .send(error_message(
-                                        ErrorCode::InvalidRequest,
-                                        "resize payloads are two big-endian u32 values",
-                                    ))
-                                    .await;
-                                let _ = sink.send(Message::Close(None)).await;
-                                return;
-                            };
-                            if kernel
-                                .stream_input(&stream_ticket, StreamInput::Resize { cols, rows })
-                                .await
-                                .is_err()
-                            {
-                                let _ = sink
-                                    .send(error_message(
-                                        ErrorCode::Conflict,
-                                        "the stream session is not active",
-                                    ))
-                                    .await;
-                                let _ = sink.send(Message::Close(None)).await;
-                                return;
-                            }
-                            let status = sink
-                                .send(text_message(&StreamServerMessage::Status {
-                                    message: format!("resized to {cols}x{rows}"),
-                                }))
-                                .await;
-                            if status.is_err() {
-                                return;
-                            }
-                        }
-                        _ => {
-                            let _ = sink
-                                .send(error_message(
-                                    ErrorCode::InvalidRequest,
-                                    "unsupported client payload kind on this route",
-                                ))
-                                .await;
-                            let _ = sink.send(Message::Close(None)).await;
-                            return;
-                        }
-                    }
+                    let _ = raw;
+                    let _ = sink.send(error_message(ErrorCode::InvalidRequest, "the logs route accepts no client payloads")).await;
+                    let _ = sink.send(Message::Close(None)).await;
+                    return;
                 }
                 Some(Ok(Message::Text(_))) => {
                     let _ = sink

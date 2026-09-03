@@ -13,7 +13,6 @@ mod create;
 mod deployment_projection;
 mod discovery;
 mod events;
-mod exec;
 mod infrastructure;
 mod logs;
 pub(crate) mod metrics;
@@ -41,7 +40,7 @@ use crate::port::{
     AdapterError, ApiResourceDescriptor, BackendError, BootstrapInfo, Command, ContextInfo,
     ContextPermissionsData, ContextSwitchData, Gvk, KubernetesAccess, OperationId, Query,
     QueryResult, ResourceListData, ResourceRef, ResourceTypesData, ResourceWatchIdentity,
-    StreamInput, Subscribe, SubscriptionHandle,
+    Subscribe, SubscriptionHandle,
 };
 use crate::runtime::ContextRegistry;
 use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
@@ -169,8 +168,6 @@ pub struct KubeAdapter {
     validation_tickets: StdMutex<crate::validation::ticket::TicketStore>,
     /// Bounded single-use authority for real Kubernetes log streams.
     stream_tickets: logs::StreamTickets,
-    /// Active real exec sessions accept only bounded stdin/resize commands.
-    exec_sessions: std::sync::Arc<exec::ExecSessions>,
     /// Test-only scripted watch sources overriding the real kube-rs path.
     #[cfg(feature = "testkit")]
     watch_scripts: ScriptedWatches,
@@ -227,7 +224,6 @@ impl KubeAdapter {
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             stream_tickets: logs::StreamTickets::new(),
-            exec_sessions: std::sync::Arc::new(exec::ExecSessions::default()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -284,7 +280,6 @@ impl KubeAdapter {
             operations: crate::operation::OperationEngine::default(),
             validation_tickets: StdMutex::new(crate::validation::ticket::TicketStore::new()),
             stream_tickets: logs::StreamTickets::new(),
-            exec_sessions: std::sync::Arc::new(exec::ExecSessions::default()),
             #[cfg(feature = "testkit")]
             watch_scripts: ScriptedWatches(Arc::new(std::sync::Mutex::new(None))),
         })
@@ -453,14 +448,6 @@ impl KubernetesAccess for KubeAdapter {
                 )),
             }
         })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        ticket_id: &'a str,
-        input: StreamInput,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async move { self.exec_sessions.send(ticket_id, input).await })
     }
 }
 

@@ -15,9 +15,9 @@ use k10s_protocol::{
     ResourceListRow, ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse,
     ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
     ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, StreamType, Subscribe, SubscriptionId, SubscriptionSelector,
-    TRAFFIC_EVENT_UPDATED, TrafficSample, TrafficWatchSpec, Unsubscribe, YamlApplyRequest,
-    YamlOutcome, YamlValidateRequest,
+    StreamTicketResponse, Subscribe, SubscriptionId, SubscriptionSelector, TRAFFIC_EVENT_UPDATED,
+    TrafficSample, TrafficWatchSpec, Unsubscribe, YamlApplyRequest, YamlOutcome,
+    YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -218,16 +218,12 @@ pub enum Query {
         /// The exact YAML text to validate.
         yaml: String,
     },
-    /// Issue a single-use stream ticket for a dedicated logs/exec socket.
+    /// Issue a single-use stream ticket for a dedicated logs socket.
     /// The ticket is redeemed in the stream socket's first `hello`, never
     /// placed in any URL.
     StreamTicket {
         /// Pod/container to attach to.
         target: StreamTarget,
-        /// Whether this opens logs or an exec session.
-        stream_type: StreamType,
-        /// Exec mode: interactive TTY shell vs separated stdout/stderr.
-        tty: bool,
         /// Logs-only history window.
         since_seconds: Option<i64>,
         /// Logs-only previous terminated-container selection.
@@ -399,7 +395,7 @@ pub enum QueryResult {
     Infrastructure(Box<InfrastructureResponse>),
     /// Guarded YAML validation outcome; `Valid` carries the ticket.
     YamlValidate(Box<YamlOutcome>),
-    /// A granted single-use stream ticket for a dedicated logs/exec socket.
+    /// A granted single-use stream ticket for a dedicated logs socket.
     StreamTicket(Box<StreamTicketResponse>),
     /// An accepted mutation command with its background operation ID.
     Applied(OperationAccepted),
@@ -599,24 +595,18 @@ impl PendingAction {
             }),
             Self::Query(Query::StreamTicket {
                 target,
-                stream_type,
-                tty,
                 since_seconds,
                 previous,
             }) => encode(StreamTicketRequest {
                 target: target.clone(),
-                stream_type: *stream_type,
-                tty: *tty,
-                command: if *stream_type == k10s_protocol::StreamType::Exec {
-                    vec!["/bin/sh".to_owned()]
-                } else {
-                    Vec::new()
-                },
-                tail_lines: (*stream_type == k10s_protocol::StreamType::Logs).then_some(200),
+                stream_type: k10s_protocol::StreamType::Logs,
+                tty: false,
+                command: Vec::new(),
+                tail_lines: Some(200),
                 since_seconds: *since_seconds,
                 previous: *previous,
-                timestamps: *stream_type == k10s_protocol::StreamType::Logs,
-                follow: *stream_type == k10s_protocol::StreamType::Logs,
+                timestamps: true,
+                follow: true,
             }),
             Self::Query(Query::OperationStatus(ids)) => encode(OperationStatusRequest {
                 operation_ids: ids.clone(),

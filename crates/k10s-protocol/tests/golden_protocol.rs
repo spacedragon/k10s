@@ -151,3 +151,51 @@ fn application_routes_are_stable() {
     assert_eq!(LOGS_PATH, "/api/v1/logs");
     assert_eq!(EXEC_PATH, "/api/v1/exec");
 }
+
+#[test]
+fn retired_exec_discriminants_remain_reserved_for_the_major_one_tombstone() {
+    assert_eq!(EXEC_PATH, "/api/v1/exec");
+    let legacy: k10s_protocol::StreamTicketRequest = serde_json::from_value(json!({
+        "target": {"context":"dev","namespace":"default","pod":"web","uid":"uid-web","container":"app"},
+        "streamType":"exec","tty":true,"command":["/bin/sh"]
+    })).unwrap();
+    assert_eq!(legacy.stream_type, k10s_protocol::StreamType::Exec);
+    for (kind, value) in [
+        (k10s_protocol::payload_kind::TTY_OUTPUT, 3),
+        (k10s_protocol::payload_kind::STDIN, 4),
+        (k10s_protocol::payload_kind::RESIZE, 5),
+    ] {
+        assert_eq!(kind, value);
+        assert_eq!(
+            k10s_protocol::decode_stream_payload(&[1, kind])
+                .unwrap()
+                .kind,
+            kind
+        );
+    }
+}
+
+#[test]
+fn active_exec_symbols_are_absent_from_production_layers() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap();
+    let output = std::process::Command::new("rg")
+        .current_dir(workspace)
+        .args([
+            "-n",
+            "StreamKind::Exec|StreamRouteKind::Exec|StreamRoute::Exec|ExecSessions|send_stdin|send_resize|exec\\.attach",
+            "crates/k10s-backend/src",
+            "crates/k10s-server/src",
+            "crates/k10s-ui/src/client",
+        ])
+        .output()
+        .expect("rg is required by the source allowlist regression");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

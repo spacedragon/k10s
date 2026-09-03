@@ -447,7 +447,7 @@ pub struct Hello {
     /// Last acknowledged sequence for resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_acked_sequence: Option<u64>,
-    /// Single-use ticket for a logs or exec stream.
+    /// Single-use ticket for a stream (legacy exec requests are tombstoned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_ticket: Option<String>,
 }

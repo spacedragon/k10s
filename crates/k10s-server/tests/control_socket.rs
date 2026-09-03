@@ -78,14 +78,6 @@ impl KubernetesAccess for StatusKubernetes {
             Ok(SubscriptionHandle::with_events(id, self.events.subscribe()))
         })
     }
-
-    fn stream_input<'a>(
-        &'a self,
-        _ticket_id: &'a str,
-        _input: k10s_backend::StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
-    }
 }
 
 impl KubernetesAccess for HugeKubernetes {
@@ -117,14 +109,6 @@ impl KubernetesAccess for HugeKubernetes {
         _: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        _ticket_id: &'a str,
-        _input: k10s_backend::StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }
 
@@ -159,14 +143,6 @@ impl KubernetesAccess for SensitiveKubernetes {
             ))
         })
     }
-
-    fn stream_input<'a>(
-        &'a self,
-        _ticket_id: &'a str,
-        _input: k10s_backend::StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
-    }
 }
 
 impl KubernetesAccess for SlowKubernetes {
@@ -199,14 +175,6 @@ impl KubernetesAccess for SlowKubernetes {
         _: Subscribe,
     ) -> Pin<Box<dyn Future<Output = Result<SubscriptionHandle, BackendError>> + Send + 'a>> {
         Box::pin(async { Err(BackendError::unsupported("subscribe")) })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        _ticket_id: &'a str,
-        _input: k10s_backend::StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Err(BackendError::unsupported("stream.input")) })
     }
 }
 
@@ -315,7 +283,7 @@ async fn hello_negotiates_then_bootstrap_preserves_request_id() {
     let welcome: ServerFrame =
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(welcome.kind, ServerKind::Welcome);
-    assert_eq!(welcome.payload["protocol"], json!({"major": 1, "minor": 5}));
+    assert_eq!(welcome.payload["protocol"], json!({"major": 1, "minor": 6}));
     assert_eq!(welcome.payload["capabilities"], json!(["logs.tail"]));
 
     let request_id = RequestId::from("req-7");

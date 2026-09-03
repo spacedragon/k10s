@@ -1,4 +1,4 @@
-//! Dedicated `/api/v1/exec` terminal stream socket route.
+//! Authenticated major-1 compatibility tombstone for the retired exec route.
 
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::HeaderMap;
@@ -6,11 +6,11 @@ use axum::response::Response;
 
 use crate::streams::StreamRoute;
 
-/// Upgrade handler for the dedicated exec terminal socket.
+/// Upgrade handler for the fail-closed legacy route.
 pub(crate) async fn upgrade(
     state: State<crate::lifecycle::AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, axum::http::StatusCode> {
-    crate::lifecycle::stream_upgrade(state, headers, ws, StreamRoute::Exec).await
+    crate::lifecycle::stream_upgrade(state, headers, ws, StreamRoute::LegacyExecTombstone).await
 }
