@@ -393,13 +393,15 @@ fn temporary_powershell_runtime_rechecks_parent_and_self_cleans() {
     std::fs::create_dir(&root).unwrap();
     let kubectl = root.join("kubectl.cmd");
     std::fs::write(&kubectl, "@exit /b 41\r\n").unwrap();
-    let descriptor = KubectlLaunchDescriptor::new(
+    let mut descriptor = KubectlLaunchDescriptor::new(
         1,
         kubectl,
         "context".into(),
         vec![root.join("config")],
         BTreeMap::from([
             ("PATH".into(), root.display().to_string()),
+            ("SYSTEMROOT".into(), std::env::var("SYSTEMROOT").unwrap()),
+            ("WINDIR".into(), std::env::var("WINDIR").unwrap()),
             (
                 "KUBECONFIG".into(),
                 root.join("config").display().to_string(),
@@ -408,6 +410,7 @@ fn temporary_powershell_runtime_rechecks_parent_and_self_cleans() {
         Vec::new(),
     )
     .unwrap();
+    descriptor.kubeconfig_snapshot = b"apiVersion: v1\r\nkind: Config\r\n".to_vec();
     let storage = TemporaryShellStorage::new(root.join("storage")).unwrap();
     let target = ExternalShellTarget {
         generation: 1,
@@ -1059,6 +1062,7 @@ fn main() {{
     ] {
         fs::write(&log, "").unwrap();
         let mut selected_target = target();
+        selected_target.generation = 1;
         selected_target.uid = "uid-1".into();
         selected_target.pod = pod.into();
         fs::write(

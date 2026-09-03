@@ -181,21 +181,38 @@ fn active_exec_symbols_are_absent_from_production_layers() {
         .parent()
         .and_then(std::path::Path::parent)
         .unwrap();
-    let output = std::process::Command::new("rg")
-        .current_dir(workspace)
-        .args([
-            "-n",
-            "StreamKind::Exec|StreamRouteKind::Exec|StreamRoute::Exec|ExecSessions|send_stdin|send_resize|exec\\.attach",
-            "crates/k10s-backend/src",
-            "crates/k10s-server/src",
-            "crates/k10s-ui/src/client",
-        ])
-        .output()
-        .expect("rg is required by the source allowlist regression");
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    let forbidden = [
+        "StreamKind::Exec",
+        "StreamRouteKind::Exec",
+        "StreamRoute::Exec",
+        "ExecSessions",
+        "send_stdin",
+        "send_resize",
+        "exec.attach",
+    ];
+    for relative in [
+        "crates/k10s-backend/src",
+        "crates/k10s-server/src",
+        "crates/k10s-ui/src/client",
+    ] {
+        assert_source_tree_omits(&workspace.join(relative), &forbidden);
+    }
+}
+
+fn assert_source_tree_omits(directory: &std::path::Path, forbidden: &[&str]) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            assert_source_tree_omits(&path, forbidden);
+        } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+            let source = std::fs::read_to_string(&path).unwrap();
+            for symbol in forbidden {
+                assert!(
+                    !source.contains(symbol),
+                    "{} contains {symbol}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
