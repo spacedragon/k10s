@@ -76,11 +76,16 @@ pub(super) fn create_private_directory(
     rustix::fs::mkdirat(&parent.fd, name, Mode::from_raw_mode(0o700)).map_err(io::Error::from)?;
     match open_child(parent, name) {
         Ok(child) => Ok(child),
-        Err(error) => {
-            let _rollback = rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR);
-            Err(error)
-        }
+        Err(error) => match rollback_created_directory(parent, name) {
+            Ok(()) => Err(error),
+            Err(_) => Err(StorageError::RollbackFailed),
+        },
     }
+}
+fn rollback_created_directory(parent: &PrivateParent, name: &str) -> Result<(), StorageError> {
+    rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR)
+        .map_err(|_| StorageError::RollbackFailed)?;
+    Ok(())
 }
 pub(super) fn open_child(parent: &PrivateParent, name: &str) -> Result<PrivateChild, StorageError> {
     validate_private_parent(parent)?;
@@ -214,4 +219,22 @@ pub(super) fn remove_empty_directory(child: &PrivateChild) -> Result<(), Storage
     rustix::fs::unlinkat(&child.parent.fd, child.name.as_str(), AtFlags::REMOVEDIR)
         .map_err(io::Error::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_directory_rollback_is_typed() {
+        let root = std::env::temp_dir().join(format!("k10s-unix-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let parent = ensure_private_parent(&root).unwrap();
+        rustix::fs::mkdirat(&parent.fd, "child", Mode::from_raw_mode(0o700)).unwrap();
+        std::fs::write(root.join("child/blocker"), "x").unwrap();
+        assert!(matches!(
+            rollback_created_directory(&parent, "child"),
+            Err(StorageError::RollbackFailed)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
