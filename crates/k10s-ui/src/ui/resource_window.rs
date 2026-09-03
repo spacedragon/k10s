@@ -211,7 +211,10 @@ pub struct ResourceFeed {
     pub relations: HashMap<ResourceIdentity, RelationState>,
     /// Exact identity-matched resource and container metrics for detail panes.
     pub metrics: HashMap<ResourceIdentity, k10s_protocol::ResourceMetricsResponse>,
+    /// Whether the negotiated server accepts Service port-forward targets.
     pub port_forward_available: bool,
+    /// Whether the negotiated server accepts Pod port-forward targets.
+    pub pod_port_forward_available: bool,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
     pub port_forward_error: Option<String>,
 }

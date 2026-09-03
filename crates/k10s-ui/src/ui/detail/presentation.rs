@@ -177,6 +177,14 @@ impl<'a> DetailPresentationInput<'a> {
         };
         let mutations_allowed =
             mutations_allowed && !gone && matches!(primary, DetailPrimary::Loaded(_));
+        let port_forward_capability = if identity.gvk.group.is_empty()
+            && identity.gvk.version == "v1"
+            && identity.gvk.kind == "Pod"
+        {
+            feed.pod_port_forward_available
+        } else {
+            feed.port_forward_available
+        };
         Some(Self {
             identity,
             primary,
@@ -196,7 +204,7 @@ impl<'a> DetailPresentationInput<'a> {
             // shares exact mutation authority. Existing sessions remain
             // visible so Stop can still perform safe cleanup when authority
             // to create new sessions has been revoked.
-            port_forward_available: feed.port_forward_available && mutations_allowed,
+            port_forward_available: port_forward_capability && mutations_allowed,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })

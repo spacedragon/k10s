@@ -749,29 +749,16 @@ where
                             self.requested_context = Some((to, ContextRequestOrigin::Explicit));
                         }
                         WorkspaceEvent::PortForwardStartRequested {
-                            service,
-                            port,
-                            local_port,
+                            target,
+                            remote_label,
+                            initial_local_port,
                         } => {
-                            if let Some(identity) = service.as_row_identity().cloned() {
-                                let remote_label = match &port {
-                                    k10s_protocol::PortForwardPortSelector::Name { name } => {
-                                        format!("Service port {name}")
-                                    }
-                                    k10s_protocol::PortForwardPortSelector::Number { number } => {
-                                        format!("Service port {number}")
-                                    }
-                                };
-                                self.port_forward_actions
-                                    .push(PortForwardAction::OpenStart {
-                                        target: k10s_protocol::PortForwardTarget::Service {
-                                            identity,
-                                            port,
-                                        },
-                                        remote_label,
-                                        initial_local_port: local_port,
-                                    });
-                            }
+                            self.port_forward_actions
+                                .push(PortForwardAction::OpenStart {
+                                    target,
+                                    remote_label,
+                                    initial_local_port,
+                                });
                         }
                         WorkspaceEvent::PortForwardStopRequested(id) => {
                             self.port_forward_actions.push(PortForwardAction::Stop(id));

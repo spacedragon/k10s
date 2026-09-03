@@ -2,9 +2,8 @@
 //! projection, structured read-only Ports, events, and the guarded YAML
 //! workflow.
 //!
-//! This panel is deliberately action-free beyond YAML editing: no Scale,
-//! Delete, logs, or exec, and no port-forward controls — those arrive with
-//! the desktop capability in a later task.
+//! This panel is deliberately action-free beyond YAML editing and bounded
+//! port-forward lifecycle controls: no Scale, Delete, logs, or exec.
 
 use egui::{Grid, RichText, WidgetType};
 use k10s_protocol::{ResourceDetailResponse, ServiceProjection};
@@ -22,7 +21,7 @@ pub(super) fn show<I>(
     view: &ResourceDetailResponse,
     presentation: &super::presentation::DetailPresentationInput<'_>,
     yaml: &mut tools::YamlEditors,
-    port_drafts: Option<&std::collections::BTreeMap<String, String>>,
+    _port_drafts: Option<&std::collections::BTreeMap<String, String>>,
     _resource_actions: &mut Vec<crate::ui::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -31,15 +30,7 @@ pub(super) fn show<I>(
     let projection = projection_of(view);
     match detail.active_tab {
         DetailTab::Overview => overview_tab(ui, window_id, projection, presentation),
-        DetailTab::Ports => ports_tab(
-            ui,
-            window_id,
-            &detail.identity,
-            projection,
-            presentation,
-            port_drafts,
-            queued,
-        ),
+        DetailTab::Ports => ports_tab(ui, window_id, projection, presentation, queued),
         DetailTab::Events => super::events::show(ui, view.events_condition, &view.events),
         DetailTab::Yaml => {
             if !view.capabilities.can_edit_yaml {
@@ -229,15 +220,14 @@ fn overview_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.end_row();
 }
 
-/// Ports tab: one structured read-only line per declared port. UDP/SCTP
-/// entries are labelled read-only; TCP entries expose no controls yet.
+/// Ports tab: one structured line per declared port. UDP/SCTP remain
+/// read-only; TCP preserves live session controls and opens the shared start
+/// dialog when no active session owns the port.
 fn ports_tab<I: RowIdentity>(
     ui: &mut egui::Ui,
     window_id: WindowId,
-    identity: &I,
     projection: Option<&ServiceProjection>,
     presentation: &super::presentation::DetailPresentationInput<'_>,
-    port_drafts: Option<&std::collections::BTreeMap<String, String>>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) {
     let Some(projection) = projection else {
@@ -260,9 +250,7 @@ fn ports_tab<I: RowIdentity>(
         if port.protocol != k10s_protocol::TransportProtocol::Tcp {
             continue;
         }
-        let Some(service) = identity.as_row_identity() else {
-            continue;
-        };
+        let service = presentation.identity;
         let session = presentation
             .port_forward_sessions
             .iter()
@@ -315,55 +303,32 @@ fn ports_tab<I: RowIdentity>(
                 ));
             }
         } else if presentation.port_forward_available {
-            let draft_key = crate::workspace::ServiceWindowState::<I>::port_draft_key(
-                &service.uid,
-                port.service_port,
+            let start = ui.push_id(
+                (
+                    "k10s.detail.service.port.start",
+                    window_id.0,
+                    port.service_port,
+                ),
+                |ui| ui.button("Start"),
             );
-            let mut draft = port_drafts
-                .and_then(|drafts| drafts.get(&draft_key))
-                .cloned()
-                .unwrap_or_default();
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut draft)
-                    .hint_text("Local port (blank = automatic)")
-                    .desired_width(180.0),
-            );
-            if edit.changed() {
-                queued.push(WorkspaceCommand::SetServicePortDraft(
-                    window_id,
-                    draft_key,
-                    draft.clone(),
-                ));
-            }
-            let local_port = if draft.trim().is_empty() || draft.trim() == "0" {
-                Ok(0)
-            } else {
-                draft
-                    .trim()
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|port| *port != 0)
-                    .ok_or(())
-            };
-            if local_port.is_err() {
-                ui.label(
-                    RichText::new("Enter a port from 1 to 65535").color(crate::ui::theme::WARNING),
-                );
-            }
-            if ui
-                .add_enabled(local_port.is_ok(), egui::Button::new("Start"))
-                .clicked()
-            {
+            if start.inner.clicked() {
                 let selector = port.name.clone().map_or(
                     k10s_protocol::PortForwardPortSelector::Number {
                         number: port.service_port,
                     },
                     |name| k10s_protocol::PortForwardPortSelector::Name { name },
                 );
+                let initial_local_port = match port.target_port {
+                    k10s_protocol::TargetPort::Number { number } => number,
+                    k10s_protocol::TargetPort::Name { .. } => port.service_port,
+                };
                 queued.push(WorkspaceCommand::StartPortForward {
-                    service: identity.clone(),
-                    port: selector,
-                    local_port: local_port.unwrap_or(0),
+                    target: k10s_protocol::PortForwardTarget::Service {
+                        identity: service.clone(),
+                        port: selector,
+                    },
+                    remote_label: line,
+                    initial_local_port,
                 });
             }
         } else {

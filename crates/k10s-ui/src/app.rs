@@ -2527,6 +2527,7 @@ impl K10sApp {
             relations: self.relations.clone().into_iter().collect(),
             metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
+            pod_port_forward_available: self.client.pod_port_forward_available(),
             port_forward_sessions: self
                 .client
                 .port_forward_sessions()

@@ -109,9 +109,9 @@ pub enum WorkspaceCommand<I> {
     BeginYamlEdit(WindowId),
     DiscardYaml(WindowId),
     StartPortForward {
-        service: I,
-        port: k10s_protocol::PortForwardPortSelector,
-        local_port: u16,
+        target: k10s_protocol::PortForwardTarget,
+        remote_label: String,
+        initial_local_port: u16,
     },
     StopPortForward(String),
     /// Global context switch. Preserves window kinds, geometry, filters,
@@ -158,9 +158,9 @@ pub enum WorkspaceEvent<I> {
         to: String,
     },
     PortForwardStartRequested {
-        service: I,
-        port: k10s_protocol::PortForwardPortSelector,
-        local_port: u16,
+        target: k10s_protocol::PortForwardTarget,
+        remote_label: String,
+        initial_local_port: u16,
     },
     PortForwardStopRequested(String),
 }
@@ -500,13 +500,13 @@ where
                 Vec::new()
             }
             WorkspaceCommand::StartPortForward {
-                service,
-                port,
-                local_port,
+                target,
+                remote_label,
+                initial_local_port,
             } => vec![WorkspaceEvent::PortForwardStartRequested {
-                service,
-                port,
-                local_port,
+                target,
+                remote_label,
+                initial_local_port,
             }],
             WorkspaceCommand::StopPortForward(id) => {
                 vec![WorkspaceEvent::PortForwardStopRequested(id)]

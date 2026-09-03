@@ -1041,7 +1041,66 @@ fn desktop_capability_renders_start_and_opens_the_shared_service_target() {
                 identity,
                 port: k10s_protocol::PortForwardPortSelector::Name { name },
             },
-            initial_local_port: 0,
+            initial_local_port: 8080,
+            ..
+        }] if identity == &service_identity("web-frontend") && name == "http"
+    ));
+}
+
+#[test]
+fn named_service_target_prefills_the_declared_service_port_in_the_shared_modal() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    let mut detail = service_detail("web-frontend", false);
+    let Some(ResourceProjection::Service(service)) = detail.projection.as_mut() else {
+        panic!("fixture has a typed Service projection");
+    };
+    service.ports[0].target_port = TargetPort::Name {
+        name: "http-backend".into(),
+    };
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(service_identity("web-frontend"), detail);
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::TextInput, "Local port (blank = automatic)")
+            .is_none(),
+        "the Ports tab delegates blank/zero validation to the shared modal"
+    );
+    harness.get_by_role_and_label(Role::Button, "Start").click();
+    harness.run_steps(2);
+    assert!(matches!(
+        harness
+            .state_mut()
+            .shell
+            .drain_port_forward_actions()
+            .as_slice(),
+        [k10s_ui::ui::PortForwardAction::OpenStart {
+            target: k10s_protocol::PortForwardTarget::Service {
+                identity,
+                port: k10s_protocol::PortForwardPortSelector::Name { name },
+            },
+            initial_local_port: 80,
             ..
         }] if identity == &service_identity("web-frontend") && name == "http"
     ));
