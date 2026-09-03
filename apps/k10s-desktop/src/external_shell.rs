@@ -1,12 +1,18 @@
 //! Credential-free launch descriptions and pure shell-script rendering.
 //!
-//! Temporary-file creation and terminal process launch deliberately live
-//! outside this module: this boundary only validates structured values and
-//! turns them into literal-safe scripts.
+//! It also owns the private temporary-script lifecycle and typed platform launch.
+
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+#[cfg(unix)]
+use std::ffi::OsString as PlatformString;
 use std::fmt;
+use std::path::Path;
 use std::path::PathBuf;
 
 use k10s_backend::KubePreparation;
@@ -480,4 +486,364 @@ fn posix_literal(value: &str) -> String {
 }
 fn powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+const MANIFEST_NAME: &str = "manifest.json";
+const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug)]
+pub enum StorageError {
+    Io(std::io::Error),
+    Randomness(getrandom::Error),
+    InvalidParent,
+    Render(RenderError),
+    NoTerminalLauncher,
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(_) => formatter.write_str("temporary shell storage is unavailable"),
+            Self::Randomness(_) => formatter.write_str("secure launch-name generation failed"),
+            Self::InvalidParent => formatter
+                .write_str("temporary shell parent failed ownership or permission validation"),
+            Self::Render(error) => write!(formatter, "shell request is invalid: {error}"),
+            Self::NoTerminalLauncher => {
+                formatter.write_str("no system terminal accepted the shell launch")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+impl From<std::io::Error> for StorageError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<getrandom::Error> for StorageError {
+    fn from(value: getrandom::Error) -> Self {
+        Self::Randomness(value)
+    }
+}
+impl From<RenderError> for StorageError {
+    fn from(value: RenderError) -> Self {
+        Self::Render(value)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LaunchManifest {
+    version: u32,
+    launch_id: String,
+    created_unix_seconds: u64,
+    script: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TemporaryShellStorage {
+    parent: PathBuf,
+}
+
+impl TemporaryShellStorage {
+    pub fn new(parent: PathBuf) -> Result<Self, StorageError> {
+        platform::ensure_private_parent(&parent)?;
+        Ok(Self { parent })
+    }
+
+    pub fn create(
+        &self,
+        command: &KubectlExecCommand<'_>,
+    ) -> Result<TemporaryShellScript, StorageError> {
+        platform::validate_private_parent(&self.parent)?;
+        let launch_id = random_name()?;
+        let suffix = if cfg!(windows) {
+            "ps1"
+        } else if cfg!(target_os = "macos") {
+            "command"
+        } else {
+            "sh"
+        };
+        let script_name = format!("launch.{suffix}");
+        let directory = self.parent.join(&launch_id);
+        platform::create_private_directory(&directory)?;
+        let mut transaction = CreationTransaction {
+            directory: directory.clone(),
+            manifest: None,
+            script: None,
+            committed: false,
+        };
+        (|| {
+            let manifest = LaunchManifest {
+                version: MANIFEST_VERSION,
+                launch_id,
+                created_unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                script: script_name.clone(),
+            };
+            let manifest_path = directory.join(MANIFEST_NAME);
+            platform::create_private_file(
+                &manifest_path,
+                &serde_json::to_vec(&manifest).map_err(std::io::Error::other)?,
+                false,
+            )?;
+            transaction.manifest = Some(manifest_path.clone());
+            let script_path = directory.join(script_name);
+            let body = render_self_cleaning(command, &manifest_path, &directory)?;
+            platform::create_private_file(&script_path, &body, true)?;
+            transaction.script = Some(script_path.clone());
+            transaction.committed = true;
+            Ok(TemporaryShellScript {
+                directory,
+                path: script_path,
+                manifest: manifest_path,
+            })
+        })()
+    }
+
+    pub fn cleanup_expired(&self, now_unix_seconds: u64) -> Result<CleanupReport, StorageError> {
+        platform::validate_private_parent(&self.parent)?;
+        let mut candidates = Vec::new();
+        for entry in std::fs::read_dir(&self.parent)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !valid_launch_id(name) {
+                continue;
+            }
+            let directory = entry.path();
+            if platform::validate_launch_directory(&directory).is_err() {
+                continue;
+            }
+            let manifest_path = directory.join(MANIFEST_NAME);
+            let Ok(bytes) = std::fs::read(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<LaunchManifest>(&bytes) else {
+                continue;
+            };
+            if manifest.version != MANIFEST_VERSION
+                || manifest.launch_id != name
+                || !valid_script_name(&manifest.script)
+            {
+                continue;
+            }
+            candidates.push((manifest.created_unix_seconds, directory, manifest.script));
+        }
+        candidates.sort_by_key(|candidate| candidate.0);
+        let mut report = CleanupReport::default();
+        for (created, directory, script_name) in candidates.into_iter().take(128) {
+            report.examined += 1;
+            if now_unix_seconds.saturating_sub(created) <= 24 * 60 * 60 {
+                continue;
+            }
+            let entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
+            if entries.len() != 2
+                || entries.iter().any(|entry| {
+                    let name = entry.file_name();
+                    name != std::ffi::OsStr::new(MANIFEST_NAME)
+                        && name != std::ffi::OsStr::new(&script_name)
+                })
+            {
+                continue;
+            }
+            let script = directory.join(&script_name);
+            if platform::remove_regular_file(&script).is_err()
+                || platform::remove_regular_file(&directory.join(MANIFEST_NAME)).is_err()
+            {
+                continue;
+            }
+            if platform::remove_empty_directory(&directory).is_ok() {
+                report.removed += 1;
+            }
+        }
+        Ok(report)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CleanupReport {
+    pub examined: usize,
+    pub removed: usize,
+}
+
+fn valid_launch_id(value: &str) -> bool {
+    value.len() == 24
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+fn valid_script_name(value: &str) -> bool {
+    matches!(value, "launch.sh" | "launch.command" | "launch.ps1")
+}
+
+struct CreationTransaction {
+    directory: PathBuf,
+    manifest: Option<PathBuf>,
+    script: Option<PathBuf>,
+    committed: bool,
+}
+impl Drop for CreationTransaction {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(path) = self.script.take() {
+            let _ = platform::remove_regular_file(&path);
+        }
+        if let Some(path) = self.manifest.take() {
+            let _ = platform::remove_regular_file(&path);
+        }
+        let _ = platform::remove_empty_directory(&self.directory);
+    }
+}
+
+#[derive(Debug)]
+pub struct TemporaryShellScript {
+    directory: PathBuf,
+    path: PathBuf,
+    manifest: PathBuf,
+}
+impl TemporaryShellScript {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn manifest_path(&self) -> &Path {
+        &self.manifest
+    }
+    pub fn cleanup(&self) -> Result<(), StorageError> {
+        platform::validate_launch_directory(&self.directory)?;
+        platform::remove_regular_file(&self.path)?;
+        platform::remove_regular_file(&self.manifest)?;
+        platform::remove_empty_directory(&self.directory)?;
+        Ok(())
+    }
+}
+
+fn render_self_cleaning(
+    command: &KubectlExecCommand<'_>,
+    manifest: &Path,
+    directory: &Path,
+) -> Result<Vec<u8>, StorageError> {
+    #[cfg(windows)]
+    {
+        return windows::render_with_cleanup(command, manifest, directory).map_err(Into::into);
+    }
+    #[cfg(unix)]
+    {
+        let mut body = command.render_posix()?;
+        let exit = "exit \"$K10S_STATUS\"\n";
+        let cleanup = format!(
+            "rm -f -- \"$0\" {}\nrmdir -- {} 2>/dev/null || :\nexit \"$K10S_STATUS\"\n",
+            posix_literal(manifest.to_str().ok_or(StorageError::InvalidParent)?),
+            posix_literal(directory.to_str().ok_or(StorageError::InvalidParent)?)
+        );
+        body = body
+            .strip_suffix(exit)
+            .ok_or(StorageError::InvalidParent)?
+            .to_owned()
+            + &cleanup;
+        Ok(body.into_bytes())
+    }
+}
+
+fn random_name() -> Result<String, StorageError> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let mut bytes = [0_u8; 24];
+    getrandom::fill(&mut bytes)?;
+    Ok(bytes
+        .into_iter()
+        .map(|value| ALPHABET[usize::from(value & 63)] as char)
+        .collect())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LaunchAttempt {
+    Missing,
+    Spawn(String),
+}
+
+pub fn launch_system_terminal(script: &TemporaryShellScript) -> Result<(), StorageError> {
+    #[cfg(target_os = "macos")]
+    {
+        launch_macos_with(script, |program, args| {
+            std::process::Command::new(program)
+                .args(args)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| LaunchAttempt::Spawn(error.to_string()))
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return launch_linux_with(script, |program, args| {
+            std::process::Command::new(program)
+                .args(args)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        LaunchAttempt::Missing
+                    } else {
+                        LaunchAttempt::Spawn(error.to_string())
+                    }
+                })
+        });
+    }
+    #[cfg(windows)]
+    {
+        return windows::launch(script);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn launch_macos_with<F>(script: &TemporaryShellScript, mut spawn: F) -> Result<(), StorageError>
+where
+    F: FnMut(&str, &[PlatformString]) -> Result<(), LaunchAttempt>,
+{
+    let arguments = [script.path.as_os_str().to_owned()];
+    if spawn("/usr/bin/open", &arguments).is_ok() {
+        Ok(())
+    } else {
+        let _ = script.cleanup();
+        Err(StorageError::NoTerminalLauncher)
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn launch_linux_with<F>(script: &TemporaryShellScript, mut spawn: F) -> Result<(), StorageError>
+where
+    F: FnMut(&str, &[PlatformString]) -> Result<(), LaunchAttempt>,
+{
+    for (program, marker) in [
+        ("xdg-terminal-exec", "--"),
+        ("x-terminal-emulator", "-e"),
+        ("gnome-terminal", "--"),
+        ("konsole", "-e"),
+        ("kitty", "--"),
+    ] {
+        let arguments = [
+            PlatformString::from(marker),
+            script.path.as_os_str().to_owned(),
+        ];
+        if spawn(program, &arguments).is_ok() {
+            return Ok(());
+        }
+    }
+    let _ = script.cleanup();
+    Err(StorageError::NoTerminalLauncher)
+}
+
+#[cfg(unix)]
+mod platform {
+    pub(super) use super::unix::*;
+}
+#[cfg(windows)]
+mod platform {
+    pub(super) use super::windows::*;
 }

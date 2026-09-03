@@ -1704,6 +1704,7 @@ dependencies = [
  "k10s-protocol",
  "k10s-server",
  "k10s-ui",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tokio",

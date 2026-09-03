@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use k10s_backend::{ExecPluginPreparation, KubePreparation, prepare_kube_backend_from_paths};
 use k10s_desktop::external_shell::{
     EnvironmentSnapshot, ExternalShellTarget, KubectlExecCommand, KubectlLaunchDescriptor,
-    RenderError, descriptor_when_terminal_available, probe_system_terminal,
+    RenderError, TemporaryShellStorage, descriptor_when_terminal_available, probe_system_terminal,
 };
 
 fn descriptor() -> KubectlLaunchDescriptor {
@@ -21,6 +21,141 @@ fn descriptor() -> KubectlLaunchDescriptor {
         Vec::new(),
     )
     .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_storage_is_private_unique_and_self_cleaning() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("k10s-temp-storage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let first = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let second = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    assert_ne!(first.directory(), second.directory());
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(first.directory())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(first.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(first.manifest_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let body = std::fs::read_to_string(first.path()).unwrap();
+    assert!(body.contains("rm -f -- \"$0\""));
+    assert!(body.contains("manifest.json"));
+    first.cleanup().unwrap();
+    second.cleanup().unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_startup_cleanup_removes_only_expired_valid_children() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("k10s-temp-cleanup-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!("k10s-temp-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside);
+    std::fs::write(&outside, "keep").unwrap();
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let expired = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let live = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(expired.manifest_path()).unwrap()).unwrap();
+    manifest["created_unix_seconds"] = 1.into();
+    std::fs::write(
+        expired.manifest_path(),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    symlink(&outside, root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
+    let report = storage.cleanup_expired(100_000).unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(!expired.directory().exists());
+    assert!(live.directory().exists());
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+    live.cleanup().unwrap();
+    std::fs::remove_file(root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
+    std::fs::remove_dir(root).unwrap();
+    std::fs::remove_file(outside).unwrap();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn temporary_linux_launcher_falls_back_with_exact_argv_and_cleans_total_failure() {
+    use k10s_desktop::external_shell::{LaunchAttempt, launch_linux_with};
+    let root = std::env::temp_dir().join(format!("k10s-launcher-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let path = script.path().to_path_buf();
+    let mut calls = Vec::new();
+    let result = launch_linux_with(&script, |program, args| {
+        calls.push((program.to_owned(), args.to_vec()));
+        if program == "gnome-terminal" {
+            Ok(())
+        } else {
+            Err(LaunchAttempt::Missing)
+        }
+    });
+    assert!(result.is_ok());
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "xdg-terminal-exec".into(),
+                vec!["--".into(), path.clone().into_os_string()]
+            ),
+            (
+                "x-terminal-emulator".into(),
+                vec!["-e".into(), path.clone().into_os_string()]
+            ),
+            (
+                "gnome-terminal".into(),
+                vec!["--".into(), path.clone().into_os_string()]
+            ),
+        ]
+    );
+    script.cleanup().unwrap();
+
+    let failed = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let dir = failed.directory().to_owned();
+    assert!(launch_linux_with(&failed, |_, _| Err(LaunchAttempt::Spawn("no".into()))).is_err());
+    assert!(!dir.exists());
+    std::fs::remove_dir(root).unwrap();
 }
 
 fn target() -> ExternalShellTarget {

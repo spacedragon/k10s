@@ -154,6 +154,9 @@ pub struct DesktopApp {
     /// writable config directory exists on this host.
     state_store: Option<StateStore>,
     context_state_store: Option<ContextStateStore>,
+    external_shell_storage: Option<external_shell::TemporaryShellStorage>,
+    external_shell_descriptor: Option<external_shell::KubectlLaunchDescriptor>,
+    external_shell_error: Option<String>,
 }
 
 impl std::fmt::Debug for DesktopApp {
@@ -222,12 +225,102 @@ impl DesktopApp {
         {
             app.restore_workspace_layouts(layouts);
         }
+        let storage = external_shell::TemporaryShellStorage::new(
+            std::env::temp_dir().join("finback-external-shells"),
+        )
+        .ok();
+        if let Some(storage) = &storage {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = storage.cleanup_expired(now);
+        }
+        let descriptor = storage
+            .as_ref()
+            .and_then(|_| server.kubectl_launch_descriptor().cloned());
+        app.set_external_shell_availability(descriptor.as_ref().map_or(
+            k10s_ui::ui::ExternalShellAvailability::Unavailable,
+            |descriptor| k10s_ui::ui::ExternalShellAvailability::Available {
+                generation: descriptor.generation,
+            },
+        ));
         Ok(Self {
             app: Some(app),
             server: Some(server),
             state_store,
             context_state_store,
+            external_shell_storage: storage,
+            external_shell_descriptor: descriptor,
+            external_shell_error: None,
         })
+    }
+
+    #[must_use]
+    pub fn external_shell_error(&self) -> Option<&str> {
+        self.external_shell_error.as_deref()
+    }
+
+    fn drain_external_shell(&mut self) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        for event in app.drain_app_events() {
+            let k10s_ui::K10sAppEvent::CommittedContextChanged { context } = event;
+            app.set_external_shell_availability(
+                k10s_ui::ui::ExternalShellAvailability::Unavailable,
+            );
+            let rebuilt = self
+                .external_shell_descriptor
+                .clone()
+                .and_then(|mut descriptor| {
+                    descriptor.generation = descriptor.generation.saturating_add(1);
+                    descriptor.context = context;
+                    external_shell::probe_system_terminal(
+                        &external_shell::EnvironmentSnapshot::capture(),
+                    )
+                    .map(|_| descriptor)
+                });
+            self.external_shell_descriptor = rebuilt;
+            if let Some(descriptor) = &self.external_shell_descriptor {
+                app.set_external_shell_availability(
+                    k10s_ui::ui::ExternalShellAvailability::Available {
+                        generation: descriptor.generation,
+                    },
+                );
+            }
+        }
+        for requested in app.drain_external_shell_requests() {
+            let Some(descriptor) = self
+                .external_shell_descriptor
+                .as_ref()
+                .filter(|value| value.generation == requested.generation)
+            else {
+                continue;
+            };
+            let target = external_shell::ExternalShellTarget {
+                generation: requested.generation,
+                namespace: requested.namespace,
+                pod: requested.pod,
+                uid: requested.uid,
+                container: requested.container,
+                program: requested.program,
+            };
+            let result = (|| {
+                let storage = self
+                    .external_shell_storage
+                    .as_ref()
+                    .ok_or(external_shell::StorageError::InvalidParent)?;
+                let command = external_shell::KubectlExecCommand::new(descriptor, target)?;
+                let script = storage.create(&command)?;
+                external_shell::launch_system_terminal(&script)
+            })();
+            if let Err(error) = result {
+                let sanitized = error.to_string();
+                tracing::error!("{sanitized}");
+                self.external_shell_error = Some(sanitized);
+            }
+        }
     }
 
     /// Bound address exposed for lifecycle verification.
@@ -519,6 +612,7 @@ impl eframe::App for DesktopApp {
             store.save(&app.workspace_layouts());
         }
         app.poll();
+        self.drain_external_shell();
         context.request_repaint_after(Duration::from_millis(16));
     }
 
