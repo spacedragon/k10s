@@ -147,7 +147,7 @@ distribution is used end to end:
 | `cargo bench -p k10s-backend --bench fake_scale -- --test` | dataset build time, full pod-list query time, subscription snapshot registration, and stable live memory across repeated queries |
 | `cargo test -p k10s-server --test fake_capacity` | the whole dominant-kind snapshot (~18,750 rows) streams through the real control socket as bounded ≤16-row pages and reassembles completely |
 | `tests/kind/cluster.sh up` then `cargo test --locked -p k10s-backend --test kind_read_path -- --ignored --nocapture` | real kubeconfig contexts, discovery, built-ins, CRDs, lists/details/YAML, owner traversal, events, RBAC denial, honest missing metrics, and live watch apply/delete recovery against ephemeral kind |
-| `cargo test --locked -p k10s-backend --test kind_operations -- --ignored --nocapture` (with the same kind cluster) | least-privilege server-side dry-run/apply, UID/RV conflicts, scale/restart/delete propagation, Job/CronJob actions, bounded logs/exec, RBAC denial, and reconciliation after an induced lost mutation response |
+| `cargo test --locked -p k10s-backend --test kind_operations -- --ignored --nocapture` (with the same kind cluster) | least-privilege server-side dry-run/apply, UID/RV conflicts, scale/restart/delete propagation, Job/CronJob actions, bounded logs, RBAC denial, and reconciliation after an induced lost mutation response |
 | `cargo test --locked -p k10s-server --test kind_server_read_path -- --ignored --nocapture` | the same configured cluster reaches clients through the authenticated real control WebSocket and never falls back to fake fixture contexts |
 | `cargo bench -p k10s-ui --bench ui_capacity -- --test` | the shell renders/filters/scrolls the 50k-object model at a fixed 1440×900 viewport within recorded frame-time and allocation-per-frame ceilings |
 
@@ -183,7 +183,7 @@ a `k10s_server::lifecycle` log event:
 2. Stop accepting application connections — new control upgrades are refused.
 3. Send `ShutdownNotice` to connected sessions and close the mutation gate;
    status reads keep working for a bounded grace window (`drain_grace_timeout`).
-4. Cancel watches/logs and terminate exec streams as each socket task unwinds.
+4. Cancel watches and log streams as each socket task unwinds.
 5. Drain tracked connection tasks under one absolute hard deadline
    (`drain_timeout`); survivors are force-closed, any task that still ignores
    the force signal is aborted and joined before returning, and `shutdown`
@@ -206,6 +206,9 @@ error payloads or probe bodies.
 - **WASM check** — `cargo check --locked -p k10s-web --target wasm32-unknown-unknown`
 - **Web foundation** — pinned Trunk 0.21.14 release build plus the Chromium
   Playwright smoke against the standalone server
+- **External shell platforms** — an explicit Linux/macOS/Windows matrix runs
+  generated scripts against fake kubectl and exercises native secure-storage
+  and cleanup primitives without opening a graphical terminal
 - **Native platform smoke** — release-mode server/desktop builds and loopback
   launch probes on Windows and macOS hosted runners
 
