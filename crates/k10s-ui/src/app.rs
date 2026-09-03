@@ -1975,6 +1975,7 @@ impl K10sApp {
         }
         match self.factory.connect(&self.connection_url) {
             Ok(connection) => {
+                self.revoke_external_shell();
                 self.transport_open = false;
                 self.connection = Some(connection);
             }
@@ -3671,6 +3672,7 @@ impl K10sApp {
         match self.client.retry_if_due(now_ms) {
             Ok(true) => match self.factory.connect(&self.connection_url) {
                 Ok(connection) => {
+                    self.revoke_external_shell();
                     self.transport_open = false;
                     self.connection = Some(connection);
                 }
@@ -5319,6 +5321,18 @@ mod tests {
 
         app.poll_at(100, 10);
         assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 41 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 41,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
         assert_eq!(app.view(), &AppView::Connecting);
         assert_eq!(state.borrow().connect_count, 1);
         let editor = app.shell.yaml_editors_mut().get(window).unwrap();
@@ -5383,6 +5397,11 @@ mod tests {
         // First retry fired: the new transport exists but has not opened,
         // so the freshly queued Hello must survive this tick's flushes.
         app.poll_at(10_000, 0);
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
         assert_eq!(state.borrow().connect_count, 2);
         assert_eq!(app.client.phase(), ClientPhase::Authenticating);
         assert!(
@@ -6441,13 +6460,72 @@ mod tests {
     }
 
     #[test]
-    fn delayed_external_shell_generation_is_rejected() {
+    fn successful_reconnect_install_revokes_external_shell_synchronously() {
+        let (mut app, state) = test_app(vec![
+            ConnectionScript::default(),
+            ConnectionScript::default(),
+        ]);
+        app.transient_loss(10, 0);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 8 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 8,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
+
+        app.reconnect_if_due(u64::MAX, 0);
+
+        assert_eq!(state.borrow().connect_count, 2);
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
+    }
+
+    #[test]
+    fn external_shell_dispatch_revalidates_generation_identity_container_and_authority() {
         let (mut app, _) = ready_app();
+        let pod = pod_identity("api");
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let subscription = app
+            .resource_subscriptions
+            .get(app.window_subscriptions.get(&window).unwrap())
+            .unwrap()
+            .live
+            .id()
+            .clone();
+        complete_resource_snapshot(
+            &mut app,
+            &subscription,
+            1,
+            vec![deployment_row(pod.clone(), 1)],
+            true,
+        );
+        app.web_select_resource(window, pod.clone());
+        let detail = super::stream_lifecycle_tests::detail_with_container(&pod, "api");
+        app.details.insert(pod.clone(), detail.clone());
+        app.primary_details
+            .insert(pod.clone(), PrimaryDetailState::Loaded(detail));
+        assert!(
+            app.build_resource_feed()
+                .detail_authority
+                .get(&pod)
+                .is_some_and(|authority| authority.mutations_allowed()),
+            "fixture must be authoritative: {:?}",
+            app.build_resource_feed().detail_authority.get(&pod)
+        );
         app.shell.set_external_shell_availability(
             crate::ui::ExternalShellAvailability::Available { generation: 10 },
         );
         app.handle_resource_action(ResourceAction::OpenExternalShell {
-            window: WindowId(999),
+            window,
             target: crate::ui::ExternalShellTarget {
                 generation: 9,
                 namespace: "default".into(),
@@ -6456,6 +6534,55 @@ mod tests {
                 container: "api".into(),
                 program: "/bin/sh".into(),
             },
+        });
+        assert!(app.drain_external_shell_requests().is_empty());
+
+        let valid = crate::ui::ExternalShellTarget {
+            generation: 10,
+            namespace: "default".into(),
+            pod: "api".into(),
+            uid: "uid-api".into(),
+            container: "api".into(),
+            program: "/bin/sh".into(),
+        };
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window,
+            target: valid.clone(),
+        });
+        assert_eq!(app.drain_external_shell_requests(), vec![valid.clone()]);
+        for invalid in [
+            crate::ui::ExternalShellTarget {
+                namespace: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                pod: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                uid: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                container: "other".into(),
+                ..valid.clone()
+            },
+        ] {
+            app.handle_resource_action(ResourceAction::OpenExternalShell {
+                window,
+                target: invalid,
+            });
+            assert!(app.drain_external_shell_requests().is_empty());
+        }
+        app.window_freshness_overrides.insert(
+            window,
+            WindowFreshness::Failed {
+                message: "stale".into(),
+            },
+        );
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window,
+            target: valid,
         });
         assert!(app.drain_external_shell_requests().is_empty());
     }
@@ -9378,7 +9505,24 @@ mod tests {
             .clone();
 
         app.transient_loss(150, 0);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 42 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 42,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
         app.retry_now(200, 0).unwrap();
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
         app.handle_event(WsEvent::Opened, 200, 0).unwrap();
         let mut resumed = welcome();
         resumed.payload = serde_json::to_value(Welcome {
@@ -10119,7 +10263,7 @@ mod stream_lifecycle_tests {
         );
     }
 
-    fn detail_with_container(
+    pub(super) fn detail_with_container(
         identity: &ResourceIdentity,
         container: &str,
     ) -> ResourceDetailResponse {

@@ -442,29 +442,16 @@ fn show_external_shell_action<I: RowIdentity>(
             "k10s.external-shell-availability",
         ))
     });
-    let Some(crate::ui::ExternalShellAvailability::Available { generation }) = availability else {
-        return;
-    };
     if !presentation.mutations_allowed {
         return;
     }
     let identity = presentation.identity;
-    if !identity.gvk.group.is_empty()
-        || identity.gvk.version != "v1"
-        || identity.gvk.kind != "Pod"
-        || identity.namespace.as_deref().is_none_or(str::is_empty)
-        || identity.name.is_empty()
-        || identity.uid.is_empty()
-    {
-        return;
-    }
     let presentation::DetailPrimary::Loaded(view) = presentation.primary else {
         return;
     };
     let Some(runtime) = pod::PodRuntimeProjection::from_view(identity, view) else {
         return;
     };
-    let default = runtime.default_container().to_owned();
     let selected = streams
         .logs
         .target_of(window)
@@ -475,7 +462,16 @@ fn show_external_shell_action<I: RowIdentity>(
                 && target.uid == identity.uid
                 && runtime.contains(&target.container)
         })
-        .map_or(default, |target| target.container);
+        .map(|target| target.container);
+    let Some(shell_target) = build_external_shell_target(
+        availability.unwrap_or_default(),
+        identity,
+        runtime.containers(),
+        selected.as_deref(),
+    ) else {
+        return;
+    };
+    let selected = shell_target.container.clone();
     let Some(target) = stream_target(detail, &selected) else {
         return;
     };
@@ -508,16 +504,50 @@ fn show_external_shell_action<I: RowIdentity>(
             actions.push(crate::ui::ResourceAction::OpenExternalShell {
                 window,
                 target: crate::ui::ExternalShellTarget {
-                    generation,
-                    namespace: identity.namespace.clone().expect("validated namespace"),
-                    pod: identity.name.clone(),
-                    uid: identity.uid.clone(),
+                    generation: shell_target.generation,
+                    namespace: shell_target.namespace.clone(),
+                    pod: shell_target.pod.clone(),
+                    uid: shell_target.uid.clone(),
                     container,
                     program: "/bin/sh".to_owned(),
                 },
             });
         }
     });
+}
+
+fn build_external_shell_target(
+    availability: crate::ui::ExternalShellAvailability,
+    identity: &k10s_protocol::ResourceIdentity,
+    containers: &[String],
+    selected: Option<&str>,
+) -> Option<crate::ui::ExternalShellTarget> {
+    let crate::ui::ExternalShellAvailability::Available { generation } = availability else {
+        return None;
+    };
+    if !identity.gvk.group.is_empty()
+        || identity.gvk.version != "v1"
+        || identity.gvk.kind != "Pod"
+        || identity.namespace.as_deref().is_none_or(str::is_empty)
+        || identity.name.is_empty()
+        || identity.uid.is_empty()
+    {
+        return None;
+    }
+    let container = selected
+        .filter(|selected| containers.iter().any(|container| container == selected))
+        .or_else(|| containers.first().map(String::as_str))?;
+    if container.is_empty() {
+        return None;
+    }
+    Some(crate::ui::ExternalShellTarget {
+        generation,
+        namespace: identity.namespace.clone()?,
+        pod: identity.name.clone(),
+        uid: identity.uid.clone(),
+        container: container.to_owned(),
+        program: "/bin/sh".to_owned(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -787,6 +817,75 @@ where
         },
         |identity| identity.gvk.clone(),
     )
+}
+
+#[cfg(test)]
+mod external_shell_tests {
+    use super::build_external_shell_target;
+    use crate::ui::ExternalShellAvailability;
+    use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+
+    fn pod() -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "api".into(),
+            uid: "uid-api".into(),
+        }
+    }
+
+    #[test]
+    fn external_shell_target_requires_exact_complete_pod_and_container() {
+        let available = ExternalShellAvailability::Available { generation: 7 };
+        let containers = vec!["app".to_owned(), "metrics".to_owned()];
+        let expected = build_external_shell_target(available, &pod(), &containers, Some("metrics"))
+            .expect("exact target");
+        assert_eq!(expected.container, "metrics");
+        assert_eq!(expected.generation, 7);
+        assert_eq!(expected.namespace, "default");
+        assert_eq!(expected.pod, "api");
+        assert_eq!(expected.uid, "uid-api");
+        assert_eq!(expected.program, "/bin/sh");
+
+        assert_eq!(
+            build_external_shell_target(available, &pod(), &containers, None)
+                .unwrap()
+                .container,
+            "app"
+        );
+        assert!(
+            build_external_shell_target(
+                ExternalShellAvailability::Unavailable,
+                &pod(),
+                &containers,
+                None
+            )
+            .is_none()
+        );
+        let mut invalid = pod();
+        invalid.gvk.group = "apps".into();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.gvk.version = "v1beta1".into();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.namespace = None;
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.name.clear();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.uid.clear();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        assert!(build_external_shell_target(available, &pod(), &[], None).is_none());
+        assert_eq!(
+            build_external_shell_target(available, &pod(), &containers, Some("missing"))
+                .unwrap()
+                .container,
+            "app"
+        );
+    }
 }
 
 #[cfg(test)]

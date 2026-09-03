@@ -474,6 +474,10 @@ fn external_shell_capability_gates_pod_action() {
         ));
     run_steps(&mut harness);
     let id = workload_id(harness.state(), W::Pods);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetSplitRatio(id, 1.0));
     common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Select resource db-postgres-0")
         .click();
@@ -540,6 +544,55 @@ fn external_shell_capability_gates_pod_action() {
             },
         }]
     );
+
+    let identity = harness
+        .state()
+        .shell
+        .workspace()
+        .resource_state(id)
+        .and_then(|state| state.selection.clone())
+        .unwrap();
+    let detail = harness.state_mut().feed.details.get_mut(&identity).unwrap();
+    let Some(ResourceProjection::Pod(pod)) = detail.projection.as_mut() else {
+        panic!("typed pod")
+    };
+    pod.containers.push(PodContainerProjection {
+        name: "metrics".into(),
+        image: None,
+        state: Some(ContainerStateProjection::Running),
+        ready: None,
+        restart_count: None,
+        last_termination: None,
+    });
+    let selected = StreamTarget {
+        context: CONTEXT.into(),
+        namespace: "default".into(),
+        pod: "db-postgres-0".into(),
+        uid: format!("uid-{CONTEXT}-pod-default-db-postgres-0"),
+        container: "metrics".into(),
+    };
+    harness
+        .state_mut()
+        .shell
+        .stream_stores_mut()
+        .logs
+        .ensure(id, selected)
+        .select_container("metrics");
+    run_steps(&mut harness);
+    assert!(
+        common::workload_window(&harness, "Pods")
+            .children_recursive()
+            .any(|node| node.accesskit_node().value().as_deref() == Some("metrics"))
+    );
+    common::workload_window(&harness, "Pods")
+        .get_by_role_and_label(Role::Button, "Open shell")
+        .click();
+    run_steps(&mut harness);
+    let actions = harness.state_mut().shell.drain_resource_actions();
+    let [k10s_ui::ui::ResourceAction::OpenExternalShell { target, .. }] = actions.as_slice() else {
+        panic!("one action")
+    };
+    assert_eq!(target.container, "metrics");
 }
 
 #[test]
