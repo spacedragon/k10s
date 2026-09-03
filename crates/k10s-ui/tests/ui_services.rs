@@ -1006,7 +1006,7 @@ fn failed_service_detail_is_safe_and_retries_the_exact_identity_once() {
 }
 
 #[test]
-fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
+fn desktop_capability_renders_start_and_opens_the_shared_service_target() {
     let mut harness = harness();
     harness.state_mut().feed.port_forward_available = true;
     open_via_launcher(&mut harness);
@@ -1036,11 +1036,14 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
     let actions = harness.state_mut().shell.drain_port_forward_actions();
     assert!(matches!(
         actions.as_slice(),
-        [k10s_ui::ui::PortForwardAction::Start {
-            local_port: 0,
-            port: k10s_protocol::PortForwardPortSelector::Name { name },
+        [k10s_ui::ui::PortForwardAction::OpenStart {
+            target: k10s_protocol::PortForwardTarget::Service {
+                identity,
+                port: k10s_protocol::PortForwardPortSelector::Name { name },
+            },
+            initial_local_port: 0,
             ..
-        }] if name == "http"
+        }] if identity == &service_identity("web-frontend") && name == "http"
     ));
 }
 

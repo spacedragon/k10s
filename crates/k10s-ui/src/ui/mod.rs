@@ -7,6 +7,7 @@ pub mod dialogs;
 mod infrastructure;
 mod launcher;
 mod overview;
+mod port_forward;
 mod resource_table;
 mod resource_window;
 mod responsive_table;
@@ -20,6 +21,10 @@ mod window;
 
 pub(crate) use detail::PodRuntimeProjection;
 
+pub use port_forward::{
+    LocalPortError, PortForwardRetryErrors, PortForwardStartModal, RETRY_LOCAL_PORT_GUIDANCE,
+    retry_start_request,
+};
 pub use resource_window::{
     DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
     ResourceFeed, RowIdentity, SafeUiError, WindowFreshness,
@@ -94,7 +99,8 @@ pub struct UiShell<I> {
     /// only after the response succeeds. The origin distinguishes a fresh
     /// user action from passive mismatch reconciliation.
     requested_context: Option<(String, ContextRequestOrigin)>,
-    port_forward_actions: Vec<PortForwardAction<I>>,
+    port_forward_start_modal: Option<PortForwardStartModal>,
+    port_forward_actions: Vec<PortForwardAction>,
     resource_actions: Vec<ResourceAction>,
     external_shell_availability: ExternalShellAvailability,
     launcher: launcher::LauncherState,
@@ -137,14 +143,18 @@ pub enum ResourceAction {
     FullResyncWindow(WindowId),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum PortForwardAction<I> {
-    Start {
-        service: I,
-        port: k10s_protocol::PortForwardPortSelector,
-        local_port: u16,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortForwardAction {
+    OpenStart {
+        target: k10s_protocol::PortForwardTarget,
+        remote_label: String,
+        initial_local_port: u16,
     },
+    Start(k10s_protocol::PortForwardStartRequest),
     Stop(String),
+    Retry(k10s_protocol::PortForwardSessionId),
+    FocusSession(k10s_protocol::PortForwardSessionId),
+    CopyAddress(String),
 }
 
 impl<I> Default for UiShell<I>
@@ -171,6 +181,7 @@ where
             dialogs: dialogs::OperationDialogs::default(),
             command_palette: command_palette::CommandPalette::default(),
             requested_context: None,
+            port_forward_start_modal: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
             external_shell_availability: ExternalShellAvailability::Unavailable,
@@ -215,8 +226,103 @@ where
         self.requested_context.take()
     }
 
-    pub fn drain_port_forward_actions(&mut self) -> Vec<PortForwardAction<I>> {
+    pub fn drain_port_forward_actions(&mut self) -> Vec<PortForwardAction> {
         std::mem::take(&mut self.port_forward_actions)
+    }
+
+    /// Open the shared start dialog for one validated typed target.
+    pub fn open_port_forward_start(
+        &mut self,
+        target: k10s_protocol::PortForwardTarget,
+        remote_label: impl Into<String>,
+        initial_local_port: u16,
+    ) {
+        self.port_forward_start_modal = Some(PortForwardStartModal::new(
+            target,
+            remote_label,
+            initial_local_port,
+        ));
+    }
+
+    /// Current shared start-dialog state.
+    #[must_use]
+    pub fn port_forward_start_modal(&self) -> Option<&PortForwardStartModal> {
+        self.port_forward_start_modal.as_ref()
+    }
+
+    /// Mutable shared start-dialog state for application outcomes and tests.
+    pub fn port_forward_start_modal_mut(&mut self) -> Option<&mut PortForwardStartModal> {
+        self.port_forward_start_modal.as_mut()
+    }
+
+    /// Project a recoverable request error into the still-open dialog.
+    pub fn port_forward_start_failed(&mut self, safe_message: impl Into<String>) {
+        if let Some(modal) = self.port_forward_start_modal.as_mut() {
+            modal.pending = false;
+            modal.error = Some(safe_message.into());
+        }
+    }
+
+    /// Project an error only into the dialog that originated the request.
+    pub fn port_forward_start_failed_for(
+        &mut self,
+        target: &k10s_protocol::PortForwardTarget,
+        safe_message: impl Into<String>,
+    ) {
+        if self
+            .port_forward_start_modal
+            .as_ref()
+            .is_some_and(|modal| &modal.target == target)
+        {
+            self.port_forward_start_failed(safe_message);
+        }
+    }
+
+    /// Dismiss non-persisted start state during a context transition.
+    pub fn dismiss_port_forward_start(&mut self) {
+        self.port_forward_start_modal = None;
+    }
+
+    /// Complete a start (including duplicate success), then open/focus the
+    /// singleton manager and its returned authoritative session row.
+    pub fn port_forward_start_succeeded(&mut self, session_id: &str) {
+        self.port_forward_start_modal = None;
+        self.focus_port_forward_session(session_id);
+    }
+
+    /// Complete one originating dialog without dismissing a different target
+    /// that may have opened while the response was in flight.
+    pub fn port_forward_start_succeeded_for(
+        &mut self,
+        target: &k10s_protocol::PortForwardTarget,
+        session_id: &str,
+    ) {
+        if self
+            .port_forward_start_modal
+            .as_ref()
+            .is_some_and(|modal| &modal.target == target)
+        {
+            self.port_forward_start_modal = None;
+        }
+        self.focus_port_forward_session(session_id);
+    }
+
+    /// Open/focus the singleton manager and one authoritative session row.
+    pub fn focus_port_forward_session(&mut self, session_id: &str) {
+        let events = self.workspace.apply(WorkspaceCommand::ActivateLauncherItem(
+            crate::workspace::LauncherItem::PortForwards,
+        ));
+        let window = events.into_iter().find_map(|event| match event {
+            WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(id),
+            _ => None,
+        });
+        if let Some(window) = window {
+            self.workspace
+                .apply(WorkspaceCommand::FocusPortForwardSession(
+                    window,
+                    session_id.to_owned(),
+                ));
+        }
     }
 
     pub fn drain_resource_actions(&mut self) -> Vec<ResourceAction> {
@@ -575,6 +681,12 @@ where
             refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
         }
 
+        port_forward::show(
+            ui.ctx(),
+            &mut self.port_forward_start_modal,
+            &mut self.port_forward_actions,
+        );
+
         let context_change = context_change
             .map(|context| (context, ContextRequestOrigin::Explicit))
             .or_else(|| {
@@ -611,11 +723,27 @@ where
                             service,
                             port,
                             local_port,
-                        } => self.port_forward_actions.push(PortForwardAction::Start {
-                            service,
-                            port,
-                            local_port,
-                        }),
+                        } => {
+                            if let Some(identity) = service.as_row_identity().cloned() {
+                                let remote_label = match &port {
+                                    k10s_protocol::PortForwardPortSelector::Name { name } => {
+                                        format!("Service port {name}")
+                                    }
+                                    k10s_protocol::PortForwardPortSelector::Number { number } => {
+                                        format!("Service port {number}")
+                                    }
+                                };
+                                self.port_forward_actions
+                                    .push(PortForwardAction::OpenStart {
+                                        target: k10s_protocol::PortForwardTarget::Service {
+                                            identity,
+                                            port,
+                                        },
+                                        remote_label,
+                                        initial_local_port: local_port,
+                                    });
+                            }
+                        }
                         WorkspaceEvent::PortForwardStopRequested(id) => {
                             self.port_forward_actions.push(PortForwardAction::Stop(id));
                         }
