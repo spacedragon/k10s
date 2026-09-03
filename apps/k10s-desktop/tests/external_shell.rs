@@ -430,9 +430,10 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
             r#"use std::{{env, fs::OpenOptions, io::Write}};
 fn main() {{
  let args: Vec<String> = env::args().skip(1).collect();
+ let mut environment: Vec<(String, String)> = env::vars().collect();
+ environment.sort();
  let mut log = OpenOptions::new().create(true).append(true).open({:?}).unwrap();
- for arg in &args {{ writeln!(log, "ARG={{arg}}").unwrap(); }}
- for key in ["PATH", "USERPROFILE", "KUBECONFIG", "SHOULD_NOT_LEAK"] {{ writeln!(log, "ENV {{key}}={{}}", env::var(key).unwrap_or_else(|_| "<unset>".into())).unwrap(); }}
+ writeln!(log, "CALL\nARGS={{args:?}}\nENV={{environment:?}}\nEND").unwrap();
  if args.iter().any(|arg| arg == "get") {{
    let pod = args.iter().position(|arg| arg == "pod").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("");
    if pod == "lookup-fail" {{ std::process::exit(41); }}
@@ -481,28 +482,68 @@ fn main() {{
     let script_path = dir.join("rendered.ps1");
     fs::write(
         &script_path,
-        KubectlExecCommand::new(&descriptor, exec_target)
+        KubectlExecCommand::new(&descriptor, exec_target.clone())
             .unwrap()
             .render_powershell()
             .unwrap(),
     )
     .unwrap();
-    let status = Command::new("powershell.exe")
+    let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-File"])
         .arg(&script_path)
         .env("SHOULD_NOT_LEAK", "secret")
         .stdin(Stdio::null())
-        .status()
+        .output()
         .unwrap();
-    assert_eq!(status.code(), Some(23));
-    let recorded = fs::read_to_string(&log).unwrap();
-    assert!(recorded.contains("ARG=exec\nARG=-it\nARG=pod '$(malicious)' & | <> %!\n"));
-    assert!(recorded.contains("ENV SHOULD_NOT_LEAK=<unset>"));
-    for (name, value) in &descriptor.environment {
-        assert!(recorded.contains(&format!("ENV {name}={value}\n")));
-    }
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "Finback shell: kubectl exec failed."
+    );
+    let environment = descriptor
+        .environment
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let lookup = vec![
+        "--context".into(),
+        descriptor.context.clone(),
+        "--namespace".into(),
+        exec_target.namespace.clone(),
+        "get".into(),
+        "pod".into(),
+        exec_target.pod.clone(),
+        "-o".into(),
+        "jsonpath={.metadata.uid}".into(),
+    ];
+    let exec = vec![
+        "--context".into(),
+        descriptor.context.clone(),
+        "--namespace".into(),
+        exec_target.namespace.clone(),
+        "exec".into(),
+        "-it".into(),
+        exec_target.pod.clone(),
+        "--container".into(),
+        exec_target.container.clone(),
+        "--".into(),
+        exec_target.program.clone(),
+    ];
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!(
+            "CALL\nARGS={lookup:?}\nENV={environment:?}\nEND\nCALL\nARGS={exec:?}\nENV={environment:?}\nEND\n"
+        )
+    );
 
-    for (pod, expected, must_exec) in [("lookup-fail", 41, false), ("mismatch", 66, false)] {
+    for (pod, expected, diagnostic) in [
+        ("lookup-fail", 41, "Finback shell: Pod UID lookup failed."),
+        (
+            "mismatch",
+            66,
+            "Finback shell: Pod UID changed; refusing exec.",
+        ),
+    ] {
         fs::write(&log, "").unwrap();
         let mut target = target();
         target.uid = "uid-1".into();
@@ -515,16 +556,28 @@ fn main() {{
                 .unwrap(),
         )
         .unwrap();
-        let status = Command::new("powershell.exe")
+        let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-File"])
             .arg(&script_path)
             .stdin(Stdio::null())
-            .status()
+            .output()
             .unwrap();
-        assert_eq!(status.code(), Some(expected));
+        assert_eq!(output.status.code(), Some(expected));
+        assert_eq!(String::from_utf8(output.stderr).unwrap().trim(), diagnostic);
+        let lookup = vec![
+            "--context".to_owned(),
+            descriptor.context.clone(),
+            "--namespace".to_owned(),
+            target().namespace,
+            "get".to_owned(),
+            "pod".to_owned(),
+            pod.to_owned(),
+            "-o".to_owned(),
+            "jsonpath={.metadata.uid}".to_owned(),
+        ];
         assert_eq!(
-            fs::read_to_string(&log).unwrap().contains("ARG=exec"),
-            must_exec
+            fs::read_to_string(&log).unwrap(),
+            format!("CALL\nARGS={lookup:?}\nENV={environment:?}\nEND\n")
         );
     }
     fs::remove_dir_all(dir).unwrap();
