@@ -31,12 +31,44 @@ TLS, authentication, and access control at a reverse proxy.
 - The OCI image runs as `10001:10001`; mount credentials read-only and grant
   only the Kubernetes RBAC needed for intended operations.
 
+## External desktop shell
+
+Shell launch is available only to the desktop composition root for its own
+embedded-local connection. Loopback or same-machine connectivity is not proof
+of this capability; Web and remote/standalone connections expose no shell.
+The process is the user's installed `kubectl` in the user's system terminal and
+therefore has the same local filesystem, exec-auth-plugin, and Kubernetes
+authority as that user.
+
+At embedded-server startup, the desktop freezes a launch descriptor containing
+the resolved kubectl executable, exact ordered kubeconfig sources, selected
+context, connection generation, and only explicitly allowed non-secret
+environment needed by kubectl/plugins. It withholds the capability if the
+configuration is in-memory, unavailable locally, depends on sensitive
+environment, or otherwise cannot be reproduced exactly. Kubeconfig contents,
+credentials, access tokens, and user resource values are never copied into a
+fallback command.
+
+The private script checks the live Pod UID immediately before invoking exec.
+This preflight prevents common stale-name mistakes but is not atomic: Kubernetes
+exec accepts no UID/resource-version precondition, so deletion and same-name
+recreation can still race between the check and exec. That residual race is an
+explicit limitation.
+
+Scripts use random safe names in an owner-only Finback temporary directory
+(Unix directory/file mode `0700`; Windows owner-only ACL), create-new and
+no-follow/reparse checks, platform-specific quoting, and direct executable/argv
+launch. They self-delete after execution; synchronous launch failure deletes
+immediately, and bounded startup cleanup removes validated owned entries older
+than 24 hours. Cleanup refuses symlinks/reparse points and unvalidated
+lookalikes and never recursively targets the general temporary directory.
+
 ## Logs and diagnostics
 
 Request/subscription/operation IDs are safe correlation IDs for joining client
 errors to server lifecycle and operation logs. Operators may share those IDs,
 timestamps, error codes, and redacted configuration. They must never log payloads,
-YAML bodies, exec input/output, log-stream contents, access tokens, or raw
+YAML bodies, external-shell script bodies, log-stream contents, access tokens, or raw
 kubeconfig. See [Troubleshooting](troubleshooting.md) for the correlation flow.
 
 Browser WebSocket origins are checked against the observed host. The server

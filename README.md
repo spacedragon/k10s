@@ -3,7 +3,8 @@
 A local Kubernetes control-plane client with a Rust workspace foundation: a
 protocol crate shared by native and web frontends, a fake-backed backend
 kernel, and an embeddable Axum control server. The release candidate includes
-real kubeconfig-backed reads and operations, guarded YAML, logs, exec, bounded
+real kubeconfig-backed reads and operations, guarded YAML, logs, external
+desktop shells, bounded
 recovery, browser/native frontends, load budgets, and native/server packages.
 
 ## Scope
@@ -31,6 +32,24 @@ cargo test --locked --workspace          # all unit + integration tests
 cargo run -p k10s-desktop                # desktop app (embeds the server)
 cargo run -p k10s-server-app             # standalone server on 127.0.0.1:8080
 ```
+
+### External desktop shell
+
+`Open shell` is available only in the native desktop application while it is
+connected to the embedded server that the same application started. It opens
+one independent `kubectl exec -it` session in the system terminal; Finback does
+not embed, monitor, or terminate that terminal. Web builds and desktop clients
+connected to a standalone or remote server have no Shell tab, shortcut,
+command-palette action, placeholder, or external-shell button.
+
+The local machine must provide `kubectl`, a usable kubeconfig, and a terminal
+launcher. macOS opens a private executable `.command` file with `open`; Linux
+tries `xdg-terminal-exec`, `x-terminal-emulator`, `gnome-terminal`, `konsole`,
+then `kitty`; Windows starts a BOM/CRLF PowerShell script with
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File` and a new
+console. See [configuration](docs/configuration.md),
+[security](docs/security.md), and [troubleshooting](docs/troubleshooting.md)
+for descriptor reproduction, Pod-identity, and cleanup details.
 
 Standalone server environment:
 
@@ -107,7 +126,8 @@ loading/empty/stale/error state of the approved screen set:
   lists, stale-connection banners, textual (never color-only) status and
   metrics conditions, conflict reasons inside operation dialogs, a gone-resource
   projection for deleted selections, unavailable GVKs after context switches,
-  disconnected logs that retain history, active-shell navigation guards,
+  disconnected logs that retain history, external shells that never create
+  navigation guards,
   keyboard focus order, and minimum-size non-overlap.
 - `crates/k10s-ui/tests/ui_snapshots.rs` + `tests/snapshots/*.txt` — stable
   accessibility-tree snapshots of the approved screens. These are deterministic

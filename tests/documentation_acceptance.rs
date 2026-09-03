@@ -260,7 +260,7 @@ fn operational_contracts_have_acceptance_coverage() {
         assert!(security.contains(required), "missing contract: {required}");
     }
     assert!(troubleshooting.contains("correlation ID"));
-    for required in ["major `1`", "minor `0..=5`", "`resyncRequired`"] {
+    for required in ["major `1`", "minor `5..=6`", "`resyncRequired`"] {
         assert!(protocol.contains(required), "missing contract: {required}");
     }
 

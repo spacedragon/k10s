@@ -173,14 +173,6 @@ impl Runtime {
                     Err(error) => format!("Logs request failed: {error}"),
                 };
             }
-        } else if action == "connect-shell" {
-            if let Some(window) = self.active_window {
-                app.web_set_detail_tab(window, DetailTab::Shell);
-                self.action_status = match app.web_connect_shell(window) {
-                    Ok(()) => "Exec connection requested".to_owned(),
-                    Err(error) => format!("Exec request failed: {error}"),
-                };
-            }
         } else if action == "reconnect" {
             self.action_status = "Control reconnect requested".to_owned();
             app.web_reconnect();
@@ -375,7 +367,6 @@ impl Runtime {
                 ("YAML", "Yaml"),
                 ("Events", "Events"),
                 ("Logs", "Logs"),
-                ("Shell", "Shell"),
             ] {
                 self.append_button_to(&tabs, label, &format!("tab:{tab}"));
             }
@@ -396,21 +387,14 @@ impl Runtime {
                 if detail.capabilities.can_view_logs {
                     self.append_button("Connect logs", "connect-logs");
                 }
-                if detail.capabilities.can_exec {
-                    self.append_button("Connect shell", "connect-shell");
-                }
             } else {
                 self.append_text_with_attr("p", "Loading details", "role", "status");
             }
         }
 
-        if let Some((log_phase, log_lines, shell_phase, shell_lines)) = stream {
+        if let Some((log_phase, log_lines)) = stream {
             self.append_text("p", &format!("Logs: {log_phase}"));
             for line in log_lines {
-                self.append_text("pre", &line);
-            }
-            self.append_text("p", &format!("Exec: {shell_phase}"));
-            for line in shell_lines {
                 self.append_text("pre", &line);
             }
         }
@@ -517,7 +501,6 @@ fn parse_tab(value: &str) -> Option<DetailTab> {
         "Yaml" => Some(DetailTab::Yaml),
         "Events" => Some(DetailTab::Events),
         "Logs" => Some(DetailTab::Logs),
-        "Shell" => Some(DetailTab::Shell),
         _ => None,
     }
 }
