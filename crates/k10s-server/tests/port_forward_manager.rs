@@ -80,6 +80,201 @@ struct ScriptedSeam {
     fail_connections: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[derive(Debug)]
+struct ResolveGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ResolveGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct GatedResolveSeam {
+    gate: Arc<ResolveGate>,
+}
+
+impl k10s_backend::PortForwardSeam for GatedResolveSeam {
+    fn resolve<'a>(
+        &'a self,
+        request: PortForwardRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<k10s_backend::ResolvedPortForward, BackendError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.gate.started.notify_one();
+            self.gate.release.notified().await;
+            let PortForwardTarget::Service { identity, port } = request.target else {
+                unreachable!("the regression uses a Service target")
+            };
+            let source_port = match port {
+                PortForwardPortSelector::Number { number } => number,
+                PortForwardPortSelector::Name { .. } => 80,
+            };
+            Ok(k10s_backend::ResolvedPortForward {
+                context: request.context,
+                namespace: identity.namespace.unwrap(),
+                target_uid: identity.uid,
+                source_port,
+                pod_name: "pinned-pod".into(),
+                pod_uid: "uid-pinned".into(),
+                pod_port: 8_080,
+            })
+        })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        _resolved: &'a k10s_backend::ResolvedPortForward,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<k10s_backend::PortForwardStream, BackendError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(BackendError::Cancelled) })
+    }
+}
+
+#[derive(Debug)]
+struct NotFoundSeam;
+
+impl k10s_backend::PortForwardSeam for NotFoundSeam {
+    fn resolve<'a>(
+        &'a self,
+        _request: PortForwardRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<k10s_backend::ResolvedPortForward, BackendError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(BackendError::NotFound) })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        _resolved: &'a k10s_backend::ResolvedPortForward,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<k10s_backend::PortForwardStream, BackendError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(BackendError::Cancelled) })
+    }
+}
+
+async fn manager_with_connector(connector: PortForwardConnector) -> PortForwardManager {
+    let cancel = CancellationToken::new();
+    let (events_tx, _events_rx) = broadcast::channel(64);
+    let manager = PortForwardManager::new(connector, cancel, events_tx);
+    manager.begin_context_transition("dev-local".into()).await;
+    manager
+}
+
+#[tokio::test]
+async fn request_cancellation_rolls_back_before_commit_but_not_after_active_linearizes() {
+    let gate = ResolveGate::new();
+    let manager = manager_with_connector(PortForwardConnector::new(Arc::new(GatedResolveSeam {
+        gate: gate.clone(),
+    })))
+    .await;
+    let request_cancel = CancellationToken::new();
+    let start_manager = manager.clone();
+    let start_cancel = request_cancel.clone();
+    let start = tokio::spawn(async move {
+        start_manager
+            .start_cancellable(
+                service_target("web", PortForwardPortSelector::Number { number: 80 }),
+                0,
+                "dev-local".into(),
+                start_cancel,
+            )
+            .await
+    });
+    gate.started.notified().await;
+    request_cancel.cancel();
+    gate.release.notify_one();
+    assert_eq!(
+        start.await.unwrap(),
+        Err(k10s_server::port_forward::StartError::Cancelled)
+    );
+    assert!(manager.list().await.is_empty());
+
+    let gate = ResolveGate::new();
+    let manager = manager_with_connector(PortForwardConnector::new(Arc::new(GatedResolveSeam {
+        gate: gate.clone(),
+    })))
+    .await;
+    let mut events = manager.subscribe().await;
+    let request_cancel = CancellationToken::new();
+    let start_manager = manager.clone();
+    let start_cancel = request_cancel.clone();
+    let start = tokio::spawn(async move {
+        start_manager
+            .start_cancellable(
+                service_target("web", PortForwardPortSelector::Number { number: 80 }),
+                0,
+                "dev-local".into(),
+                start_cancel,
+            )
+            .await
+    });
+    gate.started.notified().await;
+    gate.release.notify_one();
+    let active = events.recv().await.unwrap();
+    assert_eq!(active.session.state, PortForwardSessionState::Active);
+    request_cancel.cancel();
+    let completed = start.await.unwrap().expect("Active wins cancellation");
+    assert_eq!(completed.id, active.session.id);
+    assert_eq!(manager.list().await.len(), 1);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn generic_not_found_messages_name_the_requested_target_kind() {
+    let manager = manager_with_connector(PortForwardConnector::new(Arc::new(NotFoundSeam))).await;
+    let service = manager
+        .start(
+            service_target(
+                "missing-service",
+                PortForwardPortSelector::Number { number: 80 },
+            ),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(service.message, "the service does not exist");
+
+    let pod = manager
+        .start(
+            pod_target("missing-pod", "app", 8_080),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(pod.message, "the pod does not exist");
+    manager.shutdown().await;
+}
+
 impl ScriptedSeam {
     fn new(names: &[&str]) -> Self {
         Self {
@@ -541,6 +736,65 @@ async fn retained_failed_session_retries_its_recorded_target_and_explicit_port()
 }
 
 #[tokio::test]
+async fn service_retry_preserves_failed_row_and_occupied_requested_port() {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let requested_port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let seam = ScriptedSeam::new(&["web"]);
+    let failures = seam.failure_switch();
+    let (manager, _) = manager_for(seam).await;
+    let mut events = manager.subscribe().await;
+    let original = manager
+        .start(
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
+            requested_port,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    failures.store(true, std::sync::atomic::Ordering::Release);
+    let addr: std::net::SocketAddr = original.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        tokio::net::TcpStream::connect(addr).await.unwrap();
+    }
+    while events.recv().await.unwrap().session.state != PortForwardSessionState::Failed {}
+    let failed_before = manager.session(original.id.as_str()).await.unwrap();
+    assert_eq!(failed_before.state, PortForwardSessionState::Failed);
+
+    failures.store(false, std::sync::atomic::Ordering::Release);
+    let occupied = std::net::TcpListener::bind(addr).expect("failed session released its port");
+    let retry = manager.retry_failed(original.id.as_str()).await;
+    assert!(matches!(
+        retry,
+        Err(ref rejected)
+            if rejected.category
+                == k10s_protocol::PortForwardFailureCategory::LocalPortInUse
+    ));
+    let failed_after = manager.session(original.id.as_str()).await.unwrap();
+    assert_eq!(
+        failed_after, failed_before,
+        "retry never mutates the source row"
+    );
+    drop(occupied);
+
+    let retried = manager
+        .retry_failed(original.id.as_str())
+        .await
+        .expect("Service retry succeeds once the port is free")
+        .expect("the source row remains failed");
+    assert_ne!(retried.id, original.id);
+    assert!(matches!(retried.target, PortForwardTarget::Service { .. }));
+    assert!(
+        manager
+            .list()
+            .await
+            .iter()
+            .any(|session| session.id == original.id)
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn cancelled_stop_still_joins_and_publishes_its_terminal_revision() {
     let seam = ScriptedSeam::new(&["web"]);
     let mut peers = seam.add_peer_channel().await;
@@ -563,16 +817,14 @@ async fn cancelled_stop_still_joins_and_publishes_its_terminal_revision() {
     let stop_manager = manager.clone();
     let session_id = session.id.clone();
     let stop = tokio::spawn(async move { stop_manager.stop(session_id.as_str()).await });
-    loop {
-        if manager
-            .session(session.id.as_str())
-            .await
-            .is_some_and(|snapshot| snapshot.state == PortForwardSessionState::Stopped)
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    let stopping = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("Stopping publishes before teardown")
+        .unwrap();
+    assert_eq!(stopping.session.id, session.id);
+    assert_eq!(stopping.session.state, PortForwardSessionState::Stopping);
+    assert!(stopping.session.failure.is_none());
+    assert!(stopping.revision > session.revision);
     stop.abort();
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
@@ -581,8 +833,9 @@ async fn cancelled_stop_still_joins_and_publishes_its_terminal_revision() {
         .unwrap();
     assert_eq!(event.session.id, session.id);
     assert_eq!(event.session.state, PortForwardSessionState::Stopped);
-    assert!(event.revision > session.revision);
+    assert!(event.revision > stopping.revision);
     assert!(tokio::net::TcpListener::bind(addr).await.is_ok());
+    manager.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]

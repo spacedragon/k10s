@@ -673,20 +673,13 @@ pub(crate) async fn serve_socket(
                                     None => Err(RequestFailure::Backend(
                                         BackendError::unsupported("portForward"),
                                     )),
-                                    Some(manager) =>
-                                    // Cancellation-aware like every other request.
-                                    {
-                                        tokio::select! {
-                                            () = request_cancel.cancelled() =>
-                                                Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                            outcome = dispatch_port_forward(
-                                                &manager,
-                                                op,
-                                                task_protocol.minor,
-                                                task_port_forward_capabilities,
-                                            ) => outcome,
-                                        }
-                                    }
+                                    Some(manager) => dispatch_port_forward(
+                                        &manager,
+                                        op,
+                                        task_protocol.minor,
+                                        task_port_forward_capabilities,
+                                        request_cancel.clone(),
+                                    ).await
                                 }
                             }
                             Ok(None) => Err(RequestFailure::Backend(BackendError::unsupported(
@@ -1764,6 +1757,7 @@ async fn dispatch_port_forward(
     op: PortForwardOp,
     protocol_minor: u16,
     capabilities: PortForwardCapabilities,
+    request_cancel: CancellationToken,
 ) -> Result<RequestOutcome, RequestFailure> {
     match op {
         PortForwardOp::Start {
@@ -1786,7 +1780,9 @@ async fn dispatch_port_forward(
                     PortForwardCapabilities::required_for(&target),
                 )));
             }
-            let outcome = manager.start(*target, local_port, context).await;
+            let outcome = manager
+                .start_cancellable(*target, local_port, context, request_cancel)
+                .await;
             match outcome {
                 Ok(session) => {
                     let source_port = manager.resolved_source_port(session.id.as_str()).await;
@@ -1797,10 +1793,15 @@ async fn dispatch_port_forward(
                         "session": session
                     })))
                 }
-                Err(rejected) => Err(RequestFailure::Backend(BackendError::PortForward {
-                    category: rejection_from_failure(rejected.category),
-                    message: rejected.message,
-                })),
+                Err(crate::port_forward::StartError::Rejected(rejected)) => {
+                    Err(RequestFailure::Backend(BackendError::PortForward {
+                        category: rejection_from_failure(rejected.category),
+                        message: rejected.message,
+                    }))
+                }
+                Err(crate::port_forward::StartError::Cancelled) => {
+                    Err(RequestFailure::Backend(BackendError::Cancelled))
+                }
             }
         }
         PortForwardOp::Stop { session_id } => {

@@ -151,6 +151,78 @@ async fn receive_frame(ws: &mut Ws) -> ServerFrame {
     serde_json::from_str(&message.into_text().unwrap()).unwrap()
 }
 
+async fn cancel_request(ws: &mut Ws, id: &str) {
+    ws.send(Message::Text(
+        json!({"kind":"cancelRequest","requestId":id,"payload":null})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_start_never_reports_cancelled_after_active_commits() {
+    let server = spawn(true).await;
+    let mut ws = connect_authenticated(&server).await;
+
+    for attempt in 0..16 {
+        let start_id = format!("racing-start-{attempt}");
+        request(
+            &mut ws,
+            &start_id,
+            REQUEST_PORT_FORWARD_START,
+            serde_json::to_value(
+                PortForwardStartRequest::try_service(
+                    service(),
+                    k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .await;
+        cancel_request(&mut ws, &start_id).await;
+        let outcome = receive_frame(&mut ws).await;
+
+        let list_id = format!("racing-list-{attempt}");
+        request(&mut ws, &list_id, REQUEST_PORT_FORWARD_LIST, json!({})).await;
+        let listed: PortForwardListResponse = receive_frame(&mut ws)
+            .await
+            .decode_response_payload()
+            .unwrap();
+        let active = listed.sessions.iter().find(|session| {
+            session.state == PortForwardSessionState::Active
+                && matches!(&session.target, PortForwardTarget::Service { identity, .. } if identity.uid == service().uid)
+        });
+        match outcome.kind {
+            ServerKind::Response => {
+                let started: PortForwardStartResponse = outcome.decode_response_payload().unwrap();
+                assert_eq!(active.map(|session| &session.id), Some(&started.session.id));
+                let stop_id = format!("racing-stop-{attempt}");
+                request(
+                    &mut ws,
+                    &stop_id,
+                    REQUEST_PORT_FORWARD_STOP,
+                    serde_json::to_value(PortForwardStopRequest {
+                        session_id: started.session.id,
+                    })
+                    .unwrap(),
+                )
+                .await;
+                assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Response);
+            }
+            ServerKind::Error => {
+                assert_eq!(outcome.payload["code"], json!("cancelled"));
+                assert!(active.is_none(), "Cancelled cannot hide committed Active");
+            }
+            kind => panic!("unexpected start outcome: {kind:?}"),
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn start_list_and_stop_round_trip_over_the_control_socket() {
     let server = spawn(true).await;

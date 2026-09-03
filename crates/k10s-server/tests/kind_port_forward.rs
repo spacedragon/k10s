@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use k10s_backend::{BackendMode, PortForwardPortSelection, Query, build_kernel};
-use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+use k10s_backend::{BackendMode, Query, build_kernel};
+use k10s_protocol::{
+    GroupVersionKind, PortForwardPortSelector, PortForwardTarget, ResourceIdentity,
+};
 use k10s_server::port_forward::{PortForwardManager, StopOutcome};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -90,8 +92,12 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
     for requested in [0_u16, explicit_port] {
         let session = manager
             .start(
-                identity.clone(),
-                PortForwardPortSelection::Name("http".into()),
+                PortForwardTarget::Service {
+                    identity: identity.clone(),
+                    port: PortForwardPortSelector::Name {
+                        name: "http".into(),
+                    },
+                },
                 requested,
                 context.clone(),
             )

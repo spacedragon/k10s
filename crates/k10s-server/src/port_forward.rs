@@ -54,6 +54,21 @@ impl StartRejected {
     }
 }
 
+/// Cancellation-aware start completion used by control requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartError {
+    /// Validation, resolution, binding, or lifecycle rejection.
+    Rejected(StartRejected),
+    /// The request was cancelled before Active publication linearized.
+    Cancelled,
+}
+
+impl From<StartRejected> for StartError {
+    fn from(rejected: StartRejected) -> Self {
+        Self::Rejected(rejected)
+    }
+}
+
 /// Outcome of an idempotent stop.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +135,19 @@ struct PublicationClock {
 
 type SharedPublicationClock = Arc<PublicationClock>;
 
+/// Cloneable dependencies shared by one session's accept and pump tasks.
+#[derive(Clone)]
+struct SessionRuntime {
+    session: Arc<Mutex<SessionInner>>,
+    cancel: CancellationToken,
+    connector: PortForwardConnector,
+    events_tx: broadcast::Sender<PortForwardSessionEvent>,
+    live_connections: LiveConnections,
+    counters: Arc<SessionCounters>,
+    publication: SharedPublicationClock,
+    finalizers: TaskTracker,
+}
+
 /// Shared mutable manager state guarded by one lock so epochs and revisions
 /// are linearizable with respect to publication and the transition gate.
 struct ManagerState {
@@ -139,6 +167,8 @@ pub struct PortForwardManager {
     /// Global accepted-connection budget, lock-free so data paths never
     /// serialize behind session publication.
     live_connections: LiveConnections,
+    /// Manager-owned starts, accept loops, stops, and failure finalizers.
+    tasks: TaskTracker,
 }
 
 impl std::fmt::Debug for PortForwardManager {
@@ -169,6 +199,7 @@ impl PortForwardManager {
                 gate: Mutex::new(()),
             }),
             live_connections: Arc::new(AtomicUsize::new(0)),
+            tasks: TaskTracker::new(),
         }
     }
 
@@ -196,25 +227,88 @@ impl PortForwardManager {
         requested_local_port: u16,
         requested_context: String,
     ) -> Result<PortForwardSession, StartRejected> {
+        match self
+            .start_cancellable(
+                target,
+                requested_local_port,
+                requested_context,
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(StartError::Rejected(rejected)) => Err(rejected),
+            Err(StartError::Cancelled) => Err(StartRejected::new(
+                PortForwardFailureCategory::TransportClosed,
+                "the forward request was cancelled",
+            )),
+        }
+    }
+
+    /// Start under request cancellation without letting caller cancellation
+    /// detach a bound listener. The manager-owned task either rolls back
+    /// before publication or returns the committed Active snapshot.
+    pub async fn start_cancellable(
+        &self,
+        target: PortForwardTarget,
+        requested_local_port: u16,
+        requested_context: String,
+        request_cancel: CancellationToken,
+    ) -> Result<PortForwardSession, StartError> {
+        let manager = self.clone();
+        let completion = self.tasks.spawn(async move {
+            manager
+                .start_owned(
+                    target,
+                    requested_local_port,
+                    requested_context,
+                    request_cancel,
+                )
+                .await
+        });
+        completion.await.unwrap_or_else(|_| {
+            Err(StartRejected::new(
+                PortForwardFailureCategory::TransportClosed,
+                "the forward could not be established",
+            )
+            .into())
+        })
+    }
+
+    async fn start_owned(
+        &self,
+        target: PortForwardTarget,
+        requested_local_port: u16,
+        requested_context: String,
+        request_cancel: CancellationToken,
+    ) -> Result<PortForwardSession, StartError> {
         if let Err(message) = target.validate() {
-            let category = match target {
+            let category = match &target {
                 PortForwardTarget::Service { .. } => PortForwardFailureCategory::UnsupportedService,
                 PortForwardTarget::Pod { .. } => PortForwardFailureCategory::UnsupportedPod,
             };
-            return Err(StartRejected::new(category, message));
+            return Err(StartRejected::new(category, message).into());
         }
-        let observed_epoch = {
-            let state = self.state.lock().await;
-            if let Some(existing) = Self::find_exact_requested_target(&state, &target).await {
-                return Ok(existing);
+        if request_cancel.is_cancelled() {
+            return Err(StartError::Cancelled);
+        }
+        let observed_epoch = tokio::select! {
+            biased;
+            () = request_cancel.cancelled() => return Err(StartError::Cancelled),
+            state = self.state.lock() => {
+                let state = state;
+                if let Some(existing) = Self::find_exact_requested_target(&state, &target).await {
+                    return Ok(existing);
+                }
+                state.epoch
             }
-            state.epoch
         };
         if self.cancel.is_cancelled() {
             return Err(StartRejected::new(
                 PortForwardFailureCategory::TransportClosed,
                 "the embedded server is shutting down",
-            ));
+            )
+            .into());
         }
 
         // Resolve before binding; failures never touch local resources.
@@ -222,13 +316,25 @@ impl PortForwardManager {
             context: requested_context.clone(),
             target: target.clone(),
         };
-        let resolved = match self.connector.resolve(request).await {
+        let resolved = match tokio::select! {
+            biased;
+            () = request_cancel.cancelled() => return Err(StartError::Cancelled),
+            () = self.cancel.cancelled() => return Err(StartRejected::new(
+                PortForwardFailureCategory::TransportClosed,
+                "the embedded server is shutting down",
+            ).into()),
+            resolved = self.connector.resolve(request) => resolved,
+        } {
             Ok(resolved) => resolved,
-            Err(error) => return Err(Self::map_backend_error(error, &target)),
+            Err(error) => return Err(Self::map_backend_error(error, &target).into()),
         };
         let target_key = TargetKey::from_resolved(&target, &resolved);
 
-        let mut state = self.state.lock().await;
+        let mut state = tokio::select! {
+            biased;
+            () = request_cancel.cancelled() => return Err(StartError::Cancelled),
+            state = self.state.lock() => state,
+        };
         Self::prune_expired(&mut state).await;
         // Context-switch atomicity: validate the request identity against
         // the authoritative committed context under the same lock used by
@@ -242,7 +348,8 @@ impl PortForwardManager {
             return Err(StartRejected::new(
                 PortForwardFailureCategory::ContextTransition,
                 "the context switched; retry after it completes",
-            ));
+            )
+            .into());
         }
         // Resolution canonicalizes named and numeric Service selectors. Check
         // that key before any bind or budget rejection so a duplicate always
@@ -265,7 +372,8 @@ impl PortForwardManager {
             return Err(StartRejected::new(
                 PortForwardFailureCategory::UnavailableEndpoint,
                 "the maximum number of port-forward sessions is active",
-            ));
+            )
+            .into());
         }
 
         // Bind only 127.0.0.1 before reporting success; port 0 asks the OS.
@@ -273,13 +381,18 @@ impl PortForwardManager {
         // transition cannot publish between canonical duplicate detection and
         // insertion.
         let bind_addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, requested_local_port));
-        let listener = match TcpListener::bind(bind_addr).await {
+        let listener = match tokio::select! {
+            biased;
+            () = request_cancel.cancelled() => return Err(StartError::Cancelled),
+            listener = TcpListener::bind(bind_addr) => listener,
+        } {
             Ok(listener) => listener,
             Err(_) => {
                 return Err(StartRejected::new(
                     PortForwardFailureCategory::LocalPortInUse,
                     format!("local port {requested_local_port} is already in use"),
-                ));
+                )
+                .into());
             }
         };
 
@@ -290,7 +403,26 @@ impl PortForwardManager {
                 "the bound address could not be observed",
             )
         })?;
+        let _publication = tokio::select! {
+            biased;
+            () = request_cancel.cancelled() => return Err(StartError::Cancelled),
+            publication = self.publication.gate.lock() => publication,
+        };
+        // Active publication is the linearization point. There are no await
+        // points from the final cancellation check through registration and
+        // event publication, so cancellation has an unambiguous winner.
+        if request_cancel.is_cancelled() {
+            return Err(StartError::Cancelled);
+        }
+        if self.cancel.is_cancelled() {
+            return Err(StartRejected::new(
+                PortForwardFailureCategory::TransportClosed,
+                "the embedded server is shutting down",
+            )
+            .into());
+        }
         let session_cancel = self.cancel.child_token();
+        let revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
         let inner = Arc::new(Mutex::new(SessionInner {
             id: id.clone(),
             target,
@@ -300,101 +432,112 @@ impl PortForwardManager {
             resolved,
             state: PortForwardSessionState::Active,
             failure: None,
-            revision: 0,
+            revision,
             open_failures: 0,
             terminal_at: None,
             pumps: TaskTracker::new(),
-            cancel: session_cancel,
+            cancel: session_cancel.clone(),
             accept_task: None,
         }));
         let events_tx = state.events_tx.clone();
         let live = self.live_connections.clone();
         let counters = Arc::new(SessionCounters::default());
         let connector = self.connector.clone();
-        let accept_task = tokio::spawn(accept_loop(
+        // Hold the session lock while launching its accept loop so the handle
+        // is installed before that task can observe or mutate the session.
+        let mut guard = inner
+            .try_lock()
+            .expect("new session mutex is uncontended before accept launch");
+        let accept_task = self.tasks.spawn(accept_loop(
             listener,
-            inner.clone(),
-            connector,
-            events_tx,
-            live,
-            counters,
-            self.publication.clone(),
+            SessionRuntime {
+                session: inner.clone(),
+                cancel: session_cancel,
+                connector,
+                events_tx,
+                live_connections: live,
+                counters,
+                publication: self.publication.clone(),
+                finalizers: self.tasks.clone(),
+            },
         ));
-        let mut guard = inner.lock().await;
         guard.accept_task = Some(accept_task);
-        drop(guard);
+        let snapshot = snapshot_of(&guard);
         state.sessions.insert(id.clone(), inner.clone());
         if state.current_context.is_empty() {
             state.current_context = requested_context;
         }
         // Publish the authoritative Active snapshot so every subscribed
         // panel converges without polling.
-        {
-            let mut guard = inner.lock().await;
-            let _publication = self.publication.gate.lock().await;
-            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
-            let _ = state.events_tx.send(PortForwardSessionEvent {
-                revision: guard.revision,
-                session: snapshot_of(&guard),
-            });
-        }
+        let _ = state.events_tx.send(PortForwardSessionEvent {
+            revision: snapshot.revision,
+            session: snapshot.clone(),
+        });
+        drop(guard);
         drop(state);
-
-        let guard = inner.lock().await;
-        let snapshot = snapshot_of(&guard);
         Ok(snapshot)
     }
 
     /// Idempotent stop by session ID.
     pub async fn stop(&self, session_id: &str) -> StopOutcome {
-        let inner = {
+        let manager = self.clone();
+        let session_id = session_id.to_owned();
+        let completion = self
+            .tasks
+            .spawn(async move { manager.stop_owned(&session_id).await });
+        completion.await.unwrap_or(StopOutcome::AlreadyTerminal)
+    }
+
+    async fn stop_owned(&self, session_id: &str) -> StopOutcome {
+        let (inner, events_tx) = {
             let state = self.state.lock().await;
-            state.sessions.get(session_id).cloned()
+            (
+                state.sessions.get(session_id).cloned(),
+                state.events_tx.clone(),
+            )
         };
         let Some(inner) = inner else {
             return StopOutcome::AlreadyTerminal;
         };
         let accept_handle = {
             let mut guard = inner.lock().await;
-            if matches!(
-                guard.state,
-                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-            ) {
+            if guard.state != PortForwardSessionState::Active {
                 return StopOutcome::AlreadyTerminal;
             }
-            guard.state = PortForwardSessionState::Stopped;
+            guard.state = PortForwardSessionState::Stopping;
             guard.failure = None;
-            guard.terminal_at = Some(tokio::time::Instant::now());
+            guard.terminal_at = None;
             // Cancelling stops new accepts and tears down live pumps; their
             // tasks are joined below WITHOUT any lock held so a pump that is
             // mid-copy can always finish its release bookkeeping.
             guard.cancel.cancel();
             guard.pumps.close();
-            guard.accept_task.take()
-        };
-        // Once mutation begins, an owned task completes teardown and
-        // publication even if the requesting socket disconnects and drops
-        // this future while it is awaiting the result.
-        let state = Arc::clone(&self.state);
-        let publication = Arc::clone(&self.publication);
-        let finalizer_inner = Arc::clone(&inner);
-        let finalizer = tokio::spawn(async move {
-            Self::join_session_tasks(accept_handle, &finalizer_inner).await;
-            let state = state.lock().await;
-            let mut guard = finalizer_inner.lock().await;
-            let _publication = publication.gate.lock().await;
-            guard.revision = publication.next.fetch_add(1, Ordering::AcqRel);
+            let handle = guard.accept_task.take();
+            let _publication = self.publication.gate.lock().await;
+            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             let snapshot = snapshot_of(&guard);
-            let _ = state.events_tx.send(PortForwardSessionEvent {
+            let _ = events_tx.send(PortForwardSessionEvent {
                 revision: snapshot.revision,
-                session: snapshot.clone(),
+                session: snapshot,
             });
-            snapshot
-        });
-        match finalizer.await {
-            Ok(snapshot) => StopOutcome::Stopped(snapshot),
-            Err(_) => StopOutcome::AlreadyTerminal,
+            handle
+        };
+        Self::join_session_tasks(accept_handle, &inner).await;
+        let mut guard = inner.lock().await;
+        if guard.state != PortForwardSessionState::Stopping {
+            return StopOutcome::AlreadyTerminal;
         }
+        guard.state = PortForwardSessionState::Stopped;
+        guard.failure = None;
+        guard.terminal_at = Some(tokio::time::Instant::now());
+        let _publication = self.publication.gate.lock().await;
+        guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
+        let snapshot = snapshot_of(&guard);
+        let _ = events_tx.send(PortForwardSessionEvent {
+            revision: snapshot.revision,
+            session: snapshot.clone(),
+        });
+        StopOutcome::Stopped(snapshot)
     }
 
     /// Join one session's accept loop and pump tracker with no lock held.
@@ -519,9 +662,9 @@ impl PortForwardManager {
             ) {
                 continue;
             }
-            guard.state = PortForwardSessionState::Stopped;
+            guard.state = PortForwardSessionState::Stopping;
             guard.failure = None;
-            guard.terminal_at = Some(tokio::time::Instant::now());
+            guard.terminal_at = None;
             let _publication = self.publication.gate.lock().await;
             guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             guard.cancel.cancel();
@@ -539,6 +682,19 @@ impl PortForwardManager {
         // no Start can publish in the gap between the two operations.
         for (inner, handle) in joins {
             Self::join_session_tasks(handle, &inner).await;
+            let mut guard = inner.lock().await;
+            if guard.state == PortForwardSessionState::Stopping {
+                guard.state = PortForwardSessionState::Stopped;
+                guard.failure = None;
+                guard.terminal_at = Some(tokio::time::Instant::now());
+                let _publication = self.publication.gate.lock().await;
+                guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
+                let snapshot = snapshot_of(&guard);
+                let _ = state.events_tx.send(PortForwardSessionEvent {
+                    revision: snapshot.revision,
+                    session: snapshot,
+                });
+            }
         }
         let result = commit.await;
         if result.is_ok() {
@@ -572,8 +728,9 @@ impl PortForwardManager {
                     guard.state,
                     PortForwardSessionState::Stopped | PortForwardSessionState::Failed
                 ) {
-                    guard.state = PortForwardSessionState::Stopped;
-                    guard.terminal_at = Some(tokio::time::Instant::now());
+                    guard.state = PortForwardSessionState::Stopping;
+                    guard.failure = None;
+                    guard.terminal_at = None;
                 }
                 guard.cancel.cancel();
                 guard.pumps.close();
@@ -581,11 +738,14 @@ impl PortForwardManager {
             };
             handles.push((id, inner, handle));
         }
-        for (id, inner, handle) in handles {
+        for (_id, inner, handle) in handles {
             Self::join_session_tasks(handle, &inner).await;
-            let mut state = self.state.lock().await;
-            state.sessions.remove(&id);
         }
+        // Starts and stop/failure finalizers own their progress through this
+        // tracker. Cancelled request futures cannot outlive shutdown.
+        self.tasks.close();
+        self.tasks.wait().await;
+        self.state.lock().await.sessions.clear();
     }
 
     async fn find_exact_requested_target(
@@ -805,19 +965,10 @@ fn random_id() -> String {
 ///
 /// Runs without the manager lock: budgets are lock-free atomics, so the
 /// context-transition gate can hold its write side while this loop drains.
-async fn accept_loop(
-    listener: TcpListener,
-    session: Arc<Mutex<SessionInner>>,
-    connector: PortForwardConnector,
-    events_tx: broadcast::Sender<PortForwardSessionEvent>,
-    live: LiveConnections,
-    counters: Arc<SessionCounters>,
-    publication: SharedPublicationClock,
-) {
-    let cancel = session.lock().await.cancel.clone();
+async fn accept_loop(listener: TcpListener, runtime: SessionRuntime) {
     loop {
         let accepted = tokio::select! {
-            _ = cancel.cancelled() => break,
+            _ = runtime.cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
         let Ok((socket, _peer)) = accepted else {
@@ -825,25 +976,17 @@ async fn accept_loop(
         };
         // Reserve first, then bound-check: a plain load-then-add lets two
         // concurrent accept loops exceed the hard total.
-        if live.fetch_add(1, Ordering::AcqRel) >= MAX_TOTAL_CONNECTIONS {
-            live.fetch_sub(1, Ordering::AcqRel);
+        if runtime.live_connections.fetch_add(1, Ordering::AcqRel) >= MAX_TOTAL_CONNECTIONS {
+            runtime.live_connections.fetch_sub(1, Ordering::AcqRel);
             continue;
         }
-        if counters.active.fetch_add(1, Ordering::AcqRel) >= MAX_SESSION_CONNECTIONS {
-            counters.active.fetch_sub(1, Ordering::AcqRel);
-            live.fetch_sub(1, Ordering::AcqRel);
+        if runtime.counters.active.fetch_add(1, Ordering::AcqRel) >= MAX_SESSION_CONNECTIONS {
+            runtime.counters.active.fetch_sub(1, Ordering::AcqRel);
+            runtime.live_connections.fetch_sub(1, Ordering::AcqRel);
             continue;
         }
-        let tracker = session.lock().await.pumps.clone();
-        tracker.spawn(pump_connection(
-            socket,
-            session.clone(),
-            connector.clone(),
-            events_tx.clone(),
-            live.clone(),
-            counters.clone(),
-            publication.clone(),
-        ));
+        let tracker = runtime.session.lock().await.pumps.clone();
+        tracker.spawn(pump_connection(socket, runtime.clone()));
     }
 }
 
@@ -853,25 +996,18 @@ async fn accept_loop(
 /// the failure counter. A transport error with zero transferred bytes
 /// counts toward [`OPEN_FAILURE_THRESHOLD`]; three consecutive ones fail
 /// the session. Errors after bytes moved stay connection-terminal only.
-async fn pump_connection(
-    socket: tokio::net::TcpStream,
-    session: Arc<Mutex<SessionInner>>,
-    connector: PortForwardConnector,
-    events_tx: broadcast::Sender<PortForwardSessionEvent>,
-    live: LiveConnections,
-    counters: Arc<SessionCounters>,
-    publication: SharedPublicationClock,
-) {
+async fn pump_connection(socket: tokio::net::TcpStream, runtime: SessionRuntime) {
     let release = {
-        let counters = counters.clone();
+        let counters = runtime.counters.clone();
+        let live_connections = runtime.live_connections.clone();
         move || {
             counters.active.fetch_sub(1, Ordering::AcqRel);
-            live.fetch_sub(1, Ordering::AcqRel);
+            live_connections.fetch_sub(1, Ordering::AcqRel);
         }
     };
     let release = &release;
     let (resolved, cancel) = {
-        let guard = session.lock().await;
+        let guard = runtime.session.lock().await;
         (guard.resolved.clone(), guard.cancel.clone())
     };
     let opened = tokio::select! {
@@ -879,13 +1015,19 @@ async fn pump_connection(
             release();
             return;
         }
-        opened = connector.connect(&resolved) => opened,
+        opened = runtime.connector.connect(&resolved) => opened,
     };
     let upstream = match opened {
         Ok(upstream) => upstream,
         Err(_) => {
             release();
-            record_open_failure(&session, &events_tx, publication).await;
+            record_open_failure(
+                &runtime.session,
+                &runtime.events_tx,
+                runtime.publication,
+                runtime.finalizers,
+            )
+            .await;
             return;
         }
     };
@@ -906,10 +1048,16 @@ async fn pump_connection(
         None => {}
         // copy_bidirectional reports the byte counts of both directions.
         Some(Ok(_)) => {
-            session.lock().await.open_failures = 0;
+            runtime.session.lock().await.open_failures = 0;
         }
         Some(Err(_)) if moved == 0 => {
-            record_open_failure(&session, &events_tx, publication).await;
+            record_open_failure(
+                &runtime.session,
+                &runtime.events_tx,
+                runtime.publication,
+                runtime.finalizers,
+            )
+            .await;
         }
         Some(Err(_)) => {
             // Connection-terminal only; never changes session state.
@@ -981,6 +1129,7 @@ async fn record_open_failure(
     session: &Arc<Mutex<SessionInner>>,
     events_tx: &broadcast::Sender<PortForwardSessionEvent>,
     publication: SharedPublicationClock,
+    finalizers: TaskTracker,
 ) {
     let mut guard = session.lock().await;
     if guard.state != PortForwardSessionState::Active {
@@ -1003,7 +1152,7 @@ async fn record_open_failure(
 
     let finalizer_session = Arc::clone(session);
     let finalizer_events = events_tx.clone();
-    tokio::spawn(async move {
+    finalizers.spawn(async move {
         PortForwardManager::join_session_tasks(accept_handle, &finalizer_session).await;
         let mut guard = finalizer_session.lock().await;
         // An explicit Stop may have won while failure teardown drained.
