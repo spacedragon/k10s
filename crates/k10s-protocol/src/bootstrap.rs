@@ -149,7 +149,7 @@ impl BootstrapResponse {
     pub fn fixture() -> Self {
         Self {
             protocol: ProtocolVersion { major: 1, minor: 2 },
-            capabilities: vec!["logs.tail".into(), "exec.attach".into()],
+            capabilities: vec!["logs.tail".into()],
             server: Some(ServerInfo {
                 instance_id: "instance-1".into(),
                 version: "0.1.0".into(),

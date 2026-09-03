@@ -1022,7 +1022,6 @@ fn capabilities_for_gvk(gvk: &Gvk) -> ResourceCapabilities {
         }
         Some(WorkloadKind::Pod) => {
             capabilities.can_view_logs = true;
-            capabilities.can_exec = true;
         }
         Some(WorkloadKind::ReplicaSet | WorkloadKind::Job | WorkloadKind::CronJob) | None => {}
     }

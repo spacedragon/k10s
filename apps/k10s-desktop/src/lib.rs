@@ -158,6 +158,7 @@ pub struct DesktopApp {
     context_state_store: Option<ContextStateStore>,
     external_shell_storage: Option<external_shell::TemporaryShellStorage>,
     external_shell_descriptor: Option<external_shell::KubectlLaunchDescriptor>,
+    external_shell_generation: u64,
     kube_preparation: Option<k10s_backend::KubePreparation>,
     shell_environment: external_shell::EnvironmentSnapshot,
     terminal_adapters: Vec<external_shell::TerminalAdapter>,
@@ -179,6 +180,21 @@ impl std::fmt::Debug for DesktopApp {
 }
 
 impl DesktopApp {
+    fn advance_external_shell_generation(
+        generation_slot: &mut u64,
+        descriptor: &mut Option<external_shell::KubectlLaunchDescriptor>,
+    ) -> Option<u64> {
+        match generation_slot.checked_add(1) {
+            Some(generation) => {
+                *generation_slot = generation;
+                Some(generation)
+            }
+            None => {
+                *descriptor = None;
+                None
+            }
+        }
+    }
     fn clear_external_shell_status(app: &mut K10sApp, error_slot: &mut Option<String>) {
         *error_slot = None;
         app.clear_host_error();
@@ -288,6 +304,7 @@ impl DesktopApp {
             context_state_store,
             external_shell_storage: storage,
             external_shell_descriptor: descriptor,
+            external_shell_generation: 1,
             kube_preparation,
             shell_environment,
             terminal_adapters,
@@ -310,10 +327,13 @@ impl DesktopApp {
                 k10s_ui::ui::ExternalShellAvailability::Unavailable,
             );
             Self::clear_external_shell_status(app, &mut self.external_shell_error);
-            let generation = self
-                .external_shell_descriptor
-                .as_ref()
-                .map_or(1, |value| value.generation.saturating_add(1));
+            let Some(generation) = Self::advance_external_shell_generation(
+                &mut self.external_shell_generation,
+                &mut self.external_shell_descriptor,
+            ) else {
+                self.terminal_adapters.clear();
+                continue;
+            };
             let preparation = self
                 .kube_preparation
                 .as_ref()
@@ -800,17 +820,7 @@ fn launch_embedded_server_on(
                 if ready_sender.send(Ok(addr)).is_err() {
                     return Ok(());
                 }
-                let config = ServerConfig {
-                    access_token: thread_token,
-                    capabilities: vec![
-                        "logs.tail".to_owned(),
-                        "exec.attach".to_owned(),
-                        // Desktop-only: the embedded server owns loopback
-                        // listeners; standalone and web never advertise this.
-                        k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
-                    ],
-                    ..ServerConfig::default()
-                };
+                let config = embedded_server_config(thread_token);
                 k10s_server::run(listener, config, kernel, thread_cancel).await
             })
         })?;
@@ -846,6 +856,19 @@ fn launch_embedded_server_on(
     })
 }
 
+fn embedded_server_config(access_token: String) -> ServerConfig {
+    ServerConfig {
+        access_token,
+        capabilities: vec![
+            "logs.tail".to_owned(),
+            // Desktop-only: the embedded server owns loopback listeners;
+            // standalone and web never advertise this.
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+        ],
+        ..ServerConfig::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, TcpListener};
@@ -858,8 +881,83 @@ mod tests {
     };
 
     use super::{
-        ContextStateStore, DesktopApp, EmbeddedServerError, StateStore, launch_embedded_server_on,
+        ContextStateStore, DesktopApp, EmbeddedServerError, StateStore, embedded_server_config,
+        launch_embedded_server_on,
     };
+
+    #[test]
+    fn embedded_server_bootstrap_does_not_advertise_exec() {
+        let config = embedded_server_config("test-token".to_owned());
+        assert_eq!(
+            config.capabilities,
+            [
+                "logs.tail".to_owned(),
+                k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+            ]
+        );
+        assert!(
+            !config
+                .capabilities
+                .iter()
+                .any(|value| value == "exec.attach")
+        );
+    }
+
+    #[test]
+    fn shell_generation_is_not_reused_across_unavailable_contexts() {
+        let mut desktop = DesktopApp::launch_with_mode_and_store(&BackendMode::Fake, None).unwrap();
+        desktop.external_shell_descriptor = Some(crate::external_shell::KubectlLaunchDescriptor {
+            generation: 1,
+            kubectl: PathBuf::from("kubectl"),
+            context: "first".to_owned(),
+            kubeconfig_sources: vec![PathBuf::from("first-config")],
+            environment: Default::default(),
+            exec_plugins: Vec::new(),
+        });
+
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            Some(2)
+        );
+        desktop.external_shell_descriptor = None;
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            Some(3)
+        );
+        desktop.external_shell_descriptor = Some(crate::external_shell::KubectlLaunchDescriptor {
+            generation: 3,
+            kubectl: PathBuf::from("kubectl"),
+            context: "third".to_owned(),
+            kubeconfig_sources: vec![PathBuf::from("third-config")],
+            environment: Default::default(),
+            exec_plugins: Vec::new(),
+        });
+
+        assert!(
+            desktop
+                .external_shell_descriptor
+                .as_ref()
+                .filter(|descriptor| descriptor.generation == 1)
+                .is_none(),
+            "a request from the first available context must stay stale"
+        );
+
+        desktop.external_shell_generation = u64::MAX;
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            None
+        );
+        assert!(desktop.external_shell_descriptor.is_none());
+    }
 
     #[test]
     fn listener_startup_error_is_delivered_to_the_launcher() {

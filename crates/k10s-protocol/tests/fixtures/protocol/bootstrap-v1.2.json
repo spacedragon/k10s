@@ -7,8 +7,7 @@
       "minor": 2
     },
     "capabilities": [
-      "logs.tail",
-      "exec.attach"
+      "logs.tail"
     ],
     "server": {
       "instanceId": "instance-1",
