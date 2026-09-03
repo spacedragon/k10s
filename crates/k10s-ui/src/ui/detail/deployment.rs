@@ -1361,6 +1361,7 @@ mod tests {
                 gone: false,
                 mutations_allowed: false,
                 port_forward_capability: false,
+                port_forward_list_state: crate::ui::PortForwardListState::Ready,
                 port_forward_sessions: &[],
                 port_forward_error: None,
             };
@@ -1484,6 +1485,7 @@ mod tests {
                 gone: false,
                 mutations_allowed: false,
                 port_forward_capability: false,
+                port_forward_list_state: crate::ui::PortForwardListState::Ready,
                 port_forward_sessions: &[],
                 port_forward_error: None,
             };

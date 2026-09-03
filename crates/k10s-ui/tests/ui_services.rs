@@ -16,8 +16,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, PrimaryDetailState, ResourceAction, ResourceFeed, SafeUiError, UiShell,
-        WindowFreshness,
+        ConnectionState, PortForwardListState, PrimaryDetailState, ResourceAction, ResourceFeed,
+        SafeUiError, UiShell, WindowFreshness,
     },
     workspace::{WindowGeom, WindowId, WorkspaceCommand},
 };
@@ -1258,6 +1258,61 @@ fn active_port_forward_is_not_shadowed_by_an_older_terminal_session() {
             .is_disabled(),
         "a draining session remains visible but cannot be stopped twice"
     );
+}
+
+#[test]
+fn service_port_forward_controls_wait_for_authoritative_session_list() {
+    for (state, status) in [
+        (
+            PortForwardListState::Loading,
+            "Loading port-forward sessions…",
+        ),
+        (
+            PortForwardListState::Reconstructing,
+            "Reconstructing port-forward sessions…",
+        ),
+    ] {
+        let mut harness = harness();
+        harness.state_mut().feed.port_forward_available = true;
+        harness.state_mut().feed.port_forward_list_state = state;
+        open_via_launcher(&mut harness);
+        harness
+            .get_by_role_and_label(Role::Window, "Services")
+            .get_by_role_and_label(Role::Button, "Select service web-frontend")
+            .click();
+        harness.run_steps(4);
+        harness.state_mut().feed.details.insert(
+            service_identity("web-frontend"),
+            service_detail("web-frontend", false),
+        );
+        let window_id = services_window_id(harness.state());
+        harness.state_mut().feed.window_freshness.insert(
+            window_id,
+            WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+        );
+        harness.state_mut().feed.port_forward_sessions = vec![service_port_forward_session(
+            "retained-active",
+            PortForwardSessionState::Active,
+            2,
+        )];
+        harness.run_steps(4);
+        harness
+            .get_by_role_and_label(Role::Button, "Tab Ports")
+            .click();
+        harness.run_steps(4);
+
+        harness.get_by_label(status);
+        for label in ["Start", "Stop", "Copy address"] {
+            assert!(
+                harness
+                    .query_by_role_and_label(Role::Button, label)
+                    .is_none(),
+                "{state:?} must suppress stale {label} controls"
+            );
+        }
+    }
 }
 
 #[test]

@@ -148,6 +148,7 @@ pub(crate) struct DetailPresentationInput<'a> {
     /// authority. Kind bodies combine this with `mutations_allowed` so stale
     /// native views never masquerade as web/capability absence.
     pub port_forward_capability: bool,
+    pub port_forward_list_state: crate::ui::PortForwardListState,
     pub port_forward_sessions: &'a [k10s_protocol::PortForwardSession],
     pub port_forward_error: Option<&'a str>,
 }
@@ -204,6 +205,7 @@ impl<'a> DetailPresentationInput<'a> {
             gone,
             mutations_allowed,
             port_forward_capability,
+            port_forward_list_state: feed.port_forward_list_state,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })
@@ -673,6 +675,7 @@ mod tests {
             gone: false,
             mutations_allowed: false,
             port_forward_capability: false,
+            port_forward_list_state: crate::ui::PortForwardListState::Ready,
             port_forward_sessions: &[],
             port_forward_error: None,
         }

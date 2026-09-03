@@ -113,6 +113,7 @@ struct PodDetailProjection {
     ports: Vec<PodContainerPort>,
     port_forward_capability: bool,
     port_forward_authority: bool,
+    port_forward_list_state: crate::ui::PortForwardListState,
     labels: Vec<(String, String)>,
     annotations: Vec<(String, String)>,
     created_at: String,
@@ -262,7 +263,9 @@ impl PodDetailProjection {
             host_ip: optional(pod.host_ip.as_deref()),
             ports: pod.ports.clone(),
             port_forward_capability: input.port_forward_capability,
-            port_forward_authority: input.mutations_allowed,
+            port_forward_authority: input.mutations_allowed
+                && input.port_forward_list_state == crate::ui::PortForwardListState::Ready,
+            port_forward_list_state: input.port_forward_list_state,
             labels,
             annotations,
             created_at: optional(pod.created_at.as_deref()),
@@ -512,6 +515,15 @@ fn show_operational<I: RowIdentity>(
     if pod.ports.is_empty() {
         ui.label("No declared ports");
     } else {
+        match pod.port_forward_list_state {
+            crate::ui::PortForwardListState::Loading => {
+                ui.label("Loading port-forward sessions…");
+            }
+            crate::ui::PortForwardListState::Reconstructing => {
+                ui.label("Reconstructing port-forward sessions…");
+            }
+            crate::ui::PortForwardListState::Ready => {}
+        }
         table_region(ui, window_id, "ports", "Pod ports table", |ui| {
             let available = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(1.0);
             let widths = [0.18, 0.22, 0.14, 0.14, 0.32].map(|part| available * part);
@@ -559,7 +571,10 @@ fn show_operational<I: RowIdentity>(
                                     if port.protocol != TransportProtocol::Tcp {
                                         return;
                                     }
-                                    if pod.port_forward_capability {
+                                    if pod.port_forward_capability
+                                        && pod.port_forward_list_state
+                                            == crate::ui::PortForwardListState::Ready
+                                    {
                                         let action_name = port.name.as_deref().map_or_else(
                                             || {
                                                 format!(
@@ -624,6 +639,7 @@ fn show_operational<I: RowIdentity>(
             }
         });
         if pod.port_forward_capability
+            && pod.port_forward_list_state == crate::ui::PortForwardListState::Ready
             && !pod.port_forward_authority
             && pod
                 .ports

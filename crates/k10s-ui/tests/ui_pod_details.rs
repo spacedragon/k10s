@@ -14,8 +14,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
-        SafeUiError, UiShell, WindowFreshness, tools::LogsPhase,
+        ConnectionState, DetailAuthority, DetailLifecycle, PortForwardListState,
+        PrimaryDetailState, ResourceFeed, SafeUiError, UiShell, WindowFreshness, tools::LogsPhase,
     },
     workspace::{DetailTab, WindowContent, WindowGeom, WindowKind, WorkspaceCommand},
 };
@@ -321,6 +321,44 @@ fn pod_port_forward_action_requires_live_matching_loaded_authority() {
             .query_by_role_and_label(Role::Button, "Port Forward")
             .is_none()
     );
+}
+
+#[test]
+fn pod_port_forward_actions_wait_for_authoritative_session_list() {
+    for (state, status) in [
+        (
+            PortForwardListState::Loading,
+            "Loading port-forward sessions…",
+        ),
+        (
+            PortForwardListState::Reconstructing,
+            "Reconstructing port-forward sessions…",
+        ),
+    ] {
+        let identity = pod_identity("web-0");
+        let mut harness = harness(1_100.0, healthy_detail());
+        harness.state_mut().feed.pod_port_forward_available = true;
+        harness.state_mut().feed.port_forward_list_state = state;
+        harness.state_mut().feed.detail_authority.insert(
+            identity,
+            DetailAuthority {
+                freshness: WindowFreshness::Live {
+                    last_sync_age: "just now".into(),
+                },
+                lifecycle: DetailLifecycle::Present,
+            },
+        );
+        harness.run_steps(3);
+
+        let detail = pod_window(&harness);
+        detail.get_by_label(status);
+        assert!(
+            detail
+                .query_by_role_and_label(Role::Button, "Port Forward")
+                .is_none(),
+            "{state:?} must suppress stale start controls"
+        );
+    }
 }
 
 #[test]

@@ -6278,6 +6278,57 @@ mod tests {
     }
 
     #[test]
+    fn stale_initial_port_forward_list_transfers_to_one_reconstructing_replacement() {
+        let (mut app, state) = ready_app_with_port_forward_capabilities();
+        let initial = app.port_forward_list.clone().unwrap();
+        while app.client.take_outbound().is_some() {}
+        state.borrow_mut().sent.clear();
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(k10s_protocol::PortForwardStartResponse {
+                    session: failed_port_forward("pf-newer", 6),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                initial.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 5,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        assert!(app.port_forward_list.is_none());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+        let sent_replacements = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .count();
+        let queued_replacements = std::iter::from_fn(|| app.client.take_outbound())
+            .filter(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .count();
+        assert_eq!(sent_replacements + queued_replacements, 1);
+    }
+
+    #[test]
     fn reconnect_port_forward_list_request_projects_reconstruction_until_completion() {
         let mut bootstrap = BootstrapResponse::fixture();
         bootstrap.capabilities.extend([
@@ -6397,6 +6448,17 @@ mod tests {
             panic!("fixture requires a Pod port-forward target");
         };
         let (mut app, state) = ready_app_with_port_forward_capabilities();
+        let initial_port_forward_list = app.port_forward_list.clone().unwrap();
+        app.client
+            .apply(ServerFrame::response(
+                initial_port_forward_list.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            ))
+            .unwrap();
+        app.finish_port_forward_list();
         let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
         let subscription = app
             .window_subscriptions

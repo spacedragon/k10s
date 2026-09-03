@@ -134,6 +134,9 @@ pub(crate) fn port_forward_start_authorization(
     {
         return Err(PORT_FORWARD_AUTHORITY_UNAVAILABLE);
     }
+    if feed.port_forward_list_state != super::PortForwardListState::Ready {
+        return Err("Port-forward sessions are still loading");
+    }
     Ok(())
 }
 

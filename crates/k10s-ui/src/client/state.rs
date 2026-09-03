@@ -1829,9 +1829,25 @@ impl ClientState {
                     let response: PortForwardListResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    if self.apply_port_forward_list(&response)
-                        && self.port_forward_reconstruction.as_ref() == Some(&id)
-                    {
+                    if !self.apply_port_forward_list(&response) {
+                        // Retire the stale request before starting its successor
+                        // so replacement preserves the exact request-retention
+                        // bound, even when capacity is one. An already tracked
+                        // list owns the single replacement obligation.
+                        self.pending.remove(&id);
+                        if self
+                            .port_forward_reconstruction
+                            .as_ref()
+                            .is_none_or(|request| request == &id)
+                        {
+                            // Preserve the non-ready signal if queuing the
+                            // replacement itself surfaces a terminal bound.
+                            self.port_forward_reconstruction.get_or_insert(id);
+                            let _ = self.begin_port_forward_reconstruction()?;
+                        }
+                        return Ok(());
+                    }
+                    if self.port_forward_reconstruction.as_ref() == Some(&id) {
                         self.port_forward_reconstruction = None;
                     }
                     QueryResult::PortForwardList(Box::new(response))

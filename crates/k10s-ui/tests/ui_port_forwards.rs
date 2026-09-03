@@ -910,6 +910,32 @@ fn service_authority_loss_after_open_disables_modal_submission() {
 }
 
 #[test]
+fn session_list_authority_loss_after_open_disables_modal_submission() {
+    for state in [
+        PortForwardListState::Loading,
+        PortForwardListState::Reconstructing,
+    ] {
+        let mut harness = authorization_harness(service_target());
+        harness.run_steps(2);
+        harness.state_mut().feed.port_forward_list_state = state;
+        harness.run_steps(2);
+
+        let start = harness.get_by_role_and_label(Role::Button, "Start port forward");
+        assert!(start.accesskit_node().is_disabled());
+        harness.get_by_label("Port-forward sessions are still loading");
+        start.click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .state_mut()
+                .shell
+                .drain_port_forward_actions()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn service_modal_submits_blank_and_zero_as_automatic_local_port() {
     for draft in ["", "0"] {
         let target = service_target();

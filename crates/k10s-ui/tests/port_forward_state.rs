@@ -10,7 +10,11 @@ use k10s_protocol::{
 use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget};
 
 fn ready_client_with_capabilities(capabilities: &[&str]) -> ClientState {
-    let mut client = ClientState::new(ClientConfig::default());
+    ready_client_with_config(ClientConfig::default(), capabilities)
+}
+
+fn ready_client_with_config(config: ClientConfig, capabilities: &[&str]) -> ClientState {
+    let mut client = ClientState::new(config);
     client
         .connect(ConnectTarget::new(
             "ws://localhost/api/v1/control",
@@ -536,6 +540,78 @@ fn subscription_lag_exposes_reconstruction_until_the_replacement_list_applies() 
         client.port_forward_sessions()[0].id.as_str(),
         "pf-recovered"
     );
+}
+
+#[test]
+fn stale_reconstruction_list_queues_exactly_one_replacement_until_the_watermark_is_covered() {
+    let mut client = ready_client_with_config(
+        ClientConfig {
+            request_capacity: 2,
+            ..ClientConfig::default()
+        },
+        &[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD],
+    );
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+    while client.take_outbound().is_some() {}
+
+    let reconstruction = client.begin_port_forward_reconstruction().unwrap();
+    let first_list = take_port_forward_list_request(&mut client);
+    assert_eq!(first_list, *reconstruction.id());
+    client
+        .apply(ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: Some(1),
+            payload: serde_json::to_value(Event {
+                event_kind: k10s_protocol::PORT_FORWARD_EVENT_SESSION.into(),
+                revision: None,
+                payload: serde_json::to_value(PortForwardSessionEvent {
+                    revision: 6,
+                    session: service_session("pf-newer", PortForwardSessionState::Active, 6),
+                })
+                .unwrap(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+
+    client
+        .apply(ServerFrame::response(
+            first_list,
+            k10s_protocol::PortForwardListResponse {
+                revision: 5,
+                sessions: Vec::new(),
+            },
+        ))
+        .unwrap();
+
+    assert!(client.port_forward_reconstructing());
+    let replacement = take_port_forward_list_request(&mut client);
+    assert!(
+        client.take_outbound().is_none(),
+        "only one replacement list"
+    );
+
+    client
+        .apply(ServerFrame::response(
+            replacement,
+            k10s_protocol::PortForwardListResponse {
+                revision: 6,
+                sessions: vec![service_session(
+                    "pf-newer",
+                    PortForwardSessionState::Active,
+                    6,
+                )],
+            },
+        ))
+        .unwrap();
+
+    assert!(!client.port_forward_reconstructing());
+    assert_eq!(client.port_forward_sessions()[0].id.as_str(), "pf-newer");
 }
 
 #[test]

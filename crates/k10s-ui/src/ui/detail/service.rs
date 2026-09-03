@@ -247,6 +247,15 @@ fn ports_tab<I: RowIdentity>(
     if let Some(error) = presentation.port_forward_error {
         ui.label(RichText::new(error).color(crate::ui::theme::WARNING));
     }
+    match presentation.port_forward_list_state {
+        crate::ui::PortForwardListState::Loading => {
+            ui.label("Loading port-forward sessions…");
+        }
+        crate::ui::PortForwardListState::Reconstructing => {
+            ui.label("Reconstructing port-forward sessions…");
+        }
+        crate::ui::PortForwardListState::Ready => {}
+    }
     for port in &projection.ports {
         let line = crate::ui::port_detail_label(port);
         let label = ui.label(RichText::new(line.clone()).strong());
@@ -254,6 +263,9 @@ fn ports_tab<I: RowIdentity>(
             egui::WidgetInfo::labeled(WidgetType::Label, true, format!("Port {line}"))
         });
         if port.protocol != k10s_protocol::TransportProtocol::Tcp {
+            continue;
+        }
+        if presentation.port_forward_list_state != crate::ui::PortForwardListState::Ready {
             continue;
         }
         let service = presentation.identity;
