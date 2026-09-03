@@ -563,14 +563,16 @@ fn delete_handle(handle: HANDLE) -> Result<(), StorageError> {
 pub(super) fn render_with_cleanup(
     command: &KubectlExecCommand<'_>,
     manifest: &Path,
+    kubeconfig: &Path,
     directory: &Path,
 ) -> Result<Vec<u8>, io::Error> {
     let mut body = command.render_powershell().map_err(io::Error::other)?;
     let exit = "exit $K10sStatus\r\n";
     let manifest = manifest.to_string_lossy().replace('\'', "''");
+    let kubeconfig = kubeconfig.to_string_lossy().replace('\'', "''");
     let directory = directory.to_string_lossy().replace('\'', "''");
     let cleanup = format!(
-        "$K10sParent = Get-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\nif ($null -ne $K10sParent -and (($K10sParent.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {{\r\nRemove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{manifest}' -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\n}}\r\nexit $K10sStatus\r\n"
+        "$K10sParent = Get-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\nif ($null -ne $K10sParent -and (($K10sParent.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {{\r\nRemove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{manifest}' -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{kubeconfig}' -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\n}}\r\nexit $K10sStatus\r\n"
     );
     body = body.strip_suffix(exit).unwrap_or(&body).to_owned() + &cleanup;
     let mut encoded = vec![0xEF, 0xBB, 0xBF];

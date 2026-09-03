@@ -8,7 +8,7 @@ use k10s_desktop::external_shell::{
 };
 
 fn descriptor() -> KubectlLaunchDescriptor {
-    KubectlLaunchDescriptor::new(
+    let mut descriptor = KubectlLaunchDescriptor::new(
         7,
         PathBuf::from("/opt/kube tools/kubectl"),
         "prod '$(touch nope)'".into(),
@@ -20,7 +20,9 @@ fn descriptor() -> KubectlLaunchDescriptor {
         ]),
         Vec::new(),
     )
-    .unwrap()
+    .unwrap();
+    descriptor.kubeconfig_snapshot = b"apiVersion: v1\nkind: Config\n".to_vec();
+    descriptor
 }
 
 #[cfg(unix)]
@@ -65,9 +67,19 @@ fn temporary_storage_is_private_unique_and_self_cleaning() {
             & 0o777,
         0o600
     );
+    let snapshot = first.directory().join("kubeconfig.yaml");
+    assert_eq!(
+        std::fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).unwrap(),
+        descriptor().kubeconfig_snapshot
+    );
     let body = std::fs::read_to_string(first.path()).unwrap();
     assert!(body.contains("rm -f -- \"$0\""));
     assert!(body.contains("manifest.json"));
+    assert!(body.contains("kubeconfig.yaml"));
     first.cleanup().unwrap();
     second.cleanup().unwrap();
     std::fs::remove_dir(root).unwrap();
@@ -565,7 +577,7 @@ fn descriptor_rejects_non_unicode_allowed_environment_and_missing_kubectl() {
     use std::os::unix::ffi::OsStringExt;
     let preparation = KubePreparation {
         source_paths: vec!["/tmp/config".into()],
-        source_digests: vec![[0; 32]],
+        source_snapshot: b"snapshot".to_vec(),
         selected_context: "context".into(),
         exec_plugins: Vec::new(),
         context_exec_plugins: BTreeMap::from([("context".into(), Vec::new())]),
@@ -649,7 +661,7 @@ fn descriptor_resolves_kubectl_and_exec_plugin_from_one_preparation() {
     }
     let preparation = KubePreparation {
         source_paths: vec![dir.join("first"), dir.join("second")],
-        source_digests: vec![[0; 32]; 2],
+        source_snapshot: b"snapshot".to_vec(),
         selected_context: "same-name".into(),
         exec_plugins: vec![ExecPluginPreparation {
             command: "login-helper".into(),
@@ -691,8 +703,7 @@ fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
 
     let mut descriptor = descriptor();
     descriptor.kubeconfig_sources = vec![first.clone(), kube.source_paths[1].clone()];
-    descriptor.kubeconfig_digests = kube.source_digests.clone();
-    descriptor.validate_kubeconfig_snapshot().unwrap();
+    descriptor.kubeconfig_snapshot = kube.source_snapshot.clone();
 
     // A later file/environment change cannot alter the already prepared snapshot.
     fs::write(
@@ -704,7 +715,7 @@ fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
         prepared.kube().unwrap().exec_plugins[0].command,
         "first-helper"
     );
-    assert!(descriptor.validate_kubeconfig_snapshot().is_err());
+    assert_eq!(descriptor.kubeconfig_snapshot, kube.source_snapshot);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -949,7 +960,7 @@ fn main() {{
     );
     let preparation = KubePreparation {
         source_paths: vec![dir.join("config")],
-        source_digests: vec![[0; 32]],
+        source_snapshot: b"snapshot".to_vec(),
         selected_context: "context".into(),
         exec_plugins: vec![ExecPluginPreparation {
             command: "aws".into(),
@@ -961,6 +972,8 @@ fn main() {{
         ("PATH".into(), dir.display().to_string()),
         ("PATHEXT".into(), ".EXE;.CMD;.BAT;.COM".into()),
         ("USERPROFILE".into(), dir.display().to_string()),
+        ("SYSTEMROOT".into(), std::env::var("SYSTEMROOT").unwrap()),
+        ("WINDIR".into(), std::env::var("WINDIR").unwrap()),
     ]));
     let descriptor =
         KubectlLaunchDescriptor::from_preparation(1, &preparation, &shell_environment).unwrap();

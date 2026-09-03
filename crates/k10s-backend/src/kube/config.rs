@@ -10,11 +10,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kube::config::{Config, ExecInteractiveMode, Kubeconfig, KubeconfigError};
-use sha2::{Digest, Sha256};
 
 use crate::port::{AdapterError, ContextAvailability, ContextInfo};
 
-type LoadedKubeconfig = (Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>, Vec<[u8; 32]>);
+type LoadedKubeconfig = (Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>, Vec<u8>);
 
 /// Load credential-free context summaries from an explicit kubeconfig path or
 /// standard discovery (`KUBECONFIG`, then `~/.kube/config`), along with the
@@ -38,7 +37,7 @@ pub(crate) fn load_from_paths(paths: Vec<PathBuf>) -> Result<LoadedKubeconfig, A
         .map(|path| unicode_path(path))
         .collect::<Result<Vec<_>, _>>()?
         .join(if cfg!(windows) { ";" } else { ":" });
-    let frozen = paths
+    let documents = paths
         .iter()
         .map(|path| {
             fs::read(path)
@@ -53,13 +52,9 @@ pub(crate) fn load_from_paths(paths: Vec<PathBuf>) -> Result<LoadedKubeconfig, A
                         }
                     }
                 })
-                .and_then(|bytes| {
-                    let digest: [u8; 32] = Sha256::digest(&bytes).into();
-                    decode_kubeconfig(&bytes, path).map(|document| (document, digest))
-                })
+                .and_then(|bytes| decode_kubeconfig(&bytes, path))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (documents, digests): (Vec<_>, Vec<_>) = frozen.into_iter().unzip();
     let mut kubeconfig = Kubeconfig::default();
     for (path, document) in paths.iter().zip(documents) {
         let mut next =
@@ -75,7 +70,13 @@ pub(crate) fn load_from_paths(paths: Vec<PathBuf>) -> Result<LoadedKubeconfig, A
                 detail: describe(error),
             })?;
     }
-    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths, digests))
+    let snapshot = serde_yaml_ng::to_string(&kubeconfig)
+        .map_err(|_| AdapterError::KubeconfigInvalid {
+            source: source.clone(),
+            detail: "the prepared kubeconfig could not be frozen".into(),
+        })?
+        .into_bytes();
+    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths, snapshot))
 }
 
 fn decode_kubeconfig(bytes: &[u8], path: &Path) -> Result<String, AdapterError> {

@@ -16,7 +16,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use k10s_backend::KubePreparation;
-use sha2::{Digest, Sha256};
 
 /// Immutable environment view used during descriptor preparation.
 #[derive(Clone, Debug, Default)]
@@ -147,15 +146,30 @@ pub fn probe_system_terminals(_environment: &EnvironmentSnapshot) -> Vec<Termina
 }
 
 /// Immutable kubectl inputs captured from the same kube preparation as the server.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct KubectlLaunchDescriptor {
     pub generation: u64,
     pub kubectl: PathBuf,
     pub context: String,
     pub kubeconfig_sources: Vec<PathBuf>,
-    pub kubeconfig_digests: Vec<[u8; 32]>,
+    pub kubeconfig_snapshot: Vec<u8>,
     pub environment: BTreeMap<String, String>,
     pub exec_plugins: Vec<ResolvedExecPlugin>,
+}
+
+impl fmt::Debug for KubectlLaunchDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KubectlLaunchDescriptor")
+            .field("generation", &self.generation)
+            .field("kubectl", &self.kubectl)
+            .field("context", &self.context)
+            .field("kubeconfig_sources", &self.kubeconfig_sources)
+            .field("kubeconfig_snapshot", &"REDACTED")
+            .field("environment", &self.environment)
+            .field("exec_plugins", &self.exec_plugins)
+            .finish()
+    }
 }
 
 impl KubectlLaunchDescriptor {
@@ -175,6 +189,13 @@ impl KubectlLaunchDescriptor {
         if let Some(profile) = environment.unicode(profile_key)? {
             allowed.insert(profile_key.into(), profile);
         }
+        #[cfg(windows)]
+        for key in ["SYSTEMROOT", "WINDIR"] {
+            let value = environment
+                .unicode(key)?
+                .ok_or(DescriptorError::Unreproducible)?;
+            allowed.insert(key.into(), value);
+        }
         let kubeconfig = std::env::join_paths(&preparation.source_paths)
             .map_err(|_| DescriptorError::Unrepresentable)?;
         allowed.insert(
@@ -189,7 +210,10 @@ impl KubectlLaunchDescriptor {
                 if is_sensitive(key) || is_sensitive_value(value) {
                     return Err(DescriptorError::SensitiveEnvironment(key.clone()));
                 }
-                if !matches!(key.as_str(), "PATH" | "HOME" | "USERPROFILE" | "KUBECONFIG") {
+                if !matches!(
+                    key.as_str(),
+                    "PATH" | "HOME" | "USERPROFILE" | "KUBECONFIG" | "SYSTEMROOT" | "WINDIR"
+                ) {
                     return Err(DescriptorError::UnsupportedEnvironment(key.clone()));
                 }
                 validate_value(value).map_err(|_| DescriptorError::Unrepresentable)?;
@@ -206,10 +230,10 @@ impl KubectlLaunchDescriptor {
             allowed,
             plugins,
         )?;
-        if preparation.source_paths.len() != preparation.source_digests.len() {
+        if preparation.source_snapshot.is_empty() {
             return Err(DescriptorError::Unreproducible);
         }
-        descriptor.kubeconfig_digests = preparation.source_digests.clone();
+        descriptor.kubeconfig_snapshot = preparation.source_snapshot.clone();
         Ok(descriptor)
     }
 
@@ -245,7 +269,7 @@ impl KubectlLaunchDescriptor {
             }
             if !matches!(
                 name.as_str(),
-                "PATH" | "HOME" | "USERPROFILE" | "KUBECONFIG"
+                "PATH" | "HOME" | "USERPROFILE" | "KUBECONFIG" | "SYSTEMROOT" | "WINDIR"
             ) {
                 return Err(DescriptorError::UnsupportedEnvironment(name.clone()));
             }
@@ -256,26 +280,10 @@ impl KubectlLaunchDescriptor {
             kubectl,
             context,
             kubeconfig_sources,
-            kubeconfig_digests: Vec::new(),
+            kubeconfig_snapshot: Vec::new(),
             environment,
             exec_plugins,
         })
-    }
-
-    /// Refuse launch if any kubeconfig source no longer matches the exact
-    /// bytes used to prepare the embedded backend.
-    pub fn validate_kubeconfig_snapshot(&self) -> Result<(), DescriptorError> {
-        if self.kubeconfig_sources.len() != self.kubeconfig_digests.len() {
-            return Err(DescriptorError::Unreproducible);
-        }
-        for (path, expected) in self.kubeconfig_sources.iter().zip(&self.kubeconfig_digests) {
-            let bytes = std::fs::read(path).map_err(|_| DescriptorError::KubeconfigChanged)?;
-            let actual: [u8; 32] = Sha256::digest(&bytes).into();
-            if &actual != expected {
-                return Err(DescriptorError::KubeconfigChanged);
-            }
-        }
-        Ok(())
     }
 }
 
@@ -310,7 +318,6 @@ fn is_sensitive_value(value: &str) -> bool {
 pub enum DescriptorError {
     Unreproducible,
     Unrepresentable,
-    KubeconfigChanged,
     SensitiveEnvironment(String),
     UnsupportedEnvironment(String),
     MissingExecutable(String),
@@ -321,9 +328,6 @@ impl fmt::Display for DescriptorError {
         match self {
             Self::Unreproducible => f.write_str("configuration cannot be reproduced by kubectl"),
             Self::Unrepresentable => f.write_str("configuration contains an unrepresentable value"),
-            Self::KubeconfigChanged => {
-                f.write_str("kubeconfig changed after the embedded server started")
-            }
             Self::SensitiveEnvironment(name) => write!(
                 f,
                 "sensitive environment variable {name} cannot be rendered"
@@ -531,6 +535,7 @@ fn powershell_literal(value: &str) -> String {
 }
 
 const MANIFEST_NAME: &str = "manifest.json";
+const KUBECONFIG_NAME: &str = "kubeconfig.yaml";
 const MANIFEST_VERSION: u32 = 1;
 const STARTUP_SCAN_LIMIT: usize = 1024;
 const STARTUP_CANDIDATE_LIMIT: usize = 128;
@@ -672,6 +677,7 @@ impl TemporaryShellStorage {
         let mut transaction = CreationTransaction {
             child: child.clone(),
             manifest: None,
+            kubeconfig: None,
             script: None,
             committed: false,
         };
@@ -702,9 +708,37 @@ impl TemporaryShellStorage {
             )?;
             self.injected(StorageFaultPoint::ManifestWrite)?;
             self.injected(StorageFaultPoint::ManifestSync)?;
+            if command.descriptor.kubeconfig_snapshot.is_empty() {
+                return Err(StorageError::Descriptor(DescriptorError::Unreproducible));
+            }
+            let kubeconfig_path = directory.join(KUBECONFIG_NAME);
+            platform::create_private_file(
+                &child,
+                KUBECONFIG_NAME,
+                &command.descriptor.kubeconfig_snapshot,
+                false,
+                || transaction.kubeconfig = Some(kubeconfig_path.clone()),
+            )?;
+            let mut launch_descriptor = command.descriptor.clone();
+            launch_descriptor.environment.insert(
+                "KUBECONFIG".into(),
+                kubeconfig_path
+                    .to_str()
+                    .ok_or(StorageError::InvalidParent)?
+                    .to_owned(),
+            );
+            let launch_command = KubectlExecCommand {
+                descriptor: &launch_descriptor,
+                target: command.target.clone(),
+            };
             let script_path = directory.join(&script_name);
             self.injected(StorageFaultPoint::Render)?;
-            let body = render_self_cleaning(command, &manifest_path, &directory)?;
+            let body = render_self_cleaning(
+                &launch_command,
+                &manifest_path,
+                &kubeconfig_path,
+                &directory,
+            )?;
             self.injected(StorageFaultPoint::ScriptCreate)?;
             platform::create_private_file(&child, &script_name, &body, true, || {
                 transaction.script = Some(script_path.clone());
@@ -790,12 +824,13 @@ impl TemporaryShellStorage {
                 continue;
             }
             let entries = std::fs::read_dir(&directory)?
-                .take(3)
+                .take(4)
                 .collect::<Result<Vec<_>, _>>()?;
-            if entries.len() != 2
+            if entries.len() != 3
                 || entries.iter().any(|entry| {
                     let name = entry.file_name();
                     name != std::ffi::OsStr::new(MANIFEST_NAME)
+                        && name != std::ffi::OsStr::new(KUBECONFIG_NAME)
                         && name != std::ffi::OsStr::new(&script_name)
                 })
             {
@@ -803,8 +838,10 @@ impl TemporaryShellStorage {
             }
             platform::validate_regular_file(&child, &script_name)?;
             platform::validate_regular_file(&child, MANIFEST_NAME)?;
+            platform::validate_regular_file(&child, KUBECONFIG_NAME)?;
             platform::remove_regular_file(&child, &script_name)?;
             platform::remove_regular_file(&child, MANIFEST_NAME)?;
+            platform::remove_regular_file(&child, KUBECONFIG_NAME)?;
             platform::remove_empty_directory(&child)?;
             report.removed += 1;
         }
@@ -832,6 +869,7 @@ fn valid_script_name(value: &str) -> bool {
 struct CreationTransaction {
     child: platform::PrivateChild,
     manifest: Option<PathBuf>,
+    kubeconfig: Option<PathBuf>,
     script: Option<PathBuf>,
     committed: bool,
 }
@@ -854,6 +892,13 @@ impl CreationTransaction {
             .is_err();
         }
         if let Some(path) = self.manifest.take() {
+            failed |= platform::remove_regular_file(
+                &self.child,
+                path.file_name().and_then(|v| v.to_str()).unwrap_or(""),
+            )
+            .is_err();
+        }
+        if let Some(path) = self.kubeconfig.take() {
             failed |= platform::remove_regular_file(
                 &self.child,
                 path.file_name().and_then(|v| v.to_str()).unwrap_or(""),
@@ -897,6 +942,7 @@ impl TemporaryShellScript {
                 .ok_or(StorageError::InvalidParent)?,
         )?;
         platform::remove_regular_file(&self.child, MANIFEST_NAME)?;
+        platform::remove_regular_file(&self.child, KUBECONFIG_NAME)?;
         platform::remove_empty_directory(&self.child)?;
         Ok(())
     }
@@ -905,19 +951,22 @@ impl TemporaryShellScript {
 fn render_self_cleaning(
     command: &KubectlExecCommand<'_>,
     manifest: &Path,
+    kubeconfig: &Path,
     directory: &Path,
 ) -> Result<Vec<u8>, StorageError> {
     #[cfg(windows)]
     {
-        return windows::render_with_cleanup(command, manifest, directory).map_err(Into::into);
+        return windows::render_with_cleanup(command, manifest, kubeconfig, directory)
+            .map_err(Into::into);
     }
     #[cfg(unix)]
     {
         let mut body = command.render_posix()?;
         let exit = "exit \"$K10S_STATUS\"\n";
         let cleanup = format!(
-            "rm -f -- \"$0\" {}\nrmdir -- {} 2>/dev/null || :\nexit \"$K10S_STATUS\"\n",
+            "rm -f -- \"$0\" {} {}\nrmdir -- {} 2>/dev/null || :\nexit \"$K10S_STATUS\"\n",
             posix_literal(manifest.to_str().ok_or(StorageError::InvalidParent)?),
+            posix_literal(kubeconfig.to_str().ok_or(StorageError::InvalidParent)?),
             posix_literal(directory.to_str().ok_or(StorageError::InvalidParent)?)
         );
         body = body

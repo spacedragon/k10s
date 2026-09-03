@@ -51,10 +51,14 @@ configuration is in-memory, unavailable locally, depends on sensitive
 environment, or otherwise cannot be reproduced exactly. Kubeconfig contents,
 credentials, access tokens, and user resource values are never copied into a
 fallback command.
-Immediately before creating the script, Finback re-reads the ordered sources
-and refuses launch unless every cryptographic digest still matches the bytes
-used for backend preparation. The original files remain kubectl's inputs; their
-contents are never copied into the script or temporary launch directory.
+Windows additionally retains the audited non-secret `SYSTEMROOT` and `WINDIR`
+runtime variables so PowerShell remains functional; arbitrary inherited
+variables are still removed before kubectl runs.
+Finback writes the exact merged configuration prepared for the backend as an
+owner-only file beside the launch script and points kubectl at that immutable
+snapshot. It is never embedded in the script, and self-cleanup removes the
+snapshot together with the script and manifest. Later edits to the original
+source paths therefore cannot retarget an already prepared shell.
 
 The private script checks the live Pod UID immediately before invoking exec.
 This preflight prevents common stale-name mistakes but is not atomic: Kubernetes

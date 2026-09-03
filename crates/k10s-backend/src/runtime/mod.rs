@@ -61,13 +61,26 @@ pub struct ExecPluginPreparation {
 }
 
 /// Reproduction metadata captured from the exact kubeconfig parse used by the kernel.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct KubePreparation {
     pub source_paths: Vec<PathBuf>,
-    pub source_digests: Vec<[u8; 32]>,
+    pub source_snapshot: Vec<u8>,
     pub selected_context: String,
     pub exec_plugins: Vec<ExecPluginPreparation>,
     pub context_exec_plugins: BTreeMap<String, Vec<ExecPluginPreparation>>,
+}
+
+impl std::fmt::Debug for KubePreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KubePreparation")
+            .field("source_paths", &self.source_paths)
+            .field("source_snapshot", &"REDACTED")
+            .field("selected_context", &self.selected_context)
+            .field("exec_plugins", &self.exec_plugins)
+            .field("context_exec_plugins", &self.context_exec_plugins)
+            .finish()
+    }
 }
 
 impl KubePreparation {
@@ -82,7 +95,7 @@ impl KubePreparation {
             })?;
         Ok(Self {
             source_paths: self.source_paths.clone(),
-            source_digests: self.source_digests.clone(),
+            source_snapshot: self.source_snapshot.clone(),
             selected_context: context.to_owned(),
             exec_plugins,
             context_exec_plugins: self.context_exec_plugins.clone(),
@@ -115,9 +128,9 @@ pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterErr
             kube: None,
         }),
         BackendMode::Kube { kubeconfig } => {
-            let (contexts, parsed, sources, source_digests) =
+            let (contexts, parsed, sources, source_snapshot) =
                 crate::kube::config::load_with_source(kubeconfig.as_deref())?;
-            prepare_kube_parts(contexts, parsed, sources, source_digests)
+            prepare_kube_parts(contexts, parsed, sources, source_snapshot)
         }
     }
 }
@@ -126,16 +139,16 @@ pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterErr
 pub fn prepare_kube_backend_from_paths(
     source_paths: Vec<PathBuf>,
 ) -> Result<PreparedBackend, AdapterError> {
-    let (contexts, parsed, sources, source_digests) =
+    let (contexts, parsed, sources, source_snapshot) =
         crate::kube::config::load_from_paths(source_paths)?;
-    prepare_kube_parts(contexts, parsed, sources, source_digests)
+    prepare_kube_parts(contexts, parsed, sources, source_snapshot)
 }
 
 fn prepare_kube_parts(
     contexts: Vec<crate::port::ContextInfo>,
     parsed: kube::config::Kubeconfig,
     sources: Vec<PathBuf>,
-    source_digests: Vec<[u8; 32]>,
+    source_snapshot: Vec<u8>,
 ) -> Result<PreparedBackend, AdapterError> {
     let selected_context =
         parsed
@@ -187,7 +200,7 @@ fn prepare_kube_parts(
         kernel: BackendKernel::new(adapter),
         kube: Some(KubePreparation {
             source_paths: sources,
-            source_digests,
+            source_snapshot,
             selected_context,
             exec_plugins,
             context_exec_plugins,

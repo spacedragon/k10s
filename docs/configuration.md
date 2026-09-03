@@ -37,6 +37,9 @@ resolve local `kubectl`, faithfully reproduce the ordered kubeconfig sources
 and selected context, and find a platform terminal adapter. An in-memory or
 unavailable kubeconfig, a remote/standalone connection, missing kubectl, or a
 descriptor that would require secret environment makes the action unavailable.
+On Windows, the fixed non-secret allowlist also preserves `SYSTEMROOT` and
+`WINDIR`, which Windows PowerShell and the CLR require after environment
+sanitization.
 
 The descriptor, not Pod data, is authoritative for context and kubeconfig.
 Allowed non-secret exec-plugin environment is captured when the embedded server
@@ -45,8 +48,9 @@ structured and platform-quoted. macOS uses `open` on a private `.command` file,
 Linux uses the documented ordered terminal-adapter fallback, and Windows starts
 `powershell.exe` directly with a private `.ps1` file and new console. See
 [Security](security.md) for the UID preflight's residual race and cleanup rules.
-Immediately before launch, Finback hashes every source again and refuses the
-request if its bytes differ from the snapshot used to prepare the backend.
+Finback serializes the exact merged configuration prepared for the backend into
+the owner-only launch directory and points kubectl at that immutable snapshot,
+so later edits to the original source paths cannot retarget the shell.
 
 ## Embeddable `ServerConfig`
 
