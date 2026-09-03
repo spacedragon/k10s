@@ -894,15 +894,24 @@ async fn connect_opens_a_stream_through_the_backend_only() {
     // The fake seam proves connect succeeds without a cluster.
     let fake = std::sync::Arc::new(k10s_backend::FakePortForwardSeam::new());
     let connector = k10s_backend::PortForwardConnector::new(fake);
-    let resolved = ResolvedPortForward {
-        context: CONTEXT.into(),
-        namespace: NS.into(),
-        target_uid: SERVICE_UID.into(),
-        source_port: 80,
-        pod_name: "web-1".into(),
-        pod_uid: "uid-pod".into(),
-        pod_port: 8_080,
-    };
+    let pod_name = "web-frontend-7d9f8-00001";
+    let resolved = connector
+        .resolve(PortForwardRequest {
+            context: "dev-local".into(),
+            target: PortForwardTarget::Pod {
+                identity: ResourceIdentity {
+                    context: "dev-local".into(),
+                    gvk: GroupVersionKind::core("v1", "Pod"),
+                    namespace: Some(NS.into()),
+                    name: pod_name.into(),
+                    uid: format!("uid-dev-local-pod-default-{pod_name}"),
+                },
+                container_name: "app".into(),
+                remote_port: 8_080,
+            },
+        })
+        .await
+        .expect("the fake resolves its seeded Pod");
     let stream = connector
         .connect(&resolved)
         .await

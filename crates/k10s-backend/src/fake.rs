@@ -2945,6 +2945,25 @@ mod tests {
         }
     }
 
+    fn fake_service_request() -> PortForwardRequest {
+        let name = "web-frontend";
+        PortForwardRequest {
+            context: "dev-local".into(),
+            target: PortForwardTarget::Service {
+                identity: k10s_protocol::ResourceIdentity {
+                    context: "dev-local".into(),
+                    gvk: k10s_protocol::GroupVersionKind::core("v1", "Service"),
+                    namespace: Some("default".into()),
+                    name: name.into(),
+                    uid: uid("dev-local", "Service", Some("default"), name),
+                },
+                port: PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+            },
+        }
+    }
+
     #[tokio::test]
     async fn fake_port_forward_resolves_from_the_owning_world() {
         let fake = FakeKubernetes::standard();
@@ -3046,6 +3065,77 @@ mod tests {
             wrong_protocol,
             BackendError::PortForward {
                 category: RejectionCategory::UnsupportedPod,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fake_connect_revalidates_direct_and_service_pod_uids() {
+        let direct_fake = FakeKubernetes::standard();
+        let direct_connector = direct_fake
+            .port_forward_connector()
+            .expect("the fake exposes port forwarding");
+        let direct = direct_connector
+            .resolve(fake_pod_request("app", 8_080))
+            .await
+            .expect("the direct Pod resolves");
+        {
+            let mut state = direct_fake.lock();
+            let pod = state
+                .find_index(
+                    &direct.context,
+                    &Gvk::core("v1", "Pod"),
+                    Some(&direct.namespace),
+                    &direct.pod_name,
+                )
+                .expect("the resolved Pod exists");
+            state.records[pod].reference.uid = "uid-recreated-direct-pod".into();
+        }
+        let direct_error = direct_connector
+            .connect(&direct)
+            .await
+            .expect_err("a recreated direct Pod cannot receive a fake stream");
+        assert!(matches!(
+            direct_error,
+            BackendError::PortForward {
+                category: RejectionCategory::VanishedResource,
+                ..
+            }
+        ));
+
+        let service_fake = FakeKubernetes::standard();
+        let service_connector = service_fake
+            .port_forward_connector()
+            .expect("the fake exposes port forwarding");
+        let service = service_connector
+            .resolve(fake_service_request())
+            .await
+            .expect("the Service-backed Pod resolves");
+        assert_eq!(
+            service.pod_uid,
+            uid(
+                &service.context,
+                "Pod",
+                Some(&service.namespace),
+                &service.pod_name,
+            ),
+            "Service resolution pins the selected fake Pod's actual UID"
+        );
+        assert!(service_fake.delete_resource(
+            &service.context,
+            &Gvk::core("v1", "Pod"),
+            Some(&service.namespace),
+            &service.pod_name,
+        ));
+        let service_error = service_connector
+            .connect(&service)
+            .await
+            .expect_err("a deleted Service-backed Pod cannot receive a fake stream");
+        assert!(matches!(
+            service_error,
+            BackendError::PortForward {
+                category: RejectionCategory::VanishedResource,
                 ..
             }
         ));
@@ -3179,7 +3269,7 @@ impl PortForwardSeam for FakePortForwardSeam {
                 });
             }
             drop(state);
-            let mut pods: Vec<String> = {
+            let mut pods: Vec<(String, String)> = {
                 let state = self.state.lock().unwrap();
                 state
                     .records
@@ -3190,11 +3280,11 @@ impl PortForwardSeam for FakePortForwardSeam {
                             && record.reference.namespace.as_deref() == Some(namespace.as_str())
                             && record.summary == "Running"
                     })
-                    .map(|record| record.reference.name.clone())
+                    .map(|record| (record.reference.name.clone(), record.reference.uid.clone()))
                     .collect()
             };
             pods.sort();
-            let Some(pod_name) = pods.into_iter().next() else {
+            let Some((pod_name, pod_uid)) = pods.into_iter().next() else {
                 return Err(BackendError::PortForward {
                     category: crate::port_forward::RejectionCategory::UnavailableEndpoint,
                     message: "no ready endpoint backs this service port".into(),
@@ -3212,7 +3302,7 @@ impl PortForwardSeam for FakePortForwardSeam {
                 target_uid: identity.uid,
                 source_port,
                 pod_name,
-                pod_uid: "uid-fake-pod".to_owned(),
+                pod_uid,
                 pod_port: source_port.max(8_080.min(source_port)),
             })
         })
@@ -3220,9 +3310,24 @@ impl PortForwardSeam for FakePortForwardSeam {
 
     fn connect<'a>(
         &'a self,
-        _resolved: &'a ResolvedPortForward,
+        resolved: &'a ResolvedPortForward,
     ) -> Pin<Box<dyn Future<Output = Result<PortForwardStream, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let state = self.state.lock().unwrap();
+            let live = state.find_record(&ResourceRef {
+                context: resolved.context.clone(),
+                gvk: Gvk::core("v1", "Pod"),
+                namespace: Some(resolved.namespace.clone()),
+                name: resolved.pod_name.clone(),
+                uid: resolved.pod_uid.clone(),
+            });
+            if live.is_none() {
+                return Err(BackendError::PortForward {
+                    category: RejectionCategory::VanishedResource,
+                    message: "the resolved pod no longer exists".into(),
+                });
+            }
+            drop(state);
             let (_client, server) = tokio::io::duplex(4096);
             Ok(PortForwardStream::new(Box::new(server)))
         })
