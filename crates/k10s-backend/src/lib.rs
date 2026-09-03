@@ -43,5 +43,8 @@ pub use port_forward::{
     PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,
     PortForwardStream, RejectionCategory, ResolvedPortForward,
 };
-pub use runtime::{BackendMode, ContextRegistry, build_kernel};
+pub use runtime::{
+    BackendMode, ContextRegistry, ExecPluginPreparation, KubePreparation, PreparedBackend,
+    build_kernel, prepare_backend,
+};
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

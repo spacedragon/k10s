@@ -8,7 +8,7 @@
 
 mod auth;
 mod auth_observer;
-mod config;
+pub(crate) mod config;
 mod create;
 mod deployment_projection;
 mod discovery;
@@ -202,6 +202,13 @@ impl KubeAdapter {
         // Prepare: load and validate credential-free summaries off-line; keep
         // the parsed kube-rs config as the lazy per-context client source.
         let (prepared, kubeconfig) = config::load_with_source(path)?;
+        Self::from_prepared_kubeconfig(prepared, kubeconfig)
+    }
+
+    pub(crate) fn from_prepared_kubeconfig(
+        prepared: Vec<ContextInfo>,
+        kubeconfig: kube::config::Kubeconfig,
+    ) -> Result<Self, AdapterError> {
         // Commit: install the complete registry and shared runtime state.
         let (availability_events, _) = tokio::sync::broadcast::channel(32);
         Ok(Self {

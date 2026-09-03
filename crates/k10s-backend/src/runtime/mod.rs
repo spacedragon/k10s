@@ -11,6 +11,7 @@ pub(crate) mod cluster;
 mod context;
 pub(crate) mod supervisor;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::fake::FakeKubernetes;
@@ -52,6 +53,100 @@ pub enum BackendMode {
     Kube { kubeconfig: Option<PathBuf> },
 }
 
+/// Credential-free exec-plugin declaration captured during kube preparation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ExecPluginPreparation {
+    pub command: String,
+    pub environment: BTreeMap<String, String>,
+}
+
+/// Reproduction metadata captured from the exact kubeconfig parse used by the kernel.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct KubePreparation {
+    pub source_paths: Vec<PathBuf>,
+    pub selected_context: String,
+    pub exec_plugins: Vec<ExecPluginPreparation>,
+}
+
+/// One-shot factory result consumed by server and desktop launch description.
+#[derive(Debug)]
+pub struct PreparedBackend {
+    kernel: BackendKernel,
+    kube: Option<KubePreparation>,
+}
+
+impl PreparedBackend {
+    pub fn into_kernel(self) -> BackendKernel {
+        self.kernel
+    }
+    #[must_use]
+    pub fn kube(&self) -> Option<&KubePreparation> {
+        self.kube.as_ref()
+    }
+}
+
+/// Prepare a backend once without independently rediscovering kube configuration.
+pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterError> {
+    match mode {
+        BackendMode::Fake => Ok(PreparedBackend {
+            kernel: BackendKernel::new(FakeKubernetes::standard()),
+            kube: None,
+        }),
+        BackendMode::Kube { kubeconfig } => {
+            let sources = crate::kube::config::source_paths(kubeconfig.as_deref())?;
+            let (contexts, parsed) = crate::kube::config::load_with_source(kubeconfig.as_deref())?;
+            let selected_context =
+                parsed
+                    .current_context
+                    .clone()
+                    .ok_or(AdapterError::KubeconfigInvalid {
+                        source: "prepared kubeconfig".into(),
+                        detail: "no current context could be determined from the kubeconfig".into(),
+                    })?;
+            let mut exec_plugins = Vec::new();
+            let selected_user = parsed
+                .contexts
+                .iter()
+                .find(|named| named.name == selected_context)
+                .and_then(|named| named.context.as_ref())
+                .and_then(|context| context.user.as_deref());
+            for named in parsed
+                .auth_infos
+                .iter()
+                .filter(|named| Some(named.name.as_str()) == selected_user)
+            {
+                if let Some(exec) = named.auth_info.as_ref().and_then(|auth| auth.exec.as_ref()) {
+                    let command = exec
+                        .command
+                        .clone()
+                        .ok_or(AdapterError::KubeconfigInvalid {
+                            source: "prepared kubeconfig".into(),
+                            detail: "exec credential plugin has no command".into(),
+                        })?;
+                    let mut environment = BTreeMap::new();
+                    for item in exec.env.as_deref().unwrap_or_default() {
+                        environment
+                            .extend(item.iter().map(|(key, value)| (key.clone(), value.clone())));
+                    }
+                    exec_plugins.push(ExecPluginPreparation {
+                        command,
+                        environment,
+                    });
+                }
+            }
+            let adapter = KubeAdapter::from_prepared_kubeconfig(contexts, parsed)?;
+            Ok(PreparedBackend {
+                kernel: BackendKernel::new(adapter),
+                kube: Some(KubePreparation {
+                    source_paths: sources,
+                    selected_context,
+                    exec_plugins,
+                }),
+            })
+        }
+    }
+}
+
 /// Build the backend kernel for the selected mode through one factory seam.
 ///
 /// Entry points must not construct kernels around adapters directly; going
@@ -59,10 +154,5 @@ pub enum BackendMode {
 /// single, testable place. The kernel itself already erases adapter types,
 /// so each branch stays concrete here.
 pub fn build_kernel(mode: &BackendMode) -> Result<BackendKernel, AdapterError> {
-    match mode {
-        BackendMode::Fake => Ok(BackendKernel::new(FakeKubernetes::standard())),
-        BackendMode::Kube { kubeconfig } => {
-            KubeAdapter::from_kubeconfig(kubeconfig.as_deref()).map(BackendKernel::new)
-        }
-    }
+    prepare_backend(mode).map(PreparedBackend::into_kernel)
 }

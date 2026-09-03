@@ -6,7 +6,7 @@
 //! contents (which may include tokens).
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kube::config::{Config, ExecInteractiveMode, Kubeconfig, KubeconfigError};
 
@@ -28,6 +28,21 @@ pub(crate) fn load_with_source(
     }?;
 
     validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig))
+}
+
+/// Exact ordered files whose merged contents produced a kube client snapshot.
+pub(crate) fn source_paths(explicit_path: Option<&Path>) -> Result<Vec<PathBuf>, AdapterError> {
+    if let Some(path) = explicit_path {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if let Some(value) = std::env::var_os("KUBECONFIG")
+        && !value.is_empty()
+    {
+        return Ok(std::env::split_paths(&value).collect());
+    }
+    std::env::home_dir()
+        .map(|home| vec![home.join(".kube").join("config")])
+        .ok_or(AdapterError::KubeconfigNotConfigured)
 }
 
 /// Describe where standard discovery looked, for operator-facing errors.

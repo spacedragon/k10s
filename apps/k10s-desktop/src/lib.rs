@@ -1,5 +1,7 @@
 //! Native desktop bootstrap and embedded-server lifecycle.
 
+pub mod external_shell;
+
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -10,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use k10s_backend::{AdapterError, BackendMode, build_kernel};
+use k10s_backend::{AdapterError, BackendMode, prepare_backend};
 use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
@@ -81,6 +83,7 @@ pub struct EmbeddedServerHandle {
     access_token: String,
     cancel: CancellationToken,
     thread: Option<JoinHandle<io::Result<()>>>,
+    kubectl_launch: Option<external_shell::KubectlLaunchDescriptor>,
 }
 
 impl std::fmt::Debug for EmbeddedServerHandle {
@@ -91,6 +94,7 @@ impl std::fmt::Debug for EmbeddedServerHandle {
             .field("control_url", &self.control_url)
             .field("access_token", &"[REDACTED]")
             .field("running", &self.thread.is_some())
+            .field("kubectl_launch_available", &self.kubectl_launch.is_some())
             .finish()
     }
 }
@@ -112,6 +116,12 @@ impl EmbeddedServerHandle {
     #[must_use]
     pub fn access_token(&self) -> &str {
         &self.access_token
+    }
+
+    /// Immutable kubectl reproduction snapshot, absent for fake or unsafe configurations.
+    #[must_use]
+    pub fn kubectl_launch_descriptor(&self) -> Option<&external_shell::KubectlLaunchDescriptor> {
+        self.kubectl_launch.as_ref()
     }
 
     /// Cancel the server, gracefully finish connections, and join its OS thread.
@@ -600,6 +610,16 @@ fn launch_embedded_server_on(
     bind_addr: SocketAddr,
     mode: &BackendMode,
 ) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
+    let prepared = prepare_backend(mode).map_err(EmbeddedServerError::Backend)?;
+    let kubectl_launch = prepared.kube().and_then(|kube| {
+        external_shell::KubectlLaunchDescriptor::from_preparation(
+            1,
+            kube,
+            &external_shell::EnvironmentSnapshot::capture(),
+        )
+        .ok()
+    });
+    let kernel = prepared.into_kernel();
     let mut token_bytes = [0_u8; 32];
     getrandom::fill(&mut token_bytes).map_err(EmbeddedServerError::Randomness)?;
     let access_token = URL_SAFE_NO_PAD.encode(token_bytes);
@@ -608,21 +628,9 @@ fn launch_embedded_server_on(
     let thread_token = access_token.clone();
     let (ready_sender, ready_receiver) =
         mpsc::sync_channel::<Result<SocketAddr, EmbeddedServerError>>(1);
-    let mode = mode.clone();
-
     let thread = thread::Builder::new()
         .name("k10s-embedded-server".to_owned())
         .spawn(move || {
-            // Build the kernel through the shared factory before readiness is
-            // reported: a broken kubeconfig must fail the launch, never fall
-            // back to fake data.
-            let kernel = match build_kernel(&mode) {
-                Ok(kernel) => kernel,
-                Err(error) => {
-                    let _ = ready_sender.send(Err(EmbeddedServerError::Backend(error)));
-                    return Ok(());
-                }
-            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -687,6 +695,7 @@ fn launch_embedded_server_on(
         access_token,
         cancel,
         thread: Some(thread),
+        kubectl_launch,
     })
 }
 
