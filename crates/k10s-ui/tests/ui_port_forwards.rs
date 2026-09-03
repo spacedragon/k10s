@@ -1,15 +1,20 @@
 //! Shared port-forward start modal and application-owned presentation behavior.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
-    GroupVersionKind, PortForwardFailure, PortForwardFailureCategory, PortForwardPodTarget,
-    PortForwardPortSelector, PortForwardSession, PortForwardSessionId, PortForwardSessionState,
-    PortForwardTarget, ResourceIdentity,
+    BackendRevision, GroupVersionKind, PortForwardFailure, PortForwardFailureCategory,
+    PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionId,
+    PortForwardSessionState, PortForwardTarget, ResourceCapabilities, ResourceDetailResponse,
+    ResourceIdentity,
 };
 use k10s_ui::{
     ui::{
-        PortForwardAction, PortForwardRetryErrors, PortForwardStartModal, UiShell,
+        ConnectionState, DetailAuthority, DetailLifecycle, PortForwardAction,
+        PortForwardRetryErrors, PortForwardStartModal, ResourceFeed, UiShell, WindowFreshness,
         retry_start_request,
     },
     workspace::{
@@ -33,6 +38,62 @@ fn pod_target() -> PortForwardTarget {
         container_name: "web".into(),
         remote_port: 8_080,
     }
+}
+
+fn service_target() -> PortForwardTarget {
+    PortForwardTarget::Service {
+        identity: ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Service"),
+            namespace: Some("default".into()),
+            name: "web".into(),
+            uid: "uid-service".into(),
+        },
+        port: PortForwardPortSelector::Number { number: 80 },
+    }
+}
+
+fn target_identity(target: &PortForwardTarget) -> &ResourceIdentity {
+    match target {
+        PortForwardTarget::Service { identity, .. } | PortForwardTarget::Pod { identity, .. } => {
+            identity
+        }
+    }
+}
+
+fn authorized_feed(target: &PortForwardTarget) -> ResourceFeed {
+    let identity = target_identity(target).clone();
+    let mut feed = ResourceFeed::default();
+    match target {
+        PortForwardTarget::Service { .. } => feed.port_forward_available = true,
+        PortForwardTarget::Pod { .. } => feed.pod_port_forward_available = true,
+    }
+    feed.details.insert(
+        identity.clone(),
+        ResourceDetailResponse {
+            identity: identity.clone(),
+            revision: BackendRevision::new(1),
+            created_at: String::new(),
+            owner_references: Vec::new(),
+            sections: Vec::new(),
+            events_condition: k10s_protocol::EventsCondition::Available,
+            events: Vec::new(),
+            related: Vec::new(),
+            capabilities: ResourceCapabilities::default(),
+            manifest: String::new(),
+            projection: None,
+        },
+    );
+    feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    feed
 }
 
 fn failed_session(id: &str, revision: u64) -> PortForwardSession {
@@ -98,11 +159,17 @@ fn modal_start_is_disabled_while_invalid_or_pending() {
 
 fn render_modal(ui: &mut egui::Ui, shell: &mut UiShell<ResourceIdentity>) {
     let mut selected = Some("dev-local".to_owned());
-    shell.show(
+    let feed = shell
+        .port_forward_start_modal()
+        .map(|modal| authorized_feed(&modal.target))
+        .unwrap_or_default();
+    shell.show_with_resources(
         ui,
-        k10s_ui::ui::ConnectionState::Connected,
+        ConnectionState::Connected,
         &[],
         &mut selected,
+        None,
+        &feed,
     );
 }
 
@@ -112,6 +179,120 @@ fn modal_harness() -> Harness<'static, UiShell<ResourceIdentity>> {
     Harness::builder()
         .with_size(egui::vec2(900.0, 640.0))
         .build_ui_state(render_modal, shell)
+}
+
+struct AuthorizationFixture {
+    shell: UiShell<ResourceIdentity>,
+    feed: ResourceFeed,
+}
+
+fn render_authorization_fixture(ui: &mut egui::Ui, fixture: &mut AuthorizationFixture) {
+    let mut selected = Some("dev-local".to_owned());
+    fixture.shell.show_with_resources(
+        ui,
+        ConnectionState::Connected,
+        &[],
+        &mut selected,
+        None,
+        &fixture.feed,
+    );
+}
+
+fn authorization_harness(target: PortForwardTarget) -> Harness<'static, AuthorizationFixture> {
+    let mut shell = UiShell::new();
+    shell.open_port_forward_start(target.clone(), "remote port", 8_080);
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 640.0))
+        .build_ui_state(
+            render_authorization_fixture,
+            AuthorizationFixture {
+                shell,
+                feed: authorized_feed(&target),
+            },
+        )
+}
+
+#[test]
+fn pod_capability_loss_after_open_disables_modal_submission() {
+    let mut harness = authorization_harness(pod_target());
+    harness.run_steps(2);
+    harness.state_mut().feed.pod_port_forward_available = false;
+    harness.run_steps(2);
+
+    let start = harness.get_by_role_and_label(Role::Button, "Start port forward");
+    assert!(start.accesskit_node().is_disabled());
+    harness.get_by_label("Pod port forwarding is unavailable on this connection");
+    start.click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_port_forward_actions()
+            .is_empty()
+    );
+}
+
+#[test]
+fn service_authority_loss_after_open_disables_modal_submission() {
+    let target = service_target();
+    let identity = target_identity(&target).clone();
+    let mut harness = authorization_harness(target);
+    harness.run_steps(2);
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::StaleRetrying {
+                last_sync_age: "30s".into(),
+                retry_in: "2s".into(),
+                attempt: 1,
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness.run_steps(2);
+
+    let start = harness.get_by_role_and_label(Role::Button, "Start port forward");
+    assert!(start.accesskit_node().is_disabled());
+    harness.get_by_label("Port forwarding requires live, matching resource details");
+    start.click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_port_forward_actions()
+            .is_empty()
+    );
+}
+
+#[test]
+fn service_modal_submits_blank_and_zero_as_automatic_local_port() {
+    for draft in ["", "0"] {
+        let target = service_target();
+        let mut harness = authorization_harness(target.clone());
+        harness
+            .state_mut()
+            .shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = draft.into();
+        harness.run_steps(2);
+        harness
+            .get_by_role_and_label(Role::Button, "Start port forward")
+            .click();
+        harness.run_steps(2);
+
+        assert!(matches!(
+            harness
+                .state_mut()
+                .shell
+                .drain_port_forward_actions()
+                .as_slice(),
+            [PortForwardAction::Start { request, .. }]
+                if request.target() == &target && request.local_port() == 0
+        ));
+    }
 }
 
 #[test]

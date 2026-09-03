@@ -20,6 +20,7 @@ mod top_bar;
 mod window;
 
 pub(crate) use detail::PodRuntimeProjection;
+pub(crate) use port_forward::port_forward_start_authorization;
 
 pub use port_forward::{
     LocalPortError, PortForwardModalGeneration, PortForwardRetryErrors, PortForwardStartModal,
@@ -710,10 +711,14 @@ where
             refresh_requested |= self.activate_palette_action(ui.ctx(), action, new_window);
         }
 
+        let port_forward_unavailable = self.port_forward_start_modal.as_ref().and_then(|modal| {
+            port_forward::port_forward_start_authorization(feed, &modal.target).err()
+        });
         port_forward::show(
             ui.ctx(),
             &mut self.port_forward_start_modal,
             &mut self.port_forward_actions,
+            port_forward_unavailable,
         );
 
         let context_change = context_change

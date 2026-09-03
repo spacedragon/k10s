@@ -1360,7 +1360,7 @@ mod tests {
                 now: web_time::UNIX_EPOCH,
                 gone: false,
                 mutations_allowed: false,
-                port_forward_available: false,
+                port_forward_capability: false,
                 port_forward_sessions: &[],
                 port_forward_error: None,
             };
@@ -1483,7 +1483,7 @@ mod tests {
                 now: web_time::UNIX_EPOCH + Duration::from_secs(32 * 24 * 60 * 60),
                 gone: false,
                 mutations_allowed: false,
-                port_forward_available: false,
+                port_forward_capability: false,
                 port_forward_sessions: &[],
                 port_forward_error: None,
             };

@@ -10,6 +10,53 @@ use k10s_protocol::{
 
 use super::PortForwardAction;
 
+pub(crate) const PORT_FORWARD_AUTHORITY_UNAVAILABLE: &str =
+    "Port forwarding requires live, matching resource details";
+
+/// Revalidate the exact target against the current capability and resource
+/// feed. Both the modal and the application dispatch boundary use this
+/// function so a render-time decision can never outlive its authority.
+pub(crate) fn port_forward_start_authorization(
+    feed: &super::ResourceFeed,
+    target: &PortForwardTarget,
+) -> Result<(), &'static str> {
+    if target.validate().is_err() {
+        return Err("The selected port-forward target is no longer valid");
+    }
+    let (identity, capability, capability_error) = match target {
+        PortForwardTarget::Service { identity, .. } => (
+            identity,
+            feed.port_forward_available,
+            "Service port forwarding is unavailable on this connection",
+        ),
+        PortForwardTarget::Pod { identity, .. } => (
+            identity,
+            feed.pod_port_forward_available,
+            "Pod port forwarding is unavailable on this connection",
+        ),
+    };
+    if !capability {
+        return Err(capability_error);
+    }
+    let exact_loaded = match feed.primary_details.get(identity) {
+        Some(super::PrimaryDetailState::Loaded(view)) => view.identity == *identity,
+        Some(super::PrimaryDetailState::Loading | super::PrimaryDetailState::Failed(_)) => false,
+        None => feed
+            .details
+            .get(identity)
+            .is_some_and(|view| view.identity == *identity),
+    };
+    if !exact_loaded
+        || !feed
+            .detail_authority
+            .get(identity)
+            .is_some_and(super::DetailAuthority::mutations_allowed)
+    {
+        return Err(PORT_FORWARD_AUTHORITY_UNAVAILABLE);
+    }
+    Ok(())
+}
+
 /// Invalid local-port input in the shared start dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalPortError;
@@ -137,6 +184,7 @@ pub(super) fn show(
     ctx: &egui::Context,
     modal: &mut Option<PortForwardStartModal>,
     actions: &mut Vec<PortForwardAction>,
+    unavailable_reason: Option<&'static str>,
 ) {
     let Some(state) = modal.as_mut() else {
         return;
@@ -162,16 +210,23 @@ pub(super) fn show(
         if let Some(error) = &state.error {
             ui.label(RichText::new(error).color(super::theme::WARNING));
         }
+        if let Some(reason) = unavailable_reason {
+            ui.label(RichText::new(reason).color(super::theme::WARNING));
+        }
         if state.pending {
             ui.add(egui::Spinner::new());
         }
 
         ui.horizontal(|ui| {
-            let start = ui.add_enabled(state.can_start(), egui::Button::new("Start"));
+            let start = ui.add_enabled(
+                state.can_start() && unavailable_reason.is_none(),
+                egui::Button::new("Start"),
+            );
             start.widget_info(|| {
                 WidgetInfo::labeled(WidgetType::Button, true, "Start port forward".to_owned())
             });
-            if start.clicked()
+            if unavailable_reason.is_none()
+                && start.clicked()
                 && let Ok(local_port) = state.requested_port()
             {
                 match PortForwardStartRequest::try_target(state.target.clone(), local_port) {

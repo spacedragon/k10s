@@ -144,7 +144,10 @@ pub(crate) struct DetailPresentationInput<'a> {
     pub now: SystemTime,
     pub gone: bool,
     pub mutations_allowed: bool,
-    pub port_forward_available: bool,
+    /// Target-specific server capability, independent of current mutation
+    /// authority. Kind bodies combine this with `mutations_allowed` so stale
+    /// native views never masquerade as web/capability absence.
+    pub port_forward_capability: bool,
     pub port_forward_sessions: &'a [k10s_protocol::PortForwardSession],
     pub port_forward_error: Option<&'a str>,
 }
@@ -200,11 +203,7 @@ impl<'a> DetailPresentationInput<'a> {
             now: feed.render_time.unwrap_or_else(SystemTime::now),
             gone,
             mutations_allowed,
-            // Starting a forward creates new backend state and therefore
-            // shares exact mutation authority. Existing sessions remain
-            // visible so Stop can still perform safe cleanup when authority
-            // to create new sessions has been revoked.
-            port_forward_available: port_forward_capability && mutations_allowed,
+            port_forward_capability,
             port_forward_sessions: &feed.port_forward_sessions,
             port_forward_error: feed.port_forward_error.as_deref(),
         })
@@ -673,7 +672,7 @@ mod tests {
             now: fixed_now(),
             gone: false,
             mutations_allowed: false,
-            port_forward_available: false,
+            port_forward_capability: false,
             port_forward_sessions: &[],
             port_forward_error: None,
         }

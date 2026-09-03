@@ -111,7 +111,8 @@ struct PodDetailProjection {
     pod_ip: String,
     host_ip: String,
     ports: Vec<PodContainerPort>,
-    port_forward_available: bool,
+    port_forward_capability: bool,
+    port_forward_authority: bool,
     labels: Vec<(String, String)>,
     annotations: Vec<(String, String)>,
     created_at: String,
@@ -260,7 +261,8 @@ impl PodDetailProjection {
             pod_ip: optional(pod.pod_ip.as_deref()),
             host_ip: optional(pod.host_ip.as_deref()),
             ports: pod.ports.clone(),
-            port_forward_available: input.port_forward_available,
+            port_forward_capability: input.port_forward_capability,
+            port_forward_authority: input.mutations_allowed,
             labels,
             annotations,
             created_at: optional(pod.created_at.as_deref()),
@@ -557,10 +559,7 @@ fn show_operational<I: RowIdentity>(
                                     if port.protocol != TransportProtocol::Tcp {
                                         return;
                                     }
-                                    if pod.port_forward_available
-                                        && !port.container_name.is_empty()
-                                        && port.container_port != 0
-                                    {
+                                    if pod.port_forward_capability {
                                         let action_name = port.name.as_deref().map_or_else(
                                             || {
                                                 format!(
@@ -575,7 +574,12 @@ fn show_operational<I: RowIdentity>(
                                                 )
                                             },
                                         );
-                                        let action = ui.button("Port Forward");
+                                        let action = ui.add_enabled(
+                                            pod.port_forward_authority
+                                                && !port.container_name.is_empty()
+                                                && port.container_port != 0,
+                                            egui::Button::new("Port Forward"),
+                                        );
                                         action.widget_info(|| {
                                             WidgetInfo::labeled(
                                                 WidgetType::Button,
@@ -619,6 +623,18 @@ fn show_operational<I: RowIdentity>(
                 );
             }
         });
+        if pod.port_forward_capability
+            && !pod.port_forward_authority
+            && pod
+                .ports
+                .iter()
+                .any(|port| port.protocol == TransportProtocol::Tcp)
+        {
+            ui.label(
+                RichText::new(crate::ui::port_forward::PORT_FORWARD_AUTHORITY_UNAVAILABLE)
+                    .color(crate::ui::theme::WARNING),
+            );
+        }
     }
 
     section(ui, "CONDITIONS");

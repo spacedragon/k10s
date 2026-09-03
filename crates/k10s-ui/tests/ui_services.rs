@@ -1354,6 +1354,46 @@ fn port_forward_start_requires_live_loaded_service_authority() {
 }
 
 #[test]
+fn stale_service_authority_disables_start_without_desktop_only_copy() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::StaleRetrying {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+    );
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    let start = window.get_by_role_and_label(Role::Button, "Start");
+    assert!(start.accesskit_node().is_disabled());
+    window.get_by_label("Port forwarding requires live, matching resource details");
+    assert!(
+        window
+            .query_by_label("Port forwarding is available in the desktop application")
+            .is_none()
+    );
+}
+
+#[test]
 fn overview_traffic_policy_fields_appear_only_when_present() {
     let mut harness = harness();
     open_via_launcher(&mut harness);

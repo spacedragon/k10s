@@ -259,9 +259,14 @@ fn pod_port_forward_action_requires_live_matching_loaded_authority() {
         .detail_authority
         .insert(identity.clone(), stale_authority);
     stale.run_steps(3);
+    let stale_window = pod_window(&stale);
+    let start = stale_window
+        .get_by_role_and_label(Role::Button, "Port Forward http on container web port 8080");
+    assert!(start.accesskit_node().is_disabled());
+    stale_window.get_by_label("Port forwarding requires live, matching resource details");
     assert!(
-        pod_window(&stale)
-            .query_by_role_and_label(Role::Button, "Port Forward")
+        stale_window
+            .query_by_label("Port forwarding is available in the desktop application")
             .is_none()
     );
     stale.state_mut().feed.detail_authority.insert(

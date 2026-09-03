@@ -308,15 +308,21 @@ fn ports_tab<I: RowIdentity>(
                     session.id.as_str().to_owned(),
                 ));
             }
-        } else if presentation.port_forward_available {
+        } else if presentation.port_forward_capability {
             let start = ui.push_id(
                 (
                     "k10s.detail.service.port.start",
                     window_id.0,
                     port.service_port,
                 ),
-                |ui| ui.button("Start"),
+                |ui| ui.add_enabled(presentation.mutations_allowed, egui::Button::new("Start")),
             );
+            if !presentation.mutations_allowed {
+                ui.label(
+                    RichText::new(crate::ui::port_forward::PORT_FORWARD_AUTHORITY_UNAVAILABLE)
+                        .color(crate::ui::theme::WARNING),
+                );
+            }
             if start.inner.clicked() {
                 let selector = port.name.clone().map_or(
                     k10s_protocol::PortForwardPortSelector::Number {
