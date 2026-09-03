@@ -27,7 +27,8 @@ use crate::port::{
     ServiceProjection, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
-    PortForwardRequest, PortForwardSeam, PortForwardStream, ResolvedPortForward,
+    PortForwardPortSelector, PortForwardRequest, PortForwardSeam, PortForwardStream,
+    PortForwardTarget, RejectionCategory, ResolvedPortForward,
 };
 use crate::stream::StreamHub;
 use crate::watch::{WatchHub, WatchSelector};
@@ -2100,7 +2101,13 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 priority: None,
                 service_account: Some("default".into()),
                 restart_policy: Some("Always".into()),
-                ports: Vec::new(),
+                ports: vec![crate::port::PodContainerPort {
+                    container_name: "app".into(),
+                    name: Some("http".into()),
+                    container_port: 8_080,
+                    host_port: None,
+                    protocol: TransportProtocol::Tcp,
+                }],
                 labels: labels
                     .iter()
                     .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
@@ -2943,17 +2950,92 @@ impl PortForwardSeam for FakePortForwardSeam {
         request: PortForwardRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedPortForward, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let unsupported = match &request.target {
+                PortForwardTarget::Service { .. } => RejectionCategory::UnsupportedService,
+                PortForwardTarget::Pod { .. } => RejectionCategory::UnsupportedPod,
+            };
+            request
+                .target
+                .validate()
+                .map_err(|message| BackendError::PortForward {
+                    category: unsupported,
+                    message: message.into(),
+                })?;
+            let identity_context = match &request.target {
+                PortForwardTarget::Service { identity, .. }
+                | PortForwardTarget::Pod { identity, .. } => &identity.context,
+            };
+            if identity_context != &request.context {
+                return Err(BackendError::PortForward {
+                    category: RejectionCategory::ContextTransition,
+                    message: "the target context no longer matches the active context".into(),
+                });
+            }
+
             // Reuse the deterministic dataset through a throwaway adapter
             // only when callers did not inject one; the standard dataset is
             // process-constant, so this stays stable across calls.
             let adapter = FakeKubernetes::standard();
+            let (identity, port) = match request.target {
+                PortForwardTarget::Service { identity, port } => (identity, port),
+                PortForwardTarget::Pod {
+                    identity,
+                    container_name,
+                    remote_port,
+                } => {
+                    let namespace = identity
+                        .namespace
+                        .expect("validated Pod targets have a namespace");
+                    let state = adapter.state.lock().unwrap();
+                    let pod = state.find_record(&ResourceRef {
+                        context: request.context.clone(),
+                        gvk: Gvk::core("v1", "Pod"),
+                        namespace: Some(namespace.clone()),
+                        name: identity.name.clone(),
+                        uid: identity.uid.clone(),
+                    });
+                    let Some(pod) = pod else {
+                        return Err(BackendError::PortForward {
+                            category: RejectionCategory::VanishedResource,
+                            message: "the pod does not exist".into(),
+                        });
+                    };
+                    let declared_tcp = matches!(
+                        &pod.projection,
+                        Some(ResourceProjection::Pod(projection))
+                            if projection.ports.iter().any(|declared| {
+                                declared.container_name == container_name
+                                    && declared.container_port == remote_port
+                                    && declared.protocol == TransportProtocol::Tcp
+                            })
+                    );
+                    if !declared_tcp {
+                        return Err(BackendError::PortForward {
+                            category: RejectionCategory::UnsupportedPod,
+                            message: "the container does not declare the requested TCP port".into(),
+                        });
+                    }
+                    return Ok(ResolvedPortForward {
+                        context: request.context,
+                        namespace,
+                        target_uid: identity.uid.clone(),
+                        source_port: remote_port,
+                        pod_name: identity.name,
+                        pod_uid: identity.uid,
+                        pod_port: remote_port,
+                    });
+                }
+            };
+            let namespace = identity
+                .namespace
+                .expect("validated Service targets have a namespace");
             let state = adapter.state.lock().unwrap();
             let service_ref = state.find_record(&ResourceRef {
                 context: request.context.clone(),
                 gvk: Gvk::core("v1", "Service"),
-                namespace: Some(request.namespace.clone()),
-                name: request.service_name.clone(),
-                uid: request.service_uid.clone(),
+                namespace: Some(namespace.clone()),
+                name: identity.name,
+                uid: identity.uid.clone(),
             });
             if service_ref.is_none() {
                 return Err(BackendError::PortForward {
@@ -2970,8 +3052,7 @@ impl PortForwardSeam for FakePortForwardSeam {
                     .filter(|record| {
                         record.reference.gvk == Gvk::core("v1", "Pod")
                             && record.reference.context == request.context
-                            && record.reference.namespace.as_deref()
-                                == Some(request.namespace.as_str())
+                            && record.reference.namespace.as_deref() == Some(namespace.as_str())
                             && record.summary == "Running"
                     })
                     .map(|record| record.reference.name.clone())
@@ -2986,20 +3067,18 @@ impl PortForwardSeam for FakePortForwardSeam {
             };
             // The fake dataset forwards the declared Service port to the
             // same numeric container port.
-            let service_port = match request.port {
-                crate::port_forward::PortForwardPortSelection::Number(number) => number,
-                crate::port_forward::PortForwardPortSelection::Name(name) => {
-                    name.parse().unwrap_or(80)
-                }
+            let source_port = match port {
+                PortForwardPortSelector::Number { number } => number,
+                PortForwardPortSelector::Name { name } => name.parse().unwrap_or(80),
             };
             Ok(ResolvedPortForward {
                 context: request.context,
-                namespace: request.namespace,
-                service_uid: request.service_uid,
-                service_port,
+                namespace,
+                target_uid: identity.uid,
+                source_port,
                 pod_name,
                 pod_uid: "uid-fake-pod".to_owned(),
-                pod_port: service_port.max(8_080.min(service_port)),
+                pod_port: source_port.max(8_080.min(source_port)),
             })
         })
     }

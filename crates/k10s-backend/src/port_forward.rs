@@ -1,10 +1,10 @@
-//! Exact Service-to-Pod port-forward resolution contracts.
+//! Exact Kubernetes target-to-Pod port-forward resolution contracts.
 //!
 //! The [`PortForwardConnector`] is the sole seam for resolving one declared
-//! TCP Service port to exactly one ready backing Pod and opening opaque
-//! byte streams to it. Resolution binds every session to exact Service and
-//! Pod UIDs; streams never expose Kubernetes client types outside this
-//! crate and are never serialized onto the control protocol.
+//! TCP Service or Pod-container port to exactly one Pod and opening opaque
+//! byte streams to it. Resolution binds every session to exact target and Pod
+//! UIDs; streams never expose Kubernetes client types outside this crate and
+//! are never serialized onto the control protocol.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -13,32 +13,19 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::port::BackendError;
-
-/// Which declared Service port a start request forwards.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortForwardPortSelection {
-    /// Select by declared Service port name.
-    Name(String),
-    /// Select by declared Service port number.
-    Number(u16),
-}
+pub use k10s_protocol::{PortForwardPortSelector, PortForwardTarget};
 
 /// One bounded port-forward start request before any resolution.
 ///
-/// Carries the exact core/v1 Service identity; the UID must match the live
-/// object or resolution fails without binding anything.
+/// Carries the current context and one validated protocol target. The target
+/// identity UID must match the live object or resolution fails without
+/// binding anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortForwardRequest {
     /// Kubernetes context to resolve within.
     pub context: String,
-    /// Service namespace.
-    pub namespace: String,
-    /// Service name.
-    pub service_name: String,
-    /// Immutable Service UID the live object must carry.
-    pub service_uid: String,
-    /// Which declared Service port to forward.
-    pub port: PortForwardPortSelection,
+    /// Exact Service or Pod target to authorize and resolve.
+    pub target: PortForwardTarget,
 }
 
 /// A resolved, pinned forward target owned by the backend.
@@ -52,12 +39,14 @@ pub struct ResolvedPortForward {
     pub context: String,
     /// Namespace of both objects.
     pub namespace: String,
-    /// Verified live Service UID.
-    pub service_uid: String,
-    /// Declared Service port number the session forwards. Kept separate
-    /// from [`Self::pod_port`] so named selections retain their declared
-    /// port identity on snapshots.
-    pub service_port: u16,
+    /// Verified live source UID: Service UID for Service targets and Pod UID
+    /// for direct Pod targets.
+    pub target_uid: String,
+    /// Declared source port number: Service port for Service targets and
+    /// container port for direct Pod targets. Kept separate from
+    /// [`Self::pod_port`] so Service selections retain their declared port
+    /// identity on snapshots.
+    pub source_port: u16,
     /// Selected backing Pod name.
     pub pod_name: String,
     /// Verified Pod UID.
@@ -80,6 +69,8 @@ pub enum RejectionCategory {
     VanishedResource,
     /// The Service type or port cannot be forwarded.
     UnsupportedService,
+    /// The Pod container or declared port cannot be forwarded.
+    UnsupportedPod,
     /// The requested local port is already occupied.
     LocalPortInUse,
     /// A context switch invalidated an in-flight request; retry after it.
@@ -175,9 +166,9 @@ impl PortForwardConnector {
         Self { seam }
     }
 
-    /// Resolve one start request to an exact Service-UID- and Pod-UID-bound
-    /// target. Failures never bind local resources.
-    pub async fn resolve_service_port(
+    /// Resolve one start request to an exact target-UID- and Pod-UID-bound
+    /// destination. Failures never bind local resources.
+    pub async fn resolve(
         &self,
         request: PortForwardRequest,
     ) -> Result<ResolvedPortForward, BackendError> {

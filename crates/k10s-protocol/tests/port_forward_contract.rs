@@ -817,6 +817,7 @@ fn failure_categories_use_the_safe_stable_strings() {
             PortForwardFailureCategory::UnsupportedService,
             "unsupportedService",
         ),
+        (PortForwardFailureCategory::UnsupportedPod, "unsupportedPod"),
         (
             PortForwardFailureCategory::ContextTransition,
             "contextTransition",

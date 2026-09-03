@@ -325,6 +325,8 @@ pub enum PortForwardFailureCategory {
     VanishedResource,
     /// The Service type or port cannot be forwarded.
     UnsupportedService,
+    /// The Pod container or declared port cannot be forwarded.
+    UnsupportedPod,
     /// A context switch invalidated the request; safe to retry after it.
     ContextTransition,
     /// The control transport closed before completion.
@@ -342,6 +344,7 @@ impl PortForwardFailureCategory {
             Self::LocalPortInUse => Retryability::UserAction,
             Self::VanishedResource => Retryability::AfterRefresh,
             Self::UnsupportedService => Retryability::Never,
+            Self::UnsupportedPod => Retryability::Never,
             Self::ContextTransition => Retryability::AfterRefresh,
             Self::TransportClosed => Retryability::AfterReconnect,
         }
