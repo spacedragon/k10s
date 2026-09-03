@@ -1090,6 +1090,7 @@ impl K10sApp {
                     crate::workspace::WindowContent::Services(service) => {
                         service.detail.as_ref().map(|detail| &detail.identity)
                     }
+                    crate::workspace::WindowContent::PortForwards(_) => None,
                 })?;
         Some((identity, self.details.get(identity)))
     }
@@ -3053,6 +3054,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             identity == Some(wanted)
         })
@@ -3073,6 +3075,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             if let Some(identity) = identity {
                 tracked.insert(identity.clone());
@@ -3302,6 +3305,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|d| d.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             if let Some(identity) = identity
                 && !pinned.iter().any(|known| known == identity)
@@ -3723,6 +3727,7 @@ impl K10sApp {
                 crate::workspace::WindowContent::Detail(detail) => Some(detail),
                 crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             })?;
         let identity = k10s_ui_row_identity(&detail.identity)?;
         let runtime = self
@@ -4143,6 +4148,7 @@ impl K10sApp {
                 crate::workspace::WindowContent::Detail(detail) => Some(detail),
                 crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             })
             .is_some_and(|detail| detail.active_tab == crate::workspace::DetailTab::Logs);
         active

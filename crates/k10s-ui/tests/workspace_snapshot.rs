@@ -27,7 +27,10 @@ fn v1_literal_migrates_explicit_namespace_and_defaults_to_all_namespaces() {
     let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":"g/v/K"}},{"kind":"nodes","title":"Nodes","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace":null,"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
     assert_eq!(loaded.migrated_from, Some(1));
-    assert_eq!(loaded.snapshot.version, 3);
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
     assert!(!loaded.snapshot.free_window_resizing);
     assert_eq!(loaded.snapshot.windows[0].geometry.position, [1.0, 2.0]);
     assert_eq!(loaded.snapshot.windows[0].geometry.size, [800.0, 600.0]);
@@ -61,7 +64,10 @@ fn v2_literal_migrates_geometry_view_and_defaults_free_resize_off() {
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
 
     assert_eq!(loaded.migrated_from, Some(2));
-    assert_eq!(loaded.snapshot.version, 3);
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
     assert!(!loaded.snapshot.free_window_resizing);
     let window = &loaded.snapshot.windows[0];
     assert_eq!(window.geometry.position, [23.0, 41.0]);
@@ -313,6 +319,84 @@ fn snapshot_captures_open_windows_geometry_and_view_settings() {
     // Compatibility field remains serialized, but integrated Detail cannot
     // be hidden independently of selection.
     assert!(view.detail_visible);
+}
+
+#[test]
+fn port_forward_window_persists_only_geometry_sort_and_focused_session() {
+    let mut workspace = WorkspaceState::<TestIdentity>::new();
+    let opened = workspace.apply(WorkspaceCommand::ActivateLauncherItem(
+        LauncherItem::PortForwards,
+    ));
+    let id = opened
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    workspace.apply(WorkspaceCommand::SetGeometry(
+        id,
+        k10s_ui::workspace::WindowGeom {
+            position: [91.0, 47.0],
+            size: [930.0, 610.0],
+            collapsed: true,
+        },
+    ));
+    workspace.apply(WorkspaceCommand::SetPortForwardSort(
+        id,
+        Some(SortSpec {
+            column: "TARGET".into(),
+            ascending: false,
+        }),
+    ));
+    workspace.apply(WorkspaceCommand::FocusPortForwardSession(
+        id,
+        "pf-focused".into(),
+    ));
+
+    let snapshot = workspace.snapshot();
+    let encoded = serde_json::to_value(&snapshot).unwrap();
+    let persisted = snapshot
+        .windows
+        .iter()
+        .find(|window| window.kind == PersistedWindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(persisted.geometry.position, [91.0, 47.0]);
+    let view = persisted.port_forward_view.as_ref().unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "TARGET");
+    assert_eq!(view.focused_session.as_deref(), Some("pf-focused"));
+    assert!(!encoded.to_string().contains("sessions"));
+    assert!(!encoded.to_string().contains("modal"));
+
+    let decoded: k10s_ui::workspace::WorkspaceSnapshot = serde_json::from_value(encoded).unwrap();
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&decoded).unwrap();
+    let window = restored
+        .windows()
+        .iter()
+        .find(|window| window.kind == k10s_ui::workspace::WindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(window.geometry, persisted.geometry);
+    let view = restored.port_forward_state(window.id).unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "TARGET");
+    assert_eq!(view.focused_session.as_deref(), Some("pf-focused"));
+}
+
+#[test]
+fn v3_snapshot_migrates_without_port_forward_window_state() {
+    let raw = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"services","title":"Services","geometry":{"position":[1.0,2.0],"size":[840.0,560.0],"collapsed":false},"z":1,"view":null}]}"#;
+    let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+    assert_eq!(loaded.migrated_from, Some(3));
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&loaded.snapshot).unwrap();
+    assert!(
+        restored
+            .windows()
+            .iter()
+            .any(|window| { window.kind == k10s_ui::workspace::WindowKind::Services })
+    );
 }
 
 #[test]

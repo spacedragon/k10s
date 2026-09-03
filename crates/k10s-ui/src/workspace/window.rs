@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::detail::DetailState;
+use super::port_forward::PortForwardWindowState;
 use super::resource::ResourceWindowState;
 use super::service::ServiceWindowState;
 
@@ -135,6 +136,8 @@ pub enum WindowKind {
     Storage,
     /// The singleton Services panel.
     Services,
+    /// The singleton global port-forward session manager.
+    PortForwards,
     Workload(WorkloadKind),
     /// A dedicated detail window pinned to one resource identity.
     Detail,
@@ -147,6 +150,7 @@ impl WindowKind {
             WindowKind::Nodes => "Nodes",
             WindowKind::Storage => "Storage",
             WindowKind::Services => "Services",
+            WindowKind::PortForwards => "Port Forwards",
             WindowKind::Workload(kind) => kind.title(),
             WindowKind::Detail => "Detail",
         }
@@ -156,7 +160,9 @@ impl WindowKind {
     pub const fn min_size(self) -> [f32; 2] {
         match self {
             Self::Workload(_) | Self::Detail => [672.0, 424.0],
-            Self::Overview | Self::Nodes | Self::Storage | Self::Services => [480.0, 320.0],
+            Self::Overview | Self::Nodes | Self::Storage | Self::Services | Self::PortForwards => {
+                [480.0, 320.0]
+            }
         }
     }
 }
@@ -231,6 +237,7 @@ impl WindowGeom {
 pub enum WindowContent<I> {
     Resource(ResourceWindowState<I>),
     Services(ServiceWindowState<I>),
+    PortForwards(PortForwardWindowState),
     Detail(DetailState<I>),
 }
 

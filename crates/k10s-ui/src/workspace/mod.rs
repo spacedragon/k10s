@@ -12,6 +12,7 @@
 
 mod detail;
 mod guard;
+mod port_forward;
 mod resource;
 mod snapshot;
 
@@ -20,10 +21,11 @@ mod window;
 
 pub use detail::{DetailState, DetailTab, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
+pub use port_forward::PortForwardWindowState;
 pub use resource::{AgeMode, NamespaceScope, ResourceWindowState, SortSpec};
 pub use snapshot::{
-    COUNTER_LIMIT, LoadedWorkspaceSnapshot, PersistedListView, PersistedWindow,
-    PersistedWindowKind, SNAPSHOT_VERSION, WorkspaceSnapshot,
+    COUNTER_LIMIT, LoadedWorkspaceSnapshot, PersistedListView, PersistedPortForwardView,
+    PersistedWindow, PersistedWindowKind, SNAPSHOT_VERSION, WorkspaceSnapshot,
 };
 
 pub use service::ServiceWindowState;
@@ -38,6 +40,7 @@ pub enum LauncherItem {
     Nodes,
     Storage,
     Services,
+    PortForwards,
     Workload(WorkloadKind),
 }
 
@@ -83,6 +86,8 @@ pub enum WorkspaceCommand<I> {
     SetServicePortDraft(WindowId, String, String),
     SetFilter(WindowId, String, String),
     SetSort(WindowId, Option<SortSpec>),
+    SetPortForwardSort(WindowId, Option<SortSpec>),
+    FocusPortForwardSession(WindowId, String),
     SetSplitRatio(WindowId, f32),
     /// Give the integrated detail the full content area while remembering
     /// the user's current split for an explicit restore.
@@ -263,6 +268,14 @@ where
         }
     }
 
+    /// View state of the singleton Port Forwards window.
+    pub fn port_forward_state(&self, id: WindowId) -> Option<&PortForwardWindowState> {
+        match self.window(id).map(|window| &window.content) {
+            Some(WindowContent::PortForwards(state)) => Some(state),
+            _ => None,
+        }
+    }
+
     /// Number of open list-window instances for a workload kind.
     pub fn instance_count(&self, kind: WorkloadKind) -> usize {
         self.windows
@@ -279,6 +292,7 @@ where
             LauncherItem::Nodes => self.has_kind(WindowKind::Nodes),
             LauncherItem::Storage => self.has_kind(WindowKind::Storage),
             LauncherItem::Services => self.has_kind(WindowKind::Services),
+            LauncherItem::PortForwards => self.has_kind(WindowKind::PortForwards),
             LauncherItem::Workload(kind) => self.instance_count(kind) > 0,
         }
     }
@@ -415,6 +429,16 @@ where
                 self.with_service_mut(id, |service| service.sort = sort);
                 Vec::new()
             }
+            WorkspaceCommand::SetPortForwardSort(id, sort) => {
+                self.with_port_forward_mut(id, |state| state.sort = sort);
+                Vec::new()
+            }
+            WorkspaceCommand::FocusPortForwardSession(id, session_id) => {
+                self.with_port_forward_mut(id, |state| {
+                    state.focused_session = Some(session_id);
+                });
+                Vec::new()
+            }
             WorkspaceCommand::SetSplitRatio(id, ratio) => {
                 let clamped = ratio.clamp(0.0, 1.0);
                 self.with_resource_mut(id, move |resource| resource.split_ratio = clamped);
@@ -501,6 +525,7 @@ where
             LauncherItem::Nodes => self.activate_singleton(WindowKind::Nodes),
             LauncherItem::Storage => self.activate_singleton(WindowKind::Storage),
             LauncherItem::Services => self.activate_singleton(WindowKind::Services),
+            LauncherItem::PortForwards => self.activate_singleton(WindowKind::PortForwards),
             LauncherItem::Workload(kind) => {
                 let mru = self
                     .windows
@@ -626,13 +651,17 @@ where
             WindowKind::Overview
             | WindowKind::Nodes
             | WindowKind::Storage
-            | WindowKind::Services => [840.0, 560.0],
+            | WindowKind::Services
+            | WindowKind::PortForwards => [840.0, 560.0],
             _ => [700.0, 480.0],
         };
         let content = match kind {
             // Services is a singleton list window with its own state shape;
             // every other singleton renders a generic resource list.
             WindowKind::Services => WindowContent::Services(ServiceWindowState::default()),
+            WindowKind::PortForwards => {
+                WindowContent::PortForwards(PortForwardWindowState::default())
+            }
             _ => WindowContent::Resource(ResourceWindowState::default()),
         };
         self.push_window(kind, kind.title().to_owned(), size, content)
@@ -737,6 +766,7 @@ where
                 .map(|detail| detail.blockers(id))
                 .unwrap_or_default(),
             WindowContent::Detail(detail) => detail.blockers(id),
+            WindowContent::PortForwards(_) => Vec::new(),
         }
     }
 
@@ -817,6 +847,7 @@ where
             WindowContent::Resource(resource) => resource.selection.as_ref() == Some(&identity),
             WindowContent::Services(service) => service.selection.as_ref() == Some(&identity),
             WindowContent::Detail(_) => return Vec::new(),
+            WindowContent::PortForwards(_) => return Vec::new(),
         };
         if already_selected {
             return Vec::new();
@@ -836,6 +867,7 @@ where
                 service.detail = Some(DetailState::new(identity));
             }
             WindowContent::Detail(_) => {}
+            WindowContent::PortForwards(_) => {}
         }
         Vec::new()
     }
@@ -848,6 +880,7 @@ where
             WindowContent::Resource(resource) => resource.selection.is_some(),
             WindowContent::Services(service) => service.selection.is_some(),
             WindowContent::Detail(_) => false,
+            WindowContent::PortForwards(_) => false,
         };
         if !has_selection {
             return Vec::new();
@@ -867,6 +900,7 @@ where
                 service.detail = None;
             }
             WindowContent::Detail(_) => {}
+            WindowContent::PortForwards(_) => {}
         }
         Vec::new()
     }
@@ -890,6 +924,7 @@ where
                     .map(|detail| detail.blockers(window.id))
                     .unwrap_or_default(),
                 WindowContent::Detail(detail) => detail.blockers(window.id),
+                WindowContent::PortForwards(_) => Vec::new(),
             })
             .collect()
     }
@@ -929,6 +964,7 @@ where
                     service.detail = None;
                 }
                 WindowContent::Detail(_) => {}
+                WindowContent::PortForwards(_) => {}
             }
         }
         // Every dirty buffer was resolved before the commit could run.
@@ -951,6 +987,7 @@ where
                 service.detail.as_ref().map(|detail| &detail.identity)
             }
             WindowContent::Detail(detail) => Some(&detail.identity),
+            WindowContent::PortForwards(_) => None,
         }
     }
 
@@ -965,6 +1002,7 @@ where
                 .as_ref()
                 .is_some_and(|detail| detail.yaml.dirty),
             WindowContent::Detail(detail) => detail.yaml.dirty,
+            WindowContent::PortForwards(_) => false,
         }
     }
 
@@ -1052,7 +1090,20 @@ where
                     }
                 }
                 WindowContent::Detail(detail) => mutate(detail),
+                WindowContent::PortForwards(_) => {}
             }
+        }
+    }
+
+    fn with_port_forward_mut(
+        &mut self,
+        id: WindowId,
+        mutate: impl FnOnce(&mut PortForwardWindowState),
+    ) {
+        if let Some(window) = self.window_mut(id)
+            && let WindowContent::PortForwards(state) = &mut window.content
+        {
+            mutate(state);
         }
     }
 }

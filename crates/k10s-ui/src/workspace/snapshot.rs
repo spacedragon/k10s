@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use super::resource::{NamespaceScope, ResourceWindowState, SortSpec};
 use super::service::ServiceWindowState;
 use super::window::{WindowGeom, WindowKind, WorkloadKind};
-use super::{Window, WindowContent, WindowId, WorkspaceState};
+use super::{PortForwardWindowState, Window, WindowContent, WindowId, WorkspaceState};
 
 /// Snapshot format version written to and read from the desktop state file.
-pub const SNAPSHOT_VERSION: u32 = 3;
+pub const SNAPSHOT_VERSION: u32 = 4;
 
 /// Upper bound for persisted allocation counters. Real workspaces hand out
 /// a handful of ids per session; values near this ceiling are corruption,
@@ -35,7 +35,35 @@ pub enum PersistedWindowKind {
     Nodes,
     Storage,
     Services,
+    PortForwards,
     Workload(WorkloadKind),
+}
+
+/// Persisted presentation preferences for the Port Forwards window.
+/// Authoritative session data and modal state never enter the workspace file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistedPortForwardView {
+    pub sort: Option<SortSpec>,
+    pub focused_session: Option<String>,
+}
+
+impl From<&PortForwardWindowState> for PersistedPortForwardView {
+    fn from(state: &PortForwardWindowState) -> Self {
+        Self {
+            sort: state.sort.clone(),
+            focused_session: state.focused_session.clone(),
+        }
+    }
+}
+
+impl From<PersistedPortForwardView> for PortForwardWindowState {
+    fn from(view: PersistedPortForwardView) -> Self {
+        Self {
+            sort: view.sort,
+            focused_session: view.focused_session,
+        }
+    }
 }
 
 /// Per-list view settings that survive a restart for one window. Selection
@@ -149,6 +177,9 @@ pub struct PersistedWindow {
     pub z: u64,
     /// List view settings; present for list windows only.
     pub view: Option<PersistedListView>,
+    /// Port-forward manager preferences; present only for that window kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_forward_view: Option<PersistedPortForwardView>,
 }
 
 /// A complete persistable workspace snapshot. Written by the desktop app and
@@ -240,6 +271,17 @@ struct V3Snapshot {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct V4Snapshot {
+    #[serde(rename = "version")]
+    _version: u32,
+    next_id: u64,
+    next_z: u64,
+    free_window_resizing: bool,
+    windows: Vec<V4Window>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V2Window {
     kind: PersistedWindowKind,
     title: String,
@@ -258,6 +300,19 @@ struct V3Window {
     #[serde(default)]
     z: u64,
     view: Option<V3ListView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V4Window {
+    kind: PersistedWindowKind,
+    title: String,
+    geometry: WindowGeom,
+    #[serde(default)]
+    z: u64,
+    view: Option<V3ListView>,
+    #[serde(default)]
+    port_forward_view: Option<PersistedPortForwardView>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +373,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                             detail_visible: view.detail_visible,
                             custom_kind: view.custom_kind,
                         }),
+                        port_forward_view: None,
                     })
                     .collect();
                 (raw.next_id, raw.next_z, false, windows, Some(1))
@@ -342,11 +398,12 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                             detail_visible: view.detail_visible,
                             custom_kind: view.custom_kind,
                         }),
+                        port_forward_view: None,
                     })
                     .collect();
                 (raw.next_id, raw.next_z, false, windows, Some(2))
             }
-            SNAPSHOT_VERSION => {
+            3 => {
                 let raw: V3Snapshot =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 let windows = raw
@@ -366,6 +423,38 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                             detail_visible: view.detail_visible,
                             custom_kind: view.custom_kind,
                         }),
+                        port_forward_view: None,
+                    })
+                    .collect();
+                (
+                    raw.next_id,
+                    raw.next_z,
+                    raw.free_window_resizing,
+                    windows,
+                    Some(3),
+                )
+            }
+            SNAPSHOT_VERSION => {
+                let raw: V4Snapshot =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                let windows = raw
+                    .windows
+                    .into_iter()
+                    .map(|window| PersistedWindow {
+                        kind: window.kind,
+                        title: window.title,
+                        geometry: window.geometry,
+                        z: window.z,
+                        view: window.view.map(|view| PersistedListView {
+                            namespace_scope: view.namespace_scope,
+                            search: view.search,
+                            filters: view.filters,
+                            sort: view.sort,
+                            split_ratio: view.split_ratio,
+                            detail_visible: view.detail_visible,
+                            custom_kind: view.custom_kind,
+                        }),
+                        port_forward_view: window.port_forward_view,
                     })
                     .collect();
                 (
@@ -419,6 +508,7 @@ impl PersistedWindow {
             PersistedWindowKind::Nodes => Some(WindowKind::Nodes),
             PersistedWindowKind::Storage => Some(WindowKind::Storage),
             PersistedWindowKind::Services => Some(WindowKind::Services),
+            PersistedWindowKind::PortForwards => Some(WindowKind::PortForwards),
             PersistedWindowKind::Workload(kind) => Some(WindowKind::Workload(kind)),
         }
     }
@@ -440,9 +530,11 @@ impl PersistedWindow {
 /// degrades to this normal first-launch layout instead of rendering empty.
 fn default_size_for(kind: WindowKind) -> [f32; 2] {
     match kind {
-        WindowKind::Overview | WindowKind::Nodes | WindowKind::Storage | WindowKind::Services => {
-            [840.0, 560.0]
-        }
+        WindowKind::Overview
+        | WindowKind::Nodes
+        | WindowKind::Storage
+        | WindowKind::Services
+        | WindowKind::PortForwards => [840.0, 560.0],
         _ => [700.0, 480.0],
     }
 }
@@ -460,26 +552,36 @@ where
             // The invariant behind the workspace commands: non-detail kinds
             // hold list bodies and detail kinds pin a live identity. Anything
             // else is skipped defensively instead of persisted.
-            let (kind, view) = match (&window.kind, &window.content) {
+            let (kind, view, port_forward_view) = match (&window.kind, &window.content) {
                 (WindowKind::Overview, WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Overview,
                     Some(PersistedListView::from_resource(resource)),
+                    None,
                 ),
                 (WindowKind::Nodes, WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Nodes,
                     Some(PersistedListView::from_resource(resource)),
+                    None,
                 ),
                 (WindowKind::Storage, WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Storage,
                     Some(PersistedListView::from_resource(resource)),
+                    None,
                 ),
                 (WindowKind::Services, WindowContent::Services(service)) => (
                     PersistedWindowKind::Services,
                     Some(PersistedListView::from_service(service)),
+                    None,
+                ),
+                (WindowKind::PortForwards, WindowContent::PortForwards(state)) => (
+                    PersistedWindowKind::PortForwards,
+                    None,
+                    Some(PersistedPortForwardView::from(state)),
                 ),
                 (WindowKind::Workload(w), WindowContent::Resource(resource)) => (
                     PersistedWindowKind::Workload(*w),
                     Some(PersistedListView::from_resource(resource)),
+                    None,
                 ),
                 _ => continue,
             };
@@ -489,6 +591,7 @@ where
                 geometry: window.geometry,
                 z: window.z,
                 view,
+                port_forward_view,
             });
         }
         WorkspaceSnapshot {
@@ -564,6 +667,13 @@ where
                     Some(view) => WindowContent::Services(view.clone().into_service()),
                     None => WindowContent::Services(ServiceWindowState::default()),
                 },
+                WindowKind::PortForwards => WindowContent::PortForwards(
+                    window
+                        .port_forward_view
+                        .clone()
+                        .map(Into::into)
+                        .unwrap_or_default(),
+                ),
                 _ => match &window.view {
                     Some(view) => WindowContent::Resource(view.clone().into_resource()),
                     None => WindowContent::Resource(ResourceWindowState::default()),

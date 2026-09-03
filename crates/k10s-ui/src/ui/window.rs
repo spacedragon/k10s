@@ -190,6 +190,7 @@ where
         WindowContent::Resource(resource) => (Some(resource.clone()), None, None),
         WindowContent::Services(service) => (None, Some(service.clone()), None),
         WindowContent::Detail(detail) => (None, None, Some(detail.clone())),
+        WindowContent::PortForwards(_) => (None, None, None),
     };
 
     let title = match &state.content {
@@ -202,7 +203,9 @@ where
         WindowContent::Resource(resource) if matches!(state.kind, WindowKind::Workload(_)) => {
             crate::workspace::scoped_window_title(&state.title, &resource.namespace_scope)
         }
-        WindowContent::Resource(_) | WindowContent::Services(_) => state.title.clone(),
+        WindowContent::Resource(_)
+        | WindowContent::Services(_)
+        | WindowContent::PortForwards(_) => state.title.clone(),
     };
     let mut window = egui::Window::new(title)
         .id(id)
@@ -308,6 +311,7 @@ where
                         false
                     }
                 }
+                WindowKind::PortForwards => false,
                 WindowKind::Workload(_) => {
                     unreachable!("workload windows render through resource_window")
                 }
