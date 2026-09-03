@@ -1196,20 +1196,7 @@ impl ClientState {
             REQUEST_PORT_FORWARD_LIST => {
                 let response: PortForwardListResponse = serde_json::from_value(payload.clone())
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
-                if response.revision < self.port_forward_revision {
-                    return Ok(());
-                }
-                // Reconstruction replaces state wholesale. The server owns
-                // terminal retention, so stopped and failed rows remain until
-                // a later authoritative list omits them.
-                self.port_forward_sessions.clear();
-                let mut max_revision = response.revision;
-                for session in response.sessions {
-                    max_revision = max_revision.max(session.revision);
-                    self.port_forward_sessions
-                        .insert(session.id.as_str().to_owned(), session);
-                }
-                self.port_forward_revision = max_revision;
+                self.apply_port_forward_list(&response);
                 Ok(())
             }
             REQUEST_PORT_FORWARD_STOP => {
@@ -1255,6 +1242,23 @@ impl ClientState {
         if snapshot_is_newer {
             self.port_forward_sessions.insert(session_id, session);
         }
+    }
+
+    /// Apply an authoritative reconstruction snapshot. Equal revisions still
+    /// replace state so an omission at the current watermark removes expired
+    /// terminal sessions; only strictly older lists are ignored.
+    fn apply_port_forward_list(&mut self, response: &PortForwardListResponse) {
+        if response.revision < self.port_forward_revision {
+            return;
+        }
+        self.port_forward_sessions.clear();
+        let mut max_revision = response.revision;
+        for session in &response.sessions {
+            max_revision = max_revision.max(session.revision);
+            self.port_forward_sessions
+                .insert(session.id.as_str().to_owned(), session.clone());
+        }
+        self.port_forward_revision = max_revision;
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -1806,16 +1810,7 @@ impl ClientState {
                     let response: PortForwardListResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    if response.revision >= self.port_forward_revision {
-                        self.port_forward_sessions.clear();
-                        let mut max_revision = response.revision;
-                        for session in &response.sessions {
-                            max_revision = max_revision.max(session.revision);
-                            self.port_forward_sessions
-                                .insert(session.id.as_str().to_owned(), session.clone());
-                        }
-                        self.port_forward_revision = max_revision;
-                    }
+                    self.apply_port_forward_list(&response);
                     QueryResult::PortForwardList(Box::new(response))
                 }
                 PendingAction::Query(Query::ResourceList(_)) => {

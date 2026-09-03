@@ -4,7 +4,10 @@
 //! desktop capability-gated port-forward controls, and accessibility names.
 
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable as _};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT as _, Queryable as _},
+};
 use k10s_protocol::{
     BackendRevision, GroupVersionKind, PortForwardPodTarget, PortForwardPortSelector,
     PortForwardSession, PortForwardSessionId, PortForwardSessionState, PortForwardTarget,
@@ -1042,6 +1045,107 @@ fn desktop_capability_renders_start_and_queues_an_authoritative_request() {
 }
 
 #[test]
+fn terminal_only_port_forward_exposes_start_instead_of_stop() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
+    harness.state_mut().feed.port_forward_sessions = vec![service_port_forward_session(
+        "stopped",
+        PortForwardSessionState::Stopped,
+        1,
+    )];
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Stop")
+            .is_none()
+    );
+    harness.get_by_role_and_label(Role::Button, "Start");
+}
+
+#[test]
+fn active_port_forward_is_not_shadowed_by_an_older_terminal_session() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
+    let mut active = service_port_forward_session("active", PortForwardSessionState::Active, 2);
+    active.local_addr = "127.0.0.1:18081".into();
+    harness.state_mut().feed.port_forward_sessions = vec![
+        service_port_forward_session("stopped", PortForwardSessionState::Stopped, 1),
+        active,
+    ];
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Start")
+            .is_none()
+    );
+    harness.get_by_label("127.0.0.1:18081 · web-0:8080 · Active");
+    harness.get_by_role_and_label(Role::Button, "Stop").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state_mut().shell.drain_port_forward_actions(),
+        vec![k10s_ui::ui::PortForwardAction::Stop("active".into())]
+    );
+
+    harness.state_mut().feed.port_forward_sessions = vec![service_port_forward_session(
+        "stopping",
+        PortForwardSessionState::Stopping,
+        3,
+    )];
+    harness.run_steps(3);
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Stop")
+            .accesskit_node()
+            .is_disabled(),
+        "a draining session remains visible but cannot be stopped twice"
+    );
+}
+
+#[test]
 fn port_forward_start_requires_live_loaded_service_authority() {
     let states = [
         WindowFreshness::StaleRetrying {
@@ -1356,6 +1460,31 @@ fn service_identity(name: &str) -> ResourceIdentity {
         namespace: Some("default".to_owned()),
         name: name.to_owned(),
         uid: format!("uid-{CONTEXT}-service-default-{name}"),
+    }
+}
+
+fn service_port_forward_session(
+    id: &str,
+    state: PortForwardSessionState,
+    revision: u64,
+) -> PortForwardSession {
+    PortForwardSession {
+        id: PortForwardSessionId::try_new(id).unwrap(),
+        target: PortForwardTarget::Service {
+            identity: service_identity("web-frontend"),
+            port: PortForwardPortSelector::Number { number: 80 },
+        },
+        requested_local_port: 18_080,
+        pod: PortForwardPodTarget {
+            namespace: "default".into(),
+            name: "web-0".into(),
+            uid: "pod-uid".into(),
+        },
+        pod_port: 8080,
+        local_addr: "127.0.0.1:18080".into(),
+        state,
+        failure: None,
+        revision,
     }
 }
 

@@ -403,20 +403,24 @@ fn reconnect_resubscribes_and_reconstructs_sessions_from_an_authoritative_list()
     client.apply(resumed).unwrap();
 
     let recovery_frames: Vec<_> = std::iter::from_fn(|| client.take_outbound()).collect();
-    let bootstrap_id = recovery_frames
-        .iter()
-        .find(|frame| frame.kind == k10s_protocol::ClientKind::Request)
-        .and_then(|frame| frame.request_id.clone())
+    let [bootstrap_frame, resubscribe] = recovery_frames.as_slice() else {
+        panic!("recovery must queue exactly one bootstrap and one resubscribe");
+    };
+    assert_eq!(bootstrap_frame.kind, k10s_protocol::ClientKind::Request);
+    let bootstrap_id = bootstrap_frame
+        .request_id
+        .clone()
         .expect("reconnect bootstrap request");
-    assert!(recovery_frames.iter().any(|frame| {
-        frame.kind == k10s_protocol::ClientKind::Subscribe
-            && frame.subscription_id.as_ref() == Some(subscription.id())
-            && frame
-                .payload
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                == Some("portForwardSessions")
-    }));
+    assert_eq!(resubscribe.kind, k10s_protocol::ClientKind::Subscribe);
+    assert_eq!(
+        resubscribe.subscription_id.as_ref(),
+        Some(subscription.id())
+    );
+    assert_eq!(
+        serde_json::from_value::<k10s_protocol::SubscriptionSelector>(resubscribe.payload.clone())
+            .expect("port-forward selector"),
+        k10s_protocol::SubscriptionSelector::PortForwardSessions
+    );
 
     let mut bootstrap = BootstrapResponse::fixture();
     bootstrap.capabilities = vec![k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned()];

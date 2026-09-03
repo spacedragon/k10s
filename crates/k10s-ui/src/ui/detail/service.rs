@@ -263,21 +263,36 @@ fn ports_tab<I: RowIdentity>(
         let Some(service) = identity.as_row_identity() else {
             continue;
         };
-        let session = presentation.port_forward_sessions.iter().find(|session| {
-            matches!(
-                &session.target,
-                k10s_protocol::PortForwardTarget::Service { identity, port: selector }
-                    if identity.uid == service.uid
-                        && match selector {
-                            k10s_protocol::PortForwardPortSelector::Name { name } => {
-                                port.name.as_ref() == Some(name)
+        let session = presentation
+            .port_forward_sessions
+            .iter()
+            .filter(|session| {
+                matches!(
+                    session.state,
+                    k10s_protocol::PortForwardSessionState::Starting
+                        | k10s_protocol::PortForwardSessionState::Active
+                        | k10s_protocol::PortForwardSessionState::Stopping
+                ) && matches!(
+                    &session.target,
+                    k10s_protocol::PortForwardTarget::Service { identity, port: selector }
+                        if identity.uid == service.uid
+                            && match selector {
+                                k10s_protocol::PortForwardPortSelector::Name { name } => {
+                                    port.name.as_ref() == Some(name)
+                                }
+                                k10s_protocol::PortForwardPortSelector::Number { number } => {
+                                    *number == port.service_port
+                                }
                             }
-                            k10s_protocol::PortForwardPortSelector::Number { number } => {
-                                *number == port.service_port
-                            }
-                        }
-            )
-        });
+                )
+            })
+            .min_by_key(|session| match session.state {
+                k10s_protocol::PortForwardSessionState::Active => 0,
+                k10s_protocol::PortForwardSessionState::Starting => 1,
+                k10s_protocol::PortForwardSessionState::Stopping => 2,
+                k10s_protocol::PortForwardSessionState::Stopped
+                | k10s_protocol::PortForwardSessionState::Failed => 3,
+            });
         if let Some(session) = session {
             ui.label(format!(
                 "{} · {}:{} · {:?}",
@@ -286,7 +301,15 @@ fn ports_tab<I: RowIdentity>(
             if ui.button("Copy address").clicked() {
                 ui.ctx().copy_text(session.local_addr.clone());
             }
-            if ui.button("Stop").clicked() {
+            let stoppable = matches!(
+                session.state,
+                k10s_protocol::PortForwardSessionState::Starting
+                    | k10s_protocol::PortForwardSessionState::Active
+            );
+            if ui
+                .add_enabled(stoppable, egui::Button::new("Stop"))
+                .clicked()
+            {
                 queued.push(WorkspaceCommand::StopPortForward(
                     session.id.as_str().to_owned(),
                 ));
