@@ -196,6 +196,16 @@ impl KubectlLaunchDescriptor {
         {
             return Err(DescriptorError::Unreproducible);
         }
+        if kubectl.to_str().is_none()
+            || kubeconfig_sources
+                .iter()
+                .any(|path| path.to_str().is_none())
+            || exec_plugins
+                .iter()
+                .any(|plugin| plugin.command.to_str().is_none())
+        {
+            return Err(DescriptorError::Unrepresentable);
+        }
         validate_value(&context).map_err(|_| DescriptorError::Unrepresentable)?;
         for (name, value) in &environment {
             if is_sensitive(name) || is_sensitive_value(value) {
@@ -371,7 +381,7 @@ impl<'a> KubectlExecCommand<'a> {
         let mut script = String::from("#!/bin/sh\n");
         script.push_str(&format!(
             "K10S_KUBECTL={}\n",
-            q(&d.kubectl.to_string_lossy())
+            q(d.kubectl.to_str().expect("descriptor paths were validated"))
         ));
         let clean_environment = d
             .environment
@@ -410,7 +420,7 @@ impl<'a> KubectlExecCommand<'a> {
         }
         script.push_str(&format!(
             "$K10sKubectl = {}\r\n",
-            q(&d.kubectl.to_string_lossy())
+            q(d.kubectl.to_str().expect("descriptor paths were validated"))
         ));
         script.push_str("$global:LASTEXITCODE = 125\r\n");
         script.push_str(&format!("try {{ $K10sUid = & $K10sKubectl --context {} --namespace {} get pod {} -o {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125; $K10sUid = $null }}\r\n", q(&d.context), q(&t.namespace), q(&t.pod), q("jsonpath={.metadata.uid}")));

@@ -34,8 +34,8 @@ pub(crate) fn load_from_paths(
     }
     let source = paths
         .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
+        .map(|path| unicode_path(path))
+        .collect::<Result<Vec<_>, _>>()?
         .join(if cfg!(windows) { ";" } else { ":" });
     let documents = paths
         .iter()
@@ -45,7 +45,8 @@ pub(crate) fn load_from_paths(
                     AdapterError::KubeconfigMissing(path.clone())
                 } else {
                     AdapterError::KubeconfigInvalid {
-                        source: path.display().to_string(),
+                        source: unicode_path(path)
+                            .unwrap_or_else(|_| "non-Unicode kubeconfig path".into()),
                         detail: "the file exists but could not be read".into(),
                     }
                 }
@@ -56,10 +57,10 @@ pub(crate) fn load_from_paths(
     for (path, document) in paths.iter().zip(documents) {
         let mut next =
             Kubeconfig::from_yaml(&document).map_err(|error| AdapterError::KubeconfigInvalid {
-                source: path.display().to_string(),
+                source: unicode_path(path).unwrap_or_else(|_| "non-Unicode kubeconfig path".into()),
                 detail: describe(error),
             })?;
-        resolve_relative_references(&mut next, path.parent().unwrap_or_else(|| Path::new(".")));
+        resolve_relative_references(&mut next, path.parent().unwrap_or_else(|| Path::new(".")))?;
         kubeconfig = kubeconfig
             .merge(next)
             .map_err(|error| AdapterError::KubeconfigInvalid {
@@ -99,31 +100,50 @@ fn source_paths_from(
         .ok_or(AdapterError::KubeconfigNotConfigured)
 }
 
-fn resolve_relative_references(kubeconfig: &mut Kubeconfig, directory: &Path) {
-    fn resolve(directory: &Path, value: &mut Option<String>, bare_command: bool) {
+fn unicode_path(path: &Path) -> Result<String, AdapterError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| AdapterError::KubeconfigInvalid {
+            source: "non-Unicode kubeconfig path".into(),
+            detail: "kubeconfig paths must be valid Unicode for faithful kubectl reproduction"
+                .into(),
+        })
+}
+
+fn resolve_relative_references(
+    kubeconfig: &mut Kubeconfig,
+    directory: &Path,
+) -> Result<(), AdapterError> {
+    fn resolve(
+        directory: &Path,
+        value: &mut Option<String>,
+        bare_command: bool,
+    ) -> Result<(), AdapterError> {
         let Some(current) = value.as_ref() else {
-            return;
+            return Ok(());
         };
         let path = Path::new(current);
-        if path.is_relative() && (!bare_command || current.contains(std::path::MAIN_SEPARATOR)) {
-            *value = Some(directory.join(path).to_string_lossy().into_owned());
+        if path.is_relative() && (!bare_command || current.contains(['/', '\\'])) {
+            *value = Some(unicode_path(&directory.join(path))?);
         }
+        Ok(())
     }
     for named in &mut kubeconfig.clusters {
         if let Some(cluster) = &mut named.cluster {
-            resolve(directory, &mut cluster.certificate_authority, false);
+            resolve(directory, &mut cluster.certificate_authority, false)?;
         }
     }
     for named in &mut kubeconfig.auth_infos {
         if let Some(auth) = &mut named.auth_info {
-            resolve(directory, &mut auth.client_certificate, false);
-            resolve(directory, &mut auth.client_key, false);
-            resolve(directory, &mut auth.token_file, false);
+            resolve(directory, &mut auth.client_certificate, false)?;
+            resolve(directory, &mut auth.client_key, false)?;
+            resolve(directory, &mut auth.token_file, false)?;
             if let Some(exec) = &mut auth.exec {
-                resolve(directory, &mut exec.command, true);
+                resolve(directory, &mut exec.command, true)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Map kube-rs error variants to safe, credential-free operator messages.
@@ -305,7 +325,9 @@ mod tests {
 
     use kube::config::{ExecInteractiveMode, Kubeconfig};
 
-    use super::{noninteractive_for_context, source_paths_from};
+    use super::{
+        load_from_paths, noninteractive_for_context, resolve_relative_references, source_paths_from,
+    };
 
     #[test]
     fn discovery_paths_are_explicit_or_ordered_environment_or_default() {
@@ -328,6 +350,47 @@ mod tests {
             source_paths_from(None, None, Some(Path::new("/home/u"))).unwrap(),
             [PathBuf::from("/home/u/.kube/config")]
         );
+    }
+
+    #[test]
+    fn exec_commands_with_either_platform_separator_are_relative_file_references() {
+        let directory = Path::new("/config/root");
+        for command in ["helpers/login", "helpers\\login"] {
+            let mut config = kubeconfig("Never");
+            config.auth_infos[0]
+                .auth_info
+                .as_mut()
+                .unwrap()
+                .exec
+                .as_mut()
+                .unwrap()
+                .command = Some(command.into());
+            resolve_relative_references(&mut config, directory).unwrap();
+            assert_eq!(
+                config.auth_infos[0]
+                    .auth_info
+                    .as_ref()
+                    .unwrap()
+                    .exec
+                    .as_ref()
+                    .unwrap()
+                    .command
+                    .as_deref(),
+                Some(directory.join(command).to_str().unwrap())
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_kubeconfig_path_is_a_typed_error() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+        assert!(matches!(
+            load_from_paths(vec![path]),
+            Err(crate::port::AdapterError::KubeconfigInvalid { .. })
+        ));
     }
 
     fn kubeconfig(mode: &str) -> Kubeconfig {

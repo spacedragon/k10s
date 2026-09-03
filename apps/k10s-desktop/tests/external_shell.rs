@@ -417,13 +417,43 @@ fn render_posix_uid_lookup_failure_preserves_status_and_eof_does_not_hang() {
 #[test]
 fn render_powershell_executes_under_real_windows_powershell_and_preserves_status() {
     use std::fs;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     let dir = std::env::temp_dir().join(format!("k10s-powershell-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir(&dir).unwrap();
-    let fake = dir.join("fake kubectl.ps1");
+    let fake = dir.join("fake-kubectl.exe");
     let log = dir.join("argv.txt");
-    fs::write(&fake, format!("$args | Set-Content -LiteralPath '{}'\nif ($args -contains 'get') {{ Write-Output 'uid-1'; exit 0 }}\nexit 23\n", log.display())).unwrap();
+    let source = dir.join("fake.rs");
+    fs::write(
+        &source,
+        format!(
+            r#"use std::{{env, fs::OpenOptions, io::Write}};
+fn main() {{
+ let args: Vec<String> = env::args().skip(1).collect();
+ let mut log = OpenOptions::new().create(true).append(true).open({:?}).unwrap();
+ for arg in &args {{ writeln!(log, "ARG={{arg}}").unwrap(); }}
+ for key in ["PATH", "USERPROFILE", "KUBECONFIG", "SHOULD_NOT_LEAK"] {{ writeln!(log, "ENV {{key}}={{}}", env::var(key).unwrap_or_else(|_| "<unset>".into())).unwrap(); }}
+ if args.iter().any(|arg| arg == "get") {{
+   let pod = args.iter().position(|arg| arg == "pod").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("");
+   if pod == "lookup-fail" {{ std::process::exit(41); }}
+   if pod == "mismatch" {{ print!("replaced"); }} else {{ print!("uid-1"); }}
+   return;
+ }}
+ std::process::exit(23);
+}}"#,
+            log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    assert!(
+        Command::new("rustc")
+            .args(["--edition=2021", "-o"])
+            .arg(&fake)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
     let descriptor = KubectlLaunchDescriptor::new(
         1,
         fake,
@@ -440,10 +470,10 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
         Vec::new(),
     )
     .unwrap();
-    let target = ExternalShellTarget {
+    let exec_target = ExternalShellTarget {
         generation: 1,
         namespace: "ns & 'x'".into(),
-        pod: "pod".into(),
+        pod: "pod '$(malicious)' & | <> %!".into(),
         uid: "uid-1".into(),
         container: "main".into(),
         program: "/bin/sh".into(),
@@ -451,7 +481,7 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
     let script_path = dir.join("rendered.ps1");
     fs::write(
         &script_path,
-        KubectlExecCommand::new(&descriptor, target)
+        KubectlExecCommand::new(&descriptor, exec_target)
             .unwrap()
             .render_powershell()
             .unwrap(),
@@ -460,9 +490,42 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
     let status = Command::new("powershell.exe")
         .args(["-NoProfile", "-File"])
         .arg(&script_path)
+        .env("SHOULD_NOT_LEAK", "secret")
+        .stdin(Stdio::null())
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(23));
-    assert!(fs::read_to_string(log).unwrap().contains("exec"));
+    let recorded = fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("ARG=exec\nARG=-it\nARG=pod '$(malicious)' & | <> %!\n"));
+    assert!(recorded.contains("ENV SHOULD_NOT_LEAK=<unset>"));
+    for (name, value) in &descriptor.environment {
+        assert!(recorded.contains(&format!("ENV {name}={value}\n")));
+    }
+
+    for (pod, expected, must_exec) in [("lookup-fail", 41, false), ("mismatch", 66, false)] {
+        fs::write(&log, "").unwrap();
+        let mut target = target();
+        target.uid = "uid-1".into();
+        target.pod = pod.into();
+        fs::write(
+            &script_path,
+            KubectlExecCommand::new(&descriptor, target)
+                .unwrap()
+                .render_powershell()
+                .unwrap(),
+        )
+        .unwrap();
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-File"])
+            .arg(&script_path)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(expected));
+        assert_eq!(
+            fs::read_to_string(&log).unwrap().contains("ARG=exec"),
+            must_exec
+        );
+    }
     fs::remove_dir_all(dir).unwrap();
 }
