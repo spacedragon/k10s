@@ -13,10 +13,13 @@ TLS, authentication, and access control at a reverse proxy.
   placed in URLs, web assets, browser persistence, errors, or probes.
 - Config debug output substitutes `[REDACTED]`; normal telemetry records safe
   identifiers and state transitions, never credentials or raw kubeconfig.
-- Kubeconfig exec credential plugins run only on the backend host, by direct
-  argv execution without a shell. `interactiveMode: Always` is refused and
-  `IfAvailable` is forced to `Never`. The configured current context is
-  checked during Bootstrap; other plugins run lazily when selected.
+- For backend-mediated operations, kubeconfig exec credential plugins run only
+  on the backend host, by direct argv execution without a shell.
+  `interactiveMode: Always` is refused and `IfAvailable` is forced to `Never`.
+  The configured current context is checked during Bootstrap; other plugins
+  run lazily when selected. External desktop shells use the user's local
+  `kubectl`; any credential plugin for that invocation executes locally in the
+  user's terminal process, outside the backend-mediated boundary.
 - A plugin failure disables only its context. The process and other contexts
   stay live, the selector keeps the failed context visible, and Refresh retries
   it. Diagnostics include exit status and best-effort sanitized stderr (control

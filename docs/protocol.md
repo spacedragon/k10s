@@ -7,7 +7,7 @@ carried only in the first `hello` frame.
 ## Compatibility
 
 The current protocol is major `1`, minor `6`. Supported negotiation is major
-`1` with peer minor `5..=6`; the negotiated minor is the lower value. A major
+`1` with peer minor `0..=6`; the negotiated minor is the lower value. A major
 mismatch is rejected. Unknown message kinds return a structured
 `unsupportedMessage` error instead of being ignored or crashing a peer.
 
