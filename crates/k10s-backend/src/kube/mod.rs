@@ -47,7 +47,7 @@ use crate::runtime::cluster::{ClusterMetrics, ClusterWatches};
 use crate::runtime::supervisor::WatchSource;
 use crate::watch::WatchSelector;
 
-const INFRASTRUCTURE_KINDS: [&str; 20] = [
+const INFRASTRUCTURE_KINDS: [&str; 7] = [
     "Node",
     "Pod",
     "Deployment",
@@ -55,24 +55,10 @@ const INFRASTRUCTURE_KINDS: [&str; 20] = [
     "DaemonSet",
     "Job",
     "CronJob",
-    "Event",
-    "Service",
-    "Ingress",
-    "Endpoints",
-    "NetworkPolicy",
-    "ConfigMap",
-    "Secret",
-    "PersistentVolumeClaim",
-    "PersistentVolume",
-    "StorageClass",
-    "ServiceAccount",
-    "Role",
-    "RoleBinding",
 ];
 
 fn is_infrastructure_descriptor(entry: &ApiResourceDescriptor) -> bool {
     INFRASTRUCTURE_KINDS.contains(&entry.gvk.kind.as_str())
-        && (entry.gvk.kind != "Event" || entry.gvk.group.is_empty())
 }
 
 /// A test-only override choosing scripted watch sources per selection.
@@ -534,7 +520,7 @@ impl KubeAdapter {
                 nodes = inventory.nodes;
                 continue;
             }
-            match read::list_resource(
+            match read::list_infrastructure_resource(
                 &client,
                 context,
                 &descriptor.gvk,
@@ -1610,7 +1596,21 @@ mod client_build_lock_tests {
     }
 
     #[test]
-    fn infrastructure_catalog_includes_every_launcher_count_kind_once() {
+    fn infrastructure_catalog_includes_only_overview_kinds() {
+        for (group, kind) in [
+            ("", "Node"),
+            ("", "Pod"),
+            ("apps", "Deployment"),
+            ("apps", "StatefulSet"),
+            ("apps", "DaemonSet"),
+            ("batch", "Job"),
+            ("batch", "CronJob"),
+        ] {
+            assert!(
+                is_infrastructure_descriptor(&descriptor(group, kind)),
+                "{kind} must be included in infrastructure descriptors"
+            );
+        }
         for (group, kind) in [
             ("", "Event"),
             ("", "Service"),
@@ -1625,20 +1625,14 @@ mod client_build_lock_tests {
             ("", "ServiceAccount"),
             ("rbac.authorization.k8s.io", "Role"),
             ("rbac.authorization.k8s.io", "RoleBinding"),
+            ("events.k8s.io", "Event"),
+            ("apps", "ReplicaSet"),
         ] {
             assert!(
-                is_infrastructure_descriptor(&descriptor(group, kind)),
-                "{kind} must feed launcher counts"
+                !is_infrastructure_descriptor(&descriptor(group, kind)),
+                "{kind} must be excluded from infrastructure descriptors"
             );
         }
-        assert!(!is_infrastructure_descriptor(&descriptor(
-            "events.k8s.io",
-            "Event"
-        )));
-        assert!(!is_infrastructure_descriptor(&descriptor(
-            "apps",
-            "ReplicaSet"
-        )));
     }
 
     #[tokio::test]
