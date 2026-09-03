@@ -211,6 +211,44 @@ fn temporary_startup_cleanup_examines_exactly_the_oldest_128() {
 
 #[cfg(unix)]
 #[test]
+fn temporary_cleanup_hard_bounds_hostile_manifests_children_and_parent_scans() {
+    let root = std::env::temp_dir().join(format!("k10s-cleanup-bounds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let huge = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    std::fs::write(huge.manifest_path(), vec![b'x'; 64 * 1024]).unwrap();
+    let crowded = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(crowded.manifest_path()).unwrap()).unwrap();
+    manifest["created_unix_seconds"] = 1.into();
+    std::fs::write(
+        crowded.manifest_path(),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    for index in 0..100 {
+        std::fs::write(crowded.directory().join(format!("extra-{index}")), "x").unwrap();
+    }
+    let report = storage.cleanup_expired(100_000).unwrap();
+    assert!(report.scanned <= 1024);
+    assert!(huge.directory().exists());
+    assert!(crowded.directory().exists());
+    for index in 0..1024 {
+        std::fs::write(root.join(format!("hostile-{index}")), "x").unwrap();
+    }
+    assert!(matches!(
+        storage.cleanup_expired(100_000),
+        Err(k10s_desktop::external_shell::StorageError::CleanupBudgetExceeded)
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn temporary_creation_faults_rollback_every_owned_object_and_keep_preexisting_entries() {
     use k10s_desktop::external_shell::StorageFaultPoint;
     let root = std::env::temp_dir().join(format!("k10s-temp-faults-{}", std::process::id()));
@@ -572,7 +610,6 @@ fn render_powershell_quotes_every_structured_value() {
     assert!(script.contains("$global:LASTEXITCODE = 125"));
     assert!(script.contains("catch { $K10sStatus = 125"));
     assert!(script.contains("exit $K10sStatus"));
-    assert!(!script.contains("Invoke-Expression"));
     assert!(!script.contains("Invoke-Expression"));
 }
 

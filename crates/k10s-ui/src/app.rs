@@ -563,6 +563,10 @@ impl K10sApp {
         self.host_error = Some(error);
     }
 
+    pub fn clear_host_error(&mut self) {
+        self.host_error = None;
+    }
+
     #[must_use]
     pub fn host_error(&self) -> Option<&SafeUiError> {
         self.host_error.as_ref()

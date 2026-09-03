@@ -152,7 +152,11 @@ pub(super) fn create_private_file<F: FnOnce()>(
     file.sync_all()?;
     Ok(())
 }
-pub(super) fn read_regular_file(child: &PrivateChild, name: &str) -> Result<Vec<u8>, StorageError> {
+pub(super) fn read_regular_file_bounded(
+    child: &PrivateChild,
+    name: &str,
+    limit: usize,
+) -> Result<Vec<u8>, StorageError> {
     use std::io::Read;
     let fd = rustix::fs::openat(
         &child.fd,
@@ -161,10 +165,14 @@ pub(super) fn read_regular_file(child: &PrivateChild, name: &str) -> Result<Vec<
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    let mut file = std::fs::File::from(fd);
+    let file = std::fs::File::from(fd);
     validate_open_regular(child, name, &file)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(StorageError::CleanupBudgetExceeded);
+    }
     Ok(bytes)
 }
 fn validate_open_regular(

@@ -504,6 +504,9 @@ fn powershell_literal(value: &str) -> String {
 
 const MANIFEST_NAME: &str = "manifest.json";
 const MANIFEST_VERSION: u32 = 1;
+const STARTUP_SCAN_LIMIT: usize = 1024;
+const STARTUP_CANDIDATE_LIMIT: usize = 128;
+const MANIFEST_BYTE_LIMIT: usize = 4096;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -514,6 +517,7 @@ pub enum StorageError {
     NoTerminalLauncher,
     LaunchFailed(Vec<SafeLaunchAttempt>),
     RollbackFailed,
+    CleanupBudgetExceeded,
 }
 
 impl fmt::Display for StorageError {
@@ -535,6 +539,9 @@ impl fmt::Display for StorageError {
                 Ok(())
             }
             Self::RollbackFailed => formatter.write_str("temporary shell rollback failed"),
+            Self::CleanupBudgetExceeded => {
+                formatter.write_str("temporary shell cleanup scan budget was exceeded")
+            }
         }
     }
 }
@@ -689,8 +696,13 @@ impl TemporaryShellStorage {
 
     pub fn cleanup_expired(&self, now_unix_seconds: u64) -> Result<CleanupReport, StorageError> {
         platform::validate_private_parent(&self.parent)?;
-        let mut candidates = Vec::new();
+        let mut candidates = Vec::with_capacity(STARTUP_CANDIDATE_LIMIT);
+        let mut scanned = 0;
         for entry in std::fs::read_dir(platform::parent_path(&self.parent))? {
+            if scanned == STARTUP_SCAN_LIMIT {
+                return Err(StorageError::CleanupBudgetExceeded);
+            }
+            scanned += 1;
             let entry = entry?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -701,7 +713,9 @@ impl TemporaryShellStorage {
                 continue;
             };
             let directory = platform::child_path(&child).to_owned();
-            let Ok(bytes) = platform::read_regular_file(&child, MANIFEST_NAME) else {
+            let Ok(bytes) =
+                platform::read_regular_file_bounded(&child, MANIFEST_NAME, MANIFEST_BYTE_LIMIT)
+            else {
                 continue;
             };
             let Ok(manifest) = serde_json::from_slice::<LaunchManifest>(&bytes) else {
@@ -713,21 +727,36 @@ impl TemporaryShellStorage {
             {
                 continue;
             }
-            candidates.push((
+            let candidate = (
                 manifest.created_unix_seconds,
                 directory,
                 manifest.script,
                 child,
-            ));
+            );
+            if candidates.len() < STARTUP_CANDIDATE_LIMIT {
+                candidates.push(candidate);
+            } else if let Some((index, newest)) = candidates
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, value)| value.0)
+                && candidate.0 < newest.0
+            {
+                candidates[index] = candidate;
+            }
         }
         candidates.sort_by_key(|candidate| candidate.0);
-        let mut report = CleanupReport::default();
-        for (created, directory, script_name, child) in candidates.into_iter().take(128) {
+        let mut report = CleanupReport {
+            scanned,
+            ..CleanupReport::default()
+        };
+        for (created, directory, script_name, child) in candidates {
             report.examined += 1;
             if now_unix_seconds.saturating_sub(created) <= 24 * 60 * 60 {
                 continue;
             }
-            let entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
+            let entries = std::fs::read_dir(&directory)?
+                .take(3)
+                .collect::<Result<Vec<_>, _>>()?;
             if entries.len() != 2
                 || entries.iter().any(|entry| {
                     let name = entry.file_name();
@@ -750,6 +779,7 @@ impl TemporaryShellStorage {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CleanupReport {
+    pub scanned: usize,
     pub examined: usize,
     pub removed: usize,
 }
@@ -983,7 +1013,7 @@ where
     if spawn("/usr/bin/open", &arguments).is_ok() {
         Ok(())
     } else {
-        let _ = script.cleanup();
+        script.cleanup()?;
         Err(StorageError::NoTerminalLauncher)
     }
 }
@@ -1008,7 +1038,7 @@ where
             return Ok(());
         }
     }
-    let _ = script.cleanup();
+    script.cleanup()?;
     Err(StorageError::NoTerminalLauncher)
 }
 

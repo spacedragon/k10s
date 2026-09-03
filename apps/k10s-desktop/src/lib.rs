@@ -179,6 +179,27 @@ impl std::fmt::Debug for DesktopApp {
 }
 
 impl DesktopApp {
+    fn clear_external_shell_status(app: &mut K10sApp, error_slot: &mut Option<String>) {
+        *error_slot = None;
+        app.clear_host_error();
+    }
+    fn apply_external_shell_result(
+        app: &mut K10sApp,
+        error_slot: &mut Option<String>,
+        result: Result<(), external_shell::StorageError>,
+    ) {
+        match result {
+            Ok(()) => Self::clear_external_shell_status(app, error_slot),
+            Err(error) => {
+                let sanitized = error.to_string();
+                tracing::error!("{sanitized}");
+                *error_slot = Some(sanitized.clone());
+                app.set_host_error(k10s_ui::SafeUiError::new(format!(
+                    "External shell failed: {sanitized}"
+                )));
+            }
+        }
+    }
     /// Normal desktop launch: real `Kube` adapter through standard kubeconfig
     /// discovery. Fake mode is never implicit on this production path.
     pub fn launch() -> Result<Self, DesktopLaunchError> {
@@ -288,6 +309,7 @@ impl DesktopApp {
             app.set_external_shell_availability(
                 k10s_ui::ui::ExternalShellAvailability::Unavailable,
             );
+            Self::clear_external_shell_status(app, &mut self.external_shell_error);
             let generation = self
                 .external_shell_descriptor
                 .as_ref()
@@ -346,15 +368,7 @@ impl DesktopApp {
                 let script = storage.create(&command)?;
                 external_shell::launch_with_adapters(&script, &self.terminal_adapters)
             })();
-            if let Err(error) = result {
-                let sanitized = error.to_string();
-                tracing::error!("{sanitized}");
-                self.external_shell_error = Some(sanitized);
-                app.set_host_error(k10s_ui::SafeUiError::new(format!(
-                    "External shell failed: {}",
-                    self.external_shell_error.clone().unwrap_or_default()
-                )));
-            }
+            Self::apply_external_shell_result(app, &mut self.external_shell_error, result);
         }
     }
 
@@ -856,6 +870,30 @@ mod tests {
         let error = launch_embedded_server_on(addr, &BackendMode::Fake).unwrap_err();
 
         assert!(matches!(error, EmbeddedServerError::Io(_)));
+    }
+
+    #[test]
+    fn external_shell_host_error_clears_after_success_and_context_transition() {
+        let mut desktop = DesktopApp::launch_with_mode_and_store(&BackendMode::Fake, None).unwrap();
+        let app = desktop.app.as_mut().unwrap();
+        DesktopApp::apply_external_shell_result(
+            app,
+            &mut desktop.external_shell_error,
+            Err(crate::external_shell::StorageError::NoTerminalLauncher),
+        );
+        assert!(desktop.external_shell_error.is_some());
+        assert!(app.host_error().is_some());
+        DesktopApp::apply_external_shell_result(app, &mut desktop.external_shell_error, Ok(()));
+        assert!(desktop.external_shell_error.is_none());
+        assert!(app.host_error().is_none());
+        DesktopApp::apply_external_shell_result(
+            app,
+            &mut desktop.external_shell_error,
+            Err(crate::external_shell::StorageError::NoTerminalLauncher),
+        );
+        DesktopApp::clear_external_shell_status(app, &mut desktop.external_shell_error);
+        assert!(desktop.external_shell_error.is_none());
+        assert!(app.host_error().is_none());
     }
 
     /// Unique per-test state file inside the system temp dir; tests never
