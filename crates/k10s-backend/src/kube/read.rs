@@ -82,9 +82,9 @@ pub(crate) async fn list_infrastructure_resource(
         .iter()
         .map(|object| {
             let name = object.name_any();
-            let uid = object.uid().unwrap_or_else(|| {
-                format!("uid-{}-{}", gvk.kind.to_lowercase(), name)
-            });
+            let uid = object
+                .uid()
+                .unwrap_or_else(|| format!("uid-{}-{}", gvk.kind.to_lowercase(), name));
             let namespace = object
                 .namespace()
                 .or_else(|| namespaced.then(|| namespace.map(str::to_owned)).flatten());

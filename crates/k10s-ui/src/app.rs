@@ -811,15 +811,13 @@ impl K10sApp {
                 Ok(())
             };
             bootstrap.and_then(|()| {
-                selected_after
-                    .as_deref()
-                    .map_or(Ok(()), |context| {
-                        if self.infrastructure_demanded() {
-                            self.refresh_infrastructure(context)
-                        } else {
-                            Ok(())
-                        }
-                    })
+                selected_after.as_deref().map_or(Ok(()), |context| {
+                    if self.infrastructure_demanded() {
+                        self.refresh_infrastructure(context)
+                    } else {
+                        Ok(())
+                    }
+                })
             })
         } else {
             Ok(())
@@ -2129,18 +2127,14 @@ impl K10sApp {
     }
 
     fn infrastructure_demanded(&self) -> bool {
-        self.shell
-            .workspace()
-            .windows()
-            .iter()
-            .any(|window| {
-                matches!(
-                    window.kind,
-                    crate::workspace::WindowKind::Overview
-                        | crate::workspace::WindowKind::Nodes
-                        | crate::workspace::WindowKind::Storage
-                )
-            })
+        self.shell.workspace().windows().iter().any(|window| {
+            matches!(
+                window.kind,
+                crate::workspace::WindowKind::Overview
+                    | crate::workspace::WindowKind::Nodes
+                    | crate::workspace::WindowKind::Storage
+            )
+        })
     }
 
     fn select_infrastructure_context(&mut self, context: &str) -> Result<(), ClientError> {
@@ -6080,7 +6074,9 @@ mod tests {
 
         // Re-open Overview window via launcher
         app.shell
-            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Overview));
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Overview,
+            ));
         assert!(app.infrastructure_demanded());
 
         app.reconcile_selected_resource_streams();
@@ -6114,7 +6110,8 @@ mod tests {
             .find(|w| w.kind == WindowKind::Overview)
             .map(|w| w.id)
             .unwrap();
-        app.shell.apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
         app.reconcile_selected_resource_streams();
         assert!(!app.infrastructure_demanded());
         assert!(app.infrastructure_subscription.is_none());
@@ -6136,9 +6133,12 @@ mod tests {
             .find(|w| w.kind == WindowKind::Nodes)
             .map(|w| w.id)
             .unwrap();
-        app.shell.apply_workspace_command(WorkspaceCommand::CloseWindow(nodes));
         app.shell
-            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Storage));
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(nodes));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Storage,
+            ));
         assert!(app.infrastructure_demanded());
         app.reconcile_selected_resource_streams();
         assert!(app.infrastructure_subscription.is_some());
@@ -6152,7 +6152,8 @@ mod tests {
             .find(|w| w.kind == WindowKind::Storage)
             .map(|w| w.id)
             .unwrap();
-        app.shell.apply_workspace_command(WorkspaceCommand::CloseWindow(storage));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(storage));
         assert!(!app.infrastructure_demanded());
         app.reconcile_selected_resource_streams();
         assert!(app.infrastructure_subscription.is_none());
@@ -6183,7 +6184,8 @@ mod tests {
             .find(|w| w.kind == WindowKind::Overview)
             .map(|w| w.id)
             .unwrap();
-        app.shell.apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
         assert!(!app.infrastructure_demanded());
 
         // Connect and process bootstrap response

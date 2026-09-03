@@ -1415,8 +1415,16 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
     for (path, _) in lists {
         assert_eq!(server.hit_count(path), 1, "overview must list {path}");
     }
-    assert_eq!(server.hit_count("/api/v1/services"), 0, "overview must not list services");
-    assert_eq!(server.hit_count("/api/v1/configmaps"), 0, "overview must not list configmaps");
+    assert_eq!(
+        server.hit_count("/api/v1/services"),
+        0,
+        "overview must not list services"
+    );
+    assert_eq!(
+        server.hit_count("/api/v1/configmaps"),
+        0,
+        "overview must not list configmaps"
+    );
 
     kernel
         .subscribe(Subscribe::Infrastructure {
