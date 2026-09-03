@@ -1256,14 +1256,16 @@ impl ClientState {
 
     /// Apply one session snapshot under its monotonic revision.
     fn apply_session(&mut self, session: PortForwardSession) {
+        let revision = session.revision;
         let session_id = session.id.as_str().to_owned();
         let is_newer = self.port_forward_sessions.get(&session_id).map_or(
-            session.revision > self.port_forward_list_revision,
-            |current| session.revision > current.revision,
+            revision > self.port_forward_list_revision,
+            |current| revision > current.revision,
         );
         if is_newer {
             self.port_forward_sessions.insert(session_id, session);
         }
+        self.port_forward_feed_revision = self.port_forward_feed_revision.max(revision);
     }
 
     /// Apply a subscription event using its manager-global envelope revision
