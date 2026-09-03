@@ -115,6 +115,7 @@ fn an_explicit_fake_mode_still_serves_the_offline_demo() {
         bootstrap_context_names(&server),
         ["dev-local", "prod-readonly"]
     );
+    assert!(server.kubectl_launch_descriptor().is_none());
 
     server.shutdown().expect("server stops cleanly");
 }

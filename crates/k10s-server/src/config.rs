@@ -144,7 +144,7 @@ pub struct ServerConfig {
     pub drain_timeout: Duration,
     /// Capabilities implemented by this server.
     pub capabilities: Vec<String>,
-    /// Maximum individual WebSocket frame size on the dedicated logs/exec
+    /// Maximum individual WebSocket frame size on dedicated stream routes
     /// stream sockets. Deliberately separate from (and smaller than) the
     /// control-socket limit.
     pub max_stream_frame_size: usize,
@@ -183,7 +183,7 @@ impl Default for ServerConfig {
             snapshot_rows_per_chunk: 128,
             drain_grace_timeout: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(10),
-            capabilities: vec!["logs.tail".into(), "exec.attach".into()],
+            capabilities: vec!["logs.tail".into()],
             max_stream_frame_size: 64 << 10,
             max_stream_message_size: 256 << 10,
             stream_hello_timeout: Duration::from_secs(5),

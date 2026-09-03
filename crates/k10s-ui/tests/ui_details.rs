@@ -658,7 +658,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     pod_harness.run_steps(3);
     let pod = common::workload_window(&pod_harness, "Pods");
-    pod.get_by_label("l logs · s shell · y yaml · e events · c copy name · Esc clear selection");
+    pod.get_by_label("l logs · y yaml · e events · c copy name · Esc clear selection");
 
     let mut deployment_harness = harness();
     deployment_harness.state_mut().feed.details.insert(
@@ -720,9 +720,7 @@ fn detail_footer_exposes_owner_shortcut_only_for_verified_owner() {
     harness.run_steps(3);
     harness
         .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_label(
-            "l logs · s shell · y yaml · e events · c copy name · o owner · Esc clear selection",
-        );
+        .get_by_label("l logs · y yaml · e events · c copy name · o owner · Esc clear selection");
 }
 
 #[test]
@@ -1830,7 +1828,7 @@ fn tabs_and_actions_are_exact_per_kind() {
     window.get_by_role_and_label(Role::Button, "Delete…");
     assert!(window.query_by_label("Exec shell").is_none());
 
-    // Pod: runtime tabs plus logs/exec actions, never Scale.
+    // Pod: runtime tabs plus logs, never embedded exec or Scale.
     harness.state_mut().feed.details.insert(
         identity("Pod", "db-postgres-0"),
         pod_detail("db-postgres-0"),
@@ -1845,13 +1843,7 @@ fn tabs_and_actions_are_exact_per_kind() {
     harness.run_steps(4);
 
     let window = common::workload_window(&harness, "Pods");
-    for tab in [
-        "Tab Overview",
-        "Tab Events",
-        "Tab YAML",
-        "Tab Logs",
-        "Tab Shell",
-    ] {
+    for tab in ["Tab Overview", "Tab Events", "Tab YAML", "Tab Logs"] {
         window.get_by_role_and_label(Role::Button, tab);
     }
     assert!(
@@ -1859,6 +1851,11 @@ fn tabs_and_actions_are_exact_per_kind() {
             .query_by_role_and_label(Role::Button, "Tab Pods")
             .is_none(),
         "pods own nothing, so no related-workloads tab"
+    );
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Tab Shell")
+            .is_none()
     );
     assert!(window.query_by_label("Scale…").is_none());
 }

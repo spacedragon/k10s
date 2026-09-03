@@ -1117,10 +1117,11 @@ pub(super) fn show<I>(
     );
 
     if detail_shown && focused {
-        let auto_focus =
-            state.detail.as_ref().is_some_and(|detail| {
-                matches!(detail.active_tab, DetailTab::Logs | DetailTab::Shell)
-            }) && super::split::pane_heights(available_height, ratio, true).1
+        let auto_focus = state
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.active_tab == DetailTab::Logs)
+            && super::split::pane_heights(available_height, ratio, true).1
                 < super::split::DETAIL_PANE_MIN + 80.0;
         if auto_focus && state.prior_split_ratio.is_none() {
             queued.push(WorkspaceCommand::MaximizeDetailPane(window_id));

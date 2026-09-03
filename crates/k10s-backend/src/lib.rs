@@ -36,12 +36,15 @@ pub use port::{
     OperationId, OwnerRef, PermissionCheck, PermissionOutcome, PermissionProbe, PodContainerPort,
     Query, QueryResult, RecordEvent, RecordEventsCondition, RelatedData, RelatedRecordGroup,
     ResourceListData, ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData,
-    ResourceWatchIdentity, ServicePort, ServiceProjection, StreamGrant, StreamInput, StreamKind,
+    ResourceWatchIdentity, ServicePort, ServiceProjection, StreamGrant, StreamKind,
     StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use port_forward::{
     PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,
     PortForwardStream, RejectionCategory, ResolvedPortForward,
 };
-pub use runtime::{BackendMode, ContextRegistry, build_kernel};
+pub use runtime::{
+    BackendMode, ContextRegistry, ExecPluginPreparation, KubePreparation, PreparedBackend,
+    build_kernel, prepare_backend, prepare_kube_backend_from_paths,
+};
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

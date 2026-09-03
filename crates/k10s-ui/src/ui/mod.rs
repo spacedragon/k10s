@@ -96,12 +96,36 @@ pub struct UiShell<I> {
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_actions: Vec<PortForwardAction<I>>,
     resource_actions: Vec<ResourceAction>,
+    external_shell_availability: ExternalShellAvailability,
     launcher: launcher::LauncherState,
     traffic_history: Vec<k10s_protocol::TrafficSample>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalShellAvailability {
+    #[default]
+    Unavailable,
+    Available {
+        generation: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalShellTarget {
+    pub generation: u64,
+    pub namespace: String,
+    pub pod: String,
+    pub uid: String,
+    pub container: String,
+    pub program: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceAction {
+    OpenExternalShell {
+        window: WindowId,
+        target: ExternalShellTarget,
+    },
     Restart {
         window: WindowId,
         target: k10s_protocol::ResourceIdentity,
@@ -149,6 +173,7 @@ where
             requested_context: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
+            external_shell_availability: ExternalShellAvailability::Unavailable,
             launcher: launcher::LauncherState::default(),
             traffic_history: Vec::new(),
         }
@@ -198,6 +223,15 @@ where
         std::mem::take(&mut self.resource_actions)
     }
 
+    pub fn set_external_shell_availability(&mut self, availability: ExternalShellAvailability) {
+        self.external_shell_availability = availability;
+    }
+
+    #[must_use]
+    pub fn external_shell_availability(&self) -> ExternalShellAvailability {
+        self.external_shell_availability
+    }
+
     /// Drain the protocol actions queued by YAML editors during rendering.
     pub fn drain_yaml_actions(&mut self) -> Vec<(WindowId, tools::YamlAction)> {
         self.yaml.drain_actions()
@@ -239,16 +273,6 @@ where
     /// Drain every queued log-view protocol action.
     pub fn drain_log_actions(&mut self) -> Vec<(WindowId, tools::LogsAction)> {
         self.streams.logs.drain_actions()
-    }
-
-    /// Drain every queued explicit shell-connect request.
-    pub fn drain_shell_connects(&mut self) -> Vec<(WindowId, k10s_protocol::StreamTarget)> {
-        self.streams.shells.drain_connects()
-    }
-
-    /// Drain every queued stdin/resize action of live terminals.
-    pub fn drain_shell_actions(&mut self) -> Vec<(WindowId, tools::ShellAction)> {
-        self.streams.shells.drain_actions()
     }
 
     /// Render one frame. All mutations are queued while immutable workspace
@@ -500,6 +524,12 @@ where
             });
 
         let mut resources = std::mem::take(&mut self.resources);
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("k10s.external-shell-availability"),
+                self.external_shell_availability,
+            );
+        });
         egui::CentralPanel::default()
             .frame(theme::canvas_frame())
             .show(ui, |ui| {

@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{
     BackendError, BackendEvent, BackendKernel, Command, FakeKubernetes, KubernetesAccess,
-    OperationId, Query, QueryResult, StreamInput, Subscribe, SubscriptionHandle,
+    OperationId, Query, QueryResult, Subscribe, SubscriptionHandle,
 };
 use k10s_protocol::{
     GroupVersionKind, ProtocolVersion, ResourceDetailResponse, ResourceIdentity,
@@ -156,14 +156,6 @@ impl KubernetesAccess for ProjectionFake {
             });
             Ok(SubscriptionHandle::with_events(id, receiver))
         })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        ticket_id: &'a str,
-        input: StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        self.inner.stream_input(ticket_id, input)
     }
 }
 
@@ -402,8 +394,8 @@ fn checksum(values: &[Value]) -> String {
 }
 
 #[tokio::test]
-async fn current_protocol_reports_minor_five_and_still_negotiates_older_minors() {
-    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 5);
+async fn current_protocol_reports_minor_six_and_still_negotiates_previous_minor() {
+    assert_eq!(k10s_protocol::PROTOCOL_MINOR, 6);
     let (server, _fake) = spawn_server().await;
 
     let (_v12, welcome12) = connect_with_minor(&server, 2).await;
@@ -412,6 +404,10 @@ async fn current_protocol_reports_minor_five_and_still_negotiates_older_minors()
     assert_eq!(welcome13.protocol, ProtocolVersion { major: 1, minor: 3 });
     let (_v14, welcome14) = connect_with_minor(&server, 4).await;
     assert_eq!(welcome14.protocol, ProtocolVersion { major: 1, minor: 4 });
+    let (_v15, welcome15) = connect_with_minor(&server, 5).await;
+    assert_eq!(welcome15.protocol, ProtocolVersion { major: 1, minor: 5 });
+    let (_v16, welcome16) = connect_with_minor(&server, 6).await;
+    assert_eq!(welcome16.protocol, ProtocolVersion { major: 1, minor: 6 });
 
     server.shutdown().await.unwrap();
 }

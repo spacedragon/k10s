@@ -18,7 +18,7 @@ mod snapshot;
 mod service;
 mod window;
 
-pub use detail::{DetailState, DetailTab, ShellState, YamlState};
+pub use detail::{DetailState, DetailTab, YamlState};
 pub use guard::{BlockReason, BlockResolution, Blocker, PendingNavigation};
 pub use resource::{AgeMode, NamespaceScope, ResourceWindowState, SortSpec};
 pub use snapshot::{
@@ -43,7 +43,7 @@ pub enum LauncherItem {
 
 /// Commands applied to the workspace state. Destructive navigations (row
 /// selection, selection clearing, window close, context switch) are blocked
-/// while the affected detail has a dirty YAML buffer or a connected shell;
+/// while the affected detail has a dirty YAML buffer;
 /// the blocking command parks as a [`PendingNavigation`] and commits only
 /// after every blocker is resolved via [`WorkspaceCommand::ResolveBlock`].
 #[derive(Debug, Clone, PartialEq)]
@@ -103,8 +103,6 @@ pub enum WorkspaceCommand<I> {
     SetActiveTab(WindowId, DetailTab),
     BeginYamlEdit(WindowId),
     DiscardYaml(WindowId),
-    ConnectShell(WindowId),
-    DisconnectShell(WindowId),
     StartPortForward {
         service: I,
         port: k10s_protocol::PortForwardPortSelector,
@@ -477,14 +475,6 @@ where
                 self.discard_yaml(id);
                 Vec::new()
             }
-            WorkspaceCommand::ConnectShell(id) => {
-                self.with_detail_mut(id, |detail| detail.shell.connected = true);
-                Vec::new()
-            }
-            WorkspaceCommand::DisconnectShell(id) => {
-                self.disconnect_shell(id);
-                Vec::new()
-            }
             WorkspaceCommand::StartPortForward {
                 service,
                 port,
@@ -763,13 +753,6 @@ where
                 });
                 self.finish_pending(pending)
             }
-            BlockResolution::DisconnectShell { window } => {
-                self.disconnect_shell(window);
-                pending.blockers.retain(|blocker| {
-                    !(blocker.window == window && blocker.reason == BlockReason::ConnectedShell)
-                });
-                self.finish_pending(pending)
-            }
         }
     }
 
@@ -957,7 +940,7 @@ where
         events
     }
 
-    // -- YAML and shell state -------------------------------------------------
+    // -- YAML state -----------------------------------------------------------
 
     fn detail_identity(window: &Window<I>) -> Option<&I> {
         match &window.content {
@@ -1027,10 +1010,6 @@ where
             self.with_detail_mut(id, |detail| detail.yaml.dirty = false);
             self.yaml_owner.remove(&identity);
         }
-    }
-
-    fn disconnect_shell(&mut self, id: WindowId) {
-        self.with_detail_mut(id, |detail| detail.shell.connected = false);
     }
 
     // -- small accessors --------------------------------------------------------

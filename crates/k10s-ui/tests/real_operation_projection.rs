@@ -4,9 +4,9 @@ use k10s_protocol::{
     BackendRevision, GroupVersionKind, ResourceIdentity, StreamTarget, ValidationTicket,
     YamlOutcome, buffer_hash,
 };
-use k10s_ui::ui::tools::{LogsPhase, LogsTool, ShellPhase, ShellTool, YamlEditor};
+use k10s_ui::ui::tools::{LogsPhase, LogsTool, YamlEditor};
 use k10s_ui::workspace::{
-    BlockResolution, LauncherItem, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState,
+    LauncherItem, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState,
 };
 
 fn identity() -> ResourceIdentity {
@@ -87,7 +87,7 @@ fn conflicts_watch_drift_and_reconnect_revoke_only_server_authority() {
 }
 
 #[test]
-fn stream_loss_preserves_logs_but_exec_never_resumes_implicitly() {
+fn stream_loss_preserves_logs_until_an_explicit_reconnect() {
     let mut logs = LogsTool::new(target(), 16);
     logs.connect();
     logs.attach();
@@ -104,25 +104,10 @@ fn stream_loss_preserves_logs_but_exec_never_resumes_implicitly() {
         LogsPhase::Connecting,
         "logs reconnect only explicitly"
     );
-
-    let mut shell = ShellTool::new(target());
-    shell.connect();
-    shell.attach();
-    shell.apply_output("remote output\n");
-    shell.connection_lost();
-    assert!(matches!(shell.phase(), ShellPhase::Failed(_)));
-    shell.connect();
-    assert!(
-        matches!(shell.phase(), ShellPhase::Failed(_)),
-        "a failed exec cannot silently resume"
-    );
-    shell.dismiss_failure();
-    shell.connect();
-    assert_eq!(*shell.phase(), ShellPhase::Connecting);
 }
 
 #[test]
-fn active_exec_guard_blocks_context_switch_until_disconnect_resolution() {
+fn context_switch_has_no_exec_guard() {
     let mut workspace = WorkspaceState::<ResourceIdentity>::new();
     workspace.apply(WorkspaceCommand::CommitContextSwitch { to: "dev".into() });
     let opened = workspace.apply(WorkspaceCommand::ActivateLauncherItem(
@@ -136,17 +121,8 @@ fn active_exec_guard_blocks_context_switch_until_disconnect_resolution() {
         })
         .unwrap();
     workspace.apply(WorkspaceCommand::SelectRow(window, identity()));
-    workspace.apply(WorkspaceCommand::ConnectShell(window));
-    let blocked = workspace.apply(WorkspaceCommand::ContextSwitch { to: "prod".into() });
-    assert!(
-        blocked
-            .iter()
-            .any(|event| matches!(event, WorkspaceEvent::Blocked(_)))
-    );
-    let resolved = workspace.apply(WorkspaceCommand::ResolveBlock(
-        BlockResolution::DisconnectShell { window },
-    ));
-    assert!(resolved.iter().any(|event| matches!(
+    let switched = workspace.apply(WorkspaceCommand::ContextSwitch { to: "prod".into() });
+    assert!(switched.iter().any(|event| matches!(
         event,
         WorkspaceEvent::ContextSwitchRequested { to } if to == "prod"
     )));

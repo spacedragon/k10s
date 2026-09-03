@@ -151,3 +151,68 @@ fn application_routes_are_stable() {
     assert_eq!(LOGS_PATH, "/api/v1/logs");
     assert_eq!(EXEC_PATH, "/api/v1/exec");
 }
+
+#[test]
+fn retired_exec_discriminants_remain_reserved_for_the_major_one_tombstone() {
+    assert_eq!(EXEC_PATH, "/api/v1/exec");
+    let legacy: k10s_protocol::StreamTicketRequest = serde_json::from_value(json!({
+        "target": {"context":"dev","namespace":"default","pod":"web","uid":"uid-web","container":"app"},
+        "streamType":"exec","tty":true,"command":["/bin/sh"]
+    })).unwrap();
+    assert_eq!(legacy.stream_type, k10s_protocol::StreamType::Exec);
+    for (kind, value) in [
+        (k10s_protocol::payload_kind::TTY_OUTPUT, 3),
+        (k10s_protocol::payload_kind::STDIN, 4),
+        (k10s_protocol::payload_kind::RESIZE, 5),
+    ] {
+        assert_eq!(kind, value);
+        assert_eq!(
+            k10s_protocol::decode_stream_payload(&[1, kind])
+                .unwrap()
+                .kind,
+            kind
+        );
+    }
+}
+
+#[test]
+fn active_exec_symbols_are_absent_from_production_layers() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap();
+    let forbidden = [
+        "StreamKind::Exec",
+        "StreamRouteKind::Exec",
+        "StreamRoute::Exec",
+        "ExecSessions",
+        "send_stdin",
+        "send_resize",
+        "exec.attach",
+    ];
+    for relative in [
+        "crates/k10s-backend/src",
+        "crates/k10s-server/src",
+        "crates/k10s-ui/src/client",
+    ] {
+        assert_source_tree_omits(&workspace.join(relative), &forbidden);
+    }
+}
+
+fn assert_source_tree_omits(directory: &std::path::Path, forbidden: &[&str]) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            assert_source_tree_omits(&path, forbidden);
+        } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+            let source = std::fs::read_to_string(&path).unwrap();
+            for symbol in forbidden {
+                assert!(
+                    !source.contains(symbol),
+                    "{} contains {symbol}",
+                    path.display()
+                );
+            }
+        }
+    }
+}

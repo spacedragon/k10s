@@ -442,7 +442,7 @@ async fn pod_detail_carries_events_and_runtime_capabilities() {
     let detail = receive_detail(&mut ws, "detail-pod").await;
 
     assert!(detail.capabilities.can_view_logs);
-    assert!(detail.capabilities.can_exec);
+    assert!(!detail.capabilities.can_exec);
     assert!(
         !detail.capabilities.can_scale,
         "pods are never scaled directly"

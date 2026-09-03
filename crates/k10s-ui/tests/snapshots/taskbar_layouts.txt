@@ -256,7 +256,7 @@ Window
                       Label value="Loading details"
                         TextRun value="Loading details"
               GenericContainer
-                Label value="l logs · s shell · y yaml · e events · c copy name · Esc clear selection"
+                Label value="l logs · y yaml · e events · c copy name · Esc clear selection"
     Splitter
     Splitter
     Splitter

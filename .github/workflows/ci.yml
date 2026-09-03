@@ -79,6 +79,35 @@ jobs:
         # baseline against the 50,000-object fake model.
         run: cargo bench --locked -p k10s-ui --bench ui_capacity -- --test
 
+  # External-shell scripts and storage primitives must execute on their native
+  # platform. Launcher tests inject process spawning, so headless CI never
+  # opens a graphical terminal; real-terminal marker checks belong to release
+  # smoke environments with an interactive desktop.
+  external-shell-platforms:
+    name: External shell (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-24.04
+          - platform: macOS
+            os: macos-15
+          - platform: Windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Execute generated scripts and secure-storage tests
+        run: cargo test --locked -p k10s-desktop --test external_shell
+
   # WASM compilation gate: the shared UI/protocol stack must stay wasm-clean.
   wasm:
     name: WASM check

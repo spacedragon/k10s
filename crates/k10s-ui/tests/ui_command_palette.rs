@@ -90,6 +90,8 @@ fn shortcut_opens_grouped_accessible_results_and_escape_dismisses() {
         harness.get_by_label(heading);
     }
     harness.get_by_role_and_label(Role::TextInput, "Command palette search");
+    assert!(harness.query_by_label("Shell").is_none());
+    assert!(harness.query_by_label("Open shell").is_none());
     harness.get_by_label("Keyboard help: Up and Down or J and K navigate; Enter opens or focuses; Shift Enter opens a new window; Escape closes");
     assert!(
         harness

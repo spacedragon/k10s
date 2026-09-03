@@ -18,7 +18,6 @@ use crate::client::{
 };
 use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
-use crate::ui::tools::ShellPhase;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
     DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
@@ -191,10 +190,20 @@ pub struct K10sApp {
     recovering: bool,
     view: AppView,
     shell: UiShell<ResourceIdentity>,
+    external_shell_requests: Vec<crate::ui::ExternalShellTarget>,
+    app_events: Vec<K10sAppEvent>,
+    completed_bootstrap_once: bool,
+    host_error: Option<SafeUiError>,
     /// Restorable window layouts not currently active, keyed by kube context.
     workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
     clock_started: Instant,
     jitter_counter: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum K10sAppEvent {
+    CommittedContextChanged { context: String },
+    ControlConnectionReestablished { context: Option<String> },
 }
 
 /// A window's in-flight dedicated-stream ticket request.
@@ -398,6 +407,10 @@ impl K10sApp {
             recovering: false,
             view: AppView::Connecting,
             shell: UiShell::new(),
+            external_shell_requests: Vec::new(),
+            app_events: Vec::new(),
+            completed_bootstrap_once: false,
+            host_error: None,
             workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
@@ -485,6 +498,12 @@ impl K10sApp {
 
     fn commit_context_layout(&mut self, to: String) {
         let from = self.shell.workspace().context().to_owned();
+        if from != to {
+            self.revoke_external_shell();
+            self.app_events.push(K10sAppEvent::CommittedContextChanged {
+                context: to.clone(),
+            });
+        }
         if !from.is_empty() && from != to {
             self.workspace_layouts
                 .insert(from, self.workspace_snapshot());
@@ -521,6 +540,46 @@ impl K10sApp {
         self.client.port_forward_available()
     }
 
+    pub fn set_external_shell_availability(
+        &mut self,
+        availability: crate::ui::ExternalShellAvailability,
+    ) {
+        self.shell.set_external_shell_availability(availability);
+        if matches!(
+            availability,
+            crate::ui::ExternalShellAvailability::Unavailable
+        ) {
+            self.external_shell_requests.clear();
+        }
+    }
+
+    pub fn drain_external_shell_requests(&mut self) -> Vec<crate::ui::ExternalShellTarget> {
+        std::mem::take(&mut self.external_shell_requests)
+    }
+
+    pub fn drain_app_events(&mut self) -> Vec<K10sAppEvent> {
+        std::mem::take(&mut self.app_events)
+    }
+
+    pub fn set_host_error(&mut self, error: SafeUiError) {
+        self.host_error = Some(error);
+    }
+
+    pub fn clear_host_error(&mut self) {
+        self.host_error = None;
+    }
+
+    #[must_use]
+    pub fn host_error(&self) -> Option<&SafeUiError> {
+        self.host_error.as_ref()
+    }
+
+    fn revoke_external_shell(&mut self) {
+        self.shell
+            .set_external_shell_availability(crate::ui::ExternalShellAvailability::Unavailable);
+        self.external_shell_requests.clear();
+    }
+
     /// Current authoritative session snapshots used by native hosts/tests.
     #[must_use]
     pub fn port_forward_sessions(&self) -> Vec<&k10s_protocol::PortForwardSession> {
@@ -529,6 +588,9 @@ impl K10sApp {
 
     /// Render the approved default-egui shell for the current connection view.
     pub fn render_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.host_error {
+            ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error.message());
+        }
         self.finish_port_forward_list();
         let (connection, contexts): (ShellConnectionState, &[Context]) = match &self.view {
             AppView::Connecting => (ShellConnectionState::Connecting, &[]),
@@ -1061,20 +1123,9 @@ impl K10sApp {
         self.process_stream_requests()
     }
 
-    /// Request the selected Pod's real interactive exec stream.
-    pub fn web_connect_shell(&mut self, window: WindowId) -> Result<(), ClientError> {
-        let target = self
-            .workspace_stream_target(window)
-            .ok_or_else(|| ClientError::Protocol("selected resource cannot exec".to_owned()))?;
-        let stores = self.shell.stream_stores_mut();
-        stores.shells.ensure(window, target.clone()).connect();
-        stores.shells.queue_connect(window, target);
-        self.process_stream_requests()
-    }
-
     /// Semantic stream state rendered by the web adapter.
     #[must_use]
-    pub fn web_stream_text(&self, window: WindowId) -> (String, Vec<String>, String, Vec<String>) {
+    pub fn web_stream_text(&self, window: WindowId) -> (String, Vec<String>) {
         let logs = self.shell.stream_stores().logs.get(window);
         let log_phase = logs
             .map(|logs| format!("{:?}", logs.phase()))
@@ -1082,14 +1133,7 @@ impl K10sApp {
         let log_lines = logs
             .map(|logs| logs.visible_lines().cloned().collect())
             .unwrap_or_default();
-        let shell = self.shell.stream_stores().shells.get(window);
-        let shell_phase = shell
-            .map(|shell| format!("{:?}", shell.phase()))
-            .unwrap_or_else(|| "Disconnected".to_owned());
-        let shell_lines = shell
-            .map(|shell| shell.buffer().cloned().collect())
-            .unwrap_or_default();
-        (log_phase, log_lines, shell_phase, shell_lines)
+        (log_phase, log_lines)
     }
 
     /// Intentionally recycle the control transport. This is both a useful
@@ -1492,27 +1536,10 @@ impl K10sApp {
                                     }
                                     return Ok(());
                                 }
-                                match entry.route {
-                                    StreamRoute::Logs => {
-                                        if let Some(view) = self
-                                            .shell
-                                            .stream_stores_mut()
-                                            .logs
-                                            .get_mut(entry.window)
-                                        {
-                                            view.fail(&reason);
-                                        }
-                                    }
-                                    StreamRoute::Exec => {
-                                        if let Some(shell) = self
-                                            .shell
-                                            .stream_stores_mut()
-                                            .shells
-                                            .get_mut(entry.window)
-                                        {
-                                            shell.fail(&server_error.safe_message.clone());
-                                        }
-                                    }
+                                if let Some(view) =
+                                    self.shell.stream_stores_mut().logs.get_mut(entry.window)
+                                {
+                                    view.fail(&reason);
                                 }
                             }
                         }
@@ -1682,11 +1709,19 @@ impl K10sApp {
                                 .map(|context| context.name.clone())
                         });
                     self.client.local_ui_mut().selected_context = selected.clone();
+                    let reestablished = self.completed_bootstrap_once;
+                    self.completed_bootstrap_once = true;
                     self.view = AppView::Ready {
                         server_instance_id,
                         context_names,
                         contexts,
                     };
+                    if reestablished {
+                        self.app_events
+                            .push(K10sAppEvent::ControlConnectionReestablished {
+                                context: selected.clone(),
+                            });
+                    }
                     self.recovering = false;
                     if self.client.port_forward_available() {
                         let _ = self
@@ -1933,6 +1968,7 @@ impl K10sApp {
         }
         match self.factory.connect(&self.connection_url) {
             Ok(connection) => {
+                self.revoke_external_shell();
                 self.transport_open = false;
                 self.connection = Some(connection);
             }
@@ -1950,6 +1986,7 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        self.revoke_external_shell();
         for (window, key) in &self.window_subscriptions {
             if let Some(rows) = self
                 .resource_subscriptions
@@ -2823,6 +2860,40 @@ impl K10sApp {
 
     fn handle_resource_action(&mut self, action: ResourceAction) {
         match action {
+            ResourceAction::OpenExternalShell { window, target } => {
+                let available = matches!(
+                    self.shell.external_shell_availability(),
+                    crate::ui::ExternalShellAvailability::Available { generation }
+                        if generation == target.generation
+                );
+                let valid = self
+                    .workspace_stream_target(window)
+                    .is_some_and(|candidate| {
+                        candidate.namespace == target.namespace
+                            && candidate.pod == target.pod
+                            && candidate.uid == target.uid
+                            && target.program == "/bin/sh"
+                            && !target.container.is_empty()
+                            && self.details.values().any(|view| {
+                                view.identity.context == candidate.context
+                                    && view.identity.gvk.group.is_empty()
+                                    && view.identity.gvk.version == "v1"
+                                    && view.identity.gvk.kind == "Pod"
+                                    && view.identity.namespace.as_deref() == Some(&target.namespace)
+                                    && view.identity.name == target.pod
+                                    && view.identity.uid == target.uid
+                                    && self.mutation_authority_allows(&view.identity)
+                                    && crate::ui::PodRuntimeProjection::from_view(
+                                        &view.identity,
+                                        view,
+                                    )
+                                    .is_some_and(|runtime| runtime.contains(&target.container))
+                            })
+                    });
+                if available && valid && self.external_shell_requests.is_empty() {
+                    self.external_shell_requests.push(target);
+                }
+            }
             ResourceAction::Restart { window, target } => {
                 if !self.mutation_authority_allows(&target) {
                     return;
@@ -3594,6 +3665,7 @@ impl K10sApp {
         match self.client.retry_if_due(now_ms) {
             Ok(true) => match self.factory.connect(&self.connection_url) {
                 Ok(connection) => {
+                    self.revoke_external_shell();
                     self.transport_open = false;
                     self.connection = Some(connection);
                 }
@@ -3609,6 +3681,7 @@ impl K10sApp {
             connection.close();
         }
         self.transport_open = false;
+        self.revoke_external_shell();
         self.teardown_stream_sessions();
         self.view = AppView::Failed { message };
     }
@@ -3659,35 +3732,6 @@ impl K10sApp {
         Some(workspace_target)
     }
 
-    /// Whether the window's workspace shell guard is currently engaged.
-    fn shell_guard_connected(&self, window: WindowId) -> bool {
-        self.shell
-            .workspace()
-            .window(window)
-            .and_then(|w| match &w.content {
-                crate::workspace::WindowContent::Detail(detail) => Some(detail.shell.connected),
-                crate::workspace::WindowContent::Resource(resource) => resource
-                    .detail
-                    .as_ref()
-                    .map(|detail| detail.shell.connected),
-                crate::workspace::WindowContent::Services(service) => {
-                    service.detail.as_ref().map(|detail| detail.shell.connected)
-                }
-            })
-            .unwrap_or(false)
-    }
-
-    /// Release the workspace connected-shell guard once a terminal is no
-    /// longer live (exit, rejection, or transport loss).
-    fn release_shell_guard(&mut self, window: WindowId) {
-        for event in self
-            .shell
-            .apply_workspace_command(WorkspaceCommand::DisconnectShell(window))
-        {
-            self.handle_workspace_event(event);
-        }
-    }
-
     /// Apply workspace events produced by command application. Only the
     /// focus-raising events matter at this layer, and guard-resolved switch
     /// requests are staged toward the backend as explicit user actions.
@@ -3723,28 +3767,13 @@ impl K10sApp {
         self.resource_generation = self.resource_generation.wrapping_add(1);
     }
 
-    /// Close every dedicated stream session, release any connected-shell
-    /// guards it held, and mark its tool disconnected.
+    /// Close every dedicated stream session and mark log tools disconnected.
     fn teardown_stream_sessions(&mut self) {
-        let exec_windows: Vec<WindowId> = self
-            .stream_sessions
-            .keys()
-            .filter(|(_, route)| *route == StreamRoute::Exec)
-            .map(|(window, _)| *window)
-            .collect();
         for (_, mut session) in std::mem::take(&mut self.stream_sessions) {
             session.disconnect();
         }
         for (_, mut session) in std::mem::take(&mut self.aggregate_log_sessions) {
             session.disconnect();
-        }
-        for window in exec_windows {
-            for event in self
-                .shell
-                .apply_workspace_command(WorkspaceCommand::DisconnectShell(window))
-            {
-                self.handle_workspace_event(event);
-            }
         }
         self.pending_stream_tickets.clear();
         self.log_sources.clear();
@@ -3840,8 +3869,6 @@ impl K10sApp {
             }
             let request = self.client.begin(Query::StreamTicket {
                 target: source.target.clone(),
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds: source.since_seconds,
                 previous: source.previous,
             })?;
@@ -3872,51 +3899,18 @@ impl K10sApp {
         Ok(())
     }
 
-    /// Reconcile live sessions against the authoritative workspace state:
-    /// a window whose pinned identity rebinds to another pod must never
-    /// keep the old pod's socket, and a guard resolved away
-    /// (DisconnectShell) closes its attached terminal. Tool phases are
-    /// always kept consistent with transport ownership.
+    /// Reconcile live log sessions against the authoritative workspace state.
     fn reconcile_sessions(&mut self) {
-        // Pass 1 (immutable): decide what must be torn down.
-        let mut stale: Vec<((WindowId, StreamRoute), bool, &'static str)> = Vec::new();
-        let attached_exec: std::collections::HashSet<WindowId> = {
-            let stores = self.shell.stream_stores_mut();
-            self.stream_sessions
-                .keys()
-                .filter(|(_, route)| *route == StreamRoute::Exec)
-                .filter_map(|(window, _)| {
-                    stores
-                        .shells
-                        .get_mut(*window)
-                        .filter(|shell| matches!(shell.phase(), ShellPhase::Attached))
-                        .map(|_| *window)
-                })
-                .collect()
-        };
+        let mut stale: Vec<((WindowId, StreamRoute), &'static str)> = Vec::new();
         for (key, session) in self.stream_sessions.iter() {
             let (window, route) = *key;
             let target_matches =
                 self.current_stream_target(window, route).as_ref() == Some(session.target());
             if !target_matches {
-                // The selection moved on while this session existed. If it
-                // had already engaged the guard, release that guard too.
-                let release = route == StreamRoute::Exec && self.shell_guard_connected(window);
-                stale.push((*key, release, "the shell target changed"));
-            } else if route == StreamRoute::Exec
-                && attached_exec.contains(&window)
-                && !self.shell_guard_connected(window)
-            {
-                // The guard was resolved away without an exit signal.
-                stale.push((*key, false, "shell session closed"));
+                stale.push((*key, "the log target changed"));
             }
         }
-        // Pass 2 (mutable): tear down atomically - transport, tool phase,
-        // and workspace guard together.
-        for ((window, route), release_guard, reason) in stale {
-            if release_guard {
-                self.release_shell_guard(window);
-            }
+        for ((window, route), reason) in stale {
             if let Some(mut session) = self.stream_sessions.remove(&(window, route)) {
                 session.disconnect();
             }
@@ -3924,19 +3918,8 @@ impl K10sApp {
                 self.log_session_sources.remove(&window);
             }
             let stores = self.shell.stream_stores_mut();
-            match route {
-                StreamRoute::Logs => {
-                    if let Some(view) = stores.logs.get_mut(window) {
-                        view.fail(reason);
-                    }
-                }
-                StreamRoute::Exec => {
-                    // Intentional teardown stays reconnectable.
-                    let _ = reason;
-                    if let Some(shell) = stores.shells.get_mut(window) {
-                        shell.disconnect_intentional();
-                    }
-                }
+            if let Some(view) = stores.logs.get_mut(window) {
+                view.fail(reason);
             }
         }
     }
@@ -3948,9 +3931,7 @@ impl K10sApp {
         )
     }
 
-    /// Drain rendering-time stream actions: ticket requests for new log
-    /// views and explicit shell connects, plus stdin/resize forwarding into
-    /// live sessions.
+    /// Drain rendering-time log stream actions.
     fn process_stream_requests(&mut self) -> Result<(), ClientError> {
         let log_actions = self.shell.drain_log_actions();
         self.reconcile_aggregate_log_sessions()?;
@@ -3999,8 +3980,6 @@ impl K10sApp {
             }
             let request = match self.client.begin(Query::StreamTicket {
                 target,
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds,
                 previous,
             }) {
@@ -4035,44 +4014,6 @@ impl K10sApp {
                     aggregate_target: None,
                 },
             );
-        }
-        for (window, target) in self.shell.drain_shell_connects() {
-            let request = self.client.begin(Query::StreamTicket {
-                target,
-                stream_type: k10s_protocol::StreamType::Exec,
-                tty: true,
-                since_seconds: None,
-                previous: false,
-            })?;
-            // Same explicit Connecting transition for the terminal.
-            if let Some(shell) = self.shell.stream_stores_mut().shells.get_mut(window) {
-                shell.connect();
-            }
-            self.pending_stream_tickets.insert(
-                request.id().clone(),
-                PendingStreamTicket {
-                    request,
-                    route: StreamRoute::Exec,
-                    window,
-                    log_source: None,
-                    log_generation: None,
-                    aggregate_target: None,
-                },
-            );
-        }
-        // Forward terminal stdin/resize into live exec sessions.
-        for (window, action) in self.shell.drain_shell_actions() {
-            let key = (window, StreamRoute::Exec);
-            if let Some(session) = self.stream_sessions.get_mut(&key)
-                && session.is_live()
-            {
-                match action {
-                    crate::ui::tools::ShellAction::Input(line) => session.send_stdin(&line),
-                    crate::ui::tools::ShellAction::Resize { cols, rows } => {
-                        session.send_resize(cols, rows);
-                    }
-                }
-            }
         }
         self.flush_outbound()
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
@@ -4122,8 +4063,6 @@ impl K10sApp {
         for target in targets {
             let request = self.client.begin(Query::StreamTicket {
                 target: target.clone(),
-                stream_type: k10s_protocol::StreamType::Logs,
-                tty: false,
                 since_seconds,
                 previous: false,
             })?;
@@ -4234,8 +4173,7 @@ impl K10sApp {
                     continue;
                 }
                 if let Some(QueryResult::StreamTicket(granted)) = self.client.take(request) {
-                    let mut session =
-                        StreamSession::new(StreamRoute::Logs, granted.target.clone(), false);
+                    let mut session = StreamSession::new(StreamRoute::Logs, granted.target.clone());
                     match session.open_with_ticket(
                         &self.connection_url,
                         &self.access_token,
@@ -4329,94 +4267,32 @@ impl K10sApp {
                     && self.log_session_generations.get(&window)
                         == self.log_generations.get(&window));
             let target_current = target_current && source_current;
-            // Guard transitions are collected while the tool stores are
-            // borrowed and applied afterwards.
-            let mut guard_connected = false;
-            let mut guard_released = false;
-            let mut stale_handshake = false;
-            // Tool projections run inside this block so the store borrow
-            // ends before workspace commands are applied.
             let stores = self.shell.stream_stores_mut();
             {
                 for signal in signals {
                     match signal {
-                        StreamSignal::Ready { .. } => match route {
-                            StreamRoute::Logs => {
-                                if !target_current {
-                                    continue;
-                                }
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.attach();
-                                }
+                        StreamSignal::Ready { .. } => {
+                            if !target_current {
+                                continue;
                             }
-                            StreamRoute::Exec => {
-                                if !target_current {
-                                    // Intentional teardown: reconnectable.
-                                    if let Some(shell) = stores.shells.get_mut(window) {
-                                        shell.disconnect_intentional();
-                                    }
-                                    stale_handshake = true;
-                                    continue;
-                                }
-                                if let Some(shell) = stores.shells.get_mut(window) {
-                                    shell.attach();
-                                }
-                                // The live terminal engages the workspace's
-                                // connected-shell navigation guard.
-                                guard_connected = true;
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.attach();
                             }
-                        },
-                        StreamSignal::Output(text) => match route {
-                            StreamRoute::Logs => {
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.append(&text);
-                                }
-                            }
-                            StreamRoute::Exec => {
-                                if let Some(shell) = stores.shells.get_mut(window) {
-                                    shell.apply_output(&text);
-                                }
-                            }
-                        },
-                        StreamSignal::Status(_message) => {}
-                        StreamSignal::Exited(code) => {
-                            if let Some(shell) = stores.shells.get_mut(window) {
-                                shell.exit(code);
-                            }
-                            guard_released = true;
                         }
-                        StreamSignal::Rejected(reason) => match route {
-                            StreamRoute::Logs => {
-                                if let Some(view) = stores.logs.get_mut(window) {
-                                    view.fail(&reason);
-                                }
-                                self.stream_sessions.remove(&key);
-                                self.log_session_sources.remove(&window);
+                        StreamSignal::Output(text) => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.append(&text);
                             }
-                            StreamRoute::Exec => {
-                                if let Some(shell) = stores.shells.get_mut(window) {
-                                    shell.fail(&reason);
-                                }
-                                guard_released = true;
-                                self.stream_sessions.remove(&key);
+                        }
+                        StreamSignal::Rejected(reason) => {
+                            if let Some(view) = stores.logs.get_mut(window) {
+                                view.fail(&reason);
                             }
-                        },
+                            self.stream_sessions.remove(&key);
+                            self.log_session_sources.remove(&window);
+                        }
                     }
                 }
-            }
-            if guard_connected {
-                for event in self
-                    .shell
-                    .apply_workspace_command(WorkspaceCommand::ConnectShell(window))
-                {
-                    self.handle_workspace_event(event);
-                }
-            }
-            if guard_released {
-                self.release_shell_guard(window);
-            }
-            if stale_handshake {
-                self.stream_sessions.remove(&key);
             }
         }
     }
@@ -4453,7 +4329,6 @@ impl K10sApp {
                             ));
                             rejected = true;
                         }
-                        StreamSignal::Status(_) | StreamSignal::Exited(_) => {}
                     }
                 }
             }
@@ -4551,7 +4426,7 @@ fn session_open(
     connection_url: &str,
     access_token: &str,
 ) -> Result<(), TransportError> {
-    let mut session = StreamSession::new(route, granted.target.clone(), granted.tty);
+    let mut session = StreamSession::new(route, granted.target.clone());
     session.open_with_ticket(connection_url, access_token, &granted.ticket_id)?;
     sessions.insert((window, route), session);
     Ok(())
@@ -4578,17 +4453,9 @@ fn fail_stream_tool(
     route: StreamRoute,
     reason: &str,
 ) {
-    match route {
-        StreamRoute::Logs => {
-            if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
-                view.fail(reason);
-            }
-        }
-        StreamRoute::Exec => {
-            if let Some(tool) = shell.stream_stores_mut().shells.get_mut(window) {
-                tool.fail(reason);
-            }
-        }
+    let _ = route;
+    if let Some(view) = shell.stream_stores_mut().logs.get_mut(window) {
+        view.fail(reason);
     }
 }
 
@@ -5241,6 +5108,18 @@ mod tests {
 
         app.poll_at(100, 10);
         assert_eq!(app.client.phase(), ClientPhase::Disconnected);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 41 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 41,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
         assert_eq!(app.view(), &AppView::Connecting);
         assert_eq!(state.borrow().connect_count, 1);
         let editor = app.shell.yaml_editors_mut().get(window).unwrap();
@@ -5305,6 +5184,11 @@ mod tests {
         // First retry fired: the new transport exists but has not opened,
         // so the freshly queued Hello must survive this tick's flushes.
         app.poll_at(10_000, 0);
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
         assert_eq!(state.borrow().connect_count, 2);
         assert_eq!(app.client.phase(), ClientPhase::Authenticating);
         assert!(
@@ -6328,6 +6212,166 @@ mod tests {
             name: name.into(),
             uid: format!("uid-{name}"),
         }
+    }
+
+    #[test]
+    fn committed_context_change_revokes_external_shell_and_clears_requests() {
+        let (mut app, _) = ready_app();
+        app.drain_app_events();
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 9 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 9,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
+
+        app.commit_context_layout("other".into());
+
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.drain_external_shell_requests().is_empty());
+        assert_eq!(
+            app.drain_app_events(),
+            vec![super::K10sAppEvent::CommittedContextChanged {
+                context: "other".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn successful_reconnect_install_revokes_external_shell_synchronously() {
+        let (mut app, state) = test_app(vec![
+            ConnectionScript::default(),
+            ConnectionScript::default(),
+        ]);
+        app.transient_loss(10, 0);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 8 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 8,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
+
+        app.reconnect_if_due(u64::MAX, 0);
+
+        assert_eq!(state.borrow().connect_count, 2);
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
+    }
+
+    #[test]
+    fn external_shell_dispatch_revalidates_generation_identity_container_and_authority() {
+        let (mut app, _) = ready_app();
+        let pod = pod_identity("api");
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let subscription = app
+            .resource_subscriptions
+            .get(app.window_subscriptions.get(&window).unwrap())
+            .unwrap()
+            .live
+            .id()
+            .clone();
+        complete_resource_snapshot(
+            &mut app,
+            &subscription,
+            1,
+            vec![deployment_row(pod.clone(), 1)],
+            true,
+        );
+        app.web_select_resource(window, pod.clone());
+        let detail = super::stream_lifecycle_tests::detail_with_container(&pod, "api");
+        app.details.insert(pod.clone(), detail.clone());
+        app.primary_details
+            .insert(pod.clone(), PrimaryDetailState::Loaded(detail));
+        assert!(
+            app.build_resource_feed()
+                .detail_authority
+                .get(&pod)
+                .is_some_and(|authority| authority.mutations_allowed()),
+            "fixture must be authoritative: {:?}",
+            app.build_resource_feed().detail_authority.get(&pod)
+        );
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 10 },
+        );
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window,
+            target: crate::ui::ExternalShellTarget {
+                generation: 9,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            },
+        });
+        assert!(app.drain_external_shell_requests().is_empty());
+
+        let valid = crate::ui::ExternalShellTarget {
+            generation: 10,
+            namespace: "default".into(),
+            pod: "api".into(),
+            uid: "uid-api".into(),
+            container: "api".into(),
+            program: "/bin/sh".into(),
+        };
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window,
+            target: valid.clone(),
+        });
+        assert_eq!(app.drain_external_shell_requests(), vec![valid.clone()]);
+        for invalid in [
+            crate::ui::ExternalShellTarget {
+                namespace: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                pod: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                uid: "other".into(),
+                ..valid.clone()
+            },
+            crate::ui::ExternalShellTarget {
+                container: "other".into(),
+                ..valid.clone()
+            },
+        ] {
+            app.handle_resource_action(ResourceAction::OpenExternalShell {
+                window,
+                target: invalid,
+            });
+            assert!(app.drain_external_shell_requests().is_empty());
+        }
+        app.window_freshness_overrides.insert(
+            window,
+            WindowFreshness::Failed {
+                message: "stale".into(),
+            },
+        );
+        app.handle_resource_action(ResourceAction::OpenExternalShell {
+            window,
+            target: valid,
+        });
+        assert!(app.drain_external_shell_requests().is_empty());
     }
 
     fn pin_pod_without_request(app: &mut K10sApp, identity: &ResourceIdentity) -> WindowId {
@@ -9248,7 +9292,24 @@ mod tests {
             .clone();
 
         app.transient_loss(150, 0);
+        app.shell.set_external_shell_availability(
+            crate::ui::ExternalShellAvailability::Available { generation: 42 },
+        );
+        app.external_shell_requests
+            .push(crate::ui::ExternalShellTarget {
+                generation: 42,
+                namespace: "default".into(),
+                pod: "api".into(),
+                uid: "uid-api".into(),
+                container: "api".into(),
+                program: "/bin/sh".into(),
+            });
         app.retry_now(200, 0).unwrap();
+        assert_eq!(
+            app.shell.external_shell_availability(),
+            crate::ui::ExternalShellAvailability::Unavailable
+        );
+        assert!(app.external_shell_requests.is_empty());
         app.handle_event(WsEvent::Opened, 200, 0).unwrap();
         let mut resumed = welcome();
         resumed.payload = serde_json::to_value(Welcome {
@@ -9376,6 +9437,7 @@ mod tests {
             0,
         )
         .unwrap();
+        app.drain_app_events();
         assert!(matches!(app.view(), AppView::Ready { .. }));
         assert_eq!(
             app.client.local_ui().selected_context.as_deref(),
@@ -9463,6 +9525,24 @@ mod tests {
             "the authoritative commit clears stale selection and detail state"
         );
         assert!(app.pending_switch.is_none());
+        let reconnect_events = app.drain_app_events();
+        assert_eq!(
+            reconnect_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    super::K10sAppEvent::ControlConnectionReestablished { .. }
+                ))
+                .count(),
+            1,
+            "one completed reconnect publishes exactly one typed event"
+        );
+        assert!(reconnect_events.iter().any(|event| matches!(
+            event,
+            super::K10sAppEvent::ControlConnectionReestablished { context }
+                if context.as_deref() == Some("prod-readonly")
+        )));
+        assert!(app.drain_app_events().is_empty());
         let kinds: Vec<_> = state
             .borrow()
             .sent
@@ -9931,8 +10011,8 @@ mod stream_lifecycle_tests {
     use super::tests::{ready_app, test_app};
     use super::{K10sApp, LogSource};
     use crate::client::{StreamIo, StreamRoute, StreamSession};
-    use crate::ui::tools::{LogsAction, LogsPhase, ShellPhase};
-    use crate::workspace::{DetailTab, WorkloadKind, WorkspaceCommand};
+    use crate::ui::tools::{LogsAction, LogsPhase};
+    use crate::workspace::{WorkloadKind, WorkspaceCommand};
 
     #[derive(Debug)]
     struct ScriptStream {
@@ -9944,7 +10024,6 @@ mod stream_lifecycle_tests {
             self.events.try_recv().ok()
         }
         fn send_text(&mut self, _text: String) {}
-        fn send_binary(&mut self, _bytes: Vec<u8>) {}
     }
 
     fn pod(name: &str) -> ResourceIdentity {
@@ -9993,7 +10072,7 @@ mod stream_lifecycle_tests {
         );
     }
 
-    fn detail_with_container(
+    pub(super) fn detail_with_container(
         identity: &ResourceIdentity,
         container: &str,
     ) -> ResourceDetailResponse {
@@ -10040,18 +10119,6 @@ mod stream_lifecycle_tests {
         }
     }
 
-    fn ready_signal(tx: &mpsc::Sender<WsEvent>, container: &str) {
-        tx.send(WsEvent::Message(WsMessage::Text(
-            serde_json::to_string(&k10s_protocol::StreamServerMessage::Ready {
-                stream_type: StreamType::Exec,
-                tty: true,
-                container: container.to_owned(),
-            })
-            .unwrap(),
-        )))
-        .unwrap();
-    }
-
     pub(super) fn open_pod_detail(
         app: &mut K10sApp,
         pod: &ResourceIdentity,
@@ -10072,29 +10139,6 @@ mod stream_lifecycle_tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod.clone()));
         window
-    }
-
-    fn attach_session(
-        app: &mut K10sApp,
-        window: crate::workspace::WindowId,
-        pod: &ResourceIdentity,
-    ) -> mpsc::Sender<WsEvent> {
-        let (tx, rx) = mpsc::channel();
-        // Production renders the Shell tab first, creating the tool, and
-        // process_stream_requests moves it to Connecting on connect; mirror
-        // both here.
-        {
-            let stores = app.shell.stream_stores_mut();
-            stores
-                .shells
-                .ensure(window, target_for(&pod.name))
-                .connect();
-        }
-        let mut session = StreamSession::new(StreamRoute::Exec, target_for(&pod.name), true);
-        session.inject_for_test(ScriptStream { events: rx });
-        app.stream_sessions
-            .insert((window, StreamRoute::Exec), session);
-        tx
     }
 
     fn queue_logs_with_source(
@@ -10225,7 +10269,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, target.clone());
         view.attach();
-        let mut session = StreamSession::new(StreamRoute::Logs, target.clone(), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target.clone());
         session.inject_for_test(ScriptStream { events: rx });
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10279,7 +10323,7 @@ mod stream_lifecycle_tests {
         let target = target_for(&pod.name);
         app.stream_sessions.insert(
             (window, StreamRoute::Logs),
-            StreamSession::new(StreamRoute::Logs, target.clone(), false),
+            StreamSession::new(StreamRoute::Logs, target.clone()),
         );
         app.log_sources.insert(
             window,
@@ -10310,43 +10354,6 @@ mod stream_lifecycle_tests {
     }
 
     #[test]
-    fn exec_ready_for_typed_container_attaches_instead_of_becoming_stale() {
-        let (mut app, _state) = test_app(Vec::new());
-        let pod = pod("database");
-        let window = open_pod_detail(&mut app, &pod);
-        app.details
-            .insert(pod.clone(), detail_with_container(&pod, "postgres"));
-        let target = target_for_container(&pod.name, "postgres");
-
-        assert_eq!(app.workspace_stream_target(window).as_ref(), Some(&target));
-
-        let (tx, rx) = mpsc::channel();
-        app.shell
-            .stream_stores_mut()
-            .shells
-            .ensure(window, target.clone())
-            .connect();
-        let mut session = StreamSession::new(StreamRoute::Exec, target, true);
-        session.inject_for_test(ScriptStream { events: rx });
-        app.stream_sessions
-            .insert((window, StreamRoute::Exec), session);
-
-        ready_signal(&tx, "postgres");
-        app.poll_stream_sessions();
-
-        assert!(app.shell_guard_connected(window));
-        assert_eq!(
-            *app.shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .expect("terminal exists")
-                .phase(),
-            ShellPhase::Attached
-        );
-    }
-
-    #[test]
     fn logs_for_typed_container_attach_and_project_output() {
         let (mut app, _state) = test_app(Vec::new());
         let pod = pod("web");
@@ -10363,7 +10370,7 @@ mod stream_lifecycle_tests {
             .logs
             .ensure(window, target.clone())
             .connect();
-        let mut session = StreamSession::new(StreamRoute::Logs, target, false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target);
         session.inject_for_test(ScriptStream { events: rx });
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10435,7 +10442,7 @@ mod stream_lifecycle_tests {
             Some(selected_target.clone())
         );
 
-        let session = StreamSession::new(StreamRoute::Logs, selected_target, false);
+        let session = StreamSession::new(StreamRoute::Logs, selected_target);
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
         app.reconcile_sessions();
@@ -10467,7 +10474,7 @@ mod stream_lifecycle_tests {
                 .connect();
             app.stream_sessions.insert(
                 (window, StreamRoute::Logs),
-                StreamSession::new(StreamRoute::Logs, target.clone(), false),
+                StreamSession::new(StreamRoute::Logs, target.clone()),
             );
             app.log_session_sources
                 .insert(window, log_source(target, Some(300), false));
@@ -10583,170 +10590,6 @@ mod stream_lifecycle_tests {
             "the retired ticket cannot attach a late socket"
         );
     }
-
-    /// Ready attaches the terminal and engages the guard; resolving the
-    /// guard closes the transport and fails the tool atomically; selection
-    /// can then move on without a ghost session or a stuck guard.
-    #[test]
-    fn exec_ready_engages_guard_and_disconnect_resolution_closes_the_transport() {
-        let (mut app, _state) = test_app(Vec::new());
-        let pod_a = pod("pod-a");
-        let pod_b = pod("pod-b");
-        let window = open_pod_detail(&mut app, &pod_a);
-        app.details
-            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-a"))
-        );
-
-        // Connecting session becomes Ready: attach + guard.
-        let tx = attach_session(&mut app, window, &pod_a);
-        ready_signal(&tx, "app");
-        app.poll_stream_sessions();
-        assert!(
-            app.shell_guard_connected(window),
-            "Ready must engage the guard"
-        );
-        assert_eq!(
-            *app.shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .expect("terminal exists")
-                .phase(),
-            ShellPhase::Attached
-        );
-
-        // Navigation to pod B is blocked while the shell is connected...
-        let blocked = app
-            .shell
-            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
-        assert!(
-            blocked
-                .iter()
-                .any(|event| matches!(event, crate::workspace::WorkspaceEvent::Blocked(_)))
-        );
-
-        // ...resolving DisconnectShell commits the navigation to pod B,
-        // clearing the guard...
-        app.shell
-            .apply_workspace_command(WorkspaceCommand::ResolveBlock(
-                crate::workspace::BlockResolution::DisconnectShell { window },
-            ));
-        assert!(!app.shell_guard_connected(window));
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-b"))
-        );
-        // ...and reconciliation then closes the attached transport and
-        // fails the tool atomically.
-        app.poll_stream_sessions();
-        assert!(!app.shell_guard_connected(window));
-        assert_eq!(
-            *app.shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .expect("terminal exists")
-                .phase(),
-            ShellPhase::Disconnected
-        );
-        assert!(
-            !app.stream_sessions
-                .contains_key(&(window, StreamRoute::Exec)),
-            "the resolved-away terminal must lose its transport"
-        );
-
-        // Navigation now succeeds and the workspace rebinds to pod B; no
-        // stale session survives for the old pod.
-        app.shell
-            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-b"))
-        );
-
-        // Clearing the selection and reselecting the SAME pod A must leave
-        // a reconnectable terminal (not a dead Failed one): connect works
-        // again and a fresh Ready re-engages the guard.
-        app.shell
-            .apply_workspace_command(WorkspaceCommand::ClearSelection(window));
-        app.shell
-            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_a.clone()));
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-a"))
-        );
-        let tx2 = attach_session(&mut app, window, &pod_a);
-        ready_signal(&tx2, "app");
-        app.poll_stream_sessions();
-        assert!(
-            app.shell_guard_connected(window),
-            "a fresh session can engage the guard again"
-        );
-        assert_eq!(
-            *app.shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .expect("terminal exists")
-                .phase(),
-            ShellPhase::Attached
-        );
-    }
-
-    /// A Ready arriving after the selection moved on is dropped: it never
-    /// attaches the old pod's session nor engages the new pod's guard.
-    #[test]
-    fn stale_handshake_ready_never_attaches_or_guards() {
-        let (mut app, _state) = test_app(Vec::new());
-        let pod_a = pod("pod-a");
-        let pod_b = pod("pod-b");
-        let window = open_pod_detail(&mut app, &pod_a);
-        app.details
-            .insert(pod_b.clone(), detail_with_container(&pod_b, "app"));
-
-        // A connecting session for pod A...
-        let tx = attach_session(&mut app, window, &pod_a);
-
-        // ...and the user moves on to pod B before the handshake completes.
-        app.shell
-            .apply_workspace_command(WorkspaceCommand::SelectRow(window, pod_b.clone()));
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-b"))
-        );
-
-        ready_signal(&tx, "app");
-        app.poll_stream_sessions();
-
-        // The stale Ready is discarded outright.
-        assert!(
-            !app.stream_sessions
-                .contains_key(&(window, StreamRoute::Exec)),
-            "the superseded session must be dropped"
-        );
-        assert!(
-            !app.shell_guard_connected(window),
-            "pod B's guard must never engage for pod A's session"
-        );
-        assert_eq!(
-            *app.shell
-                .stream_stores_mut()
-                .shells
-                .get_mut(window)
-                .expect("terminal exists")
-                .phase(),
-            ShellPhase::Disconnected
-        );
-        // The detail tab state stays consistent for the next connect attempt.
-        assert_eq!(
-            app.workspace_stream_target(window).as_ref(),
-            Some(&target_for("pod-b"))
-        );
-        let _ = DetailTab::Shell;
-    }
 }
 
 #[cfg(test)]
@@ -10768,7 +10611,6 @@ mod stream_overflow_tests {
             None
         }
         fn send_text(&mut self, _text: String) {}
-        fn send_binary(&mut self, _bytes: Vec<u8>) {}
         fn overflowed(&self) -> bool {
             true
         }
@@ -10789,7 +10631,7 @@ mod stream_overflow_tests {
             .expect("workload window opens");
 
         // A live logs session whose inbox overflowed.
-        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"));
         session.inject_for_test(OverflowedSocket);
         app.stream_sessions
             .insert((window, StreamRoute::Logs), session);
@@ -10808,7 +10650,7 @@ mod stream_overflow_tests {
 
     #[test]
     fn overflow_signal_is_emitted_exactly_once_and_session_goes_non_live() {
-        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"), false);
+        let mut session = StreamSession::new(StreamRoute::Logs, target_for("pod-a"));
         session.inject_for_test(OverflowedSocket);
         assert!(session.is_live());
 

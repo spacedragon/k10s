@@ -1591,19 +1591,9 @@ fn parse_request(
                             timestamps: parsed.timestamps,
                             follow: parsed.follow,
                         },
-                        k10s_protocol::StreamType::Exec => StreamKind::Exec {
-                            context: target.context.clone(),
-                            namespace: target.namespace.clone(),
-                            pod: target.pod.clone(),
-                            uid: target.uid.clone(),
-                            container: target.container.clone(),
-                            command: if parsed.command.is_empty() {
-                                vec!["/bin/sh".to_owned()]
-                            } else {
-                                parsed.command.clone()
-                            },
-                            tty: parsed.tty,
-                        },
+                        // Major-1 legacy decode tombstone: recognize the old
+                        // discriminant but reject it before backend dispatch.
+                        k10s_protocol::StreamType::Exec => return None,
                     };
                     Some(ParsedRequest::Query(Query::StreamTicket { stream }))
                 })
@@ -1998,7 +1988,7 @@ async fn stream_backend_events(
             }
             Ok(BackendEvent::Stream(_)) => {
                 // Stream chunks never ride the control scheduler; they are
-                // forwarded by the dedicated logs/exec sockets only.
+                // forwarded by the dedicated logs socket only.
             }
             Ok(BackendEvent::Operation(update)) => {
                 let _ = forward_operation_update(outbound, sequence_counter, &update, None);

@@ -178,15 +178,6 @@ impl BackendKernel {
         self.adapter.subscribe(req).await
     }
 
-    /// Forward inbound user input into a redeemed stream session.
-    pub async fn stream_input(
-        &self,
-        ticket_id: &str,
-        input: crate::port::StreamInput,
-    ) -> Result<(), BackendError> {
-        self.adapter.stream_input(ticket_id, input).await
-    }
-
     /// Map a snapshot slice into a normalized protocol page.
     #[must_use]
     pub fn snapshot_page(
@@ -326,7 +317,7 @@ impl BootstrapResult {
         Self {
             protocol: BootstrapResponse {
                 protocol: ProtocolVersion { major: 1, minor: 1 },
-                capabilities: vec!["logs.tail".into(), "exec.attach".into()],
+                capabilities: vec!["logs.tail".into()],
                 server: Some(ServerInfo {
                     instance_id: server_instance_id,
                     version: "0.1.0".into(),
@@ -1031,7 +1022,6 @@ fn capabilities_for_gvk(gvk: &Gvk) -> ResourceCapabilities {
         }
         Some(WorkloadKind::Pod) => {
             capabilities.can_view_logs = true;
-            capabilities.can_exec = true;
         }
         Some(WorkloadKind::ReplicaSet | WorkloadKind::Job | WorkloadKind::CronJob) | None => {}
     }

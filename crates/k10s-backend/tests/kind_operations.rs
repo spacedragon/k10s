@@ -14,8 +14,7 @@ use std::time::Duration;
 use k10s_backend::operation::OutcomeData;
 use k10s_backend::{
     BackendError, BackendEvent, Command, Gvk, KubeAdapter, KubernetesAccess, OperationState,
-    Propagation, Query, QueryResult, ResourceRef, StreamInput, StreamKind, StreamOrigin,
-    StreamRouteKind, Subscribe,
+    Propagation, Query, QueryResult, ResourceRef, StreamKind, StreamRouteKind, Subscribe,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -752,7 +751,7 @@ async fn live_mutations_cover_validation_conflict_scale_restart_and_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires tests/kind/cluster.sh up"]
-async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
+async fn live_job_cronjob_logs_and_rbac_paths_are_real() {
     let _guard = KIND_LOCK.lock().await;
     let adapter = adapter();
     let cronjob = reference(
@@ -854,55 +853,6 @@ async fn live_job_cronjob_logs_exec_and_rbac_paths_are_real() {
         }
     }
     assert!(text.contains("k10s-log-ready"), "actual logs: {text:?}");
-
-    let exec = StreamKind::Exec {
-        context: CONTEXT.into(),
-        namespace: NAMESPACE.into(),
-        pod: pod.name,
-        uid: pod.uid,
-        container: "shell".into(),
-        command: vec![
-            "sh".into(),
-            "-c".into(),
-            "read value; echo exec-$value".into(),
-        ],
-        tty: false,
-    };
-    let QueryResult::StreamTicket(exec_ticket) = adapter
-        .query(Query::StreamTicket { stream: exec })
-        .await
-        .unwrap()
-    else {
-        panic!("exec ticket")
-    };
-    let ticket_id = exec_ticket.ticket_id;
-    let mut handle = adapter
-        .subscribe(Subscribe::StreamRedeem {
-            ticket_id: ticket_id.clone(),
-            route: StreamRouteKind::Exec,
-        })
-        .await
-        .unwrap();
-    let mut events = handle.take_events().unwrap();
-    adapter
-        .stream_input(&ticket_id, StreamInput::Stdin("verified\n".into()))
-        .await
-        .unwrap();
-    let mut text = String::new();
-    while let Ok(Ok(BackendEvent::Stream(chunk))) =
-        tokio::time::timeout(Duration::from_secs(5), events.recv()).await
-    {
-        if chunk.origin == StreamOrigin::Stdout {
-            text.push_str(&chunk.text);
-        }
-        if chunk.exit_code.is_some() {
-            break;
-        }
-    }
-    assert!(
-        text.contains("exec-verified"),
-        "actual exec output: {text:?}"
-    );
 
     assert_eq!(
         adapter

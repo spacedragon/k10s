@@ -29,6 +29,29 @@ referenced clusters/users. Credentials and raw kubeconfig content are never
 returned to clients. Desktop uses standard discovery and reports failure; it
 never falls back to `--fake` or switches to fixtures.
 
+## Desktop external-shell descriptor
+
+There is no standalone flag or Web setting for shell access. The native desktop
+publishes `Open shell` only for its own embedded-local connection after it can
+resolve local `kubectl`, faithfully reproduce the ordered kubeconfig sources
+and selected context, and find a platform terminal adapter. An in-memory or
+unavailable kubeconfig, a remote/standalone connection, missing kubectl, or a
+descriptor that would require secret environment makes the action unavailable.
+On Windows, the fixed non-secret allowlist also preserves `SYSTEMROOT` and
+`WINDIR`, which Windows PowerShell and the CLR require after environment
+sanitization.
+
+The descriptor, not Pod data, is authoritative for context and kubeconfig.
+Allowed non-secret exec-plugin environment is captured when the embedded server
+is prepared; resource context/namespace/name/UID/container values remain
+structured and platform-quoted. macOS uses `open` on a private `.command` file,
+Linux uses the documented ordered terminal-adapter fallback, and Windows starts
+`powershell.exe` directly with a private `.ps1` file and new console. See
+[Security](security.md) for the UID preflight's residual race and cleanup rules.
+Finback serializes the exact merged configuration prepared for the backend into
+the owner-only launch directory and points kubectl at that immutable snapshot,
+so later edits to the original source paths cannot retarget the shell.
+
 ## Embeddable `ServerConfig`
 
 These Rust API fields are not standalone environment variables. Integrators
@@ -51,9 +74,9 @@ contradictory hard bounds.
 | `snapshot_rows_per_chunk` | 128 | Normalized rows per snapshot chunk. |
 | `drain_grace_timeout` | 250 ms | Read-only status window after shutdown notice. |
 | `drain_timeout` | 10 s | Absolute tracked-task drain deadline. |
-| `capabilities` | logs.tail, exec.attach | Advertised wire capability identifiers. |
-| `max_stream_frame_size` | 64 KiB | Logs/exec frame bound. |
-| `max_stream_message_size` | 256 KiB | Assembled logs/exec message bound. |
+| `capabilities` | logs.tail | Advertised wire capability identifiers. External desktop shell is not a server capability. |
+| `max_stream_frame_size` | 64 KiB | Log-stream frame bound. |
+| `max_stream_message_size` | 256 KiB | Assembled log-stream message bound. |
 | `stream_hello_timeout` | 5 s | Dedicated-stream authentication deadline. |
 | `stream_rate_budget_bytes_per_sec` | 512 KiB/s | Per-direction stream rate budget. |
 | `max_stream_connections` | 64 | Concurrent dedicated stream cap. |

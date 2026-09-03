@@ -65,6 +65,7 @@ Any required step not described here is a release-blocking documentation bug.
 - [ ] Start the binary and observe `/readyz`: starting 503, then ready 200.
 - [ ] Load `/`, authenticate, select a context, list/detail a resource, and run
       an RBAC-permitted operation.
-- [ ] Verify logs/exec only when cluster RBAC permits them.
+- [ ] Verify logs only when cluster RBAC permits them. Shell is available only
+      from the embedded-local desktop through the user's external `kubectl`.
 - [ ] Send SIGINT/SIGTERM; observe draining 503 before `/healthz` disappears.
 - [ ] For OCI, additionally verify UID/GID 10001 and read-only secret mounts.

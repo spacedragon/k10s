@@ -1,5 +1,7 @@
 //! Native desktop bootstrap and embedded-server lifecycle.
 
+pub mod external_shell;
+
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -10,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use k10s_backend::{AdapterError, BackendMode, build_kernel};
+use k10s_backend::{AdapterError, BackendMode, prepare_backend};
 use k10s_server::ServerConfig;
 use k10s_ui::K10sApp;
 use k10s_ui::client::{ConnectTarget, TransportError};
@@ -81,6 +83,9 @@ pub struct EmbeddedServerHandle {
     access_token: String,
     cancel: CancellationToken,
     thread: Option<JoinHandle<io::Result<()>>>,
+    kubectl_launch: Option<external_shell::KubectlLaunchDescriptor>,
+    kube_preparation: Option<k10s_backend::KubePreparation>,
+    terminal_adapters: Vec<external_shell::TerminalAdapter>,
 }
 
 impl std::fmt::Debug for EmbeddedServerHandle {
@@ -91,6 +96,7 @@ impl std::fmt::Debug for EmbeddedServerHandle {
             .field("control_url", &self.control_url)
             .field("access_token", &"[REDACTED]")
             .field("running", &self.thread.is_some())
+            .field("kubectl_launch_available", &self.kubectl_launch.is_some())
             .finish()
     }
 }
@@ -112,6 +118,12 @@ impl EmbeddedServerHandle {
     #[must_use]
     pub fn access_token(&self) -> &str {
         &self.access_token
+    }
+
+    /// Immutable kubectl reproduction snapshot, absent for fake or unsafe configurations.
+    #[must_use]
+    pub fn kubectl_launch_descriptor(&self) -> Option<&external_shell::KubectlLaunchDescriptor> {
+        self.kubectl_launch.as_ref()
     }
 
     /// Cancel the server, gracefully finish connections, and join its OS thread.
@@ -144,6 +156,13 @@ pub struct DesktopApp {
     /// writable config directory exists on this host.
     state_store: Option<StateStore>,
     context_state_store: Option<ContextStateStore>,
+    external_shell_storage: Option<external_shell::TemporaryShellStorage>,
+    external_shell_descriptor: Option<external_shell::KubectlLaunchDescriptor>,
+    external_shell_generation: u64,
+    kube_preparation: Option<k10s_backend::KubePreparation>,
+    shell_environment: external_shell::EnvironmentSnapshot,
+    terminal_adapters: Vec<external_shell::TerminalAdapter>,
+    external_shell_error: Option<String>,
 }
 
 impl std::fmt::Debug for DesktopApp {
@@ -161,6 +180,42 @@ impl std::fmt::Debug for DesktopApp {
 }
 
 impl DesktopApp {
+    fn advance_external_shell_generation(
+        generation_slot: &mut u64,
+        descriptor: &mut Option<external_shell::KubectlLaunchDescriptor>,
+    ) -> Option<u64> {
+        match generation_slot.checked_add(1) {
+            Some(generation) => {
+                *generation_slot = generation;
+                Some(generation)
+            }
+            None => {
+                *descriptor = None;
+                None
+            }
+        }
+    }
+    fn clear_external_shell_status(app: &mut K10sApp, error_slot: &mut Option<String>) {
+        *error_slot = None;
+        app.clear_host_error();
+    }
+    fn apply_external_shell_result(
+        app: &mut K10sApp,
+        error_slot: &mut Option<String>,
+        result: Result<(), external_shell::StorageError>,
+    ) {
+        match result {
+            Ok(()) => Self::clear_external_shell_status(app, error_slot),
+            Err(error) => {
+                let sanitized = error.to_string();
+                tracing::error!("{sanitized}");
+                *error_slot = Some(sanitized.clone());
+                app.set_host_error(k10s_ui::SafeUiError::new(format!(
+                    "External shell failed: {sanitized}"
+                )));
+            }
+        }
+    }
     /// Normal desktop launch: real `Kube` adapter through standard kubeconfig
     /// discovery. Fake mode is never implicit on this production path.
     pub fn launch() -> Result<Self, DesktopLaunchError> {
@@ -212,12 +267,141 @@ impl DesktopApp {
         {
             app.restore_workspace_layouts(layouts);
         }
+        let storage_result = external_shell::TemporaryShellStorage::new(
+            std::env::temp_dir().join("finback-external-shells"),
+        );
+        let storage_result = storage_result.and_then(|storage| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            storage.cleanup_expired(now)?;
+            Ok(storage)
+        });
+        let initial_storage_error = storage_result.as_ref().err().map(ToString::to_string);
+        let storage = storage_result.ok();
+        let descriptor = storage
+            .as_ref()
+            .and_then(|_| server.kubectl_launch_descriptor().cloned());
+        app.set_external_shell_availability(descriptor.as_ref().map_or(
+            k10s_ui::ui::ExternalShellAvailability::Unavailable,
+            |descriptor| k10s_ui::ui::ExternalShellAvailability::Available {
+                generation: descriptor.generation,
+            },
+        ));
+        if let Some(message) = &initial_storage_error {
+            app.set_host_error(k10s_ui::SafeUiError::new(format!(
+                "Shell storage unavailable: {message}"
+            )));
+        }
+        let kube_preparation = server.kube_preparation.clone();
+        let terminal_adapters = server.terminal_adapters.clone();
+        let shell_environment = external_shell::EnvironmentSnapshot::capture();
         Ok(Self {
             app: Some(app),
             server: Some(server),
             state_store,
             context_state_store,
+            external_shell_storage: storage,
+            external_shell_descriptor: descriptor,
+            external_shell_generation: 1,
+            kube_preparation,
+            shell_environment,
+            terminal_adapters,
+            external_shell_error: None,
         })
+    }
+
+    #[must_use]
+    pub fn external_shell_error(&self) -> Option<&str> {
+        self.external_shell_error.as_deref()
+    }
+
+    fn drain_external_shell(&mut self) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let events = app.drain_app_events();
+        let (connection_changed, rebuild_context) =
+            events
+                .into_iter()
+                .fold((false, None), |_, event| match event {
+                    k10s_ui::K10sAppEvent::CommittedContextChanged { context } => {
+                        (true, Some(context))
+                    }
+                    k10s_ui::K10sAppEvent::ControlConnectionReestablished { context } => {
+                        (true, context)
+                    }
+                });
+        if connection_changed {
+            app.set_external_shell_availability(
+                k10s_ui::ui::ExternalShellAvailability::Unavailable,
+            );
+            Self::clear_external_shell_status(app, &mut self.external_shell_error);
+            let Some(generation) = Self::advance_external_shell_generation(
+                &mut self.external_shell_generation,
+                &mut self.external_shell_descriptor,
+            ) else {
+                self.terminal_adapters.clear();
+                return;
+            };
+            let preparation = rebuild_context.as_ref().and_then(|context| {
+                self.kube_preparation
+                    .as_ref()
+                    .and_then(|value| value.for_context(context).ok())
+            });
+            let terminal = external_shell::probe_system_terminals(&self.shell_environment);
+            let rebuilt = preparation
+                .as_ref()
+                .and_then(|value| {
+                    external_shell::KubectlLaunchDescriptor::from_preparation(
+                        generation,
+                        value,
+                        &self.shell_environment,
+                    )
+                    .ok()
+                })
+                .filter(|_| !terminal.is_empty());
+            self.terminal_adapters = terminal;
+            self.external_shell_descriptor = rebuilt;
+            if let Some(descriptor) = &self.external_shell_descriptor {
+                app.set_external_shell_availability(
+                    k10s_ui::ui::ExternalShellAvailability::Available {
+                        generation: descriptor.generation,
+                    },
+                );
+            }
+        }
+        for requested in app.drain_external_shell_requests() {
+            let Some(descriptor) = self
+                .external_shell_descriptor
+                .as_ref()
+                .filter(|value| value.generation == requested.generation)
+            else {
+                app.set_host_error(k10s_ui::SafeUiError::new(
+                    "External shell failed: request belongs to a stale connection generation",
+                ));
+                continue;
+            };
+            let target = external_shell::ExternalShellTarget {
+                generation: requested.generation,
+                namespace: requested.namespace,
+                pod: requested.pod,
+                uid: requested.uid,
+                container: requested.container,
+                program: requested.program,
+            };
+            let result = (|| {
+                let storage = self
+                    .external_shell_storage
+                    .as_ref()
+                    .ok_or(external_shell::StorageError::InvalidParent)?;
+                let command = external_shell::KubectlExecCommand::new(descriptor, target)?;
+                let script = storage.create(&command)?;
+                external_shell::launch_with_adapters(&script, &self.terminal_adapters)
+            })();
+            Self::apply_external_shell_result(app, &mut self.external_shell_error, result);
+        }
     }
 
     /// Bound address exposed for lifecycle verification.
@@ -509,6 +693,7 @@ impl eframe::App for DesktopApp {
             store.save(&app.workspace_layouts());
         }
         app.poll();
+        self.drain_external_shell();
         context.request_repaint_after(Duration::from_millis(16));
     }
 
@@ -600,6 +785,18 @@ fn launch_embedded_server_on(
     bind_addr: SocketAddr,
     mode: &BackendMode,
 ) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
+    let prepared = prepare_backend(mode).map_err(EmbeddedServerError::Backend)?;
+    let shell_environment = external_shell::EnvironmentSnapshot::capture();
+    let kube_preparation = prepared.kube().cloned();
+    let descriptor = prepared.kube().and_then(|kube| {
+        external_shell::KubectlLaunchDescriptor::from_preparation(1, kube, &shell_environment).ok()
+    });
+    let terminal_adapters = external_shell::probe_system_terminals(&shell_environment);
+    let kubectl_launch = external_shell::descriptor_when_terminal_available(
+        descriptor,
+        terminal_adapters.first().cloned(),
+    );
+    let kernel = prepared.into_kernel();
     let mut token_bytes = [0_u8; 32];
     getrandom::fill(&mut token_bytes).map_err(EmbeddedServerError::Randomness)?;
     let access_token = URL_SAFE_NO_PAD.encode(token_bytes);
@@ -608,21 +805,9 @@ fn launch_embedded_server_on(
     let thread_token = access_token.clone();
     let (ready_sender, ready_receiver) =
         mpsc::sync_channel::<Result<SocketAddr, EmbeddedServerError>>(1);
-    let mode = mode.clone();
-
     let thread = thread::Builder::new()
         .name("k10s-embedded-server".to_owned())
         .spawn(move || {
-            // Build the kernel through the shared factory before readiness is
-            // reported: a broken kubeconfig must fail the launch, never fall
-            // back to fake data.
-            let kernel = match build_kernel(&mode) {
-                Ok(kernel) => kernel,
-                Err(error) => {
-                    let _ = ready_sender.send(Err(EmbeddedServerError::Backend(error)));
-                    return Ok(());
-                }
-            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -647,17 +832,7 @@ fn launch_embedded_server_on(
                 if ready_sender.send(Ok(addr)).is_err() {
                     return Ok(());
                 }
-                let config = ServerConfig {
-                    access_token: thread_token,
-                    capabilities: vec![
-                        "logs.tail".to_owned(),
-                        "exec.attach".to_owned(),
-                        // Desktop-only: the embedded server owns loopback
-                        // listeners; standalone and web never advertise this.
-                        k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
-                    ],
-                    ..ServerConfig::default()
-                };
+                let config = embedded_server_config(thread_token);
                 k10s_server::run(listener, config, kernel, thread_cancel).await
             })
         })?;
@@ -687,7 +862,23 @@ fn launch_embedded_server_on(
         access_token,
         cancel,
         thread: Some(thread),
+        kubectl_launch,
+        kube_preparation,
+        terminal_adapters,
     })
+}
+
+fn embedded_server_config(access_token: String) -> ServerConfig {
+    ServerConfig {
+        access_token,
+        capabilities: vec![
+            "logs.tail".to_owned(),
+            // Desktop-only: the embedded server owns loopback listeners;
+            // standalone and web never advertise this.
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+        ],
+        ..ServerConfig::default()
+    }
 }
 
 #[cfg(test)]
@@ -702,8 +893,85 @@ mod tests {
     };
 
     use super::{
-        ContextStateStore, DesktopApp, EmbeddedServerError, StateStore, launch_embedded_server_on,
+        ContextStateStore, DesktopApp, EmbeddedServerError, StateStore, embedded_server_config,
+        launch_embedded_server_on,
     };
+
+    #[test]
+    fn embedded_server_bootstrap_does_not_advertise_exec() {
+        let config = embedded_server_config("test-token".to_owned());
+        assert_eq!(
+            config.capabilities,
+            [
+                "logs.tail".to_owned(),
+                k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+            ]
+        );
+        assert!(
+            !config
+                .capabilities
+                .iter()
+                .any(|value| value == "exec.attach")
+        );
+    }
+
+    #[test]
+    fn shell_generation_is_not_reused_across_unavailable_contexts() {
+        let mut desktop = DesktopApp::launch_with_mode_and_store(&BackendMode::Fake, None).unwrap();
+        desktop.external_shell_descriptor = Some(crate::external_shell::KubectlLaunchDescriptor {
+            generation: 1,
+            kubectl: PathBuf::from("kubectl"),
+            context: "first".to_owned(),
+            kubeconfig_sources: vec![PathBuf::from("first-config")],
+            kubeconfig_snapshot: Vec::new(),
+            environment: Default::default(),
+            exec_plugins: Vec::new(),
+        });
+
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            Some(2)
+        );
+        desktop.external_shell_descriptor = None;
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            Some(3)
+        );
+        desktop.external_shell_descriptor = Some(crate::external_shell::KubectlLaunchDescriptor {
+            generation: 3,
+            kubectl: PathBuf::from("kubectl"),
+            context: "third".to_owned(),
+            kubeconfig_sources: vec![PathBuf::from("third-config")],
+            kubeconfig_snapshot: Vec::new(),
+            environment: Default::default(),
+            exec_plugins: Vec::new(),
+        });
+
+        assert!(
+            desktop
+                .external_shell_descriptor
+                .as_ref()
+                .filter(|descriptor| descriptor.generation == 1)
+                .is_none(),
+            "a request from the first available context must stay stale"
+        );
+
+        desktop.external_shell_generation = u64::MAX;
+        assert_eq!(
+            DesktopApp::advance_external_shell_generation(
+                &mut desktop.external_shell_generation,
+                &mut desktop.external_shell_descriptor,
+            ),
+            None
+        );
+        assert!(desktop.external_shell_descriptor.is_none());
+    }
 
     #[test]
     fn listener_startup_error_is_delivered_to_the_launcher() {
@@ -714,6 +982,30 @@ mod tests {
         let error = launch_embedded_server_on(addr, &BackendMode::Fake).unwrap_err();
 
         assert!(matches!(error, EmbeddedServerError::Io(_)));
+    }
+
+    #[test]
+    fn external_shell_host_error_clears_after_success_and_context_transition() {
+        let mut desktop = DesktopApp::launch_with_mode_and_store(&BackendMode::Fake, None).unwrap();
+        let app = desktop.app.as_mut().unwrap();
+        DesktopApp::apply_external_shell_result(
+            app,
+            &mut desktop.external_shell_error,
+            Err(crate::external_shell::StorageError::NoTerminalLauncher),
+        );
+        assert!(desktop.external_shell_error.is_some());
+        assert!(app.host_error().is_some());
+        DesktopApp::apply_external_shell_result(app, &mut desktop.external_shell_error, Ok(()));
+        assert!(desktop.external_shell_error.is_none());
+        assert!(app.host_error().is_none());
+        DesktopApp::apply_external_shell_result(
+            app,
+            &mut desktop.external_shell_error,
+            Err(crate::external_shell::StorageError::NoTerminalLauncher),
+        );
+        DesktopApp::clear_external_shell_status(app, &mut desktop.external_shell_error);
+        assert!(desktop.external_shell_error.is_none());
+        assert!(app.host_error().is_none());
     }
 
     /// Unique per-test state file inside the system temp dir; tests never

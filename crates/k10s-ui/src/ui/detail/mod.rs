@@ -45,7 +45,6 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
             DetailTab::Events,
             DetailTab::Yaml,
             DetailTab::Logs,
-            DetailTab::Shell,
         ],
         Some(WorkloadKind::Deployment | WorkloadKind::ReplicaSet | WorkloadKind::StatefulSet) => &[
             DetailTab::Overview,
@@ -72,7 +71,6 @@ fn tab_label(tab: DetailTab) -> &'static str {
         DetailTab::Yaml => "YAML",
         DetailTab::Events => "Events",
         DetailTab::Logs => "Logs",
-        DetailTab::Shell => "Shell",
     }
 }
 
@@ -80,7 +78,6 @@ fn shortcut_tab(key: egui::Key) -> Option<DetailTab> {
     match key {
         egui::Key::L => Some(DetailTab::Logs),
         egui::Key::P => Some(DetailTab::Pods),
-        egui::Key::S => Some(DetailTab::Shell),
         egui::Key::Y => Some(DetailTab::Yaml),
         egui::Key::E => Some(DetailTab::Events),
         _ => None,
@@ -131,15 +128,8 @@ fn shortcut_labels_for(
     gvk: &GroupVersionKind,
     has_verified_owner: bool,
 ) -> &'static [&'static str] {
-    const POD: &[&str] = &["l logs", "s shell", "y yaml", "e events", "c copy name"];
-    const POD_OWNER: &[&str] = &[
-        "l logs",
-        "s shell",
-        "y yaml",
-        "e events",
-        "c copy name",
-        "o owner",
-    ];
+    const POD: &[&str] = &["l logs", "y yaml", "e events", "c copy name"];
+    const POD_OWNER: &[&str] = &["l logs", "y yaml", "e events", "c copy name", "o owner"];
     const CONTROLLER: &[&str] = &["p pods", "l logs", "y yaml", "e events", "c copy name"];
     const CONTROLLER_OWNER: &[&str] = &[
         "p pods",
@@ -153,7 +143,7 @@ fn shortcut_labels_for(
     const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
 
     let tabs = tabs_for_kind(gvk);
-    if tabs.contains(&DetailTab::Logs) && tabs.contains(&DetailTab::Shell) {
+    if tabs.contains(&DetailTab::Logs) && WorkloadKind::from_gvk(gvk) == Some(WorkloadKind::Pod) {
         if has_verified_owner { POD_OWNER } else { POD }
     } else if tabs.contains(&DetailTab::Pods) {
         if has_verified_owner {
@@ -215,7 +205,6 @@ pub(super) fn show<I>(
             [
                 egui::Key::L,
                 egui::Key::P,
-                egui::Key::S,
                 egui::Key::Y,
                 egui::Key::E,
                 egui::Key::C,
@@ -248,6 +237,14 @@ pub(super) fn show<I>(
 
     let mut body_queued = Vec::new();
     let mut runtime_actions = Vec::new();
+    show_external_shell_action(
+        ui,
+        window_id,
+        detail,
+        presentation,
+        streams,
+        resource_actions,
+    );
     frame::show(
         ui,
         window_id,
@@ -421,6 +418,127 @@ pub(super) fn show<I>(
     queued.extend(body_queued);
 }
 
+fn show_external_shell_action<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window: WindowId,
+    detail: &DetailState<I>,
+    presentation: &presentation::DetailPresentationInput<'_>,
+    streams: &mut tools::StreamStores,
+    actions: &mut Vec<crate::ui::ResourceAction>,
+) {
+    let availability = ui.ctx().data(|data| {
+        data.get_temp::<crate::ui::ExternalShellAvailability>(egui::Id::new(
+            "k10s.external-shell-availability",
+        ))
+    });
+    if !presentation.mutations_allowed {
+        return;
+    }
+    let identity = presentation.identity;
+    let presentation::DetailPrimary::Loaded(view) = presentation.primary else {
+        return;
+    };
+    let Some(runtime) = pod::PodRuntimeProjection::from_view(identity, view) else {
+        return;
+    };
+    let selected = streams
+        .logs
+        .target_of(window)
+        .filter(|target| {
+            target.context == identity.context
+                && target.namespace == identity.namespace.as_deref().unwrap_or_default()
+                && target.pod == identity.name
+                && target.uid == identity.uid
+                && runtime.contains(&target.container)
+        })
+        .map(|target| target.container);
+    let Some(shell_target) = build_external_shell_target(
+        availability.unwrap_or_default(),
+        identity,
+        runtime.containers(),
+        selected.as_deref(),
+    ) else {
+        return;
+    };
+    let selected = shell_target.container.clone();
+    let Some(target) = stream_target(detail, &selected) else {
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        if runtime.containers().len() > 1 {
+            let logs = streams.logs.ensure(window, target.clone());
+            egui::ComboBox::from_id_salt(("external-shell.container", window.0))
+                .selected_text(format!("Container: {}", logs.target().container))
+                .show_ui(ui, |ui| {
+                    for container in runtime.containers() {
+                        if ui
+                            .selectable_label(logs.target().container == *container, container)
+                            .clicked()
+                        {
+                            logs.select_container(container);
+                        }
+                    }
+                });
+        }
+        let container = streams
+            .logs
+            .target_of(window)
+            .filter(|candidate| runtime.contains(&candidate.container))
+            .map_or_else(|| selected.clone(), |candidate| candidate.container);
+        let button = ui
+            .button("Open shell")
+            .on_hover_text("Open an interactive kubectl shell in your system terminal");
+        if button.clicked() {
+            actions.push(crate::ui::ResourceAction::OpenExternalShell {
+                window,
+                target: crate::ui::ExternalShellTarget {
+                    generation: shell_target.generation,
+                    namespace: shell_target.namespace.clone(),
+                    pod: shell_target.pod.clone(),
+                    uid: shell_target.uid.clone(),
+                    container,
+                    program: "/bin/sh".to_owned(),
+                },
+            });
+        }
+    });
+}
+
+fn build_external_shell_target(
+    availability: crate::ui::ExternalShellAvailability,
+    identity: &k10s_protocol::ResourceIdentity,
+    containers: &[String],
+    selected: Option<&str>,
+) -> Option<crate::ui::ExternalShellTarget> {
+    let crate::ui::ExternalShellAvailability::Available { generation } = availability else {
+        return None;
+    };
+    if !identity.gvk.group.is_empty()
+        || identity.gvk.version != "v1"
+        || identity.gvk.kind != "Pod"
+        || identity.namespace.as_deref().is_none_or(str::is_empty)
+        || identity.name.is_empty()
+        || identity.uid.is_empty()
+    {
+        return None;
+    }
+    let container = selected
+        .filter(|selected| containers.iter().any(|container| container == selected))
+        .or_else(|| containers.first().map(String::as_str))?;
+    if container.is_empty() {
+        return None;
+    }
+    Some(crate::ui::ExternalShellTarget {
+        generation,
+        namespace: identity.namespace.clone()?,
+        pod: identity.name.clone(),
+        uid: identity.uid.clone(),
+        container: container.to_owned(),
+        program: "/bin/sh".to_owned(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn show_generic_body<I: RowIdentity>(
     ui: &mut egui::Ui,
@@ -486,19 +604,6 @@ fn show_generic_body<I: RowIdentity>(
                 let targets = aggregate_log_targets(presentation.identity, presentation.relations);
                 tools::logs::show_aggregate(ui, window_id, &mut streams.logs, &targets);
             }
-        }
-        DetailTab::Shell => {
-            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
-            else {
-                ui.label("Pod runtime details unavailable");
-                return;
-            };
-            tools::shell::show(
-                ui,
-                window_id,
-                &mut streams.shells,
-                stream_target(detail, runtime.default_container()),
-            );
         }
     }
 }
@@ -691,6 +796,75 @@ where
 }
 
 #[cfg(test)]
+mod external_shell_tests {
+    use super::build_external_shell_target;
+    use crate::ui::ExternalShellAvailability;
+    use k10s_protocol::{GroupVersionKind, ResourceIdentity};
+
+    fn pod() -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "api".into(),
+            uid: "uid-api".into(),
+        }
+    }
+
+    #[test]
+    fn external_shell_target_requires_exact_complete_pod_and_container() {
+        let available = ExternalShellAvailability::Available { generation: 7 };
+        let containers = vec!["app".to_owned(), "metrics".to_owned()];
+        let expected = build_external_shell_target(available, &pod(), &containers, Some("metrics"))
+            .expect("exact target");
+        assert_eq!(expected.container, "metrics");
+        assert_eq!(expected.generation, 7);
+        assert_eq!(expected.namespace, "default");
+        assert_eq!(expected.pod, "api");
+        assert_eq!(expected.uid, "uid-api");
+        assert_eq!(expected.program, "/bin/sh");
+
+        assert_eq!(
+            build_external_shell_target(available, &pod(), &containers, None)
+                .unwrap()
+                .container,
+            "app"
+        );
+        assert!(
+            build_external_shell_target(
+                ExternalShellAvailability::Unavailable,
+                &pod(),
+                &containers,
+                None
+            )
+            .is_none()
+        );
+        let mut invalid = pod();
+        invalid.gvk.group = "apps".into();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.gvk.version = "v1beta1".into();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.namespace = None;
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.name.clear();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        invalid = pod();
+        invalid.uid.clear();
+        assert!(build_external_shell_target(available, &invalid, &containers, None).is_none());
+        assert!(build_external_shell_target(available, &pod(), &[], None).is_none());
+        assert_eq!(
+            build_external_shell_target(available, &pod(), &containers, Some("missing"))
+                .unwrap()
+                .container,
+            "app"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{DetailShortcut, shortcut_for_key, shortcut_tab, tabs_for_kind};
     use crate::workspace::DetailTab;
@@ -719,7 +893,7 @@ mod tests {
     fn detail_shortcuts_map_to_investigation_tabs() {
         assert_eq!(shortcut_tab(egui::Key::L), Some(DetailTab::Logs));
         assert_eq!(shortcut_tab(egui::Key::P), Some(DetailTab::Pods));
-        assert_eq!(shortcut_tab(egui::Key::S), Some(DetailTab::Shell));
+        assert_eq!(shortcut_tab(egui::Key::S), None);
         assert_eq!(shortcut_tab(egui::Key::Y), Some(DetailTab::Yaml));
         assert_eq!(shortcut_tab(egui::Key::E), Some(DetailTab::Events));
         assert_eq!(shortcut_tab(egui::Key::Enter), None);
@@ -729,7 +903,6 @@ mod tests {
             DetailTab::Events,
             DetailTab::Yaml,
             DetailTab::Logs,
-            DetailTab::Shell,
         ];
         assert_eq!(
             shortcut_for_key(egui::Key::C, &pod_tabs, false),

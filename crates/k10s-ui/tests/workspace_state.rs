@@ -999,86 +999,23 @@ fn cancel_preserves_selection_window_and_context() {
 }
 
 #[test]
-fn connected_shell_blocks_navigation_until_disconnected() {
+fn navigation_has_no_embedded_shell_guard() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let window = open_pods(&mut state);
-    let identity = TestIdentity::pod("original");
-    select(&mut state, window, identity.clone());
-
-    events(&mut state, WorkspaceCommand::ConnectShell(window));
-
+    select(&mut state, window, TestIdentity::pod("original"));
     let out = select(&mut state, window, TestIdentity::pod("replacement"));
-    let pending = blocked(&out);
-    assert_eq!(pending.blockers[0].reason, BlockReason::ConnectedShell);
-
-    // While the guard dialog is pending, later commands are held back.
-    let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
     assert!(out.is_empty());
-    assert!(state.pending().is_some());
+    assert!(state.pending().is_none());
     let resource = state.resource_state(window).unwrap();
-    assert_eq!(resource.selection.as_ref(), Some(&identity));
-    assert_eq!(
-        resource.detail.as_ref().map(|detail| &detail.identity),
-        Some(&identity)
-    );
-
-    // Cancel preserves the selection and the connected session.
-    let out = events(
-        &mut state,
-        WorkspaceCommand::ResolveBlock(BlockResolution::Cancel),
-    );
-    assert!(out.is_empty());
-    assert_eq!(state.pending(), None);
-    let resource = match &state.window(window).unwrap().content {
-        WindowContent::Resource(resource) => resource,
-        other => panic!("expected a resource window, got {other:?}"),
-    };
-    assert_eq!(resource.selection.as_ref().unwrap().name, "original");
-    assert!(resource.detail.as_ref().unwrap().shell.connected);
-
-    // Clearing the selection is also blocked, then disconnect resolves it.
-    let out = events(&mut state, WorkspaceCommand::ClearSelection(window));
-    assert_eq!(
-        blocked(&out).blockers[0].reason,
-        BlockReason::ConnectedShell
-    );
-    let resource = state.resource_state(window).unwrap();
-    assert_eq!(resource.selection.as_ref(), Some(&identity));
-    assert_eq!(
-        resource.detail.as_ref().map(|detail| &detail.identity),
-        Some(&identity)
-    );
-    let out = events(
-        &mut state,
-        WorkspaceCommand::ResolveBlock(BlockResolution::DisconnectShell { window }),
-    );
-    assert!(out.is_empty());
-    assert_eq!(state.pending(), None);
-    // The pending ClearSelection executed after the blocker resolved.
-    let resource = match &state.window(window).unwrap().content {
-        WindowContent::Resource(resource) => resource,
-        other => panic!("expected a resource window, got {other:?}"),
-    };
-    assert_eq!(resource.selection, None);
-    assert!(resource.detail.is_none());
+    assert_eq!(resource.selection.as_ref().unwrap().name, "replacement");
 }
 
 #[test]
-fn context_switch_lists_every_affected_detail_state() {
+fn context_switch_lists_only_dirty_yaml_blockers() {
     let mut state = WorkspaceState::<TestIdentity>::new();
     let dirty = open_pods(&mut state);
     select(&mut state, dirty, TestIdentity::pod("dirty-pod"));
     events(&mut state, WorkspaceCommand::BeginYamlEdit(dirty));
-
-    let shelled = open_pods(&mut state);
-    select(&mut state, shelled, TestIdentity::pod("shelled-pod"));
-    events(&mut state, WorkspaceCommand::ConnectShell(shelled));
-
-    let dedicated = opened(&events(
-        &mut state,
-        WorkspaceCommand::OpenDedicatedDetail(TestIdentity::pod("dedicated-pod")),
-    ));
-    events(&mut state, WorkspaceCommand::ConnectShell(dedicated));
 
     let out = events(
         &mut state,
@@ -1090,14 +1027,7 @@ fn context_switch_lists_every_affected_detail_state() {
         .iter()
         .map(|blocker| (blocker.window, blocker.reason))
         .collect();
-    assert_eq!(
-        blockers,
-        vec![
-            (dirty, BlockReason::DirtyYaml),
-            (shelled, BlockReason::ConnectedShell),
-            (dedicated, BlockReason::ConnectedShell),
-        ]
-    );
+    assert_eq!(blockers, vec![(dirty, BlockReason::DirtyYaml)]);
     assert_eq!(state.pending(), Some(pending));
 }
 

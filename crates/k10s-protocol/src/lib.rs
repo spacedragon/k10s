@@ -77,8 +77,7 @@ pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use stream::{
     DecodedStreamPayload, REQUEST_STREAM_TICKET, STREAM_PAYLOAD_VERSION, StreamClientMessage,
     StreamPayloadError, StreamServerMessage, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, StreamType, decode_resize_payload, decode_stream_payload,
-    encode_resize_payload, encode_stream_payload, payload_kind,
+    StreamTicketResponse, StreamType, decode_stream_payload, encode_stream_payload, payload_kind,
 };
 pub use subscription::{
     RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, ResourceChanged, ResourceGone,
@@ -96,4 +95,6 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// projections, per-container metrics, and restart capability metadata.
 /// v1.4 added exact-identity resource watches for dedicated Detail authority.
 /// v1.5 added context-scoped Kubernetes API transport traffic telemetry.
-pub const PROTOCOL_MINOR: u16 = 5;
+/// v1.6 retired active embedded exec while retaining a one-minor legacy
+/// decode tombstone for major-version-1 clients.
+pub const PROTOCOL_MINOR: u16 = 6;

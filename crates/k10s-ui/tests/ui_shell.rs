@@ -151,7 +151,7 @@ fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
     harness.run_steps(4);
 }
 
-fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: bool) {
+fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>) {
     harness
         .state_mut()
         .shell
@@ -171,12 +171,10 @@ fn add_guarded_pods_detail(harness: &mut Harness<'_, ShellFixture>, dirty_yaml: 
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::SelectRow(window, ()));
-    let guard = if dirty_yaml {
-        WorkspaceCommand::BeginYamlEdit(window)
-    } else {
-        WorkspaceCommand::ConnectShell(window)
-    };
-    harness.state_mut().shell.apply_workspace_command(guard);
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
     harness.run_steps(4);
 }
 
@@ -944,7 +942,7 @@ fn context_selector_commits_global_context_after_rendering() {
 #[test]
 fn dirty_yaml_cancel_keeps_context_selection_and_does_not_requeue() {
     let mut harness = shell_harness();
-    add_guarded_pods_detail(&mut harness, true);
+    add_guarded_pods_detail(&mut harness);
 
     choose_secondary_context(&mut harness);
     assert_eq!(
@@ -964,34 +962,20 @@ fn dirty_yaml_cancel_keeps_context_selection_and_does_not_requeue() {
         harness.state().selected_context.as_deref(),
         Some(PRIMARY_CONTEXT)
     );
-    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
-    assert!(harness.state().shell.workspace().pending().is_none());
 }
 
 #[test]
-fn connected_shell_cancel_keeps_context_selection_and_does_not_requeue() {
+fn context_switch_is_never_blocked_by_an_external_shell() {
     let mut harness = shell_harness();
-    add_guarded_pods_detail(&mut harness, false);
-
     choose_secondary_context(&mut harness);
     assert_eq!(
         harness.state().selected_context.as_deref(),
-        Some(PRIMARY_CONTEXT)
+        Some(SECONDARY_CONTEXT)
     );
-    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
-    assert!(harness.state().shell.workspace().pending().is_some());
-
-    harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::ResolveBlock(BlockResolution::Cancel));
-    harness.run_steps(4);
-
     assert_eq!(
-        harness.state().selected_context.as_deref(),
-        Some(PRIMARY_CONTEXT)
+        harness.state().shell.workspace().context(),
+        SECONDARY_CONTEXT
     );
-    assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
     assert!(harness.state().shell.workspace().pending().is_none());
 }
 

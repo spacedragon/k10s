@@ -1,13 +1,13 @@
 # Protocol operations
 
-k10s uses JSON control frames on `/api/v1/control` and versioned binary payloads
-on ticket-authenticated `/api/v1/logs` and `/api/v1/exec` sockets. The access
-token is carried only in the first `hello` frame.
+k10s uses JSON control frames on `/api/v1/control` and versioned binary log
+payloads on ticket-authenticated `/api/v1/logs` sockets. The access token is
+carried only in the first `hello` frame.
 
 ## Compatibility
 
-The current protocol is major `1`, minor `5`. Supported negotiation is major
-`1` with peer minor `0..=5`; the negotiated minor is the lower value. A major
+The current protocol is major `1`, minor `6`. Supported negotiation is major
+`1` with peer minor `0..=6`; the negotiated minor is the lower value. A major
 mismatch is rejected. Unknown message kinds return a structured
 `unsupportedMessage` error instead of being ignored or crashing a peer.
 
@@ -36,9 +36,19 @@ and optional retry delay. Mutations close before the bounded status-read grace
 period ends. A new `serverInstanceId` makes old in-flight operation outcomes
 unknown until refreshed; clients must not guess success or blindly retry.
 
-Dedicated logs/exec sockets require a single-use ticket obtained on the
-control channel. Their binary header version is independent and currently `1`;
+Dedicated log sockets require a single-use ticket obtained on the control
+channel. Their binary header version is independent and currently `1`;
 unknown header versions or payload kinds are rejected explicitly.
+
+Minor `6` removes active embedded exec. For one current/previous-minor
+compatibility window only, legacy exec ticket requests and `/api/v1/exec`
+remain as fail-closed tombstones: a ticket request receives the typed
+`unsupportedMessage` error; the route authenticates a normal hello, never
+redeems its arbitrary legacy ticket or calls Kubernetes exec, emits the typed
+unsupported stream error, and closes. Invalid access tokens still receive the
+authentication error. New clients do not request exec, and the retained legacy
+numeric discriminants have no new meaning. External desktop shells are local
+application behavior and are never advertised or transported by this protocol.
 
 ## Resource projections and port forwarding
 

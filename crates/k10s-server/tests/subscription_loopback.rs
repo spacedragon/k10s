@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use k10s_backend::{
     BackendError, BackendKernel, Command as BackendCommand, FakeKubernetes, KubernetesAccess,
-    OperationId, Query as BackendQuery, QueryResult as BackendQueryResult, StreamInput, Subscribe,
+    OperationId, Query as BackendQuery, QueryResult as BackendQueryResult, Subscribe,
     SubscriptionHandle,
 };
 use k10s_protocol::{
@@ -87,14 +87,6 @@ impl KubernetesAccess for InterleavingFake {
                 receiver,
             ))
         })
-    }
-
-    fn stream_input<'a>(
-        &'a self,
-        ticket_id: &'a str,
-        input: StreamInput,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        self.inner.stream_input(ticket_id, input)
     }
 }
 
