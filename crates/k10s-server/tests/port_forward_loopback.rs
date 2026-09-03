@@ -515,6 +515,10 @@ async fn prior_minor_clients_use_legacy_service_shapes_and_never_see_pods() {
     .await;
     let current_service = receive_frame(&mut current).await;
     assert!(current_service.payload["session"].get("target").is_some());
+    let current_service_id = current_service.payload["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     request(
         &mut current,
         "current-pod",
@@ -538,8 +542,18 @@ async fn prior_minor_clients_use_legacy_service_shapes_and_never_see_pods() {
         current_pod.payload["session"]["target"]["kind"],
         json!("pod")
     );
+    let current_pod_id = current_pod.payload["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
-    let mut legacy = connect_with_minor(&server, k10s_protocol::PROTOCOL_MINOR - 1).await;
+    let (mut legacy, welcome) =
+        connect_with_minor_and_welcome(&server, k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR - 1)
+            .await;
+    assert_eq!(
+        welcome.payload["capabilities"],
+        json!(["service.portForward"])
+    );
     request(
         &mut legacy,
         "legacy-list",
@@ -553,6 +567,14 @@ async fn prior_minor_clients_use_legacy_service_shapes_and_never_see_pods() {
     assert!(legacy_service.get("service").is_some());
     assert_eq!(legacy_service["servicePort"], json!(80));
     assert!(legacy_service.get("target").is_none());
+    request(
+        &mut legacy,
+        "legacy-stop-pod",
+        REQUEST_PORT_FORWARD_STOP,
+        json!({"sessionId": current_pod_id}),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut legacy).await.kind, ServerKind::Error);
 
     legacy
         .send(Message::Text(
@@ -612,6 +634,38 @@ async fn prior_minor_clients_use_legacy_service_shapes_and_never_see_pods() {
     let session = &event.payload["payload"]["session"];
     assert_eq!(session["service"]["name"], json!("api-server"));
     assert!(session.get("target").is_none());
+
+    request(
+        &mut current,
+        "stop-retained-service",
+        REQUEST_PORT_FORWARD_STOP,
+        json!({"sessionId": current_service_id}),
+    )
+    .await;
+    let _ = receive_frame(&mut current).await;
+    request(
+        &mut legacy,
+        "legacy-terminal-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    let terminal_list = loop {
+        let frame = receive_frame(&mut legacy).await;
+        if frame.kind == ServerKind::Response {
+            break frame;
+        }
+    };
+    let retained = terminal_list.payload["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == json!(current_service_id))
+        .expect("stopped Service remains visible in legacy form");
+    assert_eq!(retained["state"], json!("stopped"));
+    assert!(retained.get("service").is_some());
+    assert!(retained.get("target").is_none());
+    assert!(retained.get("failure").is_none());
     server.shutdown().await.unwrap();
 }
 

@@ -8,6 +8,27 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Normalized wire profile that makes exact-frame replay safe.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ResumeProfile {
+    protocol_minor: u16,
+    capabilities: Vec<String>,
+}
+
+impl ResumeProfile {
+    /// Normalize negotiated wire-affecting properties for equality checks.
+    #[must_use]
+    pub(crate) fn new(protocol_minor: u16, capabilities: &[String]) -> Self {
+        let mut capabilities = capabilities.to_vec();
+        capabilities.sort_unstable();
+        capabilities.dedup();
+        Self {
+            protocol_minor,
+            capabilities,
+        }
+    }
+}
+
 /// One journaled frame: the exact wire text as sent, with its sequence.
 #[derive(Debug, Clone)]
 pub struct JournalEntry {
@@ -106,6 +127,7 @@ pub struct SessionState {
     pub(crate) lease_generation: u64,
     /// Wake channel for the transport currently holding this session.
     pub(crate) takeover_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    profile: Option<ResumeProfile>,
     last_activity: Instant,
 }
 
@@ -115,6 +137,7 @@ impl Default for SessionState {
             journal: SessionJournal::default(),
             lease_generation: 0,
             takeover_tx: None,
+            profile: None,
             last_activity: Instant::now(),
         }
     }
@@ -157,6 +180,7 @@ impl ResumeState {
     /// Atomically select a complete replay (when possible), capture its
     /// watermark, and transfer the transport lease. If resume is not safe, a
     /// bounded fresh session is created instead.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         &mut self,
@@ -168,6 +192,31 @@ impl ResumeState {
         takeover_tx: tokio::sync::oneshot::Sender<()>,
         replay_capacity: usize,
     ) -> Result<SessionClaim, ()> {
+        self.claim_with_profile(
+            hello_server_instance,
+            server_instance_id,
+            claimed_session,
+            last_acked_sequence,
+            fresh_session_id,
+            takeover_tx,
+            replay_capacity,
+            ResumeProfile::default(),
+        )
+    }
+
+    /// Claim a session only when its exact-frame wire profile matches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_profile(
+        &mut self,
+        hello_server_instance: Option<&str>,
+        server_instance_id: &str,
+        claimed_session: Option<&str>,
+        last_acked_sequence: Option<u64>,
+        fresh_session_id: String,
+        takeover_tx: tokio::sync::oneshot::Sender<()>,
+        replay_capacity: usize,
+        profile: ResumeProfile,
+    ) -> Result<SessionClaim, ()> {
         self.prune();
         if let (Some(instance), Some(session_id), Some(cursor)) =
             (hello_server_instance, claimed_session, last_acked_sequence)
@@ -175,6 +224,7 @@ impl ResumeState {
             && let Some(replay) = self
                 .sessions
                 .get(session_id)
+                .filter(|session| session.profile.as_ref() == Some(&profile))
                 .and_then(|session| session.journal.replay_from(cursor, self.max_age))
             && replay.len() <= replay_capacity
         {
@@ -199,6 +249,7 @@ impl ResumeState {
         let state = SessionState {
             lease_generation: 1,
             takeover_tx: Some(takeover_tx),
+            profile: Some(profile),
             ..SessionState::default()
         };
         self.sessions.insert(fresh_session_id.clone(), state);
@@ -246,7 +297,11 @@ impl ResumeState {
         message: &str,
     ) {
         if generation == 0 {
-            self.sessions.entry(session_id.to_owned()).or_default();
+            self.sessions
+                .entry(session_id.to_owned())
+                .or_default()
+                .profile
+                .get_or_insert_with(ResumeProfile::default);
         }
         if let Some(state) = self.sessions.get_mut(session_id)
             && state.lease_generation == generation
@@ -282,6 +337,66 @@ mod tests {
 
     fn store(max_entries: usize, max_age: Duration) -> ResumeState {
         ResumeState::new(max_entries, 64, max_age)
+    }
+
+    #[test]
+    fn resume_requires_the_same_normalized_negotiated_profile() {
+        let mut state = store(16, Duration::from_secs(30));
+        let current = ResumeProfile::new(
+            k10s_protocol::PROTOCOL_MINOR,
+            &["pod.portForward".into(), "service.portForward".into()],
+        );
+        let (tx, _) = tokio::sync::oneshot::channel();
+        let first = state
+            .claim_with_profile(None, "i", None, None, "s".into(), tx, 16, current.clone())
+            .unwrap();
+        state.record_frame(
+            "s",
+            first.lease_generation,
+            1,
+            r#"{"kind":"event","sequence":"1","payload":{"kind":"portForward.session","payload":{"session":{"target":{"kind":"pod"}}}}}"#,
+        );
+        state.record_frame(
+            "s",
+            first.lease_generation,
+            2,
+            r#"{"kind":"event","sequence":"2","payload":{"kind":"portForward.session","payload":{"session":{"target":{"kind":"service"}}}}}"#,
+        );
+        state.release_lease("s", first.lease_generation);
+
+        for (fresh_id, profile) in [
+            (
+                "downgrade",
+                ResumeProfile::new(
+                    k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR - 1,
+                    &["service.portForward".into()],
+                ),
+            ),
+            (
+                "reduced",
+                ResumeProfile::new(
+                    k10s_protocol::PROTOCOL_MINOR,
+                    &["service.portForward".into()],
+                ),
+            ),
+        ] {
+            let (tx, _) = tokio::sync::oneshot::channel();
+            let claim = state
+                .claim_with_profile(
+                    Some("i"),
+                    "i",
+                    Some("s"),
+                    Some(0),
+                    fresh_id.into(),
+                    tx,
+                    16,
+                    profile,
+                )
+                .unwrap();
+            assert!(!claim.resumed);
+            assert!(claim.replay.is_empty());
+            state.release_lease(&claim.session_id, claim.lease_generation);
+        }
     }
 
     #[test]

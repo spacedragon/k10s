@@ -264,12 +264,14 @@ pub(crate) async fn serve_socket(
         }
     };
     drop(unauthenticated);
+    let resume_profile =
+        crate::resume::ResumeProfile::new(negotiated.protocol.minor, &negotiated.capabilities);
     let (takeover_tx, mut takeover_rx) = tokio::sync::oneshot::channel();
     let claim_result = {
         let mut state = resume
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.claim(
+        state.claim_with_profile(
             hello.server_instance_id.as_deref(),
             kernel.server_instance_id(),
             hello.session_id.as_ref().map(SessionId::as_str),
@@ -277,6 +279,7 @@ pub(crate) async fn serve_socket(
             uuid::Uuid::new_v4().to_string(),
             takeover_tx,
             config.outbound_queue_capacity.saturating_sub(1),
+            resume_profile,
         )
     };
     let claim = match claim_result {

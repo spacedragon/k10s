@@ -224,7 +224,7 @@ impl PortForwardManager {
         };
         let resolved = match self.connector.resolve(request).await {
             Ok(resolved) => resolved,
-            Err(error) => return Err(Self::map_backend_error(error)),
+            Err(error) => return Err(Self::map_backend_error(error, &target)),
         };
         let target_key = TargetKey::from_resolved(&target, &resolved);
 
@@ -372,20 +372,29 @@ impl PortForwardManager {
             guard.pumps.close();
             guard.accept_task.take()
         };
-        Self::join_session_tasks(accept_handle, &inner).await;
-        let snapshot = {
-            let state = self.state.lock().await;
-            let mut guard = inner.lock().await;
-            let _publication = self.publication.gate.lock().await;
-            guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
+        // Once mutation begins, an owned task completes teardown and
+        // publication even if the requesting socket disconnects and drops
+        // this future while it is awaiting the result.
+        let state = Arc::clone(&self.state);
+        let publication = Arc::clone(&self.publication);
+        let finalizer_inner = Arc::clone(&inner);
+        let finalizer = tokio::spawn(async move {
+            Self::join_session_tasks(accept_handle, &finalizer_inner).await;
+            let state = state.lock().await;
+            let mut guard = finalizer_inner.lock().await;
+            let _publication = publication.gate.lock().await;
+            guard.revision = publication.next.fetch_add(1, Ordering::AcqRel);
             let snapshot = snapshot_of(&guard);
             let _ = state.events_tx.send(PortForwardSessionEvent {
                 revision: snapshot.revision,
                 session: snapshot.clone(),
             });
             snapshot
-        };
-        StopOutcome::Stopped(snapshot)
+        });
+        match finalizer.await {
+            Ok(snapshot) => StopOutcome::Stopped(snapshot),
+            Err(_) => StopOutcome::AlreadyTerminal,
+        }
     }
 
     /// Join one session's accept loop and pump tracker with no lock held.
@@ -432,6 +441,34 @@ impl PortForwardManager {
         }?;
         let guard = inner.lock().await;
         Some(snapshot_of(&guard))
+    }
+
+    /// Retry a retained failed row using its recorded target and requested
+    /// local port. The failed snapshot remains immutable; success creates a
+    /// distinct active session and failure leaves the old row untouched.
+    pub async fn retry_failed(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PortForwardSession>, StartRejected> {
+        let retry = {
+            let inner = {
+                let state = self.state.lock().await;
+                state.sessions.get(session_id).cloned()
+            };
+            let Some(inner) = inner else {
+                return Ok(None);
+            };
+            let guard = inner.lock().await;
+            if guard.state != PortForwardSessionState::Failed {
+                return Ok(None);
+            }
+            (guard.target.clone(), guard.requested_local_port)
+        };
+        let context = match &retry.0 {
+            PortForwardTarget::Service { identity, .. }
+            | PortForwardTarget::Pod { identity, .. } => identity.context.clone(),
+        };
+        self.start(retry.0, retry.1, context).await.map(Some)
     }
 
     /// Capture retained sessions together with a manager-global watermark.
@@ -483,10 +520,7 @@ impl PortForwardManager {
                 continue;
             }
             guard.state = PortForwardSessionState::Stopped;
-            guard.failure = Some(PortForwardFailure {
-                category: PortForwardFailureCategory::ContextTransition,
-                message: "the context switched while the forward was active".into(),
-            });
+            guard.failure = None;
             guard.terminal_at = Some(tokio::time::Instant::now());
             let _publication = self.publication.gate.lock().await;
             guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
@@ -628,7 +662,7 @@ impl PortForwardManager {
         }
     }
 
-    fn map_backend_error(error: BackendError) -> StartRejected {
+    fn map_backend_error(error: BackendError, target: &PortForwardTarget) -> StartRejected {
         match error {
             BackendError::PortForward { category, message } => StartRejected {
                 category: match category {
@@ -653,10 +687,16 @@ impl PortForwardManager {
                 },
                 message,
             },
-            BackendError::NotFound => StartRejected::new(
-                PortForwardFailureCategory::VanishedResource,
-                "the service does not exist",
-            ),
+            BackendError::NotFound => {
+                let kind = match target {
+                    PortForwardTarget::Service { .. } => "service",
+                    PortForwardTarget::Pod { .. } => "pod",
+                };
+                StartRejected::new(
+                    PortForwardFailureCategory::VanishedResource,
+                    format!("the {kind} does not exist"),
+                )
+            }
             BackendError::Forbidden => StartRejected::new(
                 PortForwardFailureCategory::Forbidden,
                 "kubernetes authorization denied the forward",
@@ -950,21 +990,37 @@ async fn record_open_failure(
     if guard.open_failures < OPEN_FAILURE_THRESHOLD {
         return;
     }
-    guard.state = PortForwardSessionState::Failed;
-    guard.failure = Some(PortForwardFailure {
-        category: PortForwardFailureCategory::UnavailableEndpoint,
-        message: "the pinned endpoint stopped accepting streams".into(),
-    });
-    guard.terminal_at = Some(tokio::time::Instant::now());
+    // Stop accepting immediately, but do not publish Failed until every
+    // listener/pump task (including this pump) has left and the local port is
+    // reusable. `Stopping` is internal here and is not published.
+    guard.state = PortForwardSessionState::Stopping;
+    guard.failure = None;
+    guard.terminal_at = None;
     guard.cancel.cancel();
     guard.pumps.close();
-    if let Some(handle) = guard.accept_task.take() {
-        handle.abort();
-    }
-    let _publication = publication.gate.lock().await;
-    guard.revision = publication.next.fetch_add(1, Ordering::AcqRel);
-    let _ = events_tx.send(PortForwardSessionEvent {
-        revision: guard.revision,
-        session: snapshot_of(&guard),
+    let accept_handle = guard.accept_task.take();
+    drop(guard);
+
+    let finalizer_session = Arc::clone(session);
+    let finalizer_events = events_tx.clone();
+    tokio::spawn(async move {
+        PortForwardManager::join_session_tasks(accept_handle, &finalizer_session).await;
+        let mut guard = finalizer_session.lock().await;
+        // An explicit Stop may have won while failure teardown drained.
+        if guard.state != PortForwardSessionState::Stopping {
+            return;
+        }
+        guard.state = PortForwardSessionState::Failed;
+        guard.failure = Some(PortForwardFailure {
+            category: PortForwardFailureCategory::UnavailableEndpoint,
+            message: "the pinned endpoint stopped accepting streams".into(),
+        });
+        guard.terminal_at = Some(tokio::time::Instant::now());
+        let _publication = publication.gate.lock().await;
+        guard.revision = publication.next.fetch_add(1, Ordering::AcqRel);
+        let _ = finalizer_events.send(PortForwardSessionEvent {
+            revision: guard.revision,
+            session: snapshot_of(&guard),
+        });
     });
 }

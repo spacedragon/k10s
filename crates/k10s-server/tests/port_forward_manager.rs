@@ -494,6 +494,122 @@ async fn failed_snapshot_is_retained_and_does_not_block_a_new_start() {
 }
 
 #[tokio::test]
+async fn retained_failed_session_retries_its_recorded_target_and_explicit_port() {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let requested_port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let seam = ScriptedSeam::new(&["web-pod"]);
+    let failures = seam.failure_switch();
+    let (manager, _) = manager_for(seam).await;
+    let mut events = manager.subscribe().await;
+    let original = manager
+        .start(
+            pod_target("web-pod", "app", 8_080),
+            requested_port,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    failures.store(true, std::sync::atomic::Ordering::Release);
+    let addr: std::net::SocketAddr = original.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        tokio::net::TcpStream::connect(addr).await.unwrap();
+    }
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if event.session.id == original.id && event.session.state == PortForwardSessionState::Failed
+        {
+            break;
+        }
+    }
+    failures.store(false, std::sync::atomic::Ordering::Release);
+
+    let retried = manager
+        .retry_failed(original.id.as_str())
+        .await
+        .expect("retry can start")
+        .expect("the retained row is failed");
+    assert_ne!(retried.id, original.id);
+    assert_eq!(retried.requested_local_port, requested_port);
+    assert_eq!(retried.local_addr, format!("127.0.0.1:{requested_port}"));
+    assert!(manager.list().await.iter().any(|session| {
+        session.id == original.id && session.state == PortForwardSessionState::Failed
+    }));
+}
+
+#[tokio::test]
+async fn cancelled_stop_still_joins_and_publishes_its_terminal_revision() {
+    let seam = ScriptedSeam::new(&["web"]);
+    let mut peers = seam.add_peer_channel().await;
+    let (manager, _) = manager_for(seam).await;
+    let session = manager
+        .start(
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    let mut events = manager.subscribe().await;
+    let addr: std::net::SocketAddr = session.local_addr.parse().unwrap();
+    let mut local = tokio::net::TcpStream::connect(addr).await.unwrap();
+    local.write_all(b"x").await.unwrap();
+    let mut upstream = peers.recv().await.unwrap();
+    upstream.read_exact(&mut [0_u8; 1]).await.unwrap();
+
+    let stop_manager = manager.clone();
+    let session_id = session.id.clone();
+    let stop = tokio::spawn(async move { stop_manager.stop(session_id.as_str()).await });
+    loop {
+        if manager
+            .session(session.id.as_str())
+            .await
+            .is_some_and(|snapshot| snapshot.state == PortForwardSessionState::Stopped)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    stop.abort();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("owned finalization publishes after caller cancellation")
+        .unwrap();
+    assert_eq!(event.session.id, session.id);
+    assert_eq!(event.session.state, PortForwardSessionState::Stopped);
+    assert!(event.revision > session.revision);
+    assert!(tokio::net::TcpListener::bind(addr).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_snapshots_expire_from_authoritative_lists() {
+    let seam = ScriptedSeam::new(&["web-pod"]);
+    let failures = seam.failure_switch();
+    let (manager, _) = manager_for(seam).await;
+    let mut events = manager.subscribe().await;
+    let failed = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .unwrap();
+    failures.store(true, std::sync::atomic::Ordering::Release);
+    let addr: std::net::SocketAddr = failed.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        tokio::net::TcpStream::connect(addr).await.unwrap();
+    }
+    while events.recv().await.unwrap().session.state != PortForwardSessionState::Failed {}
+    assert_eq!(manager.list().await.len(), 1);
+    tokio::time::advance(
+        PortForwardManager::TERMINAL_RETENTION + std::time::Duration::from_secs(1),
+    )
+    .await;
+    assert!(manager.list().await.is_empty());
+}
+
+#[tokio::test]
 async fn stop_is_idempotent_and_data_flows_bidirectionally() {
     let seam = ScriptedSeam::new(&["web"]);
     let mut peers = seam.add_peer_channel().await;
@@ -567,6 +683,7 @@ async fn context_transition_stops_every_session_and_advances_the_epoch_once() {
             .iter()
             .all(|session| session.state == PortForwardSessionState::Stopped)
     );
+    assert!(retained.iter().all(|session| session.failure.is_none()));
     while events.try_recv().is_ok() {}
 
     // Starts carrying the retired context abort without binding anything.
