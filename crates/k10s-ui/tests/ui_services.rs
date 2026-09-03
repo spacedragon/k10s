@@ -6,10 +6,10 @@
 use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable as _};
 use k10s_protocol::{
-    BackendRevision, GroupVersionKind, PortForwardPodTarget, PortForwardSession,
-    PortForwardSessionId, PortForwardSessionState, ResourceCapabilities, ResourceDetailResponse,
-    ResourceIdentity, ResourceListRow, ResourceProjection, ServicePort, ServiceProjection,
-    TargetPort, TransportProtocol,
+    BackendRevision, GroupVersionKind, PortForwardPodTarget, PortForwardPortSelector,
+    PortForwardSession, PortForwardSessionId, PortForwardSessionState, PortForwardTarget,
+    ResourceCapabilities, ResourceDetailResponse, ResourceIdentity, ResourceListRow,
+    ResourceProjection, ServicePort, ServiceProjection, TargetPort, TransportProtocol,
 };
 use k10s_ui::{
     ui::{
@@ -1080,8 +1080,11 @@ fn port_forward_start_requires_live_loaded_service_authority() {
         );
         harness.state_mut().feed.port_forward_sessions = vec![PortForwardSession {
             id: PortForwardSessionId::try_new("existing").unwrap(),
-            service: service_identity("web-frontend"),
-            service_port: 80,
+            target: PortForwardTarget::Service {
+                identity: service_identity("web-frontend"),
+                port: PortForwardPortSelector::Number { number: 80 },
+            },
+            requested_local_port: 18_080,
             pod: PortForwardPodTarget {
                 namespace: "default".into(),
                 name: "web-0".into(),

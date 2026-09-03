@@ -1,23 +1,23 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use k10s_protocol::{
-    Ack, BackendRevision, BootstrapResponse, CAPABILITY_SERVICE_PORT_FORWARD, CancelRequest,
-    ClientFrame, ClientKind, DeletePropagation, DeleteRequest, ErrorCode, ErrorFrame, ErrorScope,
-    Hello, INFRASTRUCTURE_EVENT_UPDATED, InfrastructureRequest, InfrastructureResponse,
-    InfrastructureWatchSpec, OperationAccepted, OperationId, OperationProgress, OperationStatus,
-    OperationStatusRequest, OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PROTOCOL_MAJOR,
-    PROTOCOL_MINOR, PortForwardListResponse, PortForwardSession, PortForwardSessionEvent,
-    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
-    PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse,
-    REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
-    REQUEST_RESOURCE_RELATIONS, RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId,
-    ResourceDetailResponse, ResourceIdentity, ResourceListRequest, ResourceListResponse,
-    ResourceListRow, ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse,
-    ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
-    ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, Subscribe, SubscriptionId, SubscriptionSelector, TRAFFIC_EVENT_UPDATED,
-    TrafficSample, TrafficWatchSpec, Unsubscribe, YamlApplyRequest, YamlOutcome,
-    YamlValidateRequest,
+    Ack, BackendRevision, BootstrapResponse, CAPABILITY_POD_PORT_FORWARD,
+    CAPABILITY_SERVICE_PORT_FORWARD, CancelRequest, ClientFrame, ClientKind, DeletePropagation,
+    DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED,
+    InfrastructureRequest, InfrastructureResponse, InfrastructureWatchSpec, OperationAccepted,
+    OperationId, OperationProgress, OperationStatus, OperationStatusRequest,
+    OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    PortForwardListResponse, PortForwardSession, PortForwardSessionEvent, PortForwardSessionId,
+    PortForwardSessionState, PortForwardStartRequest, PortForwardStartResponse,
+    PortForwardStopRequest, PortForwardStopResponse, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
+    REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP, REQUEST_RESOURCE_RELATIONS,
+    RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
+    ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
+    ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse, ResourceTypesRequest,
+    ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest, ServerFrame, ServerKind,
+    ServerPayload, SessionId, StreamTarget, StreamTicketRequest, StreamTicketResponse, StreamType,
+    Subscribe, SubscriptionId, SubscriptionSelector, TRAFFIC_EVENT_UPDATED, TrafficSample,
+    TrafficWatchSpec, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -1072,9 +1072,9 @@ impl ClientState {
         Ok(LiveSubscription { id })
     }
 
-    /// Whether the negotiated bootstrap advertises desktop port forwarding.
+    /// Whether the negotiated bootstrap advertises Service port forwarding.
     #[must_use]
-    pub fn port_forward_available(&self) -> bool {
+    pub fn service_port_forward_available(&self) -> bool {
         self.server_bootstrap.as_ref().is_some_and(|bootstrap| {
             bootstrap
                 .capabilities
@@ -1083,11 +1083,34 @@ impl ClientState {
         })
     }
 
+    /// Whether the negotiated bootstrap advertises Pod port forwarding.
+    #[must_use]
+    pub fn pod_port_forward_available(&self) -> bool {
+        self.server_bootstrap.as_ref().is_some_and(|bootstrap| {
+            bootstrap
+                .capabilities
+                .iter()
+                .any(|capability| capability == CAPABILITY_POD_PORT_FORWARD)
+        })
+    }
+
+    /// Whether either supported port-forward target is available.
+    #[must_use]
+    pub fn any_port_forward_available(&self) -> bool {
+        self.service_port_forward_available() || self.pod_port_forward_available()
+    }
+
+    /// Backward-compatible Service capability helper.
+    #[must_use]
+    pub fn port_forward_available(&self) -> bool {
+        self.service_port_forward_available()
+    }
+
     /// Subscribe to the bounded `portForwardSessions` snapshot stream.
     pub fn subscribe_port_forward_sessions(
         &mut self,
     ) -> Result<Option<LiveSubscription>, ClientError> {
-        if !self.port_forward_available() {
+        if !self.any_port_forward_available() {
             return Ok(None);
         }
         if let Some(id) = self.port_forward_subscribed.clone() {
@@ -1113,7 +1136,11 @@ impl ClientState {
         request: PortForwardStartRequest,
         _request_id: impl Into<String>,
     ) -> Result<(), ClientError> {
-        if !self.port_forward_available() {
+        let available = match request.target() {
+            PortForwardTarget::Service { .. } => self.service_port_forward_available(),
+            PortForwardTarget::Pod { .. } => self.pod_port_forward_available(),
+        };
+        if !available {
             return Err(ClientError::InvalidState(
                 "port forwarding is not available on this server",
             ));
@@ -1168,20 +1195,15 @@ impl ClientState {
                 if response.revision < self.port_forward_revision {
                     return Ok(());
                 }
-                // Reconstruction replaces state wholesale. Terminal rows
-                // advance the watermark but are not live controls: removing
-                // them restores Start/Retry immediately.
+                // Reconstruction replaces state wholesale. The server owns
+                // terminal retention, so stopped and failed rows remain until
+                // a later authoritative list omits them.
                 self.port_forward_sessions.clear();
                 let mut max_revision = response.revision;
                 for session in response.sessions {
                     max_revision = max_revision.max(session.revision);
-                    if !matches!(
-                        session.state,
-                        PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-                    ) {
-                        self.port_forward_sessions
-                            .insert(session.id.as_str().to_owned(), session);
-                    }
+                    self.port_forward_sessions
+                        .insert(session.id.as_str().to_owned(), session);
                 }
                 self.port_forward_revision = max_revision;
                 Ok(())
@@ -1204,15 +1226,8 @@ impl ClientState {
             return; // stale, reordered, or duplicated delivery
         }
         self.port_forward_revision = session.revision;
-        if matches!(
-            session.state,
-            PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-        ) {
-            self.port_forward_sessions.remove(session.id.as_str());
-        } else {
-            self.port_forward_sessions
-                .insert(session.id.as_str().to_owned(), session);
-        }
+        self.port_forward_sessions
+            .insert(session.id.as_str().to_owned(), session);
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -1769,13 +1784,8 @@ impl ClientState {
                         let mut max_revision = response.revision;
                         for session in &response.sessions {
                             max_revision = max_revision.max(session.revision);
-                            if !matches!(
-                                session.state,
-                                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
-                            ) {
-                                self.port_forward_sessions
-                                    .insert(session.id.as_str().to_owned(), session.clone());
-                            }
+                            self.port_forward_sessions
+                                .insert(session.id.as_str().to_owned(), session.clone());
                         }
                         self.port_forward_revision = max_revision;
                     }

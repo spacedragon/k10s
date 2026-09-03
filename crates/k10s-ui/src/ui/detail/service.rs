@@ -264,7 +264,19 @@ fn ports_tab<I: RowIdentity>(
             continue;
         };
         let session = presentation.port_forward_sessions.iter().find(|session| {
-            session.service.uid == service.uid && session.service_port == port.service_port
+            matches!(
+                &session.target,
+                k10s_protocol::PortForwardTarget::Service { identity, port: selector }
+                    if identity.uid == service.uid
+                        && match selector {
+                            k10s_protocol::PortForwardPortSelector::Name { name } => {
+                                port.name.as_ref() == Some(name)
+                            }
+                            k10s_protocol::PortForwardPortSelector::Number { number } => {
+                                *number == port.service_port
+                            }
+                        }
+            )
         });
         if let Some(session) = session {
             ui.label(format!(

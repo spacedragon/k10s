@@ -534,10 +534,28 @@ impl K10sApp {
         self.reconcile_selected_resource_streams();
     }
 
-    /// Whether the authenticated server negotiated desktop Service port forwarding.
+    /// Whether the authenticated server negotiated Service port forwarding.
     #[must_use]
     pub fn port_forward_available(&self) -> bool {
-        self.client.port_forward_available()
+        self.service_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated Service port forwarding.
+    #[must_use]
+    pub fn service_port_forward_available(&self) -> bool {
+        self.client.service_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated Pod port forwarding.
+    #[must_use]
+    pub fn pod_port_forward_available(&self) -> bool {
+        self.client.pod_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated either port-forward target.
+    #[must_use]
+    pub fn any_port_forward_available(&self) -> bool {
+        self.client.any_port_forward_available()
     }
 
     pub fn set_external_shell_availability(
@@ -645,11 +663,16 @@ impl K10sApp {
                     service,
                     port,
                     local_port,
-                } => Query::PortForwardStart(k10s_protocol::PortForwardStartRequest {
-                    service,
-                    port,
-                    local_port,
-                }),
+                } => {
+                    let Ok(request) = k10s_protocol::PortForwardStartRequest::try_service(
+                        service, port, local_port,
+                    ) else {
+                        self.port_forward_error =
+                            Some("The selected Service port is no longer valid".into());
+                        continue;
+                    };
+                    Query::PortForwardStart(request)
+                }
                 crate::ui::PortForwardAction::Stop(id) => {
                     match k10s_protocol::PortForwardSessionId::try_new(id) {
                         Ok(id) => Query::PortForwardStop(id),
@@ -1723,7 +1746,7 @@ impl K10sApp {
                             });
                     }
                     self.recovering = false;
-                    if self.client.port_forward_available() {
+                    if self.client.any_port_forward_available() {
                         let _ = self
                             .client
                             .subscribe_port_forward_sessions()
