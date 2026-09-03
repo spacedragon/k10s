@@ -24,14 +24,6 @@ fn set_empty_overview_lists(server: &RecordedApiServer) {
             r#"{"apiVersion":"v1","kind":"PodList","items":[]}"#,
         ),
         (
-            "/api/v1/services",
-            r#"{"apiVersion":"v1","kind":"ServiceList","items":[{"metadata":{"name":"api","namespace":"default","uid":"svc-1"},"spec":{"clusterIP":"10.0.0.1"}}]}"#,
-        ),
-        (
-            "/api/v1/configmaps",
-            r#"{"apiVersion":"v1","kind":"ConfigMapList","items":[{"metadata":{"name":"settings","namespace":"default","uid":"cm-1"}}]}"#,
-        ),
-        (
             "/apis/apps/v1/deployments",
             r#"{"apiVersion":"apps/v1","kind":"DeploymentList","items":[]}"#,
         ),
@@ -122,8 +114,8 @@ async fn infrastructure_query_lists_bound_pvc_capacity_and_storage_class() {
         response.totals.persistent_storage_bytes,
         (1 << 30) + 500_000_000 + 1_000
     );
-    assert_eq!(response.launcher.network, 1);
-    assert_eq!(response.launcher.config, 1);
+    assert_eq!(response.launcher.network, 0);
+    assert_eq!(response.launcher.config, 0);
     assert_eq!(response.launcher.storage, 6);
 }
 

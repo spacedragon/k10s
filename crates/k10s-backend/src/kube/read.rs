@@ -51,6 +51,65 @@ pub(crate) async fn list_resource(
     Ok(ListRead { rows })
 }
 
+/// Run one one-off metadata-only LIST against the cluster.
+///
+/// Uses `api.list_metadata` which sends
+/// `Accept: application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1`,
+/// avoiding giant spec, data, and managedFields payloads on large clusters.
+pub(crate) async fn list_infrastructure_resource(
+    client: &kube::Client,
+    context: &str,
+    gvk: &Gvk,
+    plural: &str,
+    namespaced: bool,
+    namespace: Option<&str>,
+) -> Result<ListRead, BackendError> {
+    use kube::ResourceExt;
+
+    let api = dynamic_api(
+        client.clone(),
+        gvk.clone(),
+        plural.to_owned(),
+        namespaced,
+        namespace.map(str::to_owned),
+    );
+    let listed = api
+        .list_metadata(&ListParams::default())
+        .await
+        .map_err(sanitize_read_list_error)?;
+    let rows = listed
+        .items
+        .iter()
+        .map(|object| {
+            let name = object.name_any();
+            let uid = object
+                .uid()
+                .unwrap_or_else(|| format!("uid-{}-{}", gvk.kind.to_lowercase(), name));
+            let namespace = object
+                .namespace()
+                .or_else(|| namespaced.then(|| namespace.map(str::to_owned)).flatten());
+            WatchRow {
+                reference: ResourceRef {
+                    context: context.to_owned(),
+                    gvk: gvk.clone(),
+                    namespace,
+                    name,
+                    uid,
+                },
+                labels: object.labels().clone(),
+                summary: String::new(),
+                created_at: object
+                    .creation_timestamp()
+                    .map(|time| time.0.to_string())
+                    .unwrap_or_default(),
+                owner_references: Vec::new(),
+                projection: None,
+            }
+        })
+        .collect();
+    Ok(ListRead { rows })
+}
+
 /// One normalized GET result for an exact object identity.
 pub(crate) struct DetailRead {
     /// The object's normalized view-model row.

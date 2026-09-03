@@ -213,6 +213,9 @@ impl CatalogSnapshot {
             .iter()
             .filter_map(|claim| crate::kube::metrics::quantity_bytes(Some(claim.capacity.clone())))
             .fold(0, u64::saturating_add);
+        let launcher_storage = (storage.persistent_volume_claims.len()
+            + storage.persistent_volumes.len()
+            + storage.storage_classes.len()) as u32;
         let mut workload_health = Vec::new();
         if healthy_workloads > 0 {
             workload_health.push(CatalogHealth {
@@ -288,11 +291,7 @@ impl CatalogSnapshot {
                 workloads,
                 network: count_kinds(&["Service", "Ingress", "Endpoints", "NetworkPolicy"]),
                 config: count_kinds(&["ConfigMap", "Secret"]),
-                storage: count_kinds(&[
-                    "PersistentVolumeClaim",
-                    "PersistentVolume",
-                    "StorageClass",
-                ]),
+                storage: launcher_storage,
                 access: count_kinds(&["ServiceAccount", "Role", "RoleBinding"]),
             },
         }

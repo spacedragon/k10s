@@ -1357,14 +1357,6 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
             ]}"#,
         ),
         (
-            "/api/v1/services",
-            r#"{"kind":"ServiceList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[]}"#,
-        ),
-        (
-            "/api/v1/configmaps",
-            r#"{"kind":"ConfigMapList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[]}"#,
-        ),
-        (
             "/apis/apps/v1/deployments",
             r#"{"kind":"DeploymentList","apiVersion":"apps/v1","metadata":{"resourceVersion":"3"},"items":[
               {"metadata":{"name":"api","namespace":"default","uid":"uid-api","creationTimestamp":"2026-08-27T00:00:00Z"},"spec":{"replicas":2},"status":{"readyReplicas":2}}
@@ -1423,6 +1415,16 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
     for (path, _) in lists {
         assert_eq!(server.hit_count(path), 1, "overview must list {path}");
     }
+    assert_eq!(
+        server.hit_count("/api/v1/services"),
+        0,
+        "overview must not list services"
+    );
+    assert_eq!(
+        server.hit_count("/api/v1/configmaps"),
+        0,
+        "overview must not list configmaps"
+    );
 
     kernel
         .subscribe(Subscribe::Infrastructure {

@@ -811,9 +811,13 @@ impl K10sApp {
                 Ok(())
             };
             bootstrap.and_then(|()| {
-                selected_after
-                    .as_deref()
-                    .map_or(Ok(()), |context| self.refresh_infrastructure(context))
+                selected_after.as_deref().map_or(Ok(()), |context| {
+                    if self.infrastructure_demanded() {
+                        self.refresh_infrastructure(context)
+                    } else {
+                        Ok(())
+                    }
+                })
             })
         } else {
             Ok(())
@@ -2122,7 +2126,33 @@ impl K10sApp {
         }
     }
 
+    fn infrastructure_demanded(&self) -> bool {
+        self.shell.workspace().windows().iter().any(|window| {
+            matches!(
+                window.kind,
+                crate::workspace::WindowKind::Overview
+                    | crate::workspace::WindowKind::Nodes
+                    | crate::workspace::WindowKind::Storage
+            )
+        })
+    }
+
     fn select_infrastructure_context(&mut self, context: &str) -> Result<(), ClientError> {
+        if !self.infrastructure_demanded() {
+            if let Some(subscription) = self.infrastructure_subscription.take() {
+                self.client.unsubscribe(&subscription)?;
+            }
+            if let Some(request) = self.infrastructure_request.take() {
+                if self.client.is_pending(&request) {
+                    self.client.cancel(&request)?;
+                } else {
+                    let _ = self.client.take(request.clone());
+                    let _ = self.client.take_failure(request);
+                }
+            }
+            self.infrastructure_context = None;
+            return Ok(());
+        }
         if self.infrastructure_context.as_deref() != Some(context) {
             if let Some(subscription) = self.infrastructure_subscription.take() {
                 self.client.unsubscribe(&subscription)?;
@@ -2130,8 +2160,9 @@ impl K10sApp {
             self.infrastructure_subscription =
                 Some(self.client.subscribe_infrastructure(context.to_owned())?);
             self.infrastructure_context = Some(context.to_owned());
+            self.refresh_infrastructure(context)?;
         }
-        self.refresh_infrastructure(context)
+        Ok(())
     }
 
     fn select_traffic_context(&mut self, context: &str) -> Result<(), ClientError> {
@@ -2858,6 +2889,29 @@ impl K10sApp {
             }
             self.resource_types.clear();
             self.types_context = None;
+        }
+
+        if self.infrastructure_demanded() {
+            if matches!(self.view, AppView::Ready { .. })
+                && self.client.phase() == ClientPhase::Ready
+                && self.infrastructure_context.as_deref() != Some(context)
+                && self.infrastructure_load != InfrastructureLoad::Unavailable
+            {
+                self.select_infrastructure_context(context)?;
+            }
+        } else {
+            if let Some(subscription) = self.infrastructure_subscription.take() {
+                self.client.unsubscribe(&subscription)?;
+            }
+            if let Some(request) = self.infrastructure_request.take() {
+                if self.client.is_pending(&request) {
+                    let _ = self.client.cancel(&request);
+                } else {
+                    let _ = self.client.take(request.clone());
+                    let _ = self.client.take_failure(request);
+                }
+            }
+            self.infrastructure_context = None;
         }
         Ok(())
     }
@@ -3917,6 +3971,13 @@ impl K10sApp {
         self.revoke_external_shell();
         self.teardown_stream_sessions();
         self.reset_port_forward_ui(Some("Connection lost; submit again"));
+        if let Some(subscription) = self.infrastructure_subscription.take() {
+            let _ = self.client.unsubscribe(&subscription);
+        }
+        if let Some(request) = self.infrastructure_request.take() {
+            let _ = self.client.cancel(&request);
+        }
+        self.infrastructure_context = None;
         self.view = AppView::Failed { message };
     }
 
@@ -5973,6 +6034,180 @@ mod tests {
             super::InfrastructureLoad::Unavailable
         );
         assert!(app.client.retry_schedule().is_some());
+    }
+
+    #[test]
+    fn infrastructure_demand_driven_lifecycle_close_and_reopen() {
+        use crate::workspace::{LauncherItem, WindowKind, WorkspaceCommand};
+
+        let (mut app, _) = ready_app();
+        assert!(app.infrastructure_demanded());
+        assert!(app.infrastructure_subscription.is_some());
+        assert_eq!(app.infrastructure_context.as_deref(), Some("dev-local"));
+
+        // Close Overview window (only window open by default)
+        let overview_window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Overview)
+            .map(|w| w.id)
+            .expect("overview window exists");
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(overview_window));
+        assert!(!app.infrastructure_demanded());
+
+        app.reconcile_selected_resource_streams();
+        assert!(
+            app.infrastructure_subscription.is_none(),
+            "closing overview must unsubscribe infrastructure"
+        );
+        assert!(
+            app.infrastructure_request.is_none(),
+            "closing overview must cancel pending infrastructure request"
+        );
+        assert!(
+            app.infrastructure_context.is_none(),
+            "closing overview must clear infrastructure context"
+        );
+
+        // Re-open Overview window via launcher
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Overview,
+            ));
+        assert!(app.infrastructure_demanded());
+
+        app.reconcile_selected_resource_streams();
+        assert!(
+            app.infrastructure_subscription.is_some(),
+            "reopening overview must subscribe infrastructure on demand"
+        );
+        assert!(
+            app.infrastructure_request.is_some(),
+            "reopening overview must initiate snapshot request on demand"
+        );
+        assert_eq!(
+            app.infrastructure_context.as_deref(),
+            Some("dev-local"),
+            "infrastructure context is re-established"
+        );
+    }
+
+    #[test]
+    fn infrastructure_demand_driven_nodes_and_storage_windows() {
+        use crate::workspace::{LauncherItem, WindowKind, WorkspaceCommand};
+
+        let (mut app, _) = ready_app();
+
+        // Close overview
+        let overview = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Overview)
+            .map(|w| w.id)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
+        app.reconcile_selected_resource_streams();
+        assert!(!app.infrastructure_demanded());
+        assert!(app.infrastructure_subscription.is_none());
+
+        // Open Nodes window
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
+        assert!(app.infrastructure_demanded());
+        app.reconcile_selected_resource_streams();
+        assert!(app.infrastructure_subscription.is_some());
+        assert_eq!(app.infrastructure_context.as_deref(), Some("dev-local"));
+
+        // Close Nodes window and open Storage window
+        let nodes = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Nodes)
+            .map(|w| w.id)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(nodes));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+                LauncherItem::Storage,
+            ));
+        assert!(app.infrastructure_demanded());
+        app.reconcile_selected_resource_streams();
+        assert!(app.infrastructure_subscription.is_some());
+
+        // Close Storage window: no infrastructure demanded
+        let storage = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Storage)
+            .map(|w| w.id)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(storage));
+        assert!(!app.infrastructure_demanded());
+        app.reconcile_selected_resource_streams();
+        assert!(app.infrastructure_subscription.is_none());
+    }
+
+    #[test]
+    fn connect_without_infrastructure_windows_never_queries_or_subscribes() {
+        use crate::workspace::{WindowKind, WorkspaceCommand};
+
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&ServerFrame::response(
+                    RequestId::from_u128(1),
+                    BootstrapResponse::fixture(),
+                )),
+            ]),
+            overflowed: false,
+        }]);
+
+        // Close Overview window before connecting/readying
+        let overview = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Overview)
+            .map(|w| w.id)
+            .unwrap();
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(overview));
+        assert!(!app.infrastructure_demanded());
+
+        // Connect and process bootstrap response
+        app.poll_at(100, 0);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+
+        // Verify that NO infrastructure.get request was sent
+        let requests: Vec<_> = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| frame.kind == ClientKind::Request)
+            .filter_map(request_kind)
+            .collect();
+        assert_eq!(
+            requests,
+            ["bootstrap"],
+            "when no infrastructure window is open, only bootstrap is sent"
+        );
+        assert!(app.infrastructure_subscription.is_none());
+        assert!(app.infrastructure_request.is_none());
+        assert!(app.infrastructure_context.is_none());
     }
 
     #[test]
