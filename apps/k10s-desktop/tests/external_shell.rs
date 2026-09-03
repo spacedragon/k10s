@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use k10s_backend::{ExecPluginPreparation, KubePreparation};
+use k10s_backend::{ExecPluginPreparation, KubePreparation, prepare_kube_backend_from_paths};
 use k10s_desktop::external_shell::{
     EnvironmentSnapshot, ExternalShellTarget, KubectlExecCommand, KubectlLaunchDescriptor,
-    RenderError,
+    RenderError, descriptor_when_terminal_available, probe_system_terminal,
 };
 
 fn descriptor() -> KubectlLaunchDescriptor {
@@ -63,6 +63,82 @@ fn descriptor_rejects_secret_shaped_environment() {
 }
 
 #[test]
+fn descriptor_public_constructor_rejects_secret_shaped_allowed_values() {
+    let error = KubectlLaunchDescriptor::new(
+        1,
+        "/usr/bin/kubectl".into(),
+        "context".into(),
+        vec!["/tmp/config".into()],
+        BTreeMap::from([("HOME".into(), "Bearer definitely-a-credential".into())]),
+        Vec::new(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("sensitive"));
+}
+
+#[test]
+fn descriptor_is_not_published_without_a_terminal_adapter() {
+    assert!(descriptor_when_terminal_available(Some(descriptor()), None).is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_probe_selects_the_exact_macos_adapter() {
+    let adapter = probe_system_terminal(&EnvironmentSnapshot::default()).unwrap();
+    assert_eq!(adapter.executable, PathBuf::from("/usr/bin/open"));
+    assert!(adapter.arguments_before_script.is_empty());
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn terminal_probe_selects_the_first_available_linux_adapter() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("k10s-terminal-probe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir).unwrap();
+    let terminal = dir.join("gnome-terminal");
+    fs::write(&terminal, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&terminal, fs::Permissions::from_mode(0o700)).unwrap();
+    let environment = EnvironmentSnapshot::from_unicode(BTreeMap::from([(
+        "PATH".into(),
+        dir.display().to_string(),
+    )]));
+    let adapter = probe_system_terminal(&environment).unwrap();
+    assert_eq!(adapter.executable, terminal);
+    assert_eq!(adapter.arguments_before_script, ["--"]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn descriptor_rejects_non_unicode_allowed_environment_and_missing_kubectl() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let preparation = KubePreparation {
+        source_paths: vec!["/tmp/config".into()],
+        selected_context: "context".into(),
+        exec_plugins: Vec::new(),
+    };
+    let invalid = EnvironmentSnapshot::from_os(BTreeMap::from([
+        ("PATH".into(), OsString::from_vec(vec![0xff])),
+        ("HOME".into(), "/home/test".into()),
+    ]));
+    assert!(KubectlLaunchDescriptor::from_preparation(1, &preparation, &invalid).is_err());
+
+    let missing = EnvironmentSnapshot::from_unicode(BTreeMap::from([
+        ("PATH".into(), "/definitely/empty".into()),
+        ("HOME".into(), "/home/test".into()),
+    ]));
+    assert!(
+        KubectlLaunchDescriptor::from_preparation(1, &preparation, &missing)
+            .unwrap_err()
+            .to_string()
+            .contains("kubectl")
+    );
+}
+
+#[test]
 fn render_posix_quotes_every_structured_value() {
     let script = KubectlExecCommand::new(&descriptor(), target())
         .unwrap()
@@ -84,6 +160,8 @@ fn render_powershell_quotes_every_structured_value() {
         .unwrap();
     assert!(script.contains("'prod ''$(touch nope)'''"));
     assert!(script.contains("& $K10sKubectl"));
+    assert!(script.contains("$global:LASTEXITCODE = 125"));
+    assert!(script.contains("catch { $K10sStatus = 125"));
     assert!(script.contains("exit $K10sStatus"));
     assert!(!script.contains("Invoke-Expression"));
 }
@@ -139,6 +217,64 @@ fn descriptor_resolves_kubectl_and_exec_plugin_from_one_preparation() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
+    use std::fs;
+    let dir = std::env::temp_dir().join(format!("k10s-merge-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir).unwrap();
+    let first = dir.join("first");
+    let second = dir.join("second");
+    fs::write(&first, kubeconfig_yaml("one", "first-user", "first-helper")).unwrap();
+    fs::write(
+        &second,
+        kubeconfig_yaml("two", "second-user", "second-helper"),
+    )
+    .unwrap();
+    let prepared = prepare_kube_backend_from_paths(vec![first.clone(), second.clone()]).unwrap();
+    let kube = prepared.kube().unwrap();
+    assert_eq!(kube.source_paths, [first.clone(), second]);
+    assert_eq!(kube.selected_context, "same");
+    assert_eq!(kube.exec_plugins[0].command, "first-helper");
+
+    // A later file/environment change cannot alter the already prepared snapshot.
+    fs::write(
+        &first,
+        kubeconfig_yaml("changed", "changed-user", "changed-helper"),
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.kube().unwrap().exec_plugins[0].command,
+        "first-helper"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn kubeconfig_yaml(cluster: &str, user: &str, command: &str) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Config
+current-context: same
+clusters:
+- name: {cluster}
+  cluster:
+    server: https://{cluster}.example.invalid
+contexts:
+- name: same
+  context:
+    cluster: {cluster}
+    user: {user}
+users:
+- name: {user}
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      interactiveMode: Never
+      command: {command}
+"#
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn render_posix_executes_exact_argv_and_preserves_exec_status() {
@@ -150,7 +286,8 @@ fn render_posix_executes_exact_argv_and_preserves_exec_status() {
     fs::create_dir(&dir).unwrap();
     let fake = dir.join("fake kubectl");
     let log = dir.join("argv");
-    fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \" $* \" in *' get pod '*) cat '{}'; exit 0;; *) exit 23;; esac\n", log.display(), dir.join("uid").display())).unwrap();
+    let env_log = dir.join("env");
+    fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf '%s\\n' \"$PATH\" \"$HOME\" \"$KUBECONFIG\" \"${{SHOULD_NOT_LEAK-unset}}\" > '{}'\ncase \" $* \" in *' get pod '*) cat '{}'; exit 0;; *) exit 23;; esac\n", log.display(), env_log.display(), dir.join("uid").display())).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
     let mut d = descriptor();
     d.kubectl = fake;
@@ -168,8 +305,35 @@ fn render_posix_executes_exact_argv_and_preserves_exec_status() {
         .unwrap();
     assert_eq!(output.status.code(), Some(23));
     let argv = fs::read_to_string(log).unwrap();
-    assert!(argv.contains("get\npod\n"));
-    assert!(argv.contains("exec\n-it\n"));
+    let expected = [
+        "--context",
+        d.context.as_str(),
+        "--namespace",
+        t.namespace.as_str(),
+        "get",
+        "pod",
+        t.pod.as_str(),
+        "-o",
+        "jsonpath={.metadata.uid}",
+        "--context",
+        d.context.as_str(),
+        "--namespace",
+        t.namespace.as_str(),
+        "exec",
+        "-it",
+        t.pod.as_str(),
+        "--container",
+        t.container.as_str(),
+        "--",
+        t.program.as_str(),
+    ]
+    .join("\n")
+        + "\n";
+    assert_eq!(argv, expected);
+    assert_eq!(
+        fs::read_to_string(env_log).unwrap(),
+        "/opt/kube tools:/usr/bin:/bin\n/home/test user\n/tmp/a config:/tmp/b\nunset\n"
+    );
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -212,5 +376,93 @@ fn render_posix_uid_mismatch_never_executes() {
         .unwrap();
     assert_eq!(output.status.code(), Some(66));
     assert!(!fs::read_to_string(log).unwrap().contains("exec\n"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn render_posix_uid_lookup_failure_preserves_status_and_eof_does_not_hang() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    let dir = std::env::temp_dir().join(format!("k10s-lookup-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir).unwrap();
+    let fake = dir.join("kubectl");
+    fs::write(&fake, "#!/bin/sh\nexit 41\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut descriptor = descriptor();
+    descriptor.kubectl = fake;
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            KubectlExecCommand::new(&descriptor, target())
+                .unwrap()
+                .render_posix()
+                .unwrap(),
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(41));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Pod UID lookup failed")
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn render_powershell_executes_under_real_windows_powershell_and_preserves_status() {
+    use std::fs;
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("k10s-powershell-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir).unwrap();
+    let fake = dir.join("fake kubectl.ps1");
+    let log = dir.join("argv.txt");
+    fs::write(&fake, format!("$args | Set-Content -LiteralPath '{}'\nif ($args -contains 'get') {{ Write-Output 'uid-1'; exit 0 }}\nexit 23\n", log.display())).unwrap();
+    let descriptor = KubectlLaunchDescriptor::new(
+        1,
+        fake,
+        "context".into(),
+        vec![dir.join("config")],
+        BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            ("USERPROFILE".into(), dir.display().to_string()),
+            (
+                "KUBECONFIG".into(),
+                dir.join("config").display().to_string(),
+            ),
+        ]),
+        Vec::new(),
+    )
+    .unwrap();
+    let target = ExternalShellTarget {
+        generation: 1,
+        namespace: "ns & 'x'".into(),
+        pod: "pod".into(),
+        uid: "uid-1".into(),
+        container: "main".into(),
+        program: "/bin/sh".into(),
+    };
+    let script_path = dir.join("rendered.ps1");
+    fs::write(
+        &script_path,
+        KubectlExecCommand::new(&descriptor, target)
+            .unwrap()
+            .render_powershell()
+            .unwrap(),
+    )
+    .unwrap();
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-File"])
+        .arg(&script_path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(23));
+    assert!(fs::read_to_string(log).unwrap().contains("exec"));
     fs::remove_dir_all(dir).unwrap();
 }

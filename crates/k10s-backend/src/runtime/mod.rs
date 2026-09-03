@@ -93,58 +93,73 @@ pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterErr
             kube: None,
         }),
         BackendMode::Kube { kubeconfig } => {
-            let sources = crate::kube::config::source_paths(kubeconfig.as_deref())?;
-            let (contexts, parsed) = crate::kube::config::load_with_source(kubeconfig.as_deref())?;
-            let selected_context =
-                parsed
-                    .current_context
-                    .clone()
-                    .ok_or(AdapterError::KubeconfigInvalid {
-                        source: "prepared kubeconfig".into(),
-                        detail: "no current context could be determined from the kubeconfig".into(),
-                    })?;
-            let mut exec_plugins = Vec::new();
-            let selected_user = parsed
-                .contexts
-                .iter()
-                .find(|named| named.name == selected_context)
-                .and_then(|named| named.context.as_ref())
-                .and_then(|context| context.user.as_deref());
-            for named in parsed
-                .auth_infos
-                .iter()
-                .filter(|named| Some(named.name.as_str()) == selected_user)
-            {
-                if let Some(exec) = named.auth_info.as_ref().and_then(|auth| auth.exec.as_ref()) {
-                    let command = exec
-                        .command
-                        .clone()
-                        .ok_or(AdapterError::KubeconfigInvalid {
-                            source: "prepared kubeconfig".into(),
-                            detail: "exec credential plugin has no command".into(),
-                        })?;
-                    let mut environment = BTreeMap::new();
-                    for item in exec.env.as_deref().unwrap_or_default() {
-                        environment
-                            .extend(item.iter().map(|(key, value)| (key.clone(), value.clone())));
-                    }
-                    exec_plugins.push(ExecPluginPreparation {
-                        command,
-                        environment,
-                    });
-                }
-            }
-            let adapter = KubeAdapter::from_prepared_kubeconfig(contexts, parsed)?;
-            Ok(PreparedBackend {
-                kernel: BackendKernel::new(adapter),
-                kube: Some(KubePreparation {
-                    source_paths: sources,
-                    selected_context,
-                    exec_plugins,
-                }),
-            })
+            let (contexts, parsed, sources) =
+                crate::kube::config::load_with_source(kubeconfig.as_deref())?;
+            prepare_kube_parts(contexts, parsed, sources)
         }
     }
+}
+
+/// Prepare from an already selected ordered path list without consulting process environment.
+pub fn prepare_kube_backend_from_paths(
+    source_paths: Vec<PathBuf>,
+) -> Result<PreparedBackend, AdapterError> {
+    let (contexts, parsed, sources) = crate::kube::config::load_from_paths(source_paths)?;
+    prepare_kube_parts(contexts, parsed, sources)
+}
+
+fn prepare_kube_parts(
+    contexts: Vec<crate::port::ContextInfo>,
+    parsed: kube::config::Kubeconfig,
+    sources: Vec<PathBuf>,
+) -> Result<PreparedBackend, AdapterError> {
+    let selected_context =
+        parsed
+            .current_context
+            .clone()
+            .ok_or(AdapterError::KubeconfigInvalid {
+                source: "prepared kubeconfig".into(),
+                detail: "no current context could be determined from the kubeconfig".into(),
+            })?;
+    let mut exec_plugins = Vec::new();
+    let selected_user = parsed
+        .contexts
+        .iter()
+        .find(|named| named.name == selected_context)
+        .and_then(|named| named.context.as_ref())
+        .and_then(|context| context.user.as_deref());
+    for named in parsed
+        .auth_infos
+        .iter()
+        .filter(|named| Some(named.name.as_str()) == selected_user)
+    {
+        if let Some(exec) = named.auth_info.as_ref().and_then(|auth| auth.exec.as_ref()) {
+            let command = exec
+                .command
+                .clone()
+                .ok_or(AdapterError::KubeconfigInvalid {
+                    source: "prepared kubeconfig".into(),
+                    detail: "exec credential plugin has no command".into(),
+                })?;
+            let mut environment = BTreeMap::new();
+            for item in exec.env.as_deref().unwrap_or_default() {
+                environment.extend(item.iter().map(|(key, value)| (key.clone(), value.clone())));
+            }
+            exec_plugins.push(ExecPluginPreparation {
+                command,
+                environment,
+            });
+        }
+    }
+    let adapter = KubeAdapter::from_prepared_kubeconfig(contexts, parsed)?;
+    Ok(PreparedBackend {
+        kernel: BackendKernel::new(adapter),
+        kube: Some(KubePreparation {
+            source_paths: sources,
+            selected_context,
+            exec_plugins,
+        }),
+    })
 }
 
 /// Build the backend kernel for the selected mode through one factory seam.

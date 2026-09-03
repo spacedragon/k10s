@@ -5,6 +5,7 @@
 //! errors are mapped to operator-facing messages that never echo file
 //! contents (which may include tokens).
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -17,84 +18,111 @@ use crate::port::{AdapterError, ContextAvailability, ContextInfo};
 /// parsed kube-rs config that seeds per-context cluster client construction.
 pub(crate) fn load_with_source(
     explicit_path: Option<&Path>,
-) -> Result<(Vec<ContextInfo>, Kubeconfig), AdapterError> {
-    let (kubeconfig, source) = match explicit_path {
-        Some(path) => Kubeconfig::read_from(path)
-            .map(|kubeconfig| (kubeconfig, path.display().to_string()))
-            .map_err(|error| normalize_load_error(error, || path.display().to_string())),
-        None => Kubeconfig::read()
-            .map(|kubeconfig| (kubeconfig, discovery_source()))
-            .map_err(normalize_discovery_error),
-    }?;
+) -> Result<(Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>), AdapterError> {
+    // Freeze discovery before touching any file, then freeze every file's
+    // bytes before parsing. Kernel construction and launch metadata therefore
+    // cannot observe different KUBECONFIG/HOME values or a later rewrite.
+    let paths = source_paths(explicit_path)?;
+    load_from_paths(paths)
+}
 
-    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig))
+pub(crate) fn load_from_paths(
+    paths: Vec<PathBuf>,
+) -> Result<(Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>), AdapterError> {
+    if paths.is_empty() {
+        return Err(AdapterError::KubeconfigNotConfigured);
+    }
+    let source = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(if cfg!(windows) { ";" } else { ":" });
+    let documents = paths
+        .iter()
+        .map(|path| {
+            fs::read_to_string(path).map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    AdapterError::KubeconfigMissing(path.clone())
+                } else {
+                    AdapterError::KubeconfigInvalid {
+                        source: path.display().to_string(),
+                        detail: "the file exists but could not be read".into(),
+                    }
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut kubeconfig = Kubeconfig::default();
+    for (path, document) in paths.iter().zip(documents) {
+        let mut next =
+            Kubeconfig::from_yaml(&document).map_err(|error| AdapterError::KubeconfigInvalid {
+                source: path.display().to_string(),
+                detail: describe(error),
+            })?;
+        resolve_relative_references(&mut next, path.parent().unwrap_or_else(|| Path::new(".")));
+        kubeconfig = kubeconfig
+            .merge(next)
+            .map_err(|error| AdapterError::KubeconfigInvalid {
+                source: source.clone(),
+                detail: describe(error),
+            })?;
+    }
+    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths))
 }
 
 /// Exact ordered files whose merged contents produced a kube client snapshot.
-pub(crate) fn source_paths(explicit_path: Option<&Path>) -> Result<Vec<PathBuf>, AdapterError> {
+fn source_paths(explicit_path: Option<&Path>) -> Result<Vec<PathBuf>, AdapterError> {
+    let kubeconfig = std::env::var_os("KUBECONFIG");
+    let home = std::env::home_dir();
+    source_paths_from(explicit_path, kubeconfig.as_deref(), home.as_deref())
+}
+
+fn source_paths_from(
+    explicit_path: Option<&Path>,
+    kubeconfig: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, AdapterError> {
     if let Some(path) = explicit_path {
         return Ok(vec![path.to_path_buf()]);
     }
-    if let Some(value) = std::env::var_os("KUBECONFIG")
+    if let Some(value) = kubeconfig
         && !value.is_empty()
     {
-        return Ok(std::env::split_paths(&value).collect());
+        let paths = std::env::split_paths(&value)
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect::<Vec<_>>();
+        if !paths.is_empty() {
+            return Ok(paths);
+        }
     }
-    std::env::home_dir()
-        .map(|home| vec![home.join(".kube").join("config")])
+    home.map(|home| vec![home.join(".kube").join("config")])
         .ok_or(AdapterError::KubeconfigNotConfigured)
 }
 
-/// Describe where standard discovery looked, for operator-facing errors.
-fn discovery_source() -> String {
-    if let Some(value) = std::env::var_os("KUBECONFIG")
-        && !value.is_empty()
-    {
-        return format!("KUBECONFIG={}", value.to_string_lossy());
-    }
-    std::env::home_dir()
-        .map(|home| home.join(".kube").join("config"))
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "~/.kube/config".into())
-}
-
-/// Normalize a kubeconfig load failure for an explicit file path.
-fn normalize_load_error(
-    error: KubeconfigError,
-    source_hint: impl FnOnce() -> String,
-) -> AdapterError {
-    match error {
-        KubeconfigError::FindPath => AdapterError::KubeconfigNotConfigured,
-        // The named file is absent (ENOENT): report it precisely.
-        KubeconfigError::ReadConfig(source, path) if source.kind() == io::ErrorKind::NotFound => {
-            AdapterError::KubeconfigMissing(path)
+fn resolve_relative_references(kubeconfig: &mut Kubeconfig, directory: &Path) {
+    fn resolve(directory: &Path, value: &mut Option<String>, bare_command: bool) {
+        let Some(current) = value.as_ref() else {
+            return;
+        };
+        let path = Path::new(current);
+        if path.is_relative() && (!bare_command || current.contains(std::path::MAIN_SEPARATOR)) {
+            *value = Some(directory.join(path).to_string_lossy().into_owned());
         }
-        KubeconfigError::ReadConfig(_, path) => AdapterError::KubeconfigInvalid {
-            source: path.display().to_string(),
-            detail: "the file exists but could not be read".into(),
-        },
-        // Parse and structural failures carry safe messages only.
-        other => AdapterError::KubeconfigInvalid {
-            source: source_hint(),
-            detail: describe(other),
-        },
     }
-}
-
-/// Normalize a kubeconfig load failure from standard discovery, where the
-/// failing file may be any entry of `KUBECONFIG` or the default path.
-fn normalize_discovery_error(error: KubeconfigError) -> AdapterError {
-    match error {
-        // Nothing configured anywhere: no env value and no default file.
-        KubeconfigError::FindPath => AdapterError::KubeconfigNotConfigured,
-        KubeconfigError::ReadConfig(source, path) if source.kind() == io::ErrorKind::NotFound => {
-            AdapterError::KubeconfigMissing(path)
+    for named in &mut kubeconfig.clusters {
+        if let Some(cluster) = &mut named.cluster {
+            resolve(directory, &mut cluster.certificate_authority, false);
         }
-        // For every other failure we know the discovery source to name.
-        other => AdapterError::KubeconfigInvalid {
-            source: discovery_source(),
-            detail: describe(other),
-        },
+    }
+    for named in &mut kubeconfig.auth_infos {
+        if let Some(auth) = &mut named.auth_info {
+            resolve(directory, &mut auth.client_certificate, false);
+            resolve(directory, &mut auth.client_key, false);
+            resolve(directory, &mut auth.token_file, false);
+            if let Some(exec) = &mut auth.exec {
+                resolve(directory, &mut exec.command, true);
+            }
+        }
     }
 }
 
@@ -273,9 +301,34 @@ pub(crate) fn context_uses_exec(kubeconfig: &Kubeconfig, context_name: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use kube::config::{ExecInteractiveMode, Kubeconfig};
 
-    use super::noninteractive_for_context;
+    use super::{noninteractive_for_context, source_paths_from};
+
+    #[test]
+    fn discovery_paths_are_explicit_or_ordered_environment_or_default() {
+        let explicit = PathBuf::from("/chosen/config");
+        assert_eq!(
+            source_paths_from(
+                Some(&explicit),
+                Some("ignored".as_ref()),
+                Some(Path::new("/home/u"))
+            )
+            .unwrap(),
+            [explicit]
+        );
+        let joined = std::env::join_paths([Path::new("/first"), Path::new("/second")]).unwrap();
+        assert_eq!(
+            source_paths_from(None, Some(&joined), Some(Path::new("/home/u"))).unwrap(),
+            [PathBuf::from("/first"), PathBuf::from("/second")]
+        );
+        assert_eq!(
+            source_paths_from(None, None, Some(Path::new("/home/u"))).unwrap(),
+            [PathBuf::from("/home/u/.kube/config")]
+        );
+    }
 
     fn kubeconfig(mode: &str) -> Kubeconfig {
         serde_yaml::from_str(&format!(

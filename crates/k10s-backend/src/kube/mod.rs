@@ -201,7 +201,7 @@ impl KubeAdapter {
     pub fn from_kubeconfig(path: Option<&Path>) -> Result<Self, AdapterError> {
         // Prepare: load and validate credential-free summaries off-line; keep
         // the parsed kube-rs config as the lazy per-context client source.
-        let (prepared, kubeconfig) = config::load_with_source(path)?;
+        let (prepared, kubeconfig, _) = config::load_with_source(path)?;
         Self::from_prepared_kubeconfig(prepared, kubeconfig)
     }
 

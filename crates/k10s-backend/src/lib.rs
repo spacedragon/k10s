@@ -45,6 +45,6 @@ pub use port_forward::{
 };
 pub use runtime::{
     BackendMode, ContextRegistry, ExecPluginPreparation, KubePreparation, PreparedBackend,
-    build_kernel, prepare_backend,
+    build_kernel, prepare_backend, prepare_kube_backend_from_paths,
 };
 pub use stream::{StreamChunk, StreamHub, StreamOrigin, StreamTicketResult};

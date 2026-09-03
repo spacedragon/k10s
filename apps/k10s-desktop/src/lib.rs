@@ -611,14 +611,14 @@ fn launch_embedded_server_on(
     mode: &BackendMode,
 ) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
     let prepared = prepare_backend(mode).map_err(EmbeddedServerError::Backend)?;
-    let kubectl_launch = prepared.kube().and_then(|kube| {
-        external_shell::KubectlLaunchDescriptor::from_preparation(
-            1,
-            kube,
-            &external_shell::EnvironmentSnapshot::capture(),
-        )
-        .ok()
+    let shell_environment = external_shell::EnvironmentSnapshot::capture();
+    let descriptor = prepared.kube().and_then(|kube| {
+        external_shell::KubectlLaunchDescriptor::from_preparation(1, kube, &shell_environment).ok()
     });
+    let kubectl_launch = external_shell::descriptor_when_terminal_available(
+        descriptor,
+        external_shell::probe_system_terminal(&shell_environment),
+    );
     let kernel = prepared.into_kernel();
     let mut token_bytes = [0_u8; 32];
     getrandom::fill(&mut token_bytes).map_err(EmbeddedServerError::Randomness)?;

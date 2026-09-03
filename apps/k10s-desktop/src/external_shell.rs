@@ -17,6 +17,11 @@ pub struct EnvironmentSnapshot(BTreeMap<String, OsString>);
 
 impl EnvironmentSnapshot {
     #[must_use]
+    pub fn from_os(values: BTreeMap<String, OsString>) -> Self {
+        Self(values)
+    }
+
+    #[must_use]
     pub fn from_unicode(values: BTreeMap<String, String>) -> Self {
         Self(
             values
@@ -59,6 +64,15 @@ pub struct ResolvedExecPlugin {
 pub struct TerminalAdapter {
     pub executable: PathBuf,
     pub arguments_before_script: Vec<String>,
+}
+
+/// Publish a prepared descriptor only when the current platform probe succeeded.
+#[must_use]
+pub fn descriptor_when_terminal_available(
+    descriptor: Option<KubectlLaunchDescriptor>,
+    terminal: Option<TerminalAdapter>,
+) -> Option<KubectlLaunchDescriptor> {
+    terminal.and(descriptor)
 }
 
 /// Probe terminal availability without opening a window (launching is Task 3).
@@ -152,7 +166,6 @@ impl KubectlLaunchDescriptor {
                     return Err(DescriptorError::UnsupportedEnvironment(key.clone()));
                 }
                 validate_value(value).map_err(|_| DescriptorError::Unrepresentable)?;
-                allowed.insert(key.clone(), value.clone());
             }
             plugins.push(ResolvedExecPlugin {
                 command: resolve_executable(&plugin.command, &path)?,
@@ -185,7 +198,7 @@ impl KubectlLaunchDescriptor {
         }
         validate_value(&context).map_err(|_| DescriptorError::Unrepresentable)?;
         for (name, value) in &environment {
-            if is_sensitive(name) {
+            if is_sensitive(name) || is_sensitive_value(value) {
                 return Err(DescriptorError::SensitiveEnvironment(name.clone()));
             }
             if !matches!(
@@ -399,8 +412,9 @@ impl<'a> KubectlExecCommand<'a> {
             "$K10sKubectl = {}\r\n",
             q(&d.kubectl.to_string_lossy())
         ));
-        script.push_str(&format!("$K10sUid = & $K10sKubectl --context {} --namespace {} get pod {} -o {}\r\n$K10sStatus = $LASTEXITCODE\r\n", q(&d.context), q(&t.namespace), q(&t.pod), q("jsonpath={.metadata.uid}")));
-        script.push_str(&format!("if ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: Pod UID lookup failed.') }} elseif ($K10sUid -ne {}) {{ $K10sStatus = 66; [Console]::Error.WriteLine('Finback shell: Pod UID changed; refusing exec.') }} else {{\r\n& $K10sKubectl --context {} --namespace {} exec -it {} --container {} -- {}\r\n$K10sStatus = $LASTEXITCODE\r\nif ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: kubectl exec failed.') }}\r\n}}\r\nif ($K10sStatus -ne 0 -and -not [Console]::IsInputRedirected) {{ [void][Console]::ReadLine() }}\r\nexit $K10sStatus\r\n", q(&t.uid), q(&d.context), q(&t.namespace), q(&t.pod), q(&t.container), q(&t.program)));
+        script.push_str("$global:LASTEXITCODE = 125\r\n");
+        script.push_str(&format!("try {{ $K10sUid = & $K10sKubectl --context {} --namespace {} get pod {} -o {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125; $K10sUid = $null }}\r\n", q(&d.context), q(&t.namespace), q(&t.pod), q("jsonpath={.metadata.uid}")));
+        script.push_str(&format!("if ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: Pod UID lookup failed.') }} elseif ($K10sUid -ne {}) {{ $K10sStatus = 66; [Console]::Error.WriteLine('Finback shell: Pod UID changed; refusing exec.') }} else {{\r\n$global:LASTEXITCODE = 125\r\ntry {{ & $K10sKubectl --context {} --namespace {} exec -it {} --container {} -- {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125 }}\r\nif ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: kubectl exec failed.') }}\r\n}}\r\nif ($K10sStatus -ne 0 -and -not [Console]::IsInputRedirected) {{ [void][Console]::ReadLine() }}\r\nexit $K10sStatus\r\n", q(&t.uid), q(&d.context), q(&t.namespace), q(&t.pod), q(&t.container), q(&t.program)));
         Ok(script)
     }
 }
