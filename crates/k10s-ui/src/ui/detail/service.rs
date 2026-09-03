@@ -6,7 +6,7 @@
 //! port-forward lifecycle controls: no Scale, Delete, logs, or exec.
 
 use egui::{Grid, RichText, WidgetType};
-use k10s_protocol::{ResourceDetailResponse, ServiceProjection};
+use k10s_protocol::{ResourceDetailResponse, ResourceIdentity, ServiceProjection};
 
 use crate::ui::tools;
 use crate::workspace::{DetailState, DetailTab, WindowId, WorkspaceCommand};
@@ -27,7 +27,7 @@ pub(super) fn show<I>(
 ) where
     I: RowIdentity,
 {
-    let projection = projection_of(view);
+    let projection = projection_of(view, presentation.identity);
     match detail.active_tab {
         DetailTab::Overview => overview_tab(ui, window_id, projection, presentation),
         DetailTab::Ports => ports_tab(ui, window_id, projection, presentation, queued),
@@ -54,7 +54,13 @@ pub(super) fn show<I>(
 }
 
 /// The Service projection of a detail response, if populated.
-fn projection_of(view: &ResourceDetailResponse) -> Option<&ServiceProjection> {
+fn projection_of<'a>(
+    view: &'a ResourceDetailResponse,
+    identity: &ResourceIdentity,
+) -> Option<&'a ServiceProjection> {
+    if view.identity != *identity {
+        return None;
+    }
     match &view.projection {
         Some(k10s_protocol::ResourceProjection::Service(projection)) => Some(projection),
         _ => None,

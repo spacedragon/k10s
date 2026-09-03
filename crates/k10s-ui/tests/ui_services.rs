@@ -1048,6 +1048,59 @@ fn desktop_capability_renders_start_and_opens_the_shared_service_target() {
 }
 
 #[test]
+fn mismatched_service_detail_renders_unavailable_and_cannot_open_start() {
+    let mut harness = harness();
+    harness.state_mut().feed.port_forward_available = true;
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(4);
+
+    let pinned = service_identity("web-frontend");
+    let mismatched = service_detail("api-server", false);
+    harness.state_mut().feed.details.insert(pinned, mismatched);
+    let window_id = services_window_id(harness.state());
+    harness.state_mut().feed.window_freshness.insert(
+        window_id,
+        WindowFreshness::Live {
+            last_sync_age: "just now".into(),
+        },
+    );
+    harness.run_steps(4);
+
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    assert_eq!(
+        window
+            .query_all_by_label("Structured details unavailable")
+            .count(),
+        2,
+        "both responsive Service columns fail closed"
+    );
+    assert!(window.query_by_label("PORTS").is_none());
+    window
+        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .click();
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    window.get_by_label("No structured projection available");
+    assert!(
+        window
+            .query_by_role_and_label(Role::Button, "Start")
+            .is_none()
+    );
+    assert!(
+        harness
+            .state_mut()
+            .shell
+            .drain_port_forward_actions()
+            .is_empty(),
+        "a mismatched response must never combine its port with the pinned identity"
+    );
+}
+
+#[test]
 fn named_service_target_prefills_the_declared_service_port_in_the_shared_modal() {
     let mut harness = harness();
     harness.state_mut().feed.port_forward_available = true;
