@@ -135,6 +135,20 @@ fn pod_request() -> k10s_protocol::PortForwardStartRequest {
 
 #[test]
 fn capabilities_are_target_specific_and_any_capability_enables_the_feed() {
+    let defaults = ClientConfig::default();
+    assert!(
+        defaults
+            .capabilities
+            .iter()
+            .any(|capability| capability == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD)
+    );
+    assert!(
+        defaults
+            .capabilities
+            .iter()
+            .any(|capability| capability == k10s_protocol::CAPABILITY_POD_PORT_FORWARD)
+    );
+
     let mut unavailable = ready_client_with_capabilities(&[]);
     assert!(!unavailable.service_port_forward_available());
     assert!(!unavailable.pod_port_forward_available());
@@ -346,9 +360,15 @@ fn explicit_connect_registers_a_fresh_port_forward_subscription() {
 }
 
 #[test]
-fn list_reconstruction_replaces_state_without_duplicates() {
+fn reconnect_resubscribes_and_reconstructs_sessions_from_an_authoritative_list() {
     let mut client =
         ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+    while client.take_outbound().is_some() {}
+
     let first = k10s_protocol::PortForwardStartResponse {
         session: service_session("pf-1", PortForwardSessionState::Active, 3),
     };
@@ -358,17 +378,72 @@ fn list_reconstruction_replaces_state_without_duplicates() {
             &serde_json::to_value(&first).unwrap(),
         )
         .unwrap();
+    assert_eq!(client.port_forward_sessions().len(), 1);
 
-    // After reconnect the server reports the same active session only.
+    client.transport_lost(1_000, 0);
+    assert!(client.port_forward_sessions().is_empty());
+    assert!(client.retry_if_due(1_000).unwrap());
+    assert_eq!(
+        client.take_outbound().expect("reconnect hello").kind,
+        k10s_protocol::ClientKind::Hello
+    );
+
+    let mut resumed = welcome();
+    resumed.payload = serde_json::to_value(k10s_protocol::Welcome {
+        protocol: k10s_protocol::ProtocolVersion {
+            major: 1,
+            minor: k10s_protocol::PROTOCOL_MINOR,
+        },
+        capabilities: vec![],
+        session_id: k10s_protocol::SessionId::new("session-2"),
+        server_instance_id: "server-1".into(),
+        resume_status: k10s_protocol::ResumeStatus::Resumed,
+    })
+    .unwrap();
+    client.apply(resumed).unwrap();
+
+    let recovery_frames: Vec<_> = std::iter::from_fn(|| client.take_outbound()).collect();
+    let bootstrap_id = recovery_frames
+        .iter()
+        .find(|frame| frame.kind == k10s_protocol::ClientKind::Request)
+        .and_then(|frame| frame.request_id.clone())
+        .expect("reconnect bootstrap request");
+    assert!(recovery_frames.iter().any(|frame| {
+        frame.kind == k10s_protocol::ClientKind::Subscribe
+            && frame.subscription_id.as_ref() == Some(subscription.id())
+            && frame
+                .payload
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("portForwardSessions")
+    }));
+
+    let mut bootstrap = BootstrapResponse::fixture();
+    bootstrap.capabilities = vec![k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned()];
+    client
+        .apply(ServerFrame::response(bootstrap_id, bootstrap))
+        .unwrap();
+    client.request_port_forward_list("reconnect-list").unwrap();
+    let list_request = std::iter::from_fn(|| client.take_outbound())
+        .find(|frame| {
+            frame.kind == k10s_protocol::ClientKind::Request
+                && frame
+                    .payload
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+        })
+        .expect("reconnect list request");
+
     let listed = k10s_protocol::PortForwardListResponse {
         revision: 5,
         sessions: vec![service_session("pf-1", PortForwardSessionState::Active, 5)],
     };
     client
-        .apply_port_forward_response(
-            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
-            &serde_json::to_value(&listed).unwrap(),
-        )
+        .apply(ServerFrame::response(
+            list_request.request_id.expect("list request id"),
+            listed,
+        ))
         .unwrap();
     let sessions = client.port_forward_sessions();
     assert_eq!(sessions.len(), 1, "no duplicate sessions after reconnect");
@@ -427,6 +502,77 @@ fn delayed_list_cannot_regress_a_session_retained_by_a_newer_event() {
         PortForwardSessionState::Stopped,
         "revision-1 reconstruction must not overwrite revision-2 terminal state"
     );
+}
+
+#[test]
+fn authoritative_list_omission_rejects_equal_or_stale_events_but_accepts_newer_events() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
+            &serde_json::to_value(k10s_protocol::PortForwardListResponse {
+                revision: 5,
+                sessions: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    for (sequence, event_revision, session_revision) in [(1, 4, 4), (2, 5, 6)] {
+        client
+            .apply(ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription.id().clone()),
+                sequence: Some(sequence),
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::PORT_FORWARD_EVENT_SESSION.into(),
+                    revision: None,
+                    payload: serde_json::to_value(PortForwardSessionEvent {
+                        revision: event_revision,
+                        session: service_session(
+                            "pf-expired",
+                            PortForwardSessionState::Stopped,
+                            session_revision,
+                        ),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            })
+            .unwrap();
+        assert!(
+            client.port_forward_sessions().is_empty(),
+            "an event at revision {event_revision} cannot resurrect a row omitted at revision 5, even when its embedded session claims revision {session_revision}"
+        );
+    }
+
+    client
+        .apply(ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: Some(3),
+            payload: serde_json::to_value(Event {
+                event_kind: k10s_protocol::PORT_FORWARD_EVENT_SESSION.into(),
+                revision: None,
+                payload: serde_json::to_value(PortForwardSessionEvent {
+                    revision: 6,
+                    session: service_session("pf-expired", PortForwardSessionState::Active, 6),
+                })
+                .unwrap(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    assert_eq!(client.port_forward_sessions().len(), 1);
+    assert_eq!(client.port_forward_sessions()[0].revision, 6);
 }
 
 #[test]

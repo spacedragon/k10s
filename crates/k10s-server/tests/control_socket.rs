@@ -283,7 +283,13 @@ async fn hello_negotiates_then_bootstrap_preserves_request_id() {
     let welcome: ServerFrame =
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(welcome.kind, ServerKind::Welcome);
-    assert_eq!(welcome.payload["protocol"], json!({"major": 1, "minor": 6}));
+    assert_eq!(
+        welcome.payload["protocol"],
+        json!({
+            "major": k10s_protocol::PROTOCOL_MAJOR,
+            "minor": k10s_protocol::PROTOCOL_MINOR,
+        })
+    );
     assert_eq!(welcome.payload["capabilities"], json!(["logs.tail"]));
 
     let request_id = RequestId::from("req-7");

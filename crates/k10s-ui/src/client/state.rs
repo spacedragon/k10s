@@ -58,6 +58,7 @@ impl Default for ClientConfig {
             capabilities: vec![
                 "bootstrap-status".to_owned(),
                 CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+                CAPABILITY_POD_PORT_FORWARD.to_owned(),
             ],
             retry_base_ms: 250,
             retry_cap_ms: 30_000,
@@ -754,7 +755,10 @@ pub struct ClientState {
     /// complete snapshots on the bounded `portForwardSessions` stream and
     /// reconstructed via `portForward.list` after reconnects.
     port_forward_sessions: BTreeMap<String, PortForwardSession>,
-    /// Highest applied session-snapshot revision; older events are stale.
+    /// Highest manager-global revision covered by an authoritative list,
+    /// response snapshot, or event envelope. Individual events must be
+    /// strictly newer so a list omission at revision R acts as a tombstone
+    /// against delayed events through R.
     port_forward_revision: u64,
     /// Desired subscription presence for the bounded session stream.
     port_forward_subscribed: Option<SubscriptionId>,
@@ -1222,12 +1226,35 @@ impl ClientState {
 
     /// Apply one session snapshot under its monotonic revision.
     fn apply_session(&mut self, session: PortForwardSession) {
-        if session.revision < self.port_forward_revision {
+        if session.revision <= self.port_forward_revision {
             return; // stale, reordered, or duplicated delivery
         }
         self.port_forward_revision = session.revision;
         self.port_forward_sessions
             .insert(session.id.as_str().to_owned(), session);
+    }
+
+    /// Apply a subscription event using its manager-global envelope revision
+    /// as the ordering authority. The embedded session revision still guards
+    /// that session against regression if an inconsistent snapshot arrives.
+    fn apply_session_event(&mut self, event: PortForwardSessionEvent) {
+        if event.revision <= self.port_forward_revision {
+            return; // covered by an equal/newer list or event
+        }
+
+        let session = event.session;
+        let session_id = session.id.as_str().to_owned();
+        let snapshot_is_newer = self
+            .port_forward_sessions
+            .get(&session_id)
+            .is_none_or(|current| session.revision > current.revision);
+        self.port_forward_revision = self
+            .port_forward_revision
+            .max(event.revision)
+            .max(session.revision);
+        if snapshot_is_newer {
+            self.port_forward_sessions.insert(session_id, session);
+        }
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -2081,7 +2108,7 @@ impl ClientState {
                     let owned = self.port_forward_subscribed.as_ref()
                         == self.owned_subscription(&frame).as_ref();
                     if owned {
-                        self.apply_session(event.session);
+                        self.apply_session_event(event);
                     }
                     Ok(())
                 }
