@@ -324,6 +324,8 @@ pub(crate) async fn serve_socket(
     let negotiated_protocol = negotiated.protocol;
     outbound.set_negotiated_protocol(negotiated_protocol);
     let negotiated_capabilities = negotiated.capabilities;
+    let negotiated_port_forward_capabilities =
+        PortForwardCapabilities::negotiated(&negotiated_capabilities);
     let welcome = Welcome {
         protocol: negotiated_protocol,
         capabilities: negotiated_capabilities.clone(),
@@ -597,7 +599,7 @@ pub(crate) async fn serve_socket(
                 let task_correlations = operation_correlations.clone();
                 let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
-                let task_server_capabilities = config.capabilities.clone();
+                let task_port_forward_capabilities = negotiated_port_forward_capabilities;
                 let task_port_forward = task_state;
                 let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
@@ -661,63 +663,13 @@ pub(crate) async fn serve_socket(
                                 }
                             }
                             Ok(Some(ParsedRequest::PortForward(op))) => {
-                                // Capability absence is enforced here and at
-                                // advertisement time; never through panics.
-                                let required_capability = match &op {
-                                    PortForwardOp::Start { target, .. } => match target.as_ref() {
-                                        k10s_protocol::PortForwardTarget::Pod { .. } => {
-                                            Some(k10s_protocol::CAPABILITY_POD_PORT_FORWARD)
-                                        }
-                                        k10s_protocol::PortForwardTarget::Service { .. } => {
-                                            Some(k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD)
-                                        }
-                                    },
-                                    PortForwardOp::Stop { .. } | PortForwardOp::List => None,
-                                };
-                                let pod_on_legacy_minor = matches!(
-                                    &op,
-                                    PortForwardOp::Start { target, .. }
-                                        if matches!(
-                                            target.as_ref(),
-                                            k10s_protocol::PortForwardTarget::Pod { .. }
-                                        )
-                                ) && task_protocol.minor
-                                    < k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR;
-                                let capability_enabled = required_capability.map_or_else(
-                                    || {
-                                        task_capabilities.iter().any(|capability| {
-                                            capability
-                                                == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
-                                                || capability
-                                                    == k10s_protocol::CAPABILITY_POD_PORT_FORWARD
-                                        })
-                                    },
-                                    |required| {
-                                        task_capabilities
-                                            .iter()
-                                            .any(|capability| capability == required)
-                                            && task_server_capabilities
-                                                .iter()
-                                                .any(|capability| capability == required)
-                                    },
-                                );
+                                // The negotiated set is already intersected
+                                // with server configuration. The manager is a
+                                // separate runtime gate.
                                 match task_port_forward.clone() {
                                     None => Err(RequestFailure::Backend(
-                                        BackendError::unsupported(
-                                            required_capability.unwrap_or("portForward"),
-                                        ),
+                                        BackendError::unsupported("portForward"),
                                     )),
-                                    Some(_) if pod_on_legacy_minor => Err(RequestFailure::Backend(
-                                        BackendError::unsupported(
-                                            k10s_protocol::CAPABILITY_POD_PORT_FORWARD,
-                                        ),
-                                    )),
-                                    Some(_) if !capability_enabled =>
-                                    {
-                                        Err(RequestFailure::Backend(BackendError::unsupported(
-                                            required_capability.expect("guard checked Some"),
-                                        )))
-                                    }
                                     Some(manager) =>
                                     // Cancellation-aware like every other request.
                                     {
@@ -728,6 +680,7 @@ pub(crate) async fn serve_socket(
                                                 &manager,
                                                 op,
                                                 task_protocol.minor,
+                                                task_port_forward_capabilities,
                                             ) => outcome,
                                         }
                                     }
@@ -991,6 +944,14 @@ pub(crate) async fn serve_socket(
                             }
                         }
                     }
+                    Ok(SubscriptionSelector::PortForwardSessions)
+                        if !negotiated_port_forward_capabilities.any() =>
+                    {
+                        Err((
+                            ErrorCode::UnsupportedMessage,
+                            "port-forward sessions require a negotiated capability".into(),
+                        ))
+                    }
                     Ok(SubscriptionSelector::PortForwardSessions) => {
                         match &state_port_forward {
                             Some(manager) => {
@@ -1044,6 +1005,7 @@ pub(crate) async fn serve_socket(
                                 let forwarder_task_id = task_id;
                                 let task_manager = Arc::clone(manager);
                                 let task_protocol_minor = negotiated_protocol.minor;
+                                let task_capabilities = negotiated_port_forward_capabilities;
                                 let mut events = manager.subscribe().await;
                                 request_tasks.spawn(async move {
                                     loop {
@@ -1083,6 +1045,9 @@ pub(crate) async fn serve_socket(
                                                 break;
                                             }
                                         };
+                                        if !task_capabilities.allows(&event.session.target) {
+                                            continue;
+                                        }
                                         let source_port = task_manager
                                             .resolved_source_port(event.session.id.as_str())
                                             .await;
@@ -1388,6 +1353,47 @@ enum PortForwardOp {
         session_id: String,
     },
     List,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortForwardCapabilities {
+    service: bool,
+    pod: bool,
+}
+
+impl PortForwardCapabilities {
+    fn negotiated(capabilities: &[String]) -> Self {
+        Self {
+            service: capabilities
+                .iter()
+                .any(|value| value == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD),
+            pod: capabilities
+                .iter()
+                .any(|value| value == k10s_protocol::CAPABILITY_POD_PORT_FORWARD),
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.service || self.pod
+    }
+
+    const fn allows(self, target: &k10s_protocol::PortForwardTarget) -> bool {
+        match target {
+            k10s_protocol::PortForwardTarget::Service { .. } => self.service,
+            k10s_protocol::PortForwardTarget::Pod { .. } => self.pod,
+        }
+    }
+
+    const fn required_for(target: &k10s_protocol::PortForwardTarget) -> &'static str {
+        match target {
+            k10s_protocol::PortForwardTarget::Service { .. } => {
+                k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
+            }
+            k10s_protocol::PortForwardTarget::Pod { .. } => {
+                k10s_protocol::CAPABILITY_POD_PORT_FORWARD
+            }
+        }
+    }
 }
 
 /// Outcome of one dispatched control request.
@@ -1754,6 +1760,7 @@ async fn dispatch_port_forward(
     manager: &PortForwardManager,
     op: PortForwardOp,
     protocol_minor: u16,
+    capabilities: PortForwardCapabilities,
 ) -> Result<RequestOutcome, RequestFailure> {
     match op {
         PortForwardOp::Start {
@@ -1761,6 +1768,21 @@ async fn dispatch_port_forward(
             local_port,
             context,
         } => {
+            if protocol_minor < k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR
+                && matches!(
+                    target.as_ref(),
+                    k10s_protocol::PortForwardTarget::Pod { .. }
+                )
+            {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    k10s_protocol::CAPABILITY_POD_PORT_FORWARD,
+                )));
+            }
+            if !capabilities.allows(&target) {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    PortForwardCapabilities::required_for(&target),
+                )));
+            }
             let outcome = manager.start(*target, local_port, context).await;
             match outcome {
                 Ok(session) => {
@@ -1778,21 +1800,43 @@ async fn dispatch_port_forward(
                 })),
             }
         }
-        PortForwardOp::Stop { session_id } => Ok(match manager.stop(&session_id).await {
-            crate::port_forward::StopOutcome::Stopped(session) => {
-                let source_port = manager.resolved_source_port(session.id.as_str()).await;
-                let session = session.wire_value_for_minor(protocol_minor, source_port);
-                RequestOutcome::PortForward(serde_json::json!({ "session": session }))
+        PortForwardOp::Stop { session_id } => {
+            if !capabilities.any() {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    "portForward",
+                )));
             }
-            crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
-                    .expect("stop response serializes"),
-            ),
-        }),
+            if let Some(session) = manager.session(&session_id).await
+                && !capabilities.allows(&session.target)
+            {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    PortForwardCapabilities::required_for(&session.target),
+                )));
+            }
+            Ok(match manager.stop(&session_id).await {
+                crate::port_forward::StopOutcome::Stopped(session) => {
+                    let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                    let session = session.wire_value_for_minor(protocol_minor, source_port);
+                    RequestOutcome::PortForward(serde_json::json!({ "session": session }))
+                }
+                crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
+                    serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
+                        .expect("stop response serializes"),
+                ),
+            })
+        }
         PortForwardOp::List => {
+            if !capabilities.any() {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    "portForward",
+                )));
+            }
             let (revision, sessions) = manager.list_snapshot().await;
             let mut projected = Vec::with_capacity(sessions.len());
             for session in sessions {
+                if !capabilities.allows(&session.target) {
+                    continue;
+                }
                 let source_port = manager.resolved_source_port(session.id.as_str()).await;
                 if let Some(session) = session.wire_value_for_minor(protocol_minor, source_port) {
                     projected.push(session);

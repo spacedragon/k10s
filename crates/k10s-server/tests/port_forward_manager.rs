@@ -330,7 +330,7 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
                     name: "http".into(),
                 },
             ),
-            0,
+            occupied,
             "dev-local".into(),
         )
         .await
@@ -338,6 +338,28 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
     assert_eq!(focused_by_name.id, first.id);
     assert_eq!(manager.list().await.len(), 1);
     let _ = manager.stop(first.id.as_str()).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_snapshots_expire_from_authoritative_lists() {
+    let seam = ScriptedSeam::new(&["web"]);
+    let (manager, _) = manager_for(seam).await;
+    let session = manager
+        .start(
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .unwrap();
+    manager.stop(session.id.as_str()).await;
+    assert_eq!(manager.list().await.len(), 1);
+
+    tokio::time::advance(
+        PortForwardManager::TERMINAL_RETENTION + std::time::Duration::from_secs(1),
+    )
+    .await;
+    assert!(manager.list().await.is_empty());
 }
 
 #[tokio::test]
@@ -348,6 +370,7 @@ async fn service_and_pod_sessions_share_the_same_session_limit() {
     let allowed: Vec<&str> = names.iter().map(String::as_str).collect();
     let seam = ScriptedSeam::new(&allowed);
     let (manager, _) = manager_for(seam).await;
+    let mut first_id = None;
 
     for (index, name) in names
         .iter()
@@ -359,11 +382,29 @@ async fn service_and_pod_sessions_share_the_same_session_limit() {
         } else {
             pod_target(name, "app", 8_080)
         };
-        manager
+        let started = manager
             .start(target, 0, "dev-local".into())
             .await
             .expect("the combined budget admits each slot");
+        if index == 0 {
+            first_id = Some(started.id);
+        }
     }
+
+    let focused_at_limit = manager
+        .start(
+            service_target(
+                &names[0],
+                PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+            ),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .expect("canonical duplicate focus precedes session-limit rejection");
+    assert_eq!(focused_at_limit.id, first_id.unwrap());
 
     let overflow = manager
         .start(
@@ -384,7 +425,7 @@ async fn service_and_pod_sessions_share_the_global_connection_limit() {
     let seam = ScriptedSeam::new(&["service-a", "service-b", "pod-a", "pod-b"]);
     let _peers = seam.add_peer_channel().await;
     let (manager, _) = manager_for(seam).await;
-    let mut addresses = Vec::new();
+    let mut addresses: Vec<std::net::SocketAddr> = Vec::new();
     for target in [
         service_target("service-a", PortForwardPortSelector::Number { number: 80 }),
         pod_target("pod-a", "app", 8_080),
@@ -425,7 +466,7 @@ async fn failed_snapshot_is_retained_and_does_not_block_a_new_start() {
         .await
         .unwrap();
     failures.store(true, std::sync::atomic::Ordering::Release);
-    let addr = failed.local_addr.parse().unwrap();
+    let addr: std::net::SocketAddr = failed.local_addr.parse().unwrap();
     for _ in 0..3 {
         tokio::net::TcpStream::connect(addr).await.unwrap();
     }
@@ -571,7 +612,7 @@ async fn failed_context_commit_keeps_the_authoritative_context() {
 
 #[tokio::test]
 async fn shutdown_cancels_sessions_and_releases_their_ports() {
-    let seam = ScriptedSeam::new(&["web"]);
+    let seam = ScriptedSeam::new(&["web", "web-pod"]);
     let (manager, cancel) = manager_for(seam).await;
     let session = manager
         .start(
@@ -582,6 +623,11 @@ async fn shutdown_cancels_sessions_and_releases_their_ports() {
         .await
         .expect("start");
     let addr: std::net::SocketAddr = session.local_addr.parse().unwrap();
+    let pod_session = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .expect("Pod starts in the same manager");
+    let pod_addr: std::net::SocketAddr = pod_session.local_addr.parse().unwrap();
 
     manager.shutdown().await;
     assert!(cancel.is_cancelled());
@@ -590,6 +636,7 @@ async fn shutdown_cancels_sessions_and_releases_their_ports() {
         tokio::net::TcpListener::bind(addr).await.is_ok(),
         "ports rebind immediately"
     );
+    assert!(tokio::net::TcpListener::bind(pod_addr).await.is_ok());
 }
 
 /// Regression: Stop must complete while a pump is mid-copy, tear the local

@@ -78,7 +78,7 @@ struct SessionInner {
     /// Consecutive stream failures before any byte moved.
     open_failures: u32,
     /// When the session reached a terminal state; drives bounded retention.
-    terminal_at: Option<std::time::Instant>,
+    terminal_at: Option<tokio::time::Instant>,
     /// Per-connection pump tasks; joined on teardown.
     pumps: TaskTracker,
     cancel: CancellationToken,
@@ -228,18 +228,6 @@ impl PortForwardManager {
         };
         let target_key = TargetKey::from_resolved(&target, &resolved);
 
-        // Bind only 127.0.0.1 before reporting success; port 0 asks the OS.
-        let bind_addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, requested_local_port));
-        let listener = match TcpListener::bind(bind_addr).await {
-            Ok(listener) => listener,
-            Err(_) => {
-                return Err(StartRejected::new(
-                    PortForwardFailureCategory::LocalPortInUse,
-                    format!("local port {requested_local_port} is already in use"),
-                ));
-            }
-        };
-
         let mut state = self.state.lock().await;
         Self::prune_expired(&mut state).await;
         // Context-switch atomicity: validate the request identity against
@@ -255,6 +243,12 @@ impl PortForwardManager {
                 PortForwardFailureCategory::ContextTransition,
                 "the context switched; retry after it completes",
             ));
+        }
+        // Resolution canonicalizes named and numeric Service selectors. Check
+        // that key before any bind or budget rejection so a duplicate always
+        // focuses its existing listener.
+        if let Some(existing) = Self::find_key_in_state(&state, &target_key).await {
+            return Ok(existing);
         }
         let mut active_sessions = 0;
         for inner in state.sessions.values() {
@@ -273,9 +267,21 @@ impl PortForwardManager {
                 "the maximum number of port-forward sessions is active",
             ));
         }
-        if let Some(existing) = Self::find_key_in_state(&state, &target_key).await {
-            return Ok(existing);
-        }
+
+        // Bind only 127.0.0.1 before reporting success; port 0 asks the OS.
+        // The manager gate remains held so another resolved start or context
+        // transition cannot publish between canonical duplicate detection and
+        // insertion.
+        let bind_addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, requested_local_port));
+        let listener = match TcpListener::bind(bind_addr).await {
+            Ok(listener) => listener,
+            Err(_) => {
+                return Err(StartRejected::new(
+                    PortForwardFailureCategory::LocalPortInUse,
+                    format!("local port {requested_local_port} is already in use"),
+                ));
+            }
+        };
 
         let id = random_id();
         let local_addr = listener.local_addr().map_err(|_| {
@@ -358,7 +364,7 @@ impl PortForwardManager {
             }
             guard.state = PortForwardSessionState::Stopped;
             guard.failure = None;
-            guard.terminal_at = Some(std::time::Instant::now());
+            guard.terminal_at = Some(tokio::time::Instant::now());
             // Cancelling stops new accepts and tears down live pumps; their
             // tasks are joined below WITHOUT any lock held so a pump that is
             // mid-copy can always finish its release bookkeeping.
@@ -418,6 +424,16 @@ impl PortForwardManager {
         Some(inner.lock().await.resolved.source_port)
     }
 
+    /// Look up one retained session by ID without changing its lifecycle.
+    pub async fn session(&self, session_id: &str) -> Option<PortForwardSession> {
+        let inner = {
+            let state = self.state.lock().await;
+            state.sessions.get(session_id).cloned()
+        }?;
+        let guard = inner.lock().await;
+        Some(snapshot_of(&guard))
+    }
+
     /// Capture retained sessions together with a manager-global watermark.
     /// The baseline is read before the snapshot and then raised to every
     /// included row revision, so a concurrently published event always
@@ -471,7 +487,7 @@ impl PortForwardManager {
                 category: PortForwardFailureCategory::ContextTransition,
                 message: "the context switched while the forward was active".into(),
             });
-            guard.terminal_at = Some(std::time::Instant::now());
+            guard.terminal_at = Some(tokio::time::Instant::now());
             let _publication = self.publication.gate.lock().await;
             guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
             guard.cancel.cancel();
@@ -523,7 +539,7 @@ impl PortForwardManager {
                     PortForwardSessionState::Stopped | PortForwardSessionState::Failed
                 ) {
                     guard.state = PortForwardSessionState::Stopped;
-                    guard.terminal_at = Some(std::time::Instant::now());
+                    guard.terminal_at = Some(tokio::time::Instant::now());
                 }
                 guard.cancel.cancel();
                 guard.pumps.close();
@@ -939,7 +955,7 @@ async fn record_open_failure(
         category: PortForwardFailureCategory::UnavailableEndpoint,
         message: "the pinned endpoint stopped accepting streams".into(),
     });
-    guard.terminal_at = Some(std::time::Instant::now());
+    guard.terminal_at = Some(tokio::time::Instant::now());
     guard.cancel.cancel();
     guard.pumps.close();
     if let Some(handle) = guard.accept_task.take() {
