@@ -890,7 +890,7 @@ mod tests {
 
     use k10s_backend::BackendMode;
     use k10s_ui::workspace::{
-        LauncherItem, WindowGeom, WorkloadKind, WorkspaceCommand, WorkspaceState,
+        LauncherItem, SNAPSHOT_VERSION, WindowGeom, WorkloadKind, WorkspaceCommand, WorkspaceState,
     };
 
     use super::{
@@ -1143,7 +1143,10 @@ mod tests {
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["contexts"]["dev"]["version"], 3);
+        assert_eq!(
+            json["contexts"]["dev"]["version"],
+            serde_json::json!(SNAPSHOT_VERSION)
+        );
         assert_eq!(json["contexts"]["dev"]["free_window_resizing"], false);
     }
 
@@ -1187,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn migrated_v1_state_is_rewritten_as_v3_after_debounce() {
+    fn migrated_v1_state_is_rewritten_as_v4_after_debounce() {
         let path = tmp_state_file("migrate-v1");
         let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":null}}]}"#;
         std::fs::write(&path, raw).unwrap();
@@ -1199,7 +1202,7 @@ mod tests {
         store.tick(&loaded.snapshot, Instant::now());
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["version"], serde_json::json!(SNAPSHOT_VERSION));
         assert_eq!(json["free_window_resizing"], false);
         assert_eq!(
             json["windows"][0]["geometry"]["position"],
@@ -1213,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn migrated_v2_state_is_rewritten_as_v3_after_debounce() {
+    fn migrated_v2_state_is_rewritten_as_v4_after_debounce() {
         let path = tmp_state_file("migrate-v2");
         let raw = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[8.0,9.0],"size":[801.0,602.0],"collapsed":true},"z":1,"view":{"namespace_scope":{"kind":"all_namespaces"},"search":"needle","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":null}}]}"#;
         std::fs::write(&path, raw).unwrap();
@@ -1225,7 +1228,7 @@ mod tests {
         store.tick(&loaded.snapshot, Instant::now());
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["version"], serde_json::json!(SNAPSHOT_VERSION));
         assert_eq!(json["free_window_resizing"], false);
         assert_eq!(
             json["windows"][0]["geometry"]["position"],

@@ -7,7 +7,7 @@
 //! navigation guards are deliberately excluded — they pin resource identities
 //! that may no longer exist after a restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -213,6 +213,29 @@ struct VersionEnvelope {
     version: u32,
 }
 
+/// Window kinds understood by snapshot schemas before Port Forwards existed.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PreV4PersistedWindowKind {
+    Overview,
+    Nodes,
+    Storage,
+    Services,
+    Workload(WorkloadKind),
+}
+
+impl From<PreV4PersistedWindowKind> for PersistedWindowKind {
+    fn from(kind: PreV4PersistedWindowKind) -> Self {
+        match kind {
+            PreV4PersistedWindowKind::Overview => Self::Overview,
+            PreV4PersistedWindowKind::Nodes => Self::Nodes,
+            PreV4PersistedWindowKind::Storage => Self::Storage,
+            PreV4PersistedWindowKind::Services => Self::Services,
+            PreV4PersistedWindowKind::Workload(kind) => Self::Workload(kind),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V1Snapshot {
@@ -226,7 +249,7 @@ struct V1Snapshot {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V1Window {
-    kind: PersistedWindowKind,
+    kind: PreV4PersistedWindowKind,
     title: String,
     geometry: WindowGeom,
     #[serde(default)]
@@ -283,7 +306,7 @@ struct V4Snapshot {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V2Window {
-    kind: PersistedWindowKind,
+    kind: PreV4PersistedWindowKind,
     title: String,
     geometry: WindowGeom,
     #[serde(default)]
@@ -294,7 +317,7 @@ struct V2Window {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V3Window {
-    kind: PersistedWindowKind,
+    kind: PreV4PersistedWindowKind,
     title: String,
     geometry: WindowGeom,
     #[serde(default)]
@@ -357,7 +380,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                     .windows
                     .into_iter()
                     .map(|window| PersistedWindow {
-                        kind: window.kind,
+                        kind: window.kind.into(),
                         title: window.title,
                         geometry: window.geometry,
                         z: window.z,
@@ -385,7 +408,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                     .windows
                     .into_iter()
                     .map(|window| PersistedWindow {
-                        kind: window.kind,
+                        kind: window.kind.into(),
                         title: window.title,
                         geometry: window.geometry,
                         z: window.z,
@@ -410,7 +433,7 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                     .windows
                     .into_iter()
                     .map(|window| PersistedWindow {
-                        kind: window.kind,
+                        kind: window.kind.into(),
                         title: window.title,
                         geometry: window.geometry,
                         z: window.z,
@@ -621,6 +644,7 @@ where
         // z, not vec position) so a healthy file round-trips unchanged on
         // relaunch. Entries with out-of-range or unrestorable fields are
         // dropped: they would overflow future increments or misrender.
+        let mut restored_singletons = HashSet::new();
         let restorable: Vec<&PersistedWindow> = snapshot
             .windows
             .iter()
@@ -628,6 +652,17 @@ where
                 window.restorable_kind().is_some()
                     && window.has_sane_geometry()
                     && window.z <= COUNTER_LIMIT
+            })
+            .filter(|window| match window.restorable_kind() {
+                Some(WindowKind::Workload(_)) => true,
+                Some(
+                    kind @ (WindowKind::Overview
+                    | WindowKind::Nodes
+                    | WindowKind::Storage
+                    | WindowKind::Services
+                    | WindowKind::PortForwards),
+                ) => restored_singletons.insert(kind),
+                Some(WindowKind::Detail) | None => false,
             })
             .collect();
 
