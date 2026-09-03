@@ -460,7 +460,7 @@ fn pod_detail_overview_with_resolved_response() {
 }
 
 #[test]
-fn external_shell_capability_gates_pod_action() {
+fn external_shell() {
     let mut harness = harness();
     harness.state_mut().feed.lists.insert(
         W::Pods,

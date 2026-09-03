@@ -19,7 +19,10 @@ use k10s_protocol::{
     ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection, StreamTarget,
 };
 use k10s_ui::{
-    ui::{ConnectionState, ResourceFeed, UiShell, WindowFreshness, tools::LogsAction},
+    ui::{
+        ConnectionState, DetailAuthority, DetailLifecycle, ExternalShellAvailability, ResourceFeed,
+        UiShell, WindowFreshness, tools::LogsAction,
+    },
     workspace::{
         BlockReason, BlockResolution, LauncherItem, WindowGeom, WindowId, WindowKind,
         WorkloadKind as WorkspaceWorkload, WorkspaceCommand, WorkspaceEvent,
@@ -72,6 +75,60 @@ fn harness() -> Harness<'static, Fixture> {
         .with_size(egui::vec2(1_440.0, 900.0))
         .with_pixels_per_point(1.0)
         .build_ui_state(render, Fixture::default())
+}
+
+#[test]
+fn external_shell() {
+    let mut harness = harness();
+    let identity = pod_row("authority-pod", "Running").identity;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::OpenDedicatedDetail(identity.clone()));
+    harness
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), pod_detail("authority-pod"));
+    harness
+        .state_mut()
+        .shell
+        .set_external_shell_availability(ExternalShellAvailability::Available { generation: 3 });
+    harness.run_steps(4);
+    assert!(
+        harness.query_by_label("Open shell").is_none(),
+        "missing authority fails closed"
+    );
+
+    harness.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Failed {
+                message: "stale".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness.run_steps(4);
+    assert!(
+        harness.query_by_label("Open shell").is_none(),
+        "stale authority fails closed"
+    );
+
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Gone,
+        },
+    );
+    harness.run_steps(4);
+    assert!(
+        harness.query_by_label("Open shell").is_none(),
+        "non-Present authority fails closed"
+    );
 }
 
 fn pod_row(name: &str, summary: &str) -> ResourceListRow {
