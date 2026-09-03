@@ -512,7 +512,7 @@ pub enum StorageError {
     InvalidParent,
     Render(RenderError),
     NoTerminalLauncher,
-    LaunchFailed,
+    LaunchFailed(Vec<SafeLaunchAttempt>),
     RollbackFailed,
 }
 
@@ -527,7 +527,13 @@ impl fmt::Display for StorageError {
             Self::NoTerminalLauncher => {
                 formatter.write_str("no system terminal accepted the shell launch")
             }
-            Self::LaunchFailed => formatter.write_str("system terminal failed to start"),
+            Self::LaunchFailed(attempts) => {
+                formatter.write_str("system terminal failed to start")?;
+                for attempt in attempts {
+                    write!(formatter, "; {} ({})", attempt.executable, attempt.category)?;
+                }
+                Ok(())
+            }
             Self::RollbackFailed => formatter.write_str("temporary shell rollback failed"),
         }
     }
@@ -560,7 +566,7 @@ struct LaunchManifest {
 
 #[derive(Clone, Debug)]
 pub struct TemporaryShellStorage {
-    parent: PathBuf,
+    parent: platform::PrivateParent,
     fault: Option<StorageFaultPoint>,
 }
 
@@ -581,7 +587,7 @@ pub enum StorageFaultPoint {
 
 impl TemporaryShellStorage {
     pub fn new(parent: PathBuf) -> Result<Self, StorageError> {
-        platform::ensure_private_parent(&parent)?;
+        let parent = platform::ensure_private_parent(&parent)?;
         Ok(Self {
             parent,
             fault: None,
@@ -618,11 +624,11 @@ impl TemporaryShellStorage {
             "sh"
         };
         let script_name = format!("launch.{suffix}");
-        let directory = self.parent.join(&launch_id);
         self.injected(StorageFaultPoint::DirectoryCreate)?;
-        platform::create_private_directory(&directory)?;
+        let child = platform::create_private_directory(&self.parent, &launch_id)?;
+        let directory = platform::child_path(&child).to_owned();
         let mut transaction = CreationTransaction {
-            directory: directory.clone(),
+            child: child.clone(),
             manifest: None,
             script: None,
             committed: false,
@@ -646,18 +652,19 @@ impl TemporaryShellStorage {
             let manifest_path = directory.join(MANIFEST_NAME);
             self.injected(StorageFaultPoint::ManifestCreate)?;
             platform::create_private_file(
-                &manifest_path,
+                &child,
+                MANIFEST_NAME,
                 &serde_json::to_vec(&manifest).map_err(std::io::Error::other)?,
                 false,
                 || transaction.manifest = Some(manifest_path.clone()),
             )?;
             self.injected(StorageFaultPoint::ManifestWrite)?;
             self.injected(StorageFaultPoint::ManifestSync)?;
-            let script_path = directory.join(script_name);
+            let script_path = directory.join(&script_name);
             self.injected(StorageFaultPoint::Render)?;
             let body = render_self_cleaning(command, &manifest_path, &directory)?;
             self.injected(StorageFaultPoint::ScriptCreate)?;
-            platform::create_private_file(&script_path, &body, true, || {
+            platform::create_private_file(&child, &script_name, &body, true, || {
                 transaction.script = Some(script_path.clone());
             })?;
             self.injected(StorageFaultPoint::ScriptWrite)?;
@@ -668,6 +675,7 @@ impl TemporaryShellStorage {
                 directory,
                 path: script_path,
                 manifest: manifest_path,
+                child,
             })
         })();
         match outcome {
@@ -682,19 +690,18 @@ impl TemporaryShellStorage {
     pub fn cleanup_expired(&self, now_unix_seconds: u64) -> Result<CleanupReport, StorageError> {
         platform::validate_private_parent(&self.parent)?;
         let mut candidates = Vec::new();
-        for entry in std::fs::read_dir(&self.parent)? {
+        for entry in std::fs::read_dir(platform::parent_path(&self.parent))? {
             let entry = entry?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if !valid_launch_id(name) {
                 continue;
             }
-            let directory = entry.path();
-            if platform::validate_launch_directory(&directory).is_err() {
+            let Ok(child) = platform::open_child(&self.parent, name) else {
                 continue;
-            }
-            let manifest_path = directory.join(MANIFEST_NAME);
-            let Ok(bytes) = std::fs::read(&manifest_path) else {
+            };
+            let directory = platform::child_path(&child).to_owned();
+            let Ok(bytes) = platform::read_regular_file(&child, MANIFEST_NAME) else {
                 continue;
             };
             let Ok(manifest) = serde_json::from_slice::<LaunchManifest>(&bytes) else {
@@ -706,11 +713,16 @@ impl TemporaryShellStorage {
             {
                 continue;
             }
-            candidates.push((manifest.created_unix_seconds, directory, manifest.script));
+            candidates.push((
+                manifest.created_unix_seconds,
+                directory,
+                manifest.script,
+                child,
+            ));
         }
         candidates.sort_by_key(|candidate| candidate.0);
         let mut report = CleanupReport::default();
-        for (created, directory, script_name) in candidates.into_iter().take(128) {
+        for (created, directory, script_name, child) in candidates.into_iter().take(128) {
             report.examined += 1;
             if now_unix_seconds.saturating_sub(created) <= 24 * 60 * 60 {
                 continue;
@@ -725,13 +737,11 @@ impl TemporaryShellStorage {
             {
                 continue;
             }
-            let script = directory.join(&script_name);
-            let manifest = directory.join(MANIFEST_NAME);
-            platform::validate_regular_file(&script)?;
-            platform::validate_regular_file(&manifest)?;
-            platform::remove_regular_file(&script)?;
-            platform::remove_regular_file(&manifest)?;
-            platform::remove_empty_directory(&directory)?;
+            platform::validate_regular_file(&child, &script_name)?;
+            platform::validate_regular_file(&child, MANIFEST_NAME)?;
+            platform::remove_regular_file(&child, &script_name)?;
+            platform::remove_regular_file(&child, MANIFEST_NAME)?;
+            platform::remove_empty_directory(&child)?;
             report.removed += 1;
         }
         Ok(report)
@@ -755,7 +765,7 @@ fn valid_script_name(value: &str) -> bool {
 }
 
 struct CreationTransaction {
-    directory: PathBuf,
+    child: platform::PrivateChild,
     manifest: Option<PathBuf>,
     script: Option<PathBuf>,
     committed: bool,
@@ -772,12 +782,20 @@ impl CreationTransaction {
     fn rollback(&mut self) -> Result<(), ()> {
         let mut failed = false;
         if let Some(path) = self.script.take() {
-            failed |= platform::remove_regular_file(&path).is_err();
+            failed |= platform::remove_regular_file(
+                &self.child,
+                path.file_name().and_then(|v| v.to_str()).unwrap_or(""),
+            )
+            .is_err();
         }
         if let Some(path) = self.manifest.take() {
-            failed |= platform::remove_regular_file(&path).is_err();
+            failed |= platform::remove_regular_file(
+                &self.child,
+                path.file_name().and_then(|v| v.to_str()).unwrap_or(""),
+            )
+            .is_err();
         }
-        failed |= platform::remove_empty_directory(&self.directory).is_err();
+        failed |= platform::remove_empty_directory(&self.child).is_err();
         if failed {
             Err(())
         } else {
@@ -792,6 +810,7 @@ pub struct TemporaryShellScript {
     directory: PathBuf,
     path: PathBuf,
     manifest: PathBuf,
+    child: platform::PrivateChild,
 }
 impl TemporaryShellScript {
     pub fn directory(&self) -> &Path {
@@ -804,10 +823,16 @@ impl TemporaryShellScript {
         &self.manifest
     }
     pub fn cleanup(&self) -> Result<(), StorageError> {
-        platform::validate_launch_directory(&self.directory)?;
-        platform::remove_regular_file(&self.path)?;
-        platform::remove_regular_file(&self.manifest)?;
-        platform::remove_empty_directory(&self.directory)?;
+        platform::validate_launch_directory(&self.child)?;
+        platform::remove_regular_file(
+            &self.child,
+            self.path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or(StorageError::InvalidParent)?,
+        )?;
+        platform::remove_regular_file(&self.child, MANIFEST_NAME)?;
+        platform::remove_empty_directory(&self.child)?;
         Ok(())
     }
 }
@@ -855,6 +880,32 @@ pub enum LaunchAttempt {
     Spawn(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SafeLaunchAttempt {
+    pub executable: String,
+    pub category: &'static str,
+}
+
+fn safe_attempt(adapter: &TerminalAdapter, error: &std::io::Error) -> SafeLaunchAttempt {
+    SafeLaunchAttempt {
+        executable: adapter
+            .executable
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("terminal")
+            .chars()
+            .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '-' | '_'))
+            .take(64)
+            .collect(),
+        category: match error.kind() {
+            std::io::ErrorKind::NotFound => "not found",
+            std::io::ErrorKind::PermissionDenied => "permission denied",
+            std::io::ErrorKind::WouldBlock => "temporarily unavailable",
+            _ => "spawn error",
+        },
+    }
+}
+
 pub fn launch_system_terminal(script: &TemporaryShellScript) -> Result<(), StorageError> {
     #[cfg(target_os = "macos")]
     {
@@ -892,25 +943,7 @@ pub fn launch_with_adapter(
     script: &TemporaryShellScript,
     adapter: &TerminalAdapter,
 ) -> Result<(), StorageError> {
-    let result = {
-        let mut command = std::process::Command::new(&adapter.executable);
-        command
-            .args(&adapter.arguments_before_script)
-            .arg(script.path());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0000_0010);
-        }
-        command.spawn()
-    };
-    match result {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            script.cleanup()?;
-            Err(StorageError::LaunchFailed)
-        }
-    }
+    launch_with_adapters(script, std::slice::from_ref(adapter))
 }
 
 pub fn launch_with_adapters(
@@ -921,6 +954,7 @@ pub fn launch_with_adapters(
         script.cleanup()?;
         return Err(StorageError::NoTerminalLauncher);
     }
+    let mut attempts = Vec::new();
     for adapter in adapters {
         let mut command = std::process::Command::new(&adapter.executable);
         command
@@ -931,12 +965,13 @@ pub fn launch_with_adapters(
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0000_0010);
         }
-        if command.spawn().is_ok() {
-            return Ok(());
+        match command.spawn() {
+            Ok(_) => return Ok(()),
+            Err(error) => attempts.push(safe_attempt(adapter, &error)),
         }
     }
     script.cleanup()?;
-    Err(StorageError::LaunchFailed)
+    Err(StorageError::LaunchFailed(attempts))
 }
 
 #[cfg(target_os = "macos")]

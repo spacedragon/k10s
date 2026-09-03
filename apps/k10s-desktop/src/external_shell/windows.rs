@@ -4,7 +4,8 @@
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
@@ -16,23 +17,76 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
-    FileDispositionInfo, GetFileInformationByHandleEx, OPEN_EXISTING, SetFileInformationByHandle,
+    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileAttributeTagInfo, FileDispositionInfo, FileIdInfo, GetFileInformationByHandleEx,
+    OPEN_EXISTING, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::{KubectlExecCommand, StorageError};
 
 struct Handle(HANDLE);
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Handle(REDACTED)")
+    }
+}
 impl Drop for Handle {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.0);
         }
     }
+}
+#[derive(Clone)]
+pub(super) struct PrivateParent {
+    handle: Arc<Handle>,
+    path: PathBuf,
+    id: FILE_ID_INFO,
+}
+impl std::fmt::Debug for PrivateParent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateParent")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Clone)]
+pub(super) struct PrivateChild {
+    parent: PrivateParent,
+    handle: Arc<Handle>,
+    path: PathBuf,
+    name: String,
+    id: FILE_ID_INFO,
+}
+impl std::fmt::Debug for PrivateChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateChild")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+fn file_id(handle: HANDLE) -> Result<FILE_ID_INFO, StorageError> {
+    let mut id = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut id).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(id)
+}
+fn same_id(left: &FILE_ID_INFO, right: &FILE_ID_INFO) -> bool {
+    left.VolumeSerialNumber == right.VolumeSerialNumber
+        && left.FileId.Identifier == right.FileId.Identifier
 }
 struct Descriptor(*mut core::ffi::c_void);
 impl Drop for Descriptor {
@@ -108,6 +162,11 @@ fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 fn open_no_reparse(path: &Path) -> Result<Handle, StorageError> {
+    let handle = raw_open_no_reparse(path)?;
+    validate_owner_acl(handle.0)?;
+    Ok(handle)
+}
+fn raw_open_no_reparse(path: &Path) -> Result<Handle, StorageError> {
     let path = wide(path);
     let handle = unsafe {
         CreateFileW(
@@ -139,7 +198,6 @@ fn open_no_reparse(path: &Path) -> Result<Handle, StorageError> {
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(StorageError::InvalidParent);
     }
-    validate_owner_acl(handle.0)?;
     Ok(handle)
 }
 fn validate_owner_acl(handle: HANDLE) -> Result<(), StorageError> {
@@ -221,25 +279,50 @@ fn validate_owner_acl(handle: HANDLE) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) fn ensure_private_parent(path: &Path) -> Result<(), StorageError> {
+pub(super) fn ensure_private_parent(path: &Path) -> Result<PrivateParent, StorageError> {
     if !path.exists() {
         create_owned_directory(path)?;
     }
-    validate_private_parent(path)
+    let handle = open_no_reparse(path)?;
+    let id = file_id(handle.0)?;
+    Ok(PrivateParent {
+        handle: Arc::new(handle),
+        path: path.to_owned(),
+        id,
+    })
 }
-
-pub(super) fn validate_private_parent(path: &Path) -> Result<(), StorageError> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-        open_no_reparse(path).map(drop)
-    } else {
-        Err(StorageError::InvalidParent)
+pub(super) fn parent_path(parent: &PrivateParent) -> &Path {
+    &parent.path
+}
+pub(super) fn validate_private_parent(parent: &PrivateParent) -> Result<(), StorageError> {
+    validate_owner_acl(parent.handle.0)?;
+    let reopened = open_no_reparse(&parent.path)?;
+    if !same_id(&parent.id, &file_id(reopened.0)?) {
+        return Err(StorageError::InvalidParent);
     }
+    Ok(())
 }
-
-pub(super) fn create_private_directory(path: &Path) -> Result<(), StorageError> {
-    create_owned_directory(path)?;
-    validate_launch_directory(path)
+pub(super) fn create_private_directory(
+    parent: &PrivateParent,
+    name: &str,
+) -> Result<PrivateChild, StorageError> {
+    validate_private_parent(parent)?;
+    let path = parent.path.join(name);
+    create_owned_directory(&path)?;
+    match open_child(parent, name) {
+        Ok(child) => Ok(child),
+        Err(error) => {
+            let rollback = raw_open_no_reparse(&path).and_then(|handle| {
+                validate_private_parent(parent)?;
+                delete_handle(handle.0)
+            });
+            if rollback.is_err() {
+                Err(StorageError::RollbackFailed)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 fn create_owned_directory(path: &Path) -> Result<(), StorageError> {
     let mut descriptor = owner_security_descriptor()?;
@@ -250,23 +333,49 @@ fn create_owned_directory(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) fn validate_launch_directory(path: &Path) -> Result<(), StorageError> {
-    validate_private_parent(path)
+pub(super) fn open_child(parent: &PrivateParent, name: &str) -> Result<PrivateChild, StorageError> {
+    validate_private_parent(parent)?;
+    let path = parent.path.join(name);
+    let handle = open_no_reparse(&path)?;
+    let id = file_id(handle.0)?;
+    validate_private_parent(parent)?;
+    Ok(PrivateChild {
+        parent: parent.clone(),
+        handle: Arc::new(handle),
+        path,
+        name: name.to_owned(),
+        id,
+    })
+}
+pub(super) fn child_path(child: &PrivateChild) -> &Path {
+    &child.path
+}
+pub(super) fn validate_launch_directory(child: &PrivateChild) -> Result<(), StorageError> {
+    validate_private_parent(&child.parent)?;
+    validate_owner_acl(child.handle.0)?;
+    let reopened = open_no_reparse(&child.path)?;
+    if !same_id(&child.id, &file_id(reopened.0)?) {
+        return Err(StorageError::InvalidParent);
+    }
+    Ok(())
 }
 
 pub(super) fn create_private_file<F: FnOnce()>(
-    path: &Path,
+    child: &PrivateChild,
+    name: &str,
     bytes: &[u8],
     _executable: bool,
     created: F,
 ) -> Result<(), StorageError> {
     use std::io::Write;
     use std::os::windows::io::{FromRawHandle, RawHandle};
+    validate_launch_directory(child)?;
+    let path = child.path.join(name);
     let mut descriptor = owner_security_descriptor()?;
     let attributes = security_attributes(&mut descriptor);
     let handle = unsafe {
         CreateFileW(
-            wide(path).as_ptr(),
+            wide(&path).as_ptr(),
             0x4000_0000,
             FILE_SHARE_READ,
             &raw const attributes,
@@ -284,29 +393,75 @@ pub(super) fn create_private_file<F: FnOnce()>(
     file.sync_all()?;
     Ok(())
 }
-
-pub(super) fn remove_regular_file(path: &Path) -> Result<(), StorageError> {
-    validate_regular_file(path)?;
-    delete_by_handle(path)
+pub(super) fn read_regular_file(child: &PrivateChild, name: &str) -> Result<Vec<u8>, StorageError> {
+    use std::io::Read;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    let handle = open_regular(child, name, 0x8000_0000)?;
+    let raw = handle.0;
+    std::mem::forget(handle);
+    let mut file = unsafe { std::fs::File::from_raw_handle(raw as RawHandle) };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
-pub(super) fn validate_regular_file(path: &Path) -> Result<(), StorageError> {
-    if std::fs::symlink_metadata(path)?.file_type().is_file() {
-        open_no_reparse(path).map(drop)
-    } else {
-        Err(StorageError::InvalidParent)
+pub(super) fn remove_regular_file(child: &PrivateChild, name: &str) -> Result<(), StorageError> {
+    let handle = open_regular(child, name, 0x0001_0000)?;
+    delete_handle(handle.0)
+}
+pub(super) fn validate_regular_file(child: &PrivateChild, name: &str) -> Result<(), StorageError> {
+    open_regular(child, name, 0).map(drop)
+}
+fn open_regular(child: &PrivateChild, name: &str, access: u32) -> Result<Handle, StorageError> {
+    validate_launch_directory(child)?;
+    let path = wide(&child.path.join(name));
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES | 0x0002_0000 | access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error().into());
     }
+    let handle = Handle(raw);
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle.0,
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    if tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Err(StorageError::InvalidParent);
+    }
+    validate_owner_acl(handle.0)?;
+    validate_launch_directory(child)?;
+    Ok(handle)
 }
 
-pub(super) fn remove_empty_directory(path: &Path) -> Result<(), StorageError> {
-    validate_launch_directory(path)?;
-    delete_by_handle(path)
+pub(super) fn remove_empty_directory(child: &PrivateChild) -> Result<(), StorageError> {
+    validate_launch_directory(child)?;
+    let linked = open_no_reparse(&child.parent.path.join(&child.name))?;
+    if !same_id(&child.id, &file_id(linked.0)?) {
+        return Err(StorageError::InvalidParent);
+    }
+    delete_handle(child.handle.0)
 }
-fn delete_by_handle(path: &Path) -> Result<(), StorageError> {
-    let handle = open_no_reparse(path)?;
+fn delete_handle(handle: HANDLE) -> Result<(), StorageError> {
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
     if unsafe {
         SetFileInformationByHandle(
-            handle.0,
+            handle,
             FileDispositionInfo,
             (&raw const disposition).cast(),
             size_of::<FILE_DISPOSITION_INFO>() as u32,
@@ -328,7 +483,7 @@ pub(super) fn render_with_cleanup(
     let manifest = manifest.to_string_lossy().replace('\'', "''");
     let directory = directory.to_string_lossy().replace('\'', "''");
     let cleanup = format!(
-        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{manifest}' -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\nexit $K10sStatus\r\n"
+        "$K10sParent = Get-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\nif ($null -ne $K10sParent -and (($K10sParent.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {{\r\nRemove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{manifest}' -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath '{directory}' -Force -ErrorAction SilentlyContinue\r\n}}\r\nexit $K10sStatus\r\n"
     );
     body = body.strip_suffix(exit).unwrap_or(&body).to_owned() + &cleanup;
     let mut encoded = vec![0xEF, 0xBB, 0xBF];

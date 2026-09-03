@@ -1,20 +1,24 @@
 use super::StorageError;
-use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-fn open_directory(path: &Path) -> Result<OwnedFd, StorageError> {
-    rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)
-    .map_err(Into::into)
+#[derive(Clone, Debug)]
+pub(super) struct PrivateParent {
+    fd: Arc<std::fs::File>,
+    path: PathBuf,
 }
-fn private_directory(fd: &OwnedFd) -> Result<(), StorageError> {
-    let stat = rustix::fs::fstat(fd).map_err(io::Error::from)?;
+#[derive(Clone, Debug)]
+pub(super) struct PrivateChild {
+    parent: PrivateParent,
+    fd: Arc<std::fs::File>,
+    name: String,
+    path: PathBuf,
+}
+
+fn private_directory(file: &std::fs::File) -> Result<(), StorageError> {
+    let stat = rustix::fs::fstat(file).map_err(io::Error::from)?;
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory
         || stat.st_uid != rustix::process::geteuid().as_raw()
         || stat.st_mode & 0o777 != 0o700
@@ -23,63 +27,115 @@ fn private_directory(fd: &OwnedFd) -> Result<(), StorageError> {
     }
     Ok(())
 }
-fn open_private_directory(path: &Path) -> Result<OwnedFd, StorageError> {
-    let fd = open_directory(path)?;
-    private_directory(&fd)?;
-    Ok(fd)
+fn open_directory(path: &Path) -> Result<std::fs::File, StorageError> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let file = std::fs::File::from(fd);
+    private_directory(&file)?;
+    Ok(file)
 }
-pub(super) fn ensure_private_parent(path: &Path) -> Result<(), StorageError> {
+pub(super) fn ensure_private_parent(path: &Path) -> Result<PrivateParent, StorageError> {
     use std::os::unix::fs::DirBuilderExt;
-    match open_private_directory(path) {
-        Ok(_) => Ok(()),
+    let file = match open_directory(path) {
+        Ok(file) => file,
         Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             let mut builder = std::fs::DirBuilder::new();
             builder.mode(0o700);
             builder.create(path)?;
-            validate_private_parent(path)
+            open_directory(path)?
         }
-        Err(error) => Err(error),
+        Err(error) => return Err(error),
+    };
+    Ok(PrivateParent {
+        fd: Arc::new(file),
+        path: path.to_owned(),
+    })
+}
+pub(super) fn parent_path(parent: &PrivateParent) -> &Path {
+    &parent.path
+}
+pub(super) fn validate_private_parent(parent: &PrivateParent) -> Result<(), StorageError> {
+    private_directory(&parent.fd)?;
+    let linked = open_directory(&parent.path)?;
+    let retained = rustix::fs::fstat(&parent.fd).map_err(io::Error::from)?;
+    let current = rustix::fs::fstat(&linked).map_err(io::Error::from)?;
+    if retained.st_dev != current.st_dev || retained.st_ino != current.st_ino {
+        return Err(StorageError::InvalidParent);
+    }
+    Ok(())
+}
+pub(super) fn create_private_directory(
+    parent: &PrivateParent,
+    name: &str,
+) -> Result<PrivateChild, StorageError> {
+    validate_private_parent(parent)?;
+    rustix::fs::mkdirat(&parent.fd, name, Mode::from_raw_mode(0o700)).map_err(io::Error::from)?;
+    match open_child(parent, name) {
+        Ok(child) => Ok(child),
+        Err(error) => {
+            let _rollback = rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR);
+            Err(error)
+        }
     }
 }
-pub(super) fn validate_private_parent(path: &Path) -> Result<(), StorageError> {
-    open_private_directory(path).map(drop)
-}
-pub(super) fn create_private_directory(path: &Path) -> Result<(), StorageError> {
-    let parent = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let name = path.file_name().ok_or(StorageError::InvalidParent)?;
-    rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700)).map_err(io::Error::from)?;
-    let child = rustix::fs::openat(
-        &parent,
+pub(super) fn open_child(parent: &PrivateParent, name: &str) -> Result<PrivateChild, StorageError> {
+    validate_private_parent(parent)?;
+    let fd = rustix::fs::openat(
+        &parent.fd,
         name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    private_directory(&child)
+    let file = std::fs::File::from(fd);
+    private_directory(&file)?;
+    let opened = rustix::fs::fstat(&file).map_err(io::Error::from)?;
+    let linked =
+        rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    if opened.st_dev != linked.st_dev || opened.st_ino != linked.st_ino {
+        return Err(StorageError::InvalidParent);
+    }
+    Ok(PrivateChild {
+        parent: parent.clone(),
+        fd: Arc::new(file),
+        name: name.to_owned(),
+        path: parent.path.join(name),
+    })
 }
-pub(super) fn validate_launch_directory(path: &Path) -> Result<(), StorageError> {
-    let parent = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let child = rustix::fs::openat(
-        &parent,
-        path.file_name().ok_or(StorageError::InvalidParent)?,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
+pub(super) fn child_path(child: &PrivateChild) -> &Path {
+    &child.path
+}
+pub(super) fn validate_launch_directory(child: &PrivateChild) -> Result<(), StorageError> {
+    validate_private_parent(&child.parent)?;
+    private_directory(&child.fd)?;
+    let opened = rustix::fs::fstat(&child.fd).map_err(io::Error::from)?;
+    let linked = rustix::fs::statat(
+        &child.parent.fd,
+        child.name.as_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
     )
     .map_err(io::Error::from)?;
-    private_directory(&child)
+    if opened.st_dev != linked.st_dev || opened.st_ino != linked.st_ino {
+        return Err(StorageError::InvalidParent);
+    }
+    Ok(())
 }
 pub(super) fn create_private_file<F: FnOnce()>(
-    path: &Path,
+    child: &PrivateChild,
+    name: &str,
     bytes: &[u8],
     executable: bool,
     created: F,
 ) -> Result<(), StorageError> {
     use std::io::Write;
-    let directory = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let name = path.file_name().ok_or(StorageError::InvalidParent)?;
+    validate_launch_directory(child)?;
     let mode = if executable { 0o700 } else { 0o600 };
     let fd = rustix::fs::openat(
-        &directory,
+        &child.fd,
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(mode),
@@ -91,42 +147,71 @@ pub(super) fn create_private_file<F: FnOnce()>(
     file.sync_all()?;
     Ok(())
 }
-pub(super) fn remove_regular_file(path: &Path) -> Result<(), StorageError> {
-    validate_regular_file(path)?;
-    let directory = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let name = path.file_name().ok_or(StorageError::InvalidParent)?;
-    rustix::fs::unlinkat(&directory, name, AtFlags::empty()).map_err(io::Error::from)?;
-    Ok(())
+pub(super) fn read_regular_file(child: &PrivateChild, name: &str) -> Result<Vec<u8>, StorageError> {
+    use std::io::Read;
+    let fd = rustix::fs::openat(
+        &child.fd,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let mut file = std::fs::File::from(fd);
+    validate_open_regular(child, name, &file)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
-pub(super) fn validate_regular_file(path: &Path) -> Result<(), StorageError> {
-    let directory = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let name = path.file_name().ok_or(StorageError::InvalidParent)?;
-    let stat =
-        rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
-    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
-        || stat.st_uid != rustix::process::geteuid().as_raw()
+fn validate_open_regular(
+    child: &PrivateChild,
+    name: &str,
+    file: &std::fs::File,
+) -> Result<(), StorageError> {
+    let opened = rustix::fs::fstat(file).map_err(io::Error::from)?;
+    let linked =
+        rustix::fs::statat(&child.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    if rustix::fs::FileType::from_raw_mode(opened.st_mode) != rustix::fs::FileType::RegularFile
+        || opened.st_uid != rustix::process::geteuid().as_raw()
+        || opened.st_dev != linked.st_dev
+        || opened.st_ino != linked.st_ino
     {
         return Err(StorageError::InvalidParent);
     }
     Ok(())
 }
-pub(super) fn remove_empty_directory(path: &Path) -> Result<(), StorageError> {
-    let parent = open_private_directory(path.parent().ok_or(StorageError::InvalidParent)?)?;
-    let name = path.file_name().ok_or(StorageError::InvalidParent)?;
-    let child = rustix::fs::openat(
-        &parent,
+pub(super) fn validate_regular_file(child: &PrivateChild, name: &str) -> Result<(), StorageError> {
+    open_regular(child, name).map(drop)
+}
+fn open_regular(child: &PrivateChild, name: &str) -> Result<std::fs::File, StorageError> {
+    let fd = rustix::fs::openat(
+        &child.fd,
         name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    private_directory(&child)?;
-    let opened = rustix::fs::fstat(&child).map_err(io::Error::from)?;
-    let linked =
-        rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    let file = std::fs::File::from(fd);
+    validate_open_regular(child, name, &file)?;
+    Ok(file)
+}
+pub(super) fn remove_regular_file(child: &PrivateChild, name: &str) -> Result<(), StorageError> {
+    let _retained_identity = open_regular(child, name)?;
+    rustix::fs::unlinkat(&child.fd, name, AtFlags::empty()).map_err(io::Error::from)?;
+    Ok(())
+}
+pub(super) fn remove_empty_directory(child: &PrivateChild) -> Result<(), StorageError> {
+    validate_launch_directory(child)?;
+    let opened = rustix::fs::fstat(&child.fd).map_err(io::Error::from)?;
+    let linked = rustix::fs::statat(
+        &child.parent.fd,
+        child.name.as_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(io::Error::from)?;
     if opened.st_dev != linked.st_dev || opened.st_ino != linked.st_ino {
         return Err(StorageError::InvalidParent);
     }
-    rustix::fs::unlinkat(&parent, name, AtFlags::REMOVEDIR).map_err(io::Error::from)?;
+    rustix::fs::unlinkat(&child.parent.fd, child.name.as_str(), AtFlags::REMOVEDIR)
+        .map_err(io::Error::from)?;
     Ok(())
 }

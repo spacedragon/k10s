@@ -115,6 +115,37 @@ fn launch_uses_the_exact_adapter_resolved_by_the_probe() {
 
 #[cfg(unix)]
 #[test]
+fn launch_failure_diagnostic_is_ordered_concrete_and_path_sanitized() {
+    use k10s_desktop::external_shell::{TerminalAdapter, launch_with_adapters};
+    let root = std::env::temp_dir().join(format!("k10s-launch-diagnostic-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let error = launch_with_adapters(
+        &script,
+        &[
+            TerminalAdapter {
+                executable: "/private/secret/first terminal".into(),
+                arguments_before_script: vec![],
+            },
+            TerminalAdapter {
+                executable: "/private/secret/second-terminal".into(),
+                arguments_before_script: vec![],
+            },
+        ],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("firstterminal (not found); second-terminal (not found)"));
+    assert!(!error.contains("/private/secret"));
+    assert!(!script.directory().exists());
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn temporary_startup_cleanup_removes_only_expired_valid_children() {
     use std::os::unix::fs::symlink;
     let root = std::env::temp_dir().join(format!("k10s-temp-cleanup-{}", std::process::id()));
@@ -213,6 +244,65 @@ fn temporary_creation_faults_rollback_every_owned_object_and_keep_preexisting_en
     std::fs::remove_dir(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn temporary_storage_refuses_parent_path_swap_without_touching_replacement() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("k10s-parent-swap-{}", std::process::id()));
+    let retained = root.with_extension("retained");
+    let outside = root.with_extension("outside");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&retained);
+    let _ = std::fs::remove_dir_all(&outside);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    std::fs::rename(&root, &retained).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("sentinel"), "keep").unwrap();
+    symlink(&outside, &root).unwrap();
+    assert!(
+        storage
+            .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("sentinel")).unwrap(),
+        "keep"
+    );
+    assert_eq!(std::fs::read_dir(&retained).unwrap().count(), 0);
+    std::fs::remove_file(root).unwrap();
+    std::fs::remove_dir_all(retained).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_cleanup_refuses_child_entry_swap_before_unlinking_files() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("k10s-child-swap-{}", std::process::id()));
+    let outside = root.with_extension("outside");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let retained = script.directory().with_extension("retained");
+    std::fs::rename(script.directory(), &retained).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("sentinel"), "keep").unwrap();
+    symlink(&outside, script.directory()).unwrap();
+    assert!(script.cleanup().is_err());
+    assert!(retained.join("manifest.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("sentinel")).unwrap(),
+        "keep"
+    );
+    std::fs::remove_file(script.directory()).unwrap();
+    std::fs::remove_dir_all(retained).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
@@ -226,6 +316,10 @@ fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
     let script = storage
         .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
         .unwrap();
+    assert!(
+        String::from_utf8_lossy(&std::fs::read(script.path()).unwrap())
+            .contains("[IO.FileAttributes]::ReparsePoint")
+    );
     assert!(symlink_dir(&outside, root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).is_ok());
     let report = storage.cleanup_expired(u64::MAX).unwrap();
     assert_eq!(report.removed, 1);
@@ -233,6 +327,57 @@ fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
     assert!(!script.directory().exists());
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn temporary_powershell_runtime_rechecks_parent_and_self_cleans() {
+    use std::process::{Command, Stdio};
+    let root = std::env::temp_dir().join(format!(
+        "k10s-windows-runtime-cleanup-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir(&root).unwrap();
+    let kubectl = root.join("kubectl.cmd");
+    std::fs::write(&kubectl, "@exit /b 41\r\n").unwrap();
+    let descriptor = KubectlLaunchDescriptor::new(
+        1,
+        kubectl,
+        "context".into(),
+        vec![root.join("config")],
+        BTreeMap::from([
+            ("PATH".into(), root.display().to_string()),
+            (
+                "KUBECONFIG".into(),
+                root.join("config").display().to_string(),
+            ),
+        ]),
+        Vec::new(),
+    )
+    .unwrap();
+    let storage = TemporaryShellStorage::new(root.join("storage")).unwrap();
+    let target = ExternalShellTarget {
+        generation: 1,
+        namespace: "ns".into(),
+        pod: "pod".into(),
+        uid: "uid".into(),
+        container: "main".into(),
+        program: "/bin/sh".into(),
+    };
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor, target).unwrap())
+        .unwrap();
+    let launch_dir = script.directory().to_owned();
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-File"])
+        .arg(script.path())
+        .stdin(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(41));
+    assert!(!launch_dir.exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -427,6 +572,7 @@ fn render_powershell_quotes_every_structured_value() {
     assert!(script.contains("$global:LASTEXITCODE = 125"));
     assert!(script.contains("catch { $K10sStatus = 125"));
     assert!(script.contains("exit $K10sStatus"));
+    assert!(!script.contains("Invoke-Expression"));
     assert!(!script.contains("Invoke-Expression"));
 }
 
