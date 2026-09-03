@@ -40,17 +40,19 @@ pub(crate) fn load_from_paths(
     let documents = paths
         .iter()
         .map(|path| {
-            fs::read_to_string(path).map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    AdapterError::KubeconfigMissing(path.clone())
-                } else {
-                    AdapterError::KubeconfigInvalid {
-                        source: unicode_path(path)
-                            .unwrap_or_else(|_| "non-Unicode kubeconfig path".into()),
-                        detail: "the file exists but could not be read".into(),
+            fs::read(path)
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        AdapterError::KubeconfigMissing(path.clone())
+                    } else {
+                        AdapterError::KubeconfigInvalid {
+                            source: unicode_path(path)
+                                .unwrap_or_else(|_| "non-Unicode kubeconfig path".into()),
+                            detail: "the file exists but could not be read".into(),
+                        }
                     }
-                }
-            })
+                })
+                .and_then(|bytes| decode_kubeconfig(&bytes, path))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut kubeconfig = Kubeconfig::default();
@@ -69,6 +71,37 @@ pub(crate) fn load_from_paths(
             })?;
     }
     validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths))
+}
+
+fn decode_kubeconfig(bytes: &[u8], path: &Path) -> Result<String, AdapterError> {
+    let invalid = || AdapterError::KubeconfigInvalid {
+        source: unicode_path(path).unwrap_or_else(|_| "non-Unicode kubeconfig path".into()),
+        detail: "the kubeconfig text encoding is invalid".into(),
+    };
+    if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        if encoded.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        let units = encoded
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units).map_err(|_| invalid());
+    }
+    if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        if encoded.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        let units = encoded
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units).map_err(|_| invalid());
+    }
+    let utf8 = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    std::str::from_utf8(utf8)
+        .map(str::to_owned)
+        .map_err(|_| invalid())
 }
 
 /// Exact ordered files whose merged contents produced a kube client snapshot.
@@ -391,6 +424,53 @@ mod tests {
             load_from_paths(vec![path]),
             Err(crate::port::AdapterError::KubeconfigInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn frozen_snapshot_decodes_utf8_bom_and_utf16_bom() {
+        let yaml = kubeconfig_yaml();
+        let mut fixtures = vec![(
+            "utf8",
+            [vec![0xef, 0xbb, 0xbf], yaml.as_bytes().to_vec()].concat(),
+        )];
+        for (name, little_endian) in [("utf16le", true), ("utf16be", false)] {
+            let mut bytes = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in yaml.encode_utf16() {
+                bytes.extend(if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            fixtures.push((name, bytes));
+        }
+        for (name, bytes) in fixtures {
+            let path =
+                std::env::temp_dir().join(format!("k10s-encoding-{name}-{}", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            let (_, parsed, _) = load_from_paths(vec![path.clone()]).unwrap();
+            assert_eq!(parsed.current_context.as_deref(), Some("exec-context"));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn frozen_snapshot_rejects_invalid_utf8_without_a_bom() {
+        let path = std::env::temp_dir().join(format!("k10s-invalid-utf8-{}", std::process::id()));
+        std::fs::write(&path, [0xff, 0x41]).unwrap();
+        assert!(matches!(
+            load_from_paths(vec![path.clone()]),
+            Err(crate::port::AdapterError::KubeconfigInvalid { .. })
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn kubeconfig_yaml() -> String {
+        serde_yaml::to_string(&kubeconfig("Never")).unwrap()
     }
 
     fn kubeconfig(mode: &str) -> Kubeconfig {

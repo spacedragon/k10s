@@ -421,7 +421,8 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
     let dir = std::env::temp_dir().join(format!("k10s-powershell-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir(&dir).unwrap();
-    let fake = dir.join("fake-kubectl.exe");
+    let fake = dir.join("kubectl.exe");
+    let plugin = dir.join("aws.CMD");
     let log = dir.join("argv.txt");
     let source = dir.join("fake.rs");
     fs::write(
@@ -446,6 +447,7 @@ fn main() {{
         ),
     )
     .unwrap();
+    fs::write(&plugin, "@exit /b 0\r\n").unwrap();
     assert!(
         Command::new("rustc")
             .args(["--edition=2021", "-o"])
@@ -455,22 +457,23 @@ fn main() {{
             .unwrap()
             .success()
     );
-    let descriptor = KubectlLaunchDescriptor::new(
-        1,
-        fake,
-        "context".into(),
-        vec![dir.join("config")],
-        BTreeMap::from([
-            ("PATH".into(), std::env::var("PATH").unwrap()),
-            ("USERPROFILE".into(), dir.display().to_string()),
-            (
-                "KUBECONFIG".into(),
-                dir.join("config").display().to_string(),
-            ),
-        ]),
-        Vec::new(),
-    )
-    .unwrap();
+    let preparation = KubePreparation {
+        source_paths: vec![dir.join("config")],
+        selected_context: "context".into(),
+        exec_plugins: vec![ExecPluginPreparation {
+            command: "aws".into(),
+            environment: BTreeMap::new(),
+        }],
+    };
+    let shell_environment = EnvironmentSnapshot::from_unicode(BTreeMap::from([
+        ("PATH".into(), dir.display().to_string()),
+        ("PATHEXT".into(), ".EXE;.CMD;.BAT;.COM".into()),
+        ("USERPROFILE".into(), dir.display().to_string()),
+    ]));
+    let descriptor =
+        KubectlLaunchDescriptor::from_preparation(1, &preparation, &shell_environment).unwrap();
+    assert_eq!(descriptor.kubectl, fake);
+    assert_eq!(descriptor.exec_plugins[0].command, plugin);
     let exec_target = ExternalShellTarget {
         generation: 1,
         namespace: "ns & 'x'".into(),

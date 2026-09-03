@@ -79,26 +79,30 @@ pub fn descriptor_when_terminal_available(
 pub fn probe_system_terminal(_environment: &EnvironmentSnapshot) -> Option<TerminalAdapter> {
     #[cfg(target_os = "macos")]
     {
-        return executable(PathBuf::from("/usr/bin/open")).map(|executable| TerminalAdapter {
+        executable(PathBuf::from("/usr/bin/open")).map(|executable| TerminalAdapter {
             executable,
             arguments_before_script: Vec::new(),
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
         let path = _environment.unicode("PATH").ok().flatten()?;
-        return resolve_executable("powershell.exe", &path)
-            .ok()
-            .map(|executable| TerminalAdapter {
-                executable,
-                arguments_before_script: vec![
-                    "-NoLogo".into(),
-                    "-NoProfile".into(),
-                    "-ExecutionPolicy".into(),
-                    "Bypass".into(),
-                    "-File".into(),
-                ],
-            });
+        resolve_executable(
+            "powershell.exe",
+            &path,
+            _environment.unicode("PATHEXT").ok().flatten().as_deref(),
+        )
+        .ok()
+        .map(|executable| TerminalAdapter {
+            executable,
+            arguments_before_script: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+            ],
+        })
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -110,7 +114,7 @@ pub fn probe_system_terminal(_environment: &EnvironmentSnapshot) -> Option<Termi
             ("konsole", vec!["-e"]),
             ("kitty", vec!["--"]),
         ] {
-            if let Ok(executable) = resolve_executable(name, &path) {
+            if let Ok(executable) = resolve_executable(name, &path, None) {
                 return Some(TerminalAdapter {
                     executable,
                     arguments_before_script: arguments.into_iter().map(str::to_owned).collect(),
@@ -141,7 +145,8 @@ impl KubectlLaunchDescriptor {
         let path = environment
             .unicode("PATH")?
             .ok_or_else(|| DescriptorError::MissingExecutable("kubectl".into()))?;
-        let kubectl = resolve_executable("kubectl", &path)?;
+        let pathext = environment.unicode("PATHEXT")?;
+        let kubectl = resolve_executable("kubectl", &path, pathext.as_deref())?;
         let mut allowed = BTreeMap::new();
         allowed.insert("PATH".into(), path.clone());
         let profile_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -168,7 +173,7 @@ impl KubectlLaunchDescriptor {
                 validate_value(value).map_err(|_| DescriptorError::Unrepresentable)?;
             }
             plugins.push(ResolvedExecPlugin {
-                command: resolve_executable(&plugin.command, &path)?,
+                command: resolve_executable(&plugin.command, &path, pathext.as_deref())?,
             });
         }
         Self::new(
@@ -286,16 +291,49 @@ impl fmt::Display for DescriptorError {
     }
 }
 
-fn resolve_executable(command: &str, path: &str) -> Result<PathBuf, DescriptorError> {
+fn resolve_executable(
+    command: &str,
+    path: &str,
+    _pathext: Option<&str>,
+) -> Result<PathBuf, DescriptorError> {
     let candidate = PathBuf::from(command);
-    if candidate.components().count() > 1 {
-        return executable(candidate)
-            .ok_or_else(|| DescriptorError::MissingExecutable(command.into()));
+    let path_qualified = candidate.is_absolute() || command.contains(['/', '\\']);
+    #[cfg(windows)]
+    let candidates = windows_executable_candidates(&candidate, _pathext);
+    #[cfg(not(windows))]
+    let candidates = vec![candidate];
+    if path_qualified {
+        candidates
+            .into_iter()
+            .find_map(executable)
+            .ok_or_else(|| DescriptorError::MissingExecutable(command.into()))
+    } else {
+        std::env::split_paths(path)
+            .flat_map(|directory| candidates.iter().map(move |name| directory.join(name)))
+            .find_map(executable)
+            .ok_or_else(|| DescriptorError::MissingExecutable(command.into()))
     }
-    std::env::split_paths(path)
-        .map(|directory| directory.join(command))
-        .find_map(executable)
-        .ok_or_else(|| DescriptorError::MissingExecutable(command.into()))
+}
+
+#[cfg(windows)]
+fn windows_executable_candidates(
+    candidate: &std::path::Path,
+    pathext: Option<&str>,
+) -> Vec<PathBuf> {
+    if candidate.extension().is_some() {
+        return vec![candidate.to_path_buf()];
+    }
+    let extensions = pathext
+        .filter(|value| !value.is_empty())
+        .unwrap_or(".EXE;.CMD;.BAT;.COM");
+    extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            let extension = extension.strip_prefix('.').unwrap_or(extension);
+            candidate.with_extension(extension)
+        })
+        .collect()
 }
 
 fn executable(path: PathBuf) -> Option<PathBuf> {
