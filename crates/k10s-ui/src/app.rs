@@ -193,6 +193,7 @@ pub struct K10sApp {
     shell: UiShell<ResourceIdentity>,
     external_shell_requests: Vec<crate::ui::ExternalShellTarget>,
     app_events: Vec<K10sAppEvent>,
+    host_error: Option<SafeUiError>,
     /// Restorable window layouts not currently active, keyed by kube context.
     workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
     clock_started: Instant,
@@ -407,6 +408,7 @@ impl K10sApp {
             shell: UiShell::new(),
             external_shell_requests: Vec::new(),
             app_events: Vec::new(),
+            host_error: None,
             workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
             jitter_counter: 0,
@@ -557,6 +559,15 @@ impl K10sApp {
         std::mem::take(&mut self.app_events)
     }
 
+    pub fn set_host_error(&mut self, error: SafeUiError) {
+        self.host_error = Some(error);
+    }
+
+    #[must_use]
+    pub fn host_error(&self) -> Option<&SafeUiError> {
+        self.host_error.as_ref()
+    }
+
     fn revoke_external_shell(&mut self) {
         self.shell
             .set_external_shell_availability(crate::ui::ExternalShellAvailability::Unavailable);
@@ -571,6 +582,9 @@ impl K10sApp {
 
     /// Render the approved default-egui shell for the current connection view.
     pub fn render_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.host_error {
+            ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error.message());
+        }
         self.finish_port_forward_list();
         let (connection, contexts): (ShellConnectionState, &[Context]) = match &self.view {
             AppView::Connecting => (ShellConnectionState::Connecting, &[]),

@@ -84,6 +84,8 @@ pub struct EmbeddedServerHandle {
     cancel: CancellationToken,
     thread: Option<JoinHandle<io::Result<()>>>,
     kubectl_launch: Option<external_shell::KubectlLaunchDescriptor>,
+    kube_preparation: Option<k10s_backend::KubePreparation>,
+    terminal_adapters: Vec<external_shell::TerminalAdapter>,
 }
 
 impl std::fmt::Debug for EmbeddedServerHandle {
@@ -156,6 +158,9 @@ pub struct DesktopApp {
     context_state_store: Option<ContextStateStore>,
     external_shell_storage: Option<external_shell::TemporaryShellStorage>,
     external_shell_descriptor: Option<external_shell::KubectlLaunchDescriptor>,
+    kube_preparation: Option<k10s_backend::KubePreparation>,
+    shell_environment: external_shell::EnvironmentSnapshot,
+    terminal_adapters: Vec<external_shell::TerminalAdapter>,
     external_shell_error: Option<String>,
 }
 
@@ -225,17 +230,19 @@ impl DesktopApp {
         {
             app.restore_workspace_layouts(layouts);
         }
-        let storage = external_shell::TemporaryShellStorage::new(
+        let storage_result = external_shell::TemporaryShellStorage::new(
             std::env::temp_dir().join("finback-external-shells"),
-        )
-        .ok();
-        if let Some(storage) = &storage {
+        );
+        let storage_result = storage_result.and_then(|storage| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let _ = storage.cleanup_expired(now);
-        }
+            storage.cleanup_expired(now)?;
+            Ok(storage)
+        });
+        let initial_storage_error = storage_result.as_ref().err().map(ToString::to_string);
+        let storage = storage_result.ok();
         let descriptor = storage
             .as_ref()
             .and_then(|_| server.kubectl_launch_descriptor().cloned());
@@ -245,6 +252,14 @@ impl DesktopApp {
                 generation: descriptor.generation,
             },
         ));
+        if let Some(message) = &initial_storage_error {
+            app.set_host_error(k10s_ui::SafeUiError::new(format!(
+                "Shell storage unavailable: {message}"
+            )));
+        }
+        let kube_preparation = server.kube_preparation.clone();
+        let terminal_adapters = server.terminal_adapters.clone();
+        let shell_environment = external_shell::EnvironmentSnapshot::capture();
         Ok(Self {
             app: Some(app),
             server: Some(server),
@@ -252,6 +267,9 @@ impl DesktopApp {
             context_state_store,
             external_shell_storage: storage,
             external_shell_descriptor: descriptor,
+            kube_preparation,
+            shell_environment,
+            terminal_adapters,
             external_shell_error: None,
         })
     }
@@ -270,17 +288,27 @@ impl DesktopApp {
             app.set_external_shell_availability(
                 k10s_ui::ui::ExternalShellAvailability::Unavailable,
             );
-            let rebuilt = self
+            let generation = self
                 .external_shell_descriptor
-                .clone()
-                .and_then(|mut descriptor| {
-                    descriptor.generation = descriptor.generation.saturating_add(1);
-                    descriptor.context = context;
-                    external_shell::probe_system_terminal(
-                        &external_shell::EnvironmentSnapshot::capture(),
+                .as_ref()
+                .map_or(1, |value| value.generation.saturating_add(1));
+            let preparation = self
+                .kube_preparation
+                .as_ref()
+                .and_then(|value| value.for_context(&context).ok());
+            let terminal = external_shell::probe_system_terminals(&self.shell_environment);
+            let rebuilt = preparation
+                .as_ref()
+                .and_then(|value| {
+                    external_shell::KubectlLaunchDescriptor::from_preparation(
+                        generation,
+                        value,
+                        &self.shell_environment,
                     )
-                    .map(|_| descriptor)
-                });
+                    .ok()
+                })
+                .filter(|_| !terminal.is_empty());
+            self.terminal_adapters = terminal;
             self.external_shell_descriptor = rebuilt;
             if let Some(descriptor) = &self.external_shell_descriptor {
                 app.set_external_shell_availability(
@@ -296,6 +324,9 @@ impl DesktopApp {
                 .as_ref()
                 .filter(|value| value.generation == requested.generation)
             else {
+                app.set_host_error(k10s_ui::SafeUiError::new(
+                    "External shell failed: request belongs to a stale connection generation",
+                ));
                 continue;
             };
             let target = external_shell::ExternalShellTarget {
@@ -313,12 +344,16 @@ impl DesktopApp {
                     .ok_or(external_shell::StorageError::InvalidParent)?;
                 let command = external_shell::KubectlExecCommand::new(descriptor, target)?;
                 let script = storage.create(&command)?;
-                external_shell::launch_system_terminal(&script)
+                external_shell::launch_with_adapters(&script, &self.terminal_adapters)
             })();
             if let Err(error) = result {
                 let sanitized = error.to_string();
                 tracing::error!("{sanitized}");
                 self.external_shell_error = Some(sanitized);
+                app.set_host_error(k10s_ui::SafeUiError::new(format!(
+                    "External shell failed: {}",
+                    self.external_shell_error.clone().unwrap_or_default()
+                )));
             }
         }
     }
@@ -706,12 +741,14 @@ fn launch_embedded_server_on(
 ) -> Result<EmbeddedServerHandle, EmbeddedServerError> {
     let prepared = prepare_backend(mode).map_err(EmbeddedServerError::Backend)?;
     let shell_environment = external_shell::EnvironmentSnapshot::capture();
+    let kube_preparation = prepared.kube().cloned();
     let descriptor = prepared.kube().and_then(|kube| {
         external_shell::KubectlLaunchDescriptor::from_preparation(1, kube, &shell_environment).ok()
     });
+    let terminal_adapters = external_shell::probe_system_terminals(&shell_environment);
     let kubectl_launch = external_shell::descriptor_when_terminal_available(
         descriptor,
-        external_shell::probe_system_terminal(&shell_environment),
+        terminal_adapters.first().cloned(),
     );
     let kernel = prepared.into_kernel();
     let mut token_bytes = [0_u8; 32];
@@ -790,6 +827,8 @@ fn launch_embedded_server_on(
         cancel,
         thread: Some(thread),
         kubectl_launch,
+        kube_preparation,
+        terminal_adapters,
     })
 }
 

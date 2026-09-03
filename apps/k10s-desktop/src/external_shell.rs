@@ -83,16 +83,25 @@ pub fn descriptor_when_terminal_available(
 
 /// Probe terminal availability without opening a window (launching is Task 3).
 pub fn probe_system_terminal(_environment: &EnvironmentSnapshot) -> Option<TerminalAdapter> {
+    probe_system_terminals(_environment).into_iter().next()
+}
+
+pub fn probe_system_terminals(_environment: &EnvironmentSnapshot) -> Vec<TerminalAdapter> {
     #[cfg(target_os = "macos")]
     {
-        executable(PathBuf::from("/usr/bin/open")).map(|executable| TerminalAdapter {
-            executable,
-            arguments_before_script: Vec::new(),
-        })
+        executable(PathBuf::from("/usr/bin/open"))
+            .map(|executable| TerminalAdapter {
+                executable,
+                arguments_before_script: Vec::new(),
+            })
+            .into_iter()
+            .collect()
     }
     #[cfg(target_os = "windows")]
     {
-        let path = _environment.unicode("PATH").ok().flatten()?;
+        let Some(path) = _environment.unicode("PATH").ok().flatten() else {
+            return Vec::new();
+        };
         resolve_executable(
             "powershell.exe",
             &path,
@@ -109,10 +118,15 @@ pub fn probe_system_terminal(_environment: &EnvironmentSnapshot) -> Option<Termi
                 "-File".into(),
             ],
         })
+        .into_iter()
+        .collect()
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let path = _environment.unicode("PATH").ok().flatten()?;
+        let Some(path) = _environment.unicode("PATH").ok().flatten() else {
+            return Vec::new();
+        };
+        let mut adapters = Vec::new();
         for (name, arguments) in [
             ("xdg-terminal-exec", vec!["--"]),
             ("x-terminal-emulator", vec!["-e"]),
@@ -121,13 +135,13 @@ pub fn probe_system_terminal(_environment: &EnvironmentSnapshot) -> Option<Termi
             ("kitty", vec!["--"]),
         ] {
             if let Ok(executable) = resolve_executable(name, &path, None) {
-                return Some(TerminalAdapter {
+                adapters.push(TerminalAdapter {
                     executable,
                     arguments_before_script: arguments.into_iter().map(str::to_owned).collect(),
                 });
             }
         }
-        None
+        adapters
     }
 }
 
@@ -498,6 +512,8 @@ pub enum StorageError {
     InvalidParent,
     Render(RenderError),
     NoTerminalLauncher,
+    LaunchFailed,
+    RollbackFailed,
 }
 
 impl fmt::Display for StorageError {
@@ -511,6 +527,8 @@ impl fmt::Display for StorageError {
             Self::NoTerminalLauncher => {
                 formatter.write_str("no system terminal accepted the shell launch")
             }
+            Self::LaunchFailed => formatter.write_str("system terminal failed to start"),
+            Self::RollbackFailed => formatter.write_str("temporary shell rollback failed"),
         }
     }
 }
@@ -543,12 +561,47 @@ struct LaunchManifest {
 #[derive(Clone, Debug)]
 pub struct TemporaryShellStorage {
     parent: PathBuf,
+    fault: Option<StorageFaultPoint>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageFaultPoint {
+    DirectoryCreate,
+    DirectoryPermissions,
+    ManifestCreate,
+    ManifestWrite,
+    ManifestSync,
+    Render,
+    ScriptCreate,
+    ScriptWrite,
+    ScriptSync,
+    ScriptPermissions,
 }
 
 impl TemporaryShellStorage {
     pub fn new(parent: PathBuf) -> Result<Self, StorageError> {
         platform::ensure_private_parent(&parent)?;
-        Ok(Self { parent })
+        Ok(Self {
+            parent,
+            fault: None,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn with_fault_for_test(mut self, fault: StorageFaultPoint) -> Self {
+        self.fault = Some(fault);
+        self
+    }
+
+    fn injected(&self, point: StorageFaultPoint) -> Result<(), StorageError> {
+        if self.fault == Some(point) {
+            Err(StorageError::Io(std::io::Error::other(
+                "injected storage failure",
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn create(
@@ -566,6 +619,7 @@ impl TemporaryShellStorage {
         };
         let script_name = format!("launch.{suffix}");
         let directory = self.parent.join(&launch_id);
+        self.injected(StorageFaultPoint::DirectoryCreate)?;
         platform::create_private_directory(&directory)?;
         let mut transaction = CreationTransaction {
             directory: directory.clone(),
@@ -573,7 +627,13 @@ impl TemporaryShellStorage {
             script: None,
             committed: false,
         };
-        (|| {
+        if let Err(error) = self.injected(StorageFaultPoint::DirectoryPermissions) {
+            transaction
+                .rollback()
+                .map_err(|()| StorageError::RollbackFailed)?;
+            return Err(error);
+        }
+        let outcome = (|| {
             let manifest = LaunchManifest {
                 version: MANIFEST_VERSION,
                 launch_id,
@@ -584,23 +644,39 @@ impl TemporaryShellStorage {
                 script: script_name.clone(),
             };
             let manifest_path = directory.join(MANIFEST_NAME);
+            self.injected(StorageFaultPoint::ManifestCreate)?;
             platform::create_private_file(
                 &manifest_path,
                 &serde_json::to_vec(&manifest).map_err(std::io::Error::other)?,
                 false,
+                || transaction.manifest = Some(manifest_path.clone()),
             )?;
-            transaction.manifest = Some(manifest_path.clone());
+            self.injected(StorageFaultPoint::ManifestWrite)?;
+            self.injected(StorageFaultPoint::ManifestSync)?;
             let script_path = directory.join(script_name);
+            self.injected(StorageFaultPoint::Render)?;
             let body = render_self_cleaning(command, &manifest_path, &directory)?;
-            platform::create_private_file(&script_path, &body, true)?;
-            transaction.script = Some(script_path.clone());
+            self.injected(StorageFaultPoint::ScriptCreate)?;
+            platform::create_private_file(&script_path, &body, true, || {
+                transaction.script = Some(script_path.clone());
+            })?;
+            self.injected(StorageFaultPoint::ScriptWrite)?;
+            self.injected(StorageFaultPoint::ScriptSync)?;
+            self.injected(StorageFaultPoint::ScriptPermissions)?;
             transaction.committed = true;
             Ok(TemporaryShellScript {
                 directory,
                 path: script_path,
                 manifest: manifest_path,
             })
-        })()
+        })();
+        match outcome {
+            Ok(script) => Ok(script),
+            Err(error) => match transaction.rollback() {
+                Ok(()) => Err(error),
+                Err(()) => Err(StorageError::RollbackFailed),
+            },
+        }
     }
 
     pub fn cleanup_expired(&self, now_unix_seconds: u64) -> Result<CleanupReport, StorageError> {
@@ -650,14 +726,13 @@ impl TemporaryShellStorage {
                 continue;
             }
             let script = directory.join(&script_name);
-            if platform::remove_regular_file(&script).is_err()
-                || platform::remove_regular_file(&directory.join(MANIFEST_NAME)).is_err()
-            {
-                continue;
-            }
-            if platform::remove_empty_directory(&directory).is_ok() {
-                report.removed += 1;
-            }
+            let manifest = directory.join(MANIFEST_NAME);
+            platform::validate_regular_file(&script)?;
+            platform::validate_regular_file(&manifest)?;
+            platform::remove_regular_file(&script)?;
+            platform::remove_regular_file(&manifest)?;
+            platform::remove_empty_directory(&directory)?;
+            report.removed += 1;
         }
         Ok(report)
     }
@@ -690,13 +765,25 @@ impl Drop for CreationTransaction {
         if self.committed {
             return;
         }
+        let _rollback_already_reported = self.rollback();
+    }
+}
+impl CreationTransaction {
+    fn rollback(&mut self) -> Result<(), ()> {
+        let mut failed = false;
         if let Some(path) = self.script.take() {
-            let _ = platform::remove_regular_file(&path);
+            failed |= platform::remove_regular_file(&path).is_err();
         }
         if let Some(path) = self.manifest.take() {
-            let _ = platform::remove_regular_file(&path);
+            failed |= platform::remove_regular_file(&path).is_err();
         }
-        let _ = platform::remove_empty_directory(&self.directory);
+        failed |= platform::remove_empty_directory(&self.directory).is_err();
+        if failed {
+            Err(())
+        } else {
+            self.committed = true;
+            Ok(())
+        }
     }
 }
 
@@ -799,6 +886,57 @@ pub fn launch_system_terminal(script: &TemporaryShellScript) -> Result<(), Stora
     {
         return windows::launch(script);
     }
+}
+
+pub fn launch_with_adapter(
+    script: &TemporaryShellScript,
+    adapter: &TerminalAdapter,
+) -> Result<(), StorageError> {
+    let result = {
+        let mut command = std::process::Command::new(&adapter.executable);
+        command
+            .args(&adapter.arguments_before_script)
+            .arg(script.path());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0000_0010);
+        }
+        command.spawn()
+    };
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            script.cleanup()?;
+            Err(StorageError::LaunchFailed)
+        }
+    }
+}
+
+pub fn launch_with_adapters(
+    script: &TemporaryShellScript,
+    adapters: &[TerminalAdapter],
+) -> Result<(), StorageError> {
+    if adapters.is_empty() {
+        script.cleanup()?;
+        return Err(StorageError::NoTerminalLauncher);
+    }
+    for adapter in adapters {
+        let mut command = std::process::Command::new(&adapter.executable);
+        command
+            .args(&adapter.arguments_before_script)
+            .arg(script.path());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0000_0010);
+        }
+        if command.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    script.cleanup()?;
+    Err(StorageError::LaunchFailed)
 }
 
 #[cfg(target_os = "macos")]

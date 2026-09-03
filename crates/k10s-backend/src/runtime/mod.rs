@@ -66,6 +66,26 @@ pub struct KubePreparation {
     pub source_paths: Vec<PathBuf>,
     pub selected_context: String,
     pub exec_plugins: Vec<ExecPluginPreparation>,
+    pub context_exec_plugins: BTreeMap<String, Vec<ExecPluginPreparation>>,
+}
+
+impl KubePreparation {
+    pub fn for_context(&self, context: &str) -> Result<Self, AdapterError> {
+        let exec_plugins = self
+            .context_exec_plugins
+            .get(context)
+            .cloned()
+            .ok_or_else(|| AdapterError::KubeconfigInvalid {
+                source: "prepared kubeconfig".into(),
+                detail: "committed context is absent from the immutable preparation".into(),
+            })?;
+        Ok(Self {
+            source_paths: self.source_paths.clone(),
+            selected_context: context.to_owned(),
+            exec_plugins,
+            context_exec_plugins: self.context_exec_plugins.clone(),
+        })
+    }
 }
 
 /// One-shot factory result consumed by server and desktop launch description.
@@ -121,36 +141,43 @@ fn prepare_kube_parts(
                 source: "prepared kubeconfig".into(),
                 detail: "no current context could be determined from the kubeconfig".into(),
             })?;
-    let mut exec_plugins = Vec::new();
-    let selected_user = parsed
-        .contexts
-        .iter()
-        .find(|named| named.name == selected_context)
-        .and_then(|named| named.context.as_ref())
-        .and_then(|context| context.user.as_deref());
-    for named in parsed
-        .auth_infos
-        .iter()
-        .filter(|named| Some(named.name.as_str()) == selected_user)
-    {
-        if let Some(exec) = named.auth_info.as_ref().and_then(|auth| auth.exec.as_ref()) {
-            let command = exec
-                .command
-                .clone()
-                .ok_or(AdapterError::KubeconfigInvalid {
-                    source: "prepared kubeconfig".into(),
-                    detail: "exec credential plugin has no command".into(),
-                })?;
-            let mut environment = BTreeMap::new();
-            for item in exec.env.as_deref().unwrap_or_default() {
-                environment.extend(item.iter().map(|(key, value)| (key.clone(), value.clone())));
+    let mut context_exec_plugins = BTreeMap::new();
+    for context in &parsed.contexts {
+        let selected_user = context
+            .context
+            .as_ref()
+            .and_then(|value| value.user.as_deref());
+        let mut plugins = Vec::new();
+        for named in parsed
+            .auth_infos
+            .iter()
+            .filter(|named| Some(named.name.as_str()) == selected_user)
+        {
+            if let Some(exec) = named.auth_info.as_ref().and_then(|auth| auth.exec.as_ref()) {
+                let command = exec
+                    .command
+                    .clone()
+                    .ok_or(AdapterError::KubeconfigInvalid {
+                        source: "prepared kubeconfig".into(),
+                        detail: "exec credential plugin has no command".into(),
+                    })?;
+                let mut environment = BTreeMap::new();
+                for item in exec.env.as_deref().unwrap_or_default() {
+                    environment
+                        .extend(item.iter().map(|(key, value)| (key.clone(), value.clone())));
+                }
+                plugins.push(ExecPluginPreparation {
+                    command,
+                    environment,
+                });
             }
-            exec_plugins.push(ExecPluginPreparation {
-                command,
-                environment,
-            });
         }
+        context_exec_plugins.insert(context.name.clone(), plugins);
     }
+    let exec_plugins = context_exec_plugins
+        .get(&selected_context)
+        .cloned()
+        .unwrap_or_default();
     let adapter = KubeAdapter::from_prepared_kubeconfig(contexts, parsed)?;
     Ok(PreparedBackend {
         kernel: BackendKernel::new(adapter),
@@ -158,6 +185,7 @@ fn prepare_kube_parts(
             source_paths: sources,
             selected_context,
             exec_plugins,
+            context_exec_plugins,
         }),
     })
 }

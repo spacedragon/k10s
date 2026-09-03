@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use k10s_backend::{ExecPluginPreparation, KubePreparation, prepare_kube_backend_from_paths};
 use k10s_desktop::external_shell::{
     EnvironmentSnapshot, ExternalShellTarget, KubectlExecCommand, KubectlLaunchDescriptor,
-    RenderError, TemporaryShellStorage, descriptor_when_terminal_available, probe_system_terminal,
+    RenderError, TemporaryShellStorage, descriptor_when_terminal_available,
 };
 
 fn descriptor() -> KubectlLaunchDescriptor {
@@ -75,6 +75,46 @@ fn temporary_storage_is_private_unique_and_self_cleaning() {
 
 #[cfg(unix)]
 #[test]
+fn launch_uses_the_exact_adapter_resolved_by_the_probe() {
+    use k10s_desktop::external_shell::{TerminalAdapter, launch_with_adapter};
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("k10s-exact-adapter-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    let log = root.join("argv");
+    let launcher = root.join("terminal resolved once");
+    std::fs::write(
+        &launcher,
+        format!("#!/bin/sh\nprintf '%s' \"$2\" > '{}'\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let adapter = TerminalAdapter {
+        executable: "/bin/sh".into(),
+        arguments_before_script: vec![launcher.display().to_string(), "--".into()],
+    };
+    launch_with_adapter(&script, &adapter).unwrap();
+    for _ in 0..100 {
+        if std::fs::metadata(&log).is_ok_and(|metadata| metadata.len() > 0) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        script.path().display().to_string()
+    );
+    script.cleanup().unwrap();
+    std::fs::remove_file(root.join("argv")).unwrap();
+    std::fs::remove_file(root.join("terminal resolved once")).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn temporary_startup_cleanup_removes_only_expired_valid_children() {
     use std::os::unix::fs::symlink;
     let root = std::env::temp_dir().join(format!("k10s-temp-cleanup-{}", std::process::id()));
@@ -107,6 +147,92 @@ fn temporary_startup_cleanup_removes_only_expired_valid_children() {
     std::fs::remove_file(root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
     std::fs::remove_dir(root).unwrap();
     std::fs::remove_file(outside).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_startup_cleanup_examines_exactly_the_oldest_128() {
+    let root = std::env::temp_dir().join(format!("k10s-temp-bound-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let mut launches = Vec::new();
+    for index in 0..129_u64 {
+        let launch = storage
+            .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+            .unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(launch.manifest_path()).unwrap()).unwrap();
+        manifest["created_unix_seconds"] = (index + 1).into();
+        std::fs::write(
+            launch.manifest_path(),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        launches.push(launch);
+    }
+    let report = storage.cleanup_expired(200_000).unwrap();
+    assert_eq!(report.examined, 128);
+    assert_eq!(report.removed, 128);
+    assert!(launches[128].directory().exists());
+    launches.pop().unwrap().cleanup().unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_creation_faults_rollback_every_owned_object_and_keep_preexisting_entries() {
+    use k10s_desktop::external_shell::StorageFaultPoint;
+    let root = std::env::temp_dir().join(format!("k10s-temp-faults-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let base = TemporaryShellStorage::new(root.clone()).unwrap();
+    let sentinel = root.join("preexisting");
+    std::fs::write(&sentinel, "keep").unwrap();
+    for fault in [
+        StorageFaultPoint::DirectoryCreate,
+        StorageFaultPoint::DirectoryPermissions,
+        StorageFaultPoint::ManifestCreate,
+        StorageFaultPoint::ManifestWrite,
+        StorageFaultPoint::ManifestSync,
+        StorageFaultPoint::Render,
+        StorageFaultPoint::ScriptCreate,
+        StorageFaultPoint::ScriptWrite,
+        StorageFaultPoint::ScriptSync,
+        StorageFaultPoint::ScriptPermissions,
+    ] {
+        let storage = base.clone().with_fault_for_test(fault);
+        assert!(
+            storage
+                .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+                .is_err(),
+            "{fault:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "{fault:?}");
+    }
+    std::fs::remove_file(sentinel).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
+    use std::os::windows::fs::symlink_dir;
+    let root = std::env::temp_dir().join(format!("k10s-windows-storage-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!("k10s-windows-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir(&outside).unwrap();
+    let storage = TemporaryShellStorage::new(root.clone()).unwrap();
+    let script = storage
+        .create(&KubectlExecCommand::new(&descriptor(), target()).unwrap())
+        .unwrap();
+    assert!(symlink_dir(&outside, root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).is_ok());
+    let report = storage.cleanup_expired(u64::MAX).unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(outside.exists());
+    assert!(!script.directory().exists());
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -219,7 +345,9 @@ fn descriptor_is_not_published_without_a_terminal_adapter() {
 #[cfg(target_os = "macos")]
 #[test]
 fn terminal_probe_selects_the_exact_macos_adapter() {
-    let adapter = probe_system_terminal(&EnvironmentSnapshot::default()).unwrap();
+    let adapter =
+        k10s_desktop::external_shell::probe_system_terminal(&EnvironmentSnapshot::default())
+            .unwrap();
     assert_eq!(adapter.executable, PathBuf::from("/usr/bin/open"));
     assert!(adapter.arguments_before_script.is_empty());
 }
@@ -239,7 +367,7 @@ fn terminal_probe_selects_the_first_available_linux_adapter() {
         "PATH".into(),
         dir.display().to_string(),
     )]));
-    let adapter = probe_system_terminal(&environment).unwrap();
+    let adapter = k10s_desktop::external_shell::probe_system_terminal(&environment).unwrap();
     assert_eq!(adapter.executable, terminal);
     assert_eq!(adapter.arguments_before_script, ["--"]);
     fs::remove_dir_all(dir).unwrap();
@@ -254,6 +382,7 @@ fn descriptor_rejects_non_unicode_allowed_environment_and_missing_kubectl() {
         source_paths: vec!["/tmp/config".into()],
         selected_context: "context".into(),
         exec_plugins: Vec::new(),
+        context_exec_plugins: BTreeMap::from([("context".into(), Vec::new())]),
     };
     let invalid = EnvironmentSnapshot::from_os(BTreeMap::from([
         ("PATH".into(), OsString::from_vec(vec![0xff])),
@@ -339,6 +468,7 @@ fn descriptor_resolves_kubectl_and_exec_plugin_from_one_preparation() {
             command: "login-helper".into(),
             environment: BTreeMap::new(),
         }],
+        context_exec_plugins: BTreeMap::new(),
     };
     let env = EnvironmentSnapshot::from_unicode(BTreeMap::from([
         ("PATH".into(), dir.to_string_lossy().into_owned()),
@@ -383,6 +513,38 @@ fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
         "first-helper"
     );
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn prepared_snapshot_rebuilds_explicit_context_plugin_without_rereading_sources() {
+    let dir = std::env::temp_dir().join(format!("k10s-context-metadata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("config");
+    std::fs::write(&source, r#"apiVersion: v1
+kind: Config
+current-context: first
+clusters:
+- name: cluster
+  cluster: {server: https://example.invalid}
+contexts:
+- name: first
+  context: {cluster: cluster, user: first-user}
+- name: second
+  context: {cluster: cluster, user: second-user}
+users:
+- name: first-user
+  user: {exec: {apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never, command: first-helper}}
+- name: second-user
+  user: {exec: {apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never, command: second-helper}}
+"#).unwrap();
+    let prepared = prepare_kube_backend_from_paths(vec![source.clone()]).unwrap();
+    let snapshot = prepared.kube().unwrap().clone();
+    std::fs::write(&source, "corrupt after preparation").unwrap();
+    let rebuilt = snapshot.for_context("second").unwrap();
+    assert_eq!(rebuilt.selected_context, "second");
+    assert_eq!(rebuilt.exec_plugins[0].command, "second-helper");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 fn kubeconfig_yaml(cluster: &str, user: &str, command: &str) -> String {
@@ -599,6 +761,7 @@ fn main() {{
             command: "aws".into(),
             environment: BTreeMap::new(),
         }],
+        context_exec_plugins: BTreeMap::new(),
     };
     let shell_environment = EnvironmentSnapshot::from_unicode(BTreeMap::from([
         ("PATH".into(), dir.display().to_string()),
@@ -683,12 +846,12 @@ fn main() {{
         ),
     ] {
         fs::write(&log, "").unwrap();
-        let mut target = target();
-        target.uid = "uid-1".into();
-        target.pod = pod.into();
+        let mut selected_target = target();
+        selected_target.uid = "uid-1".into();
+        selected_target.pod = pod.into();
         fs::write(
             &script_path,
-            KubectlExecCommand::new(&descriptor, target)
+            KubectlExecCommand::new(&descriptor, selected_target)
                 .unwrap()
                 .render_powershell()
                 .unwrap(),
