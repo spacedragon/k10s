@@ -571,10 +571,12 @@ fn show_operational<I: RowIdentity>(
                                     if port.protocol != TransportProtocol::Tcp {
                                         return;
                                     }
-                                    if pod.port_forward_capability
-                                        && pod.port_forward_list_state
-                                            == crate::ui::PortForwardListState::Ready
-                                    {
+                                    if pod.port_forward_capability {
+                                        if pod.port_forward_list_state
+                                            != crate::ui::PortForwardListState::Ready
+                                        {
+                                            return;
+                                        }
                                         let action_name = port.name.as_deref().map_or_else(
                                             || {
                                                 format!(

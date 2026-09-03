@@ -354,6 +354,12 @@ fn pod_port_forward_actions_wait_for_authoritative_session_list() {
         detail.get_by_label(status);
         assert!(
             detail
+                .query_by_label("Port forwarding is available in the desktop application")
+                .is_none(),
+            "{state:?} is native authority loss, not capability absence"
+        );
+        assert!(
+            detail
                 .query_by_role_and_label(Role::Button, "Port Forward")
                 .is_none(),
             "{state:?} must suppress stale start controls"

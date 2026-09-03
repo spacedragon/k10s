@@ -6544,6 +6544,53 @@ mod tests {
     }
 
     #[test]
+    fn direct_start_dispatch_rechecks_port_forward_list_authority() {
+        for list_state in [
+            crate::ui::PortForwardListState::Loading,
+            crate::ui::PortForwardListState::Reconstructing,
+        ] {
+            let target = failed_port_forward("authority", 1).target;
+            let (mut app, _) = ready_app_with_authorized_pod_port_forward(&target);
+            let list = match list_state {
+                crate::ui::PortForwardListState::Loading => {
+                    app.client.begin(Query::PortForwardList).unwrap()
+                }
+                crate::ui::PortForwardListState::Reconstructing => {
+                    app.client.begin_port_forward_reconstruction().unwrap()
+                }
+                crate::ui::PortForwardListState::Ready => unreachable!(),
+            };
+            app.port_forward_list = Some(list);
+            assert_eq!(
+                app.build_resource_feed().port_forward_list_state,
+                list_state
+            );
+
+            let generation =
+                app.shell
+                    .open_port_forward_start(target.clone(), "web · 8080/TCP", 8_080);
+            app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+            let request = PortForwardStartRequest::try_target(target, 18_080).unwrap();
+
+            app.process_port_forward_action(
+                &egui::Context::default(),
+                crate::ui::PortForwardAction::Start {
+                    request,
+                    generation,
+                },
+            );
+
+            assert!(app.pending_port_forwards.is_empty());
+            let modal = app.shell.port_forward_start_modal().unwrap();
+            assert!(!modal.pending);
+            assert_eq!(
+                modal.error.as_deref(),
+                Some("Port-forward sessions are still loading")
+            );
+        }
+    }
+
+    #[test]
     fn modal_start_error_and_success_are_routed_to_the_originating_dialog() {
         let failed = failed_port_forward("new-session", 7);
         let (mut app, _) = ready_app_with_authorized_pod_port_forward(&failed.target);

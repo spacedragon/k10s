@@ -762,10 +762,13 @@ pub struct ClientState {
     port_forward_revision: u64,
     /// Desired subscription presence for the bounded session stream.
     port_forward_subscribed: Option<SubscriptionId>,
-    /// Client-owned replacement list started after the session stream lags.
-    /// The exact request ID prevents unrelated list traffic from claiming
-    /// reconstruction is complete.
+    /// Current authoritative replacement list. The exact request ID prevents
+    /// unrelated list traffic from claiming reconstruction is complete.
     port_forward_reconstruction: Option<RequestId>,
+    /// Exact reconstruction request whose handle was intentionally discarded
+    /// by a client-owned recovery path. Its result is applied and consumed
+    /// internally instead of occupying the shared completed-result budget.
+    internal_port_forward_reconstruction: Option<RequestId>,
     server_state_invalid: bool,
     local_ui: LocalUiState,
     session_id: Option<SessionId>,
@@ -853,6 +856,7 @@ impl ClientState {
             port_forward_revision: 0,
             port_forward_subscribed: None,
             port_forward_reconstruction: None,
+            internal_port_forward_reconstruction: None,
             server_state_invalid: true,
             local_ui: LocalUiState::default(),
             session_id: None,
@@ -1175,14 +1179,28 @@ impl ClientState {
         &mut self,
         _request_id: impl Into<String>,
     ) -> Result<(), ClientError> {
-        let _ = self.begin_port_forward_reconstruction()?;
+        let _ = self.begin_internal_port_forward_reconstruction()?;
         Ok(())
     }
 
     /// Start an authoritative replacement list and retain its exact lifecycle.
     pub fn begin_port_forward_reconstruction(&mut self) -> Result<PendingRequest, ClientError> {
+        self.begin_port_forward_reconstruction_owned(false)
+    }
+
+    fn begin_internal_port_forward_reconstruction(
+        &mut self,
+    ) -> Result<PendingRequest, ClientError> {
+        self.begin_port_forward_reconstruction_owned(true)
+    }
+
+    fn begin_port_forward_reconstruction_owned(
+        &mut self,
+        internally_owned: bool,
+    ) -> Result<PendingRequest, ClientError> {
         let request = self.begin(Query::PortForwardList)?;
         self.port_forward_reconstruction = Some(request.id().clone());
+        self.internal_port_forward_reconstruction = internally_owned.then(|| request.id().clone());
         Ok(request)
     }
 
@@ -1842,13 +1860,23 @@ impl ClientState {
                         {
                             // Preserve the non-ready signal if queuing the
                             // replacement itself surfaces a terminal bound.
-                            self.port_forward_reconstruction.get_or_insert(id);
-                            let _ = self.begin_port_forward_reconstruction()?;
+                            self.port_forward_reconstruction
+                                .get_or_insert_with(|| id.clone());
+                            self.internal_port_forward_reconstruction.get_or_insert(id);
+                            let _ = self.begin_internal_port_forward_reconstruction()?;
                         }
                         return Ok(());
                     }
                     if self.port_forward_reconstruction.as_ref() == Some(&id) {
                         self.port_forward_reconstruction = None;
+                    }
+                    if self.internal_port_forward_reconstruction.as_ref() == Some(&id) {
+                        self.internal_port_forward_reconstruction = None;
+                        // Client-owned reconstruction lists apply directly to
+                        // retained session state. No caller owns their handle,
+                        // so do not retain an unreachable duplicate response.
+                        self.pending.remove(&id);
+                        return Ok(());
                     }
                     QueryResult::PortForwardList(Box::new(response))
                 }
@@ -2306,7 +2334,7 @@ impl ClientState {
                     .map_err(|encode| ClientError::Protocol(encode.to_string()))?;
                 self.queue_subscribe(id, selector)?;
                 if self.port_forward_reconstruction.is_none() {
-                    let _ = self.begin_port_forward_reconstruction()?;
+                    let _ = self.begin_internal_port_forward_reconstruction()?;
                 }
                 Ok(())
             }
@@ -2338,6 +2366,9 @@ impl ClientState {
                     );
                     if self.port_forward_reconstruction.as_ref() == Some(id) {
                         self.port_forward_reconstruction = None;
+                    }
+                    if self.internal_port_forward_reconstruction.as_ref() == Some(id) {
+                        self.internal_port_forward_reconstruction = None;
                     }
                     pending.cancelled
                 } else {
@@ -2409,6 +2440,7 @@ impl ClientState {
         self.port_forward_sessions.clear();
         self.port_forward_revision = 0;
         self.port_forward_reconstruction = None;
+        self.internal_port_forward_reconstruction = None;
         self.rebuilt_bootstrap = None;
         // Request IDs belong to the lost transport generation. The guarded
         // keys remain unverified and rebuild_server_state schedules fresh

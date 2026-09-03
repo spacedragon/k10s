@@ -7,7 +7,7 @@ use k10s_protocol::{
     PortForwardSessionId, PortForwardSessionState, PortForwardTarget, ResourceIdentity,
     Retryability, ServerFrame, ServerKind, SubscriptionId,
 };
-use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget};
+use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget, Query, QueryResult};
 
 fn ready_client_with_capabilities(capabilities: &[&str]) -> ClientState {
     ready_client_with_config(ClientConfig::default(), capabilities)
@@ -612,6 +612,70 @@ fn stale_reconstruction_list_queues_exactly_one_replacement_until_the_watermark_
 
     assert!(!client.port_forward_reconstructing());
     assert_eq!(client.port_forward_sessions()[0].id.as_str(), "pf-newer");
+    assert!(
+        client.begin(Query::Bootstrap).is_ok(),
+        "the internally owned successor must release its request slot"
+    );
+}
+
+#[test]
+fn repeated_internal_reconstruction_does_not_consume_request_retention() {
+    let mut client = ready_client_with_config(
+        ClientConfig {
+            request_capacity: 2,
+            ..ClientConfig::default()
+        },
+        &[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD],
+    );
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+    while client.take_outbound().is_some() {}
+
+    for revision in 1..=3 {
+        client.apply(subscription_lag(subscription.id())).unwrap();
+        let reconstruction = take_port_forward_list_request(&mut client);
+        client
+            .apply(ServerFrame::response(
+                reconstruction,
+                k10s_protocol::PortForwardListResponse {
+                    revision,
+                    sessions: Vec::new(),
+                },
+            ))
+            .unwrap();
+        assert!(!client.port_forward_reconstructing());
+    }
+
+    assert!(
+        client.begin(Query::Bootstrap).is_ok(),
+        "internally owned list results must not consume the remaining request slot"
+    );
+}
+
+#[test]
+fn retained_reconstruction_handle_keeps_its_completed_result() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let reconstruction = client.begin_port_forward_reconstruction().unwrap();
+    let request_id = reconstruction.id().clone();
+    while client.take_outbound().is_some() {}
+
+    client
+        .apply(ServerFrame::response(
+            request_id,
+            k10s_protocol::PortForwardListResponse {
+                revision: 1,
+                sessions: Vec::new(),
+            },
+        ))
+        .unwrap();
+
+    assert!(matches!(
+        client.take(reconstruction),
+        Some(QueryResult::PortForwardList(_))
+    ));
 }
 
 #[test]
