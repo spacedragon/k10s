@@ -370,13 +370,17 @@ fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
         String::from_utf8_lossy(&std::fs::read(script.path()).unwrap())
             .contains("[IO.FileAttributes]::ReparsePoint")
     );
-    assert!(symlink_dir(&outside, root.join("AAAAAAAAAAAAAAAAAAAAAAAA")).is_ok());
+    let reparse = root.join("AAAAAAAAAAAAAAAAAAAAAAAA");
+    let reparse_created = symlink_dir(&outside, &reparse).is_ok();
     let report = storage.cleanup_expired(u64::MAX).unwrap();
     assert_eq!(report.removed, 1);
     assert!(outside.exists());
     let launch_directory = script.directory().to_owned();
     drop(script);
     assert!(!launch_directory.exists());
+    if reparse_created {
+        std::fs::remove_dir(&reparse).unwrap();
+    }
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(outside).unwrap();
 }
@@ -935,7 +939,7 @@ fn render_powershell_executes_under_real_windows_powershell_and_preserves_status
             r#"use std::{{env, fs::OpenOptions, io::Write}};
 fn main() {{
  let args: Vec<String> = env::args().skip(1).collect();
- let mut environment: Vec<(String, String)> = env::vars().collect();
+ let mut environment: Vec<(String, String)> = env::vars().filter(|(name, _)| !name.starts_with('=')).collect();
  environment.sort();
  let mut log = OpenOptions::new().create(true).append(true).open({:?}).unwrap();
  writeln!(log, "CALL\nARGS={{args:?}}\nENV={{environment:?}}\nEND").unwrap();

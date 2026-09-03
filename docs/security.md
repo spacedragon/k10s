@@ -54,6 +54,10 @@ fallback command.
 Windows additionally retains the audited non-secret `SYSTEMROOT` and `WINDIR`
 runtime variables so PowerShell remains functional; arbitrary inherited
 variables are still removed before kubectl runs.
+Windows may add its own hidden `=X:` drive-current-directory pseudo-entry at
+`CreateProcess` time. It is OS-managed, contains no credential material, and
+cannot be enumerated or removed through PowerShell's `Env:` provider; it is not
+treated as part of the application environment allowlist.
 Finback writes the exact merged configuration prepared for the backend as an
 owner-only file beside the launch script and points kubectl at that immutable
 snapshot. It is never embedded in the script, and self-cleanup removes the
