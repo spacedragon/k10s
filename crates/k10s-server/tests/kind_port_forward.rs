@@ -116,7 +116,7 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
     let connector = kernel.port_forward_connector().expect("kube connector");
     let cancel = CancellationToken::new();
     let (events, _) = tokio::sync::broadcast::channel(64);
-    let manager = PortForwardManager::new(connector, cancel, events);
+    let manager = PortForwardManager::new(connector, cancel, events, context.clone());
     let service_identity = ResourceIdentity {
         context: context.clone(),
         gvk: GroupVersionKind::core("v1", "Service"),

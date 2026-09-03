@@ -78,6 +78,7 @@ struct ScriptedSeam {
     allowed: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     peers: tokio::sync::Mutex<Vec<mpsc::Sender<tokio::io::DuplexStream>>>,
     fail_connections: Arc<std::sync::atomic::AtomicBool>,
+    forbid_connections: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -183,9 +184,69 @@ impl k10s_backend::PortForwardSeam for NotFoundSeam {
 async fn manager_with_connector(connector: PortForwardConnector) -> PortForwardManager {
     let cancel = CancellationToken::new();
     let (events_tx, _events_rx) = broadcast::channel(64);
-    let manager = PortForwardManager::new(connector, cancel, events_tx);
+    let manager = PortForwardManager::new(connector, cancel, events_tx, "dev-local".into());
     manager.begin_context_transition("dev-local".into()).await;
     manager
+}
+
+#[tokio::test]
+async fn initial_context_rejects_a_first_start_from_another_context() {
+    let seam = ScriptedSeam::new(&["web"]);
+    let cancel = CancellationToken::new();
+    let (events_tx, _) = broadcast::channel(8);
+    let manager = PortForwardManager::new(
+        PortForwardConnector::new(Arc::new(seam)),
+        cancel,
+        events_tx,
+        "dev-local".into(),
+    );
+    let mut wrong = service_target("web", PortForwardPortSelector::Number { number: 80 });
+    let PortForwardTarget::Service { identity, .. } = &mut wrong else {
+        unreachable!()
+    };
+    identity.context = "prod".into();
+
+    let error = manager.start(wrong, 0, "prod".into()).await.unwrap_err();
+    assert_eq!(
+        error.category,
+        k10s_protocol::PortForwardFailureCategory::ContextTransition
+    );
+    assert!(manager.list().await.is_empty());
+}
+
+#[tokio::test]
+async fn blocked_resolution_publishes_starting_and_stop_prevents_activation() {
+    let gate = ResolveGate::new();
+    let manager = manager_with_connector(PortForwardConnector::new(Arc::new(GatedResolveSeam {
+        gate: gate.clone(),
+    })))
+    .await;
+    let mut events = manager.subscribe().await;
+    let start_manager = manager.clone();
+    let start = tokio::spawn(async move {
+        start_manager
+            .start(
+                service_target("web", PortForwardPortSelector::Number { number: 80 }),
+                0,
+                "dev-local".into(),
+            )
+            .await
+    });
+    gate.started.notified().await;
+    let starting = events.recv().await.unwrap().session;
+    assert_eq!(starting.state, PortForwardSessionState::Starting);
+
+    let stopped = manager.stop(starting.id.as_str()).await;
+    assert!(matches!(
+        stopped,
+        k10s_server::port_forward::StopOutcome::Stopped(_)
+    ));
+    gate.release.notify_one();
+    assert!(start.await.unwrap().is_err());
+    assert_eq!(
+        manager.session(starting.id.as_str()).await.unwrap().state,
+        PortForwardSessionState::Stopped
+    );
 }
 
 #[tokio::test]
@@ -238,6 +299,8 @@ async fn request_cancellation_rolls_back_before_commit_but_not_after_active_line
     });
     gate.started.notified().await;
     gate.release.notify_one();
+    let starting = events.recv().await.unwrap();
+    assert_eq!(starting.session.state, PortForwardSessionState::Starting);
     let active = events.recv().await.unwrap();
     assert_eq!(active.session.state, PortForwardSessionState::Active);
     request_cancel.cancel();
@@ -283,11 +346,16 @@ impl ScriptedSeam {
             )),
             peers: tokio::sync::Mutex::new(Vec::new()),
             fail_connections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            forbid_connections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     fn failure_switch(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.fail_connections.clone()
+    }
+
+    fn forbidden_switch(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.forbid_connections.clone()
     }
 
     async fn add_peer_channel(&self) -> mpsc::Receiver<tokio::io::DuplexStream> {
@@ -367,7 +435,14 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 return Err(BackendError::PortForward {
-                    category: RejectionCategory::UnavailableEndpoint,
+                    category: if self
+                        .forbid_connections
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        RejectionCategory::Forbidden
+                    } else {
+                        RejectionCategory::UnavailableEndpoint
+                    },
                     message: "scripted open failure".into(),
                 });
             }
@@ -383,6 +458,41 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
             Ok(k10s_backend::PortForwardStream::new(Box::new(client_side)))
         })
     }
+}
+
+#[tokio::test]
+async fn repeated_forbidden_stream_opens_preserve_typed_rbac_guidance() {
+    let seam = ScriptedSeam::new(&["web-pod"]);
+    let failures = seam.failure_switch();
+    let forbidden = seam.forbidden_switch();
+    let (manager, _) = manager_for(seam).await;
+    let active = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .unwrap();
+    failures.store(true, std::sync::atomic::Ordering::Release);
+    forbidden.store(true, std::sync::atomic::Ordering::Release);
+    let addr: std::net::SocketAddr = active.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        tokio::net::TcpStream::connect(addr).await.unwrap();
+    }
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let session = manager.session(active.id.as_str()).await.unwrap();
+            if session.state == PortForwardSessionState::Failed {
+                break session;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let failure = failed.failure.unwrap();
+    assert_eq!(
+        failure.category,
+        k10s_protocol::PortForwardFailureCategory::Forbidden
+    );
+    assert!(failure.message.contains("create on pods/portforward"));
 }
 
 #[tokio::test]
@@ -443,6 +553,7 @@ async fn manager_for(seam: ScriptedSeam) -> (PortForwardManager, CancellationTok
         PortForwardConnector::new(Arc::new(seam)),
         cancel.clone(),
         events_tx,
+        "dev-local".into(),
     );
     // Sessions validate against the committed context.
     manager.begin_context_transition("dev-local".into()).await;

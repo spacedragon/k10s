@@ -18,7 +18,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use k10s_backend::BackendKernel;
+use k10s_backend::{BackendKernel, KernelQueryResult, Query};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -527,12 +527,28 @@ pub async fn run_with_assets(
         capability == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
             || capability == k10s_protocol::CAPABILITY_POD_PORT_FORWARD
     }) {
+        let initial_context = match kernel.query(Query::Bootstrap).await {
+            Ok(KernelQueryResult::Bootstrap(bootstrap)) => bootstrap
+                .wire_payload()
+                .contexts
+                .into_iter()
+                .find(|context| context.is_current)
+                .map(|context| context.name),
+            Ok(_) => None,
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "could not establish the initial Kubernetes context: {error}"
+                )));
+            }
+        }
+        .ok_or_else(|| io::Error::other("no current Kubernetes context is configured"))?;
         kernel.port_forward_connector().map(|connector| {
             let (events_tx, _) = tokio::sync::broadcast::channel(64);
             Arc::new(crate::port_forward::PortForwardManager::new(
                 connector,
                 cancel.child_token(),
                 events_tx,
+                initial_context,
             ))
         })
     } else {
