@@ -304,7 +304,7 @@ struct PendingPortForward {
 
 #[derive(Debug)]
 enum PendingPortForwardIntent {
-    StartModal(Box<k10s_protocol::PortForwardTarget>),
+    StartModal(crate::ui::PortForwardModalGeneration),
     Retry(Box<k10s_protocol::PortForwardSession>),
     Stop,
 }
@@ -844,21 +844,22 @@ impl K10sApp {
                 target,
                 remote_label,
                 initial_local_port,
-            } => self
-                .shell
-                .open_port_forward_start(target, remote_label, initial_local_port),
-            crate::ui::PortForwardAction::Start(request) => {
-                let target = request.target().clone();
-                match self.client.begin(Query::PortForwardStart(request)) {
-                    Ok(request) => self.pending_port_forwards.push(PendingPortForward {
-                        request,
-                        intent: PendingPortForwardIntent::StartModal(Box::new(target)),
-                    }),
-                    Err(error) => self
-                        .shell
-                        .port_forward_start_failed(safe_port_forward_client_error(&error)),
-                }
+            } => {
+                self.shell
+                    .open_port_forward_start(target, remote_label, initial_local_port);
             }
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            } => match self.client.begin(Query::PortForwardStart(request)) {
+                Ok(request) => self.pending_port_forwards.push(PendingPortForward {
+                    request,
+                    intent: PendingPortForwardIntent::StartModal(generation),
+                }),
+                Err(error) => self
+                    .shell
+                    .port_forward_start_failed(safe_port_forward_client_error(&error)),
+            },
             crate::ui::PortForwardAction::Stop(id) => {
                 if let Ok(id) = k10s_protocol::PortForwardSessionId::try_new(id)
                     && let Ok(request) = self.client.begin(Query::PortForwardStop(id))
@@ -1346,6 +1347,7 @@ impl K10sApp {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.shell.yaml_editors_mut().connection_lost();
+                            self.reset_port_forward_ui(Some("Server state changed; submit again"));
                             self.enter_resource_recovery();
                             self.recovering = true;
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
@@ -1469,9 +1471,9 @@ impl K10sApp {
                             });
                             if let Some(pending) = pending {
                                 match pending.intent {
-                                    PendingPortForwardIntent::StartModal(target) => {
+                                    PendingPortForwardIntent::StartModal(generation) => {
                                         self.shell.port_forward_start_failed_for(
-                                            &target,
+                                            generation,
                                             server_error.safe_message.clone(),
                                         )
                                     }
@@ -2037,11 +2039,11 @@ impl K10sApp {
             };
             match (pending.intent, result) {
                 (
-                    PendingPortForwardIntent::StartModal(target),
+                    PendingPortForwardIntent::StartModal(generation),
                     QueryResult::PortForwardStarted(response),
                 ) => self
                     .shell
-                    .port_forward_start_succeeded_for(&target, response.session.id.as_str()),
+                    .port_forward_start_succeeded_for(generation, response.session.id.as_str()),
                 (
                     PendingPortForwardIntent::Retry(source),
                     QueryResult::PortForwardStarted(response),
@@ -2174,10 +2176,7 @@ impl K10sApp {
         // stays where it was and a retry needs a fresh user action.
         self.pending_switch = None;
         self.failed_switch = None;
-        self.pending_port_forwards.clear();
-        self.port_forward_retry_errors.clear();
-        self.shell
-            .port_forward_start_failed("Connection lost; submit again");
+        self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.teardown_stream_sessions();
         self.shell.yaml_editors_mut().connection_lost();
         // Server-issued details are stale after recovery and every in-flight
@@ -3834,10 +3833,7 @@ impl K10sApp {
         self.transport_open = false;
         self.revoke_external_shell();
         self.teardown_stream_sessions();
-        self.pending_port_forwards.clear();
-        self.port_forward_retry_errors.clear();
-        self.shell
-            .port_forward_start_failed("Connection lost; submit again");
+        self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.view = AppView::Failed { message };
     }
 
@@ -3908,9 +3904,7 @@ impl K10sApp {
         for pending in std::mem::take(&mut self.pending_port_forwards) {
             let _ = self.client.cancel(&pending.request);
         }
-        self.port_forward_retry_errors.clear();
-        self.port_forward_error = None;
-        self.shell.dismiss_port_forward_start();
+        self.reset_port_forward_ui(None);
         for identity in self.detail_requests.keys().cloned().collect::<Vec<_>>() {
             self.cancel_detail_request(&identity);
         }
@@ -3927,6 +3921,17 @@ impl K10sApp {
         self.metrics.clear();
         self.metric_checked_at.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
+    }
+
+    fn reset_port_forward_ui(&mut self, modal_error: Option<&str>) {
+        self.pending_port_forwards.clear();
+        self.port_forward_retry_errors.clear();
+        self.port_forward_error = None;
+        if let Some(message) = modal_error {
+            self.shell.port_forward_start_failed(message);
+        } else {
+            self.shell.dismiss_port_forward_start();
+        }
     }
 
     /// Close every dedicated stream session and mark log tools disconnected.
@@ -5953,6 +5958,51 @@ mod tests {
     }
 
     #[test]
+    fn sequence_gap_retires_port_forward_correlations_and_reenables_the_modal() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("pending-start", 7);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "18080".into();
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target, 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(2),
+                payload: serde_json::json!({"kind":"bootstrapStatus","payload":null}),
+            }),
+            101,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.pending_port_forwards.is_empty());
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert!(!modal.pending);
+        assert_eq!(modal.local_port_draft, "18080");
+        assert_eq!(
+            modal.error.as_deref(),
+            Some("Server state changed; submit again")
+        );
+    }
+
+    #[test]
     fn after_reconnect_error_advances_backoff_only_once() {
         let error = ErrorFrame::new(
             ErrorCode::Internal,
@@ -6077,8 +6127,9 @@ mod tests {
     fn modal_start_error_and_success_are_routed_to_the_originating_dialog() {
         let (mut app, _) = ready_app();
         let failed = failed_port_forward("new-session", 7);
-        app.shell
-            .open_port_forward_start(failed.target.clone(), "web · 8080/TCP", 8_080);
+        let generation =
+            app.shell
+                .open_port_forward_start(failed.target.clone(), "web · 8080/TCP", 8_080);
         app.shell
             .port_forward_start_modal_mut()
             .unwrap()
@@ -6088,7 +6139,10 @@ mod tests {
 
         app.process_port_forward_action(
             &egui::Context::default(),
-            crate::ui::PortForwardAction::Start(request.clone()),
+            crate::ui::PortForwardAction::Start {
+                request: request.clone(),
+                generation,
+            },
         );
         let rejected = app.pending_port_forwards[0].request.clone();
         let error = ErrorFrame::new(
@@ -6117,7 +6171,10 @@ mod tests {
         app.shell.port_forward_start_modal_mut().unwrap().pending = true;
         app.process_port_forward_action(
             &egui::Context::default(),
-            crate::ui::PortForwardAction::Start(request),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
         );
         let accepted = app.pending_port_forwards[0].request.clone();
         let mut active = failed;

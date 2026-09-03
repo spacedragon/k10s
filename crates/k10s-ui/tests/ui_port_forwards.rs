@@ -175,7 +175,7 @@ fn modal_start_emits_a_validated_target_request_and_becomes_pending() {
     let actions = harness.state_mut().drain_port_forward_actions();
     assert!(matches!(
         actions.as_slice(),
-        [PortForwardAction::Start(request)]
+        [PortForwardAction::Start { request, .. }]
             if request.target() == &pod_target() && request.local_port() == 8_080
     ));
     assert!(harness.state().port_forward_start_modal().unwrap().pending);
@@ -207,6 +207,39 @@ fn success_and_duplicate_success_close_the_modal_and_focus_the_returned_session(
             Some(session_id)
         );
     }
+}
+
+#[test]
+fn cancelled_start_error_cannot_overwrite_reopened_same_target_modal() {
+    let mut shell: UiShell<ResourceIdentity> = UiShell::new();
+    let target = pod_target();
+    let first = shell.open_port_forward_start(target.clone(), "first", 8_080);
+    shell.port_forward_start_modal_mut().unwrap().pending = true;
+    shell.dismiss_port_forward_start();
+    shell.open_port_forward_start(target.clone(), "second", 9_090);
+
+    shell.port_forward_start_failed_for(first, "stale error");
+
+    let current = shell.port_forward_start_modal().unwrap();
+    assert_eq!(current.remote_label, "second");
+    assert_eq!(current.local_port_draft, "9090");
+    assert_eq!(current.error, None);
+}
+
+#[test]
+fn cancelled_start_success_cannot_close_reopened_same_target_modal() {
+    let mut shell: UiShell<ResourceIdentity> = UiShell::new();
+    let target = pod_target();
+    let first = shell.open_port_forward_start(target.clone(), "first", 8_080);
+    shell.port_forward_start_modal_mut().unwrap().pending = true;
+    shell.dismiss_port_forward_start();
+    shell.open_port_forward_start(target.clone(), "second", 9_090);
+
+    shell.port_forward_start_succeeded_for(first, "stale-session");
+
+    let current = shell.port_forward_start_modal().unwrap();
+    assert_eq!(current.remote_label, "second");
+    assert_eq!(current.local_port_draft, "9090");
 }
 
 #[test]

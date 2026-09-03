@@ -14,6 +14,10 @@ use super::PortForwardAction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalPortError;
 
+/// One non-persisted opening of the shared start dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PortForwardModalGeneration(pub(super) u64);
+
 /// Shared start-dialog state for either an exact Pod or Service target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortForwardStartModal {
@@ -22,6 +26,8 @@ pub struct PortForwardStartModal {
     pub local_port_draft: String,
     pub pending: bool,
     pub error: Option<String>,
+    /// Correlates in-flight outcomes to this exact opening of the dialog.
+    pub generation: PortForwardModalGeneration,
 }
 
 impl PortForwardStartModal {
@@ -38,7 +44,12 @@ impl PortForwardStartModal {
             local_port_draft: initial_local_port.to_string(),
             pending: false,
             error: None,
+            generation: PortForwardModalGeneration(0),
         }
+    }
+
+    pub(super) fn set_generation(&mut self, generation: PortForwardModalGeneration) {
+        self.generation = generation;
     }
 
     /// Parse the requested loopback port. Blank and `0` request automatic
@@ -164,7 +175,10 @@ pub(super) fn show(
                     Ok(request) => {
                         state.pending = true;
                         state.error = None;
-                        actions.push(PortForwardAction::Start(request));
+                        actions.push(PortForwardAction::Start {
+                            request,
+                            generation: state.generation,
+                        });
                     }
                     Err(_) => {
                         state.error =

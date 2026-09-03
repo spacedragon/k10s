@@ -22,8 +22,8 @@ mod window;
 pub(crate) use detail::PodRuntimeProjection;
 
 pub use port_forward::{
-    LocalPortError, PortForwardRetryErrors, PortForwardStartModal, RETRY_LOCAL_PORT_GUIDANCE,
-    retry_start_request,
+    LocalPortError, PortForwardModalGeneration, PortForwardRetryErrors, PortForwardStartModal,
+    RETRY_LOCAL_PORT_GUIDANCE, retry_start_request,
 };
 pub use resource_window::{
     DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
@@ -100,6 +100,7 @@ pub struct UiShell<I> {
     /// user action from passive mismatch reconciliation.
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_start_modal: Option<PortForwardStartModal>,
+    next_port_forward_modal_generation: u64,
     port_forward_actions: Vec<PortForwardAction>,
     resource_actions: Vec<ResourceAction>,
     external_shell_availability: ExternalShellAvailability,
@@ -150,7 +151,10 @@ pub enum PortForwardAction {
         remote_label: String,
         initial_local_port: u16,
     },
-    Start(k10s_protocol::PortForwardStartRequest),
+    Start {
+        request: k10s_protocol::PortForwardStartRequest,
+        generation: PortForwardModalGeneration,
+    },
     Stop(String),
     Retry(k10s_protocol::PortForwardSessionId),
     FocusSession(k10s_protocol::PortForwardSessionId),
@@ -182,6 +186,7 @@ where
             command_palette: command_palette::CommandPalette::default(),
             requested_context: None,
             port_forward_start_modal: None,
+            next_port_forward_modal_generation: 1,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
             external_shell_availability: ExternalShellAvailability::Unavailable,
@@ -236,12 +241,16 @@ where
         target: k10s_protocol::PortForwardTarget,
         remote_label: impl Into<String>,
         initial_local_port: u16,
-    ) {
-        self.port_forward_start_modal = Some(PortForwardStartModal::new(
-            target,
-            remote_label,
-            initial_local_port,
-        ));
+    ) -> PortForwardModalGeneration {
+        let generation = PortForwardModalGeneration(self.next_port_forward_modal_generation);
+        self.next_port_forward_modal_generation = self
+            .next_port_forward_modal_generation
+            .wrapping_add(1)
+            .max(1);
+        let mut modal = PortForwardStartModal::new(target, remote_label, initial_local_port);
+        modal.set_generation(generation);
+        self.port_forward_start_modal = Some(modal);
+        generation
     }
 
     /// Current shared start-dialog state.
@@ -266,13 +275,13 @@ where
     /// Project an error only into the dialog that originated the request.
     pub fn port_forward_start_failed_for(
         &mut self,
-        target: &k10s_protocol::PortForwardTarget,
+        generation: PortForwardModalGeneration,
         safe_message: impl Into<String>,
     ) {
         if self
             .port_forward_start_modal
             .as_ref()
-            .is_some_and(|modal| &modal.target == target)
+            .is_some_and(|modal| modal.generation == generation)
         {
             self.port_forward_start_failed(safe_message);
         }
@@ -294,17 +303,17 @@ where
     /// that may have opened while the response was in flight.
     pub fn port_forward_start_succeeded_for(
         &mut self,
-        target: &k10s_protocol::PortForwardTarget,
+        generation: PortForwardModalGeneration,
         session_id: &str,
     ) {
         if self
             .port_forward_start_modal
             .as_ref()
-            .is_some_and(|modal| &modal.target == target)
+            .is_some_and(|modal| modal.generation == generation)
         {
             self.port_forward_start_modal = None;
+            self.focus_port_forward_session(session_id);
         }
-        self.focus_port_forward_session(session_id);
     }
 
     /// Open/focus the singleton manager and one authoritative session row.
