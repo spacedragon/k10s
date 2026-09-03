@@ -471,7 +471,7 @@ impl<'a> KubectlExecCommand<'a> {
         let d = self.descriptor;
         let t = &self.target;
         let mut script = String::from(
-            "$ErrorActionPreference = 'Continue'\r\nGet-ChildItem Env: | ForEach-Object { Remove-Item -LiteralPath $_.PSPath }\r\n",
+            "$ErrorActionPreference = 'Continue'\r\n$K10sError = [Console]::Error\r\n$K10sInput = [Console]::In\r\n$K10sInputRedirected = [Console]::IsInputRedirected\r\nGet-ChildItem Env: | ForEach-Object { Remove-Item -LiteralPath $_.PSPath }\r\n",
         );
         for (name, value) in &d.environment {
             script.push_str(&format!("$env:{name} = {}\r\n", q(value)));
@@ -482,7 +482,7 @@ impl<'a> KubectlExecCommand<'a> {
         ));
         script.push_str("$global:LASTEXITCODE = 125\r\n");
         script.push_str(&format!("try {{ $K10sUid = & $K10sKubectl --context {} --namespace {} get pod {} -o {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125; $K10sUid = $null }}\r\n", q(&d.context), q(&t.namespace), q(&t.pod), q("jsonpath={.metadata.uid}")));
-        script.push_str(&format!("if ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: Pod UID lookup failed.') }} elseif ($K10sUid -ne {}) {{ $K10sStatus = 66; [Console]::Error.WriteLine('Finback shell: Pod UID changed; refusing exec.') }} else {{\r\n$global:LASTEXITCODE = 125\r\ntry {{ & $K10sKubectl --context {} --namespace {} exec -it {} --container {} -- {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125 }}\r\nif ($K10sStatus -ne 0) {{ [Console]::Error.WriteLine('Finback shell: kubectl exec failed.') }}\r\n}}\r\nif ($K10sStatus -ne 0 -and -not [Console]::IsInputRedirected) {{ [void][Console]::ReadLine() }}\r\nexit $K10sStatus\r\n", q(&t.uid), q(&d.context), q(&t.namespace), q(&t.pod), q(&t.container), q(&t.program)));
+        script.push_str(&format!("if ($K10sStatus -ne 0) {{ $K10sError.WriteLine('Finback shell: Pod UID lookup failed.') }} elseif ($K10sUid -ne {}) {{ $K10sStatus = 66; $K10sError.WriteLine('Finback shell: Pod UID changed; refusing exec.') }} else {{\r\n$global:LASTEXITCODE = 125\r\ntry {{ & $K10sKubectl --context {} --namespace {} exec -it {} --container {} -- {}; $K10sStatus = $LASTEXITCODE }} catch {{ $K10sStatus = 125 }}\r\nif ($K10sStatus -ne 0) {{ $K10sError.WriteLine('Finback shell: kubectl exec failed.') }}\r\n}}\r\nif ($K10sStatus -ne 0 -and -not $K10sInputRedirected) {{ [void]$K10sInput.ReadLine() }}\r\nexit $K10sStatus\r\n", q(&t.uid), q(&d.context), q(&t.namespace), q(&t.pod), q(&t.container), q(&t.program)));
         Ok(script)
     }
 }
@@ -949,7 +949,7 @@ pub fn launch_system_terminal(script: &TemporaryShellScript) -> Result<(), Stora
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return launch_linux_with(script, |program, args| {
+        launch_linux_with(script, |program, args| {
             std::process::Command::new(program)
                 .args(args)
                 .spawn()
@@ -961,7 +961,7 @@ pub fn launch_system_terminal(script: &TemporaryShellScript) -> Result<(), Stora
                         LaunchAttempt::Spawn(error.to_string())
                     }
                 })
-        });
+        })
     }
     #[cfg(windows)]
     {

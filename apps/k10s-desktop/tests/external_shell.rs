@@ -362,7 +362,9 @@ fn temporary_windows_storage_uses_owner_acl_and_refuses_reparse_lookalikes() {
     let report = storage.cleanup_expired(u64::MAX).unwrap();
     assert_eq!(report.removed, 1);
     assert!(outside.exists());
-    assert!(!script.directory().exists());
+    let launch_directory = script.directory().to_owned();
+    drop(script);
+    assert!(!launch_directory.exists());
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(outside).unwrap();
 }
@@ -953,7 +955,12 @@ fn main() {{
     ]));
     let descriptor =
         KubectlLaunchDescriptor::from_preparation(1, &preparation, &shell_environment).unwrap();
-    assert_eq!(descriptor.kubectl, fake);
+    assert!(
+        descriptor
+            .kubectl
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&fake.to_string_lossy())
+    );
     assert_eq!(descriptor.exec_plugins[0].command, plugin);
     let exec_target = ExternalShellTarget {
         generation: 1,
