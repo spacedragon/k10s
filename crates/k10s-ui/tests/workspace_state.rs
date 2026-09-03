@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use k10s_ui::workspace::{
-    BlockReason, BlockResolution, DetailTab, LauncherItem, NamespaceScope, WindowContent,
+    BlockReason, BlockResolution, DetailTab, LauncherItem, NamespaceScope, SortSpec, WindowContent,
     WindowKind, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceState,
 };
 
@@ -373,6 +373,62 @@ fn services_window_opens_with_singleton_geometry_and_defaults() {
     assert!(service.detail_visible);
     assert!(service.detail.is_none());
     assert!(service.port_drafts.is_empty());
+}
+
+#[test]
+fn port_forwards_is_a_focused_singleton_with_non_authoritative_view_state() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let open_events = events(
+        &mut state,
+        WorkspaceCommand::ActivateLauncherItem(LauncherItem::PortForwards),
+    );
+    let port_forwards = opened(&open_events);
+    let window = state.window(port_forwards).unwrap();
+    assert_eq!(window.kind, WindowKind::PortForwards);
+    assert_eq!(window.title, "Port Forwards");
+    assert_eq!(window.geometry.size, [840.0, 560.0]);
+    assert!(matches!(window.content, WindowContent::PortForwards(_)));
+    assert!(state.launcher_highlight(LauncherItem::PortForwards));
+
+    events(
+        &mut state,
+        WorkspaceCommand::SetPortForwardSort(
+            port_forwards,
+            Some(SortSpec {
+                column: "STATUS".into(),
+                ascending: false,
+            }),
+        ),
+    );
+    events(
+        &mut state,
+        WorkspaceCommand::FocusPortForwardSession(port_forwards, "pf-7".into()),
+    );
+    let view = state.port_forward_state(port_forwards).unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "STATUS");
+    assert_eq!(view.focused_session.as_deref(), Some("pf-7"));
+
+    let repeated = events(
+        &mut state,
+        WorkspaceCommand::ActivateLauncherItem(LauncherItem::PortForwards),
+    );
+    assert_eq!(repeated, vec![WorkspaceEvent::Focused(port_forwards)]);
+    assert_eq!(
+        state
+            .windows()
+            .iter()
+            .filter(|window| window.kind == WindowKind::PortForwards)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state
+            .port_forward_state(port_forwards)
+            .unwrap()
+            .focused_session
+            .as_deref(),
+        Some("pf-7")
+    );
 }
 
 #[test]

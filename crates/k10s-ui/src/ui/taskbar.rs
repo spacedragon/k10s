@@ -12,6 +12,7 @@ fn dirty<I>(window: &Window<I>) -> bool {
         WindowContent::Resource(state) => state.detail.as_ref().is_some_and(|d| d.yaml.dirty),
         WindowContent::Services(state) => state.detail.as_ref().is_some_and(|d| d.yaml.dirty),
         WindowContent::Detail(detail) => detail.yaml.dirty,
+        WindowContent::PortForwards(_) => false,
     }
 }
 
@@ -28,6 +29,7 @@ fn identity<I: RowIdentity>(window: &Window<I>) -> String {
         WindowContent::Resource(state) => Some(&state.namespace_scope),
         WindowContent::Services(state) => Some(&state.namespace_scope),
         WindowContent::Detail(_) => None,
+        WindowContent::PortForwards(_) => None,
     };
     match (window.kind, scope) {
         (WindowKind::Workload(_), Some(scope)) => {

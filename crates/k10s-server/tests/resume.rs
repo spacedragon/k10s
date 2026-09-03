@@ -42,10 +42,14 @@ async fn default_server() -> (k10s_server::ServerHandle, FakeKubernetes) {
 }
 
 fn hello(extra: serde_json::Value) -> String {
+    hello_with_profile(extra, 1, &["logs.tail"])
+}
+
+fn hello_with_profile(extra: serde_json::Value, minor: u16, capabilities: &[&str]) -> String {
     let mut payload = json!({
         "protocolMajor": 1,
-        "protocolMinor": 1,
-        "capabilities": ["logs.tail"],
+        "protocolMinor": minor,
+        "capabilities": capabilities,
         "accessToken": "secret",
     });
     for (key, value) in extra.as_object().expect("resume fields must be an object") {
@@ -78,6 +82,138 @@ async fn handshake(ws: &mut Ws, extra: serde_json::Value) -> Welcome {
     let frame = receive_frame(ws).await;
     assert_eq!(frame.kind, ServerKind::Welcome);
     serde_json::from_value(frame.payload).expect("welcome decodes")
+}
+
+async fn handshake_with_profile(
+    ws: &mut Ws,
+    extra: serde_json::Value,
+    minor: u16,
+    capabilities: &[&str],
+) -> Welcome {
+    ws.send(Message::Text(
+        hello_with_profile(extra, minor, capabilities).into(),
+    ))
+    .await
+    .unwrap();
+    let frame = receive_frame(ws).await;
+    assert_eq!(frame.kind, ServerKind::Welcome);
+    serde_json::from_value(frame.payload).expect("welcome decodes")
+}
+
+#[tokio::test]
+async fn resume_rejects_downgraded_or_reduced_profiles_after_mixed_forward_events() {
+    let (server, _) = server_with(ServerConfig {
+        access_token: "secret".into(),
+        capabilities: vec![
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.into(),
+            k10s_protocol::CAPABILITY_POD_PORT_FORWARD.into(),
+        ],
+        ..ServerConfig::default()
+    })
+    .await;
+    let mut first = connect(&server).await;
+    let welcome = handshake_with_profile(
+        &mut first,
+        json!({}),
+        k10s_protocol::PROTOCOL_MINOR,
+        &["service.portForward", "pod.portForward"],
+    )
+    .await;
+    let session_id = welcome.session_id.as_str().to_owned();
+    first
+        .send(Message::Text(
+            json!({
+                "kind": "subscribe",
+                "subscriptionId": "mixed-pf",
+                "payload": {"kind": "portForwardSessions"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let subscribed = receive_frame(&mut first).await;
+    let cursor = subscribed.sequence.unwrap();
+
+    for (request_id, payload) in [
+        (
+            "service-start",
+            json!({
+                "service": {
+                    "context": "dev-local",
+                    "gvk": {"group": "", "version": "v1", "kind": "Service"},
+                    "namespace": "default",
+                    "name": "web-frontend",
+                    "uid": "uid-dev-local-service-default-web-frontend"
+                },
+                "port": {"kind": "number", "number": 80},
+                "localPort": 0
+            }),
+        ),
+        (
+            "pod-start",
+            json!({
+                "target": {
+                    "kind": "pod",
+                    "identity": {
+                        "context": "dev-local",
+                        "gvk": {"group": "", "version": "v1", "kind": "Pod"},
+                        "namespace": "default",
+                        "name": "web-frontend-7d9f8-00001",
+                        "uid": "uid-dev-local-pod-default-web-frontend-7d9f8-00001"
+                    },
+                    "containerName": "app",
+                    "remotePort": 8080
+                },
+                "localPort": 0
+            }),
+        ),
+    ] {
+        first
+            .send(Message::Text(
+                json!({
+                    "kind": "request",
+                    "requestId": request_id,
+                    "payload": {"kind": "portForward.start", "payload": payload}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut saw_response = false;
+        let mut saw_event = false;
+        while !(saw_response && saw_event) {
+            match receive_frame(&mut first).await.kind {
+                ServerKind::Response => saw_response = true,
+                ServerKind::Event => saw_event = true,
+                other => panic!("unexpected mixed-forward frame: {other:?}"),
+            }
+        }
+    }
+    drop(first);
+
+    for (minor, capabilities) in [
+        (
+            k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR - 1,
+            &["service.portForward", "pod.portForward"][..],
+        ),
+        (k10s_protocol::PROTOCOL_MINOR, &["service.portForward"][..]),
+    ] {
+        let mut reconnect = connect(&server).await;
+        let welcome = handshake_with_profile(
+            &mut reconnect,
+            resume_fields(&session_id, INSTANCE, cursor),
+            minor,
+            capabilities,
+        )
+        .await;
+        assert_eq!(welcome.resume_status, ResumeStatus::Fresh);
+        assert_ne!(welcome.session_id.as_str(), session_id);
+        assert!(peek_frame(&mut reconnect).await.is_none());
+        drop(reconnect);
+    }
+    server.shutdown().await.unwrap();
 }
 
 async fn receive_frame(ws: &mut Ws) -> ServerFrame {

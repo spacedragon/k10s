@@ -87,11 +87,16 @@ contradictory hard bounds.
 The standalone release intentionally fixes its startup readiness delay to one
 second and externally observable drain grace to 250 ms. Changing library
 bounds requires tests and an operator-facing release note.
-# Desktop Service port forwarding
+# Desktop Pod and Service port forwarding
 
-Service port forwarding is enabled only by the native desktop application's
-embedded server. The standalone server and browser deployment do not expose a
-flag or environment variable to enable it. Every listener binds to
-`127.0.0.1`; blank or `0` selects an available local port. Limits are 16 active
-sessions, 32 accepted connections globally, and 8 per session. Context changes
-stop and join all active forwards before committing the switch.
+Port forwarding is desktop-only. The native application's embedded server
+advertises `service.portForward` and `pod.portForward`; the standalone server
+and browser deployment advertise neither and expose no flag or environment
+variable to enable them. Every listener binds only to `127.0.0.1`. Blank or
+`0` selects an available local port; an explicit port must be in `1..=65535`.
+
+The limits—16 active sessions, 32 accepted connections globally, and 8 per
+session—are shared across both target types. The global Port Forwards window
+manages both Pod and Service sessions from the same server-owned feed. A
+context switch stops and joins both types before committing the switch, and
+application shutdown stops and joins them before the embedded runtime exits.

@@ -264,12 +264,14 @@ pub(crate) async fn serve_socket(
         }
     };
     drop(unauthenticated);
+    let resume_profile =
+        crate::resume::ResumeProfile::new(negotiated.protocol.minor, &negotiated.capabilities);
     let (takeover_tx, mut takeover_rx) = tokio::sync::oneshot::channel();
     let claim_result = {
         let mut state = resume
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.claim(
+        state.claim_with_profile(
             hello.server_instance_id.as_deref(),
             kernel.server_instance_id(),
             hello.session_id.as_ref().map(SessionId::as_str),
@@ -277,6 +279,7 @@ pub(crate) async fn serve_socket(
             uuid::Uuid::new_v4().to_string(),
             takeover_tx,
             config.outbound_queue_capacity.saturating_sub(1),
+            resume_profile,
         )
     };
     let claim = match claim_result {
@@ -324,6 +327,8 @@ pub(crate) async fn serve_socket(
     let negotiated_protocol = negotiated.protocol;
     outbound.set_negotiated_protocol(negotiated_protocol);
     let negotiated_capabilities = negotiated.capabilities;
+    let negotiated_port_forward_capabilities =
+        PortForwardCapabilities::negotiated(&negotiated_capabilities);
     let welcome = Welcome {
         protocol: negotiated_protocol,
         capabilities: negotiated_capabilities.clone(),
@@ -597,6 +602,7 @@ pub(crate) async fn serve_socket(
                 let task_correlations = operation_correlations.clone();
                 let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
+                let task_port_forward_capabilities = negotiated_port_forward_capabilities;
                 let task_port_forward = task_state;
                 let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
@@ -660,21 +666,20 @@ pub(crate) async fn serve_socket(
                                 }
                             }
                             Ok(Some(ParsedRequest::PortForward(op))) => {
-                                // Capability absence is enforced here and at
-                                // advertisement time; never through panics.
+                                // The negotiated set is already intersected
+                                // with server configuration. The manager is a
+                                // separate runtime gate.
                                 match task_port_forward.clone() {
                                     None => Err(RequestFailure::Backend(
-                                        BackendError::unsupported("service.portForward"),
+                                        BackendError::unsupported("portForward"),
                                     )),
-                                    Some(manager) =>
-                                    // Cancellation-aware like every other request.
-                                    {
-                                        tokio::select! {
-                                            () = request_cancel.cancelled() =>
-                                                Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                            outcome = dispatch_port_forward(&manager, op) => outcome,
-                                        }
-                                    }
+                                    Some(manager) => dispatch_port_forward(
+                                        &manager,
+                                        op,
+                                        task_protocol.minor,
+                                        task_port_forward_capabilities,
+                                        request_cancel.clone(),
+                                    ).await
                                 }
                             }
                             Ok(None) => Err(RequestFailure::Backend(BackendError::unsupported(
@@ -935,6 +940,14 @@ pub(crate) async fn serve_socket(
                             }
                         }
                     }
+                    Ok(SubscriptionSelector::PortForwardSessions)
+                        if !negotiated_port_forward_capabilities.any() =>
+                    {
+                        Err((
+                            ErrorCode::UnsupportedMessage,
+                            "port-forward sessions require a negotiated capability".into(),
+                        ))
+                    }
                     Ok(SubscriptionSelector::PortForwardSessions) => {
                         match &state_port_forward {
                             Some(manager) => {
@@ -986,8 +999,21 @@ pub(crate) async fn serve_socket(
                                 let task_subscription = subscription_id.clone();
                                 let task_done = forwarder_done_tx.clone();
                                 let forwarder_task_id = task_id;
+                                let task_manager = Arc::clone(manager);
+                                let task_protocol_minor = negotiated_protocol.minor;
+                                let task_capabilities = negotiated_port_forward_capabilities;
                                 let mut events = manager.subscribe().await;
                                 request_tasks.spawn(async move {
+                                    // Lifecycle deltas alone cannot express
+                                    // retention expiry. Periodically publish
+                                    // a complete authoritative cut so a
+                                    // continuously connected client removes
+                                    // terminal rows pruned by list_snapshot.
+                                    let mut reconciliation = tokio::time::interval_at(
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_secs(1),
+                                        std::time::Duration::from_secs(1),
+                                    );
                                     loop {
                                         // Coalescible P2 like every other
                                         // session telemetry; snapshots are
@@ -995,8 +1021,49 @@ pub(crate) async fn serve_socket(
                                         // next revision.
                                         let event = tokio::select! {
                                             () = cancel.cancelled() => break,
-                                            event = events.recv() => event,
+                                            event = events.recv() => Some(event),
+                                            _ = reconciliation.tick() => None,
                                         };
+                                        if event.is_none() {
+                                            let (revision, sessions) =
+                                                task_manager.list_snapshot().await;
+                                            let mut projected = Vec::with_capacity(sessions.len());
+                                            for session in sessions {
+                                                if !task_capabilities.allows(&session.target) {
+                                                    continue;
+                                                }
+                                                let source_port = task_manager
+                                                    .resolved_source_port(session.id.as_str())
+                                                    .await;
+                                                if let Some(session) = session.wire_value_for_minor(
+                                                    task_protocol_minor,
+                                                    source_port,
+                                                ) {
+                                                    projected.push(session);
+                                                }
+                                            }
+                                            let snapshot = serde_json::json!({
+                                                "revision": revision,
+                                                "sessions": projected,
+                                            });
+                                            match enqueue_delta(
+                                                &task_outbound,
+                                                &task_subscription,
+                                                "__authoritative_snapshot__",
+                                                k10s_protocol::PORT_FORWARD_EVENT_SNAPSHOT,
+                                                revision,
+                                                &snapshot,
+                                                &task_counter,
+                                            ) {
+                                                Ok(()) | Err(DeltaAdmission::Dropped) => {}
+                                                Err(DeltaAdmission::Overloaded) => {
+                                                    overload_close(&task_outbound);
+                                                    break;
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        let event = event.expect("event branch checked above");
                                         let event = match event {
                                             Ok(event) => event,
                                             Err(
@@ -1025,13 +1092,29 @@ pub(crate) async fn serve_socket(
                                                 break;
                                             }
                                         };
+                                        if !task_capabilities.allows(&event.session.target) {
+                                            continue;
+                                        }
+                                        let source_port = task_manager
+                                            .resolved_source_port(event.session.id.as_str())
+                                            .await;
+                                        let Some(session) = event
+                                            .session
+                                            .wire_value_for_minor(task_protocol_minor, source_port)
+                                        else {
+                                            continue;
+                                        };
+                                        let projected_event = serde_json::json!({
+                                            "revision": event.revision,
+                                            "session": session,
+                                        });
                                         if enqueue_delta(
                                             &task_outbound,
                                             &task_subscription,
                                             event.session.id.as_str(),
                                             k10s_protocol::PORT_FORWARD_EVENT_SESSION,
                                             event.revision,
-                                            &event,
+                                            &projected_event,
                                             &task_counter,
                                         )
                                         .is_err()
@@ -1309,8 +1392,7 @@ enum ParsedRequest {
 #[derive(Debug, Clone)]
 enum PortForwardOp {
     Start {
-        identity: k10s_protocol::ResourceIdentity,
-        selection: k10s_backend::PortForwardPortSelection,
+        target: Box<k10s_protocol::PortForwardTarget>,
         local_port: u16,
         context: String,
     },
@@ -1318,6 +1400,47 @@ enum PortForwardOp {
         session_id: String,
     },
     List,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortForwardCapabilities {
+    service: bool,
+    pod: bool,
+}
+
+impl PortForwardCapabilities {
+    fn negotiated(capabilities: &[String]) -> Self {
+        Self {
+            service: capabilities
+                .iter()
+                .any(|value| value == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD),
+            pod: capabilities
+                .iter()
+                .any(|value| value == k10s_protocol::CAPABILITY_POD_PORT_FORWARD),
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.service || self.pod
+    }
+
+    const fn allows(self, target: &k10s_protocol::PortForwardTarget) -> bool {
+        match target {
+            k10s_protocol::PortForwardTarget::Service { .. } => self.service,
+            k10s_protocol::PortForwardTarget::Pod { .. } => self.pod,
+        }
+    }
+
+    const fn required_for(target: &k10s_protocol::PortForwardTarget) -> &'static str {
+        match target {
+            k10s_protocol::PortForwardTarget::Service { .. } => {
+                k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
+            }
+            k10s_protocol::PortForwardTarget::Pod { .. } => {
+                k10s_protocol::CAPABILITY_POD_PORT_FORWARD
+            }
+        }
+    }
 }
 
 /// Outcome of one dispatched control request.
@@ -1617,20 +1740,17 @@ fn parse_request(
                         .validate()
                         .map_err(|reason| reason.to_owned())
                         .map(|_| {
-                            let context = parsed.service.context.clone();
-                            let selection = match parsed.port {
-                                k10s_protocol::PortForwardPortSelector::Name { name } => {
-                                    k10s_backend::PortForwardPortSelection::Name(name)
-                                }
-                                k10s_protocol::PortForwardPortSelector::Number { number } => {
-                                    k10s_backend::PortForwardPortSelection::Number(number)
+                            let (target, local_port) = parsed.into_parts();
+                            let context = match &target {
+                                k10s_protocol::PortForwardTarget::Service { identity, .. }
+                                | k10s_protocol::PortForwardTarget::Pod { identity, .. } => {
+                                    identity.context.clone()
                                 }
                             };
                             Some(ParsedRequest::PortForward(PortForwardOp::Start {
                                 context,
-                                identity: parsed.service,
-                                selection,
-                                local_port: parsed.local_port,
+                                target: Box::new(target),
+                                local_port,
                             }))
                         })
                 })
@@ -1686,45 +1806,99 @@ fn allocate_sequence(counter: &AtomicU64) -> Option<u64> {
 async fn dispatch_port_forward(
     manager: &PortForwardManager,
     op: PortForwardOp,
+    protocol_minor: u16,
+    capabilities: PortForwardCapabilities,
+    request_cancel: CancellationToken,
 ) -> Result<RequestOutcome, RequestFailure> {
     match op {
         PortForwardOp::Start {
-            identity,
-            selection,
+            target,
             local_port,
             context,
         } => {
+            if protocol_minor < k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR
+                && matches!(
+                    target.as_ref(),
+                    k10s_protocol::PortForwardTarget::Pod { .. }
+                )
+            {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    k10s_protocol::CAPABILITY_POD_PORT_FORWARD,
+                )));
+            }
+            if !capabilities.allows(&target) {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    PortForwardCapabilities::required_for(&target),
+                )));
+            }
             let outcome = manager
-                .start(identity, selection, local_port, context)
+                .start_cancellable(*target, local_port, context, request_cancel)
                 .await;
             match outcome {
-                Ok(session) => Ok(RequestOutcome::PortForward(
-                    serde_json::to_value(k10s_protocol::PortForwardStartResponse { session })
-                        .expect("start response serializes"),
-                )),
-                Err(rejected) => Err(RequestFailure::Backend(BackendError::PortForward {
-                    category: rejection_from_failure(rejected.category),
-                    message: rejected.message,
-                })),
+                Ok(session) => {
+                    let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                    let session = session
+                        .wire_value_for_minor(protocol_minor, source_port)
+                        .expect("a started session is visible to its compatible client");
+                    Ok(RequestOutcome::PortForward(serde_json::json!({
+                        "session": session
+                    })))
+                }
+                Err(crate::port_forward::StartError::Rejected(rejected)) => {
+                    Err(RequestFailure::Backend(BackendError::PortForward {
+                        category: rejection_from_failure(rejected.category),
+                        message: rejected.message,
+                    }))
+                }
+                Err(crate::port_forward::StartError::Cancelled) => {
+                    Err(RequestFailure::Backend(BackendError::Cancelled))
+                }
             }
         }
-        PortForwardOp::Stop { session_id } => Ok(match manager.stop(&session_id).await {
-            crate::port_forward::StopOutcome::Stopped(session) => RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardStopResponse {
-                    session: Some(session),
-                })
-                .expect("stop response serializes"),
-            ),
-            crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
-                    .expect("stop response serializes"),
-            ),
-        }),
+        PortForwardOp::Stop { session_id } => {
+            if !capabilities.any() {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    "portForward",
+                )));
+            }
+            if let Some(session) = manager.session(&session_id).await
+                && !capabilities.allows(&session.target)
+            {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    PortForwardCapabilities::required_for(&session.target),
+                )));
+            }
+            Ok(match manager.stop(&session_id).await {
+                crate::port_forward::StopOutcome::Stopped(session) => {
+                    let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                    let session = session.wire_value_for_minor(protocol_minor, source_port);
+                    RequestOutcome::PortForward(serde_json::json!({ "session": session }))
+                }
+                crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
+                    serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
+                        .expect("stop response serializes"),
+                ),
+            })
+        }
         PortForwardOp::List => {
+            if !capabilities.any() {
+                return Err(RequestFailure::Backend(BackendError::unsupported(
+                    "portForward",
+                )));
+            }
             let (revision, sessions) = manager.list_snapshot().await;
+            let mut projected = Vec::with_capacity(sessions.len());
+            for session in sessions {
+                if !capabilities.allows(&session.target) {
+                    continue;
+                }
+                let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                if let Some(session) = session.wire_value_for_minor(protocol_minor, source_port) {
+                    projected.push(session);
+                }
+            }
             Ok(RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardListResponse { revision, sessions })
-                    .expect("list response serializes"),
+                serde_json::json!({ "revision": revision, "sessions": projected }),
             ))
         }
     }
@@ -1742,6 +1916,7 @@ fn rejection_from_failure(
         F::LocalPortInUse => k10s_backend::RejectionCategory::LocalPortInUse,
         F::VanishedResource => k10s_backend::RejectionCategory::VanishedResource,
         F::UnsupportedService => k10s_backend::RejectionCategory::UnsupportedService,
+        F::UnsupportedPod => k10s_backend::RejectionCategory::UnsupportedPod,
         F::ContextTransition => k10s_backend::RejectionCategory::ContextTransition,
         F::TransportClosed => k10s_backend::RejectionCategory::TransportClosed,
     }
@@ -1756,9 +1931,11 @@ fn port_forward_error_code(category: k10s_backend::RejectionCategory) -> ErrorCo
     match category {
         C::UnavailableEndpoint | C::VanishedResource => ErrorCode::NotFound,
         C::Forbidden => ErrorCode::Unauthorized,
-        C::LocalPortInUse | C::UnsupportedService | C::ContextTransition | C::TransportClosed => {
-            ErrorCode::Conflict
-        }
+        C::LocalPortInUse
+        | C::UnsupportedService
+        | C::UnsupportedPod
+        | C::ContextTransition
+        | C::TransportClosed => ErrorCode::Conflict,
     }
 }
 

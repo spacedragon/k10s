@@ -93,6 +93,7 @@ pub(super) fn show<I: RowIdentity>(
 
 #[derive(Clone)]
 struct PodDetailProjection {
+    identity: ResourceIdentity,
     status: StatusProjection,
     failure: Option<FailureProjection>,
     containers: Vec<ContainerProjection>,
@@ -109,7 +110,10 @@ struct PodDetailProjection {
     restart_policy: String,
     pod_ip: String,
     host_ip: String,
-    ports: Vec<String>,
+    ports: Vec<PodContainerPort>,
+    port_forward_capability: bool,
+    port_forward_authority: bool,
+    port_forward_list_state: crate::ui::PortForwardListState,
     labels: Vec<(String, String)>,
     annotations: Vec<(String, String)>,
     created_at: String,
@@ -216,6 +220,7 @@ impl PodDetailProjection {
         annotations.sort_by(|left, right| left.0.cmp(&right.0));
 
         Some(Self {
+            identity: input.identity.clone(),
             status,
             failure,
             containers,
@@ -256,7 +261,11 @@ impl PodDetailProjection {
             restart_policy: optional(pod.restart_policy.as_deref()),
             pod_ip: optional(pod.pod_ip.as_deref()),
             host_ip: optional(pod.host_ip.as_deref()),
-            ports: pod.ports.iter().map(format_port).collect(),
+            ports: pod.ports.clone(),
+            port_forward_capability: input.port_forward_capability,
+            port_forward_authority: input.mutations_allowed
+                && input.port_forward_list_state == crate::ui::PortForwardListState::Ready,
+            port_forward_list_state: input.port_forward_list_state,
             labels,
             annotations,
             created_at: optional(pod.created_at.as_deref()),
@@ -502,6 +511,150 @@ fn show_operational<I: RowIdentity>(
         }
     });
 
+    section(ui, &format!("PORTS · {}", pod.ports.len()));
+    if pod.ports.is_empty() {
+        ui.label("No declared ports");
+    } else {
+        match pod.port_forward_list_state {
+            crate::ui::PortForwardListState::Loading => {
+                ui.label("Loading port-forward sessions…");
+            }
+            crate::ui::PortForwardListState::Reconstructing => {
+                ui.label("Reconstructing port-forward sessions…");
+            }
+            crate::ui::PortForwardListState::Ready => {}
+        }
+        table_region(ui, window_id, "ports", "Pod ports table", |ui| {
+            let available = (ui.available_width() - ui.spacing().item_spacing.x * 4.0).max(1.0);
+            let widths = [0.18, 0.22, 0.14, 0.14, 0.32].map(|part| available * part);
+            ui.horizontal(|ui| {
+                for (heading, width) in ["NAME", "CONTAINER", "PORT", "PROTOCOL", "ACTION"]
+                    .into_iter()
+                    .zip(widths)
+                {
+                    table_cell(ui, width, heading, None, None);
+                }
+            });
+            ui.separator();
+            for (index, port) in pod.ports.iter().enumerate() {
+                ui.push_id(
+                    (
+                        "k10s.detail.pod.port",
+                        window_id.0,
+                        index,
+                        &port.container_name,
+                        port.container_port,
+                    ),
+                    |ui| {
+                        let name = optional(port.name.as_deref());
+                        let container = present(&port.container_name);
+                        let protocol = protocol_label(port.protocol);
+                        let accessible = format!(
+                            "Port {name} · {container} · {} · {protocol}",
+                            port.container_port
+                        );
+                        let row = ui.horizontal(|ui| {
+                            table_cell(ui, widths[0], &name, None, None);
+                            table_cell(ui, widths[1], &container, None, None);
+                            table_cell(
+                                ui,
+                                widths[2],
+                                &port.container_port.to_string(),
+                                None,
+                                None,
+                            );
+                            table_cell(ui, widths[3], protocol, None, None);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(widths[4], ui.spacing().interact_size.y),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    if port.protocol != TransportProtocol::Tcp {
+                                        return;
+                                    }
+                                    if pod.port_forward_capability {
+                                        if pod.port_forward_list_state
+                                            != crate::ui::PortForwardListState::Ready
+                                        {
+                                            return;
+                                        }
+                                        let action_name = port.name.as_deref().map_or_else(
+                                            || {
+                                                format!(
+                                                    "Port Forward unnamed port on container {} port {}",
+                                                    port.container_name, port.container_port
+                                                )
+                                            },
+                                            |name| {
+                                                format!(
+                                                    "Port Forward {name} on container {} port {}",
+                                                    port.container_name, port.container_port
+                                                )
+                                            },
+                                        );
+                                        let action = ui.add_enabled(
+                                            pod.port_forward_authority
+                                                && !port.container_name.is_empty()
+                                                && port.container_port != 0,
+                                            egui::Button::new("Port Forward"),
+                                        );
+                                        action.widget_info(|| {
+                                            WidgetInfo::labeled(
+                                                WidgetType::Button,
+                                                true,
+                                                action_name.clone(),
+                                            )
+                                        });
+                                        if action.clicked() {
+                                            queued.push(WorkspaceCommand::StartPortForward {
+                                                target: k10s_protocol::PortForwardTarget::Pod {
+                                                    identity: pod.identity.clone(),
+                                                    container_name: port.container_name.clone(),
+                                                    remote_port: port.container_port,
+                                                },
+                                                remote_label: format!(
+                                                    "{name} · {container} · {} · {protocol}",
+                                                    port.container_port
+                                                ),
+                                                initial_local_port: port.container_port,
+                                            });
+                                        }
+                                    } else {
+                                        ui.add(
+                                            egui::Label::new(
+                                                "Port forwarding is available in the desktop application",
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(
+                                            "Port forwarding is available in the desktop application",
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                        row.response.widget_info(|| {
+                            WidgetInfo::labeled(WidgetType::Label, true, accessible.clone())
+                        });
+                        ui.separator();
+                    },
+                );
+            }
+        });
+        if pod.port_forward_capability
+            && pod.port_forward_list_state == crate::ui::PortForwardListState::Ready
+            && !pod.port_forward_authority
+            && pod
+                .ports
+                .iter()
+                .any(|port| port.protocol == TransportProtocol::Tcp)
+        {
+            ui.label(
+                RichText::new(crate::ui::port_forward::PORT_FORWARD_AUTHORITY_UNAVAILABLE)
+                    .color(crate::ui::theme::WARNING),
+            );
+        }
+    }
+
     section(ui, "CONDITIONS");
     if pod.conditions.is_empty() {
         ui.label("No conditions reported");
@@ -673,19 +826,10 @@ fn show_metadata<I: RowIdentity>(
     );
 
     section(ui, "NETWORK");
-    let ports = if pod.ports.is_empty() {
-        UNAVAILABLE.into()
-    } else {
-        pod.ports.join(" · ")
-    };
     metadata_grid(
         ui,
         ("k10s.detail.pod.network", window_id.0),
-        &[
-            ("Pod IP", &pod.pod_ip),
-            ("Host IP", &pod.host_ip),
-            ("Ports", &ports),
-        ],
+        &[("Pod IP", &pod.pod_ip), ("Host IP", &pod.host_ip)],
     );
 
     if !pod.labels.is_empty() || !pod.annotations.is_empty() {
@@ -750,24 +894,12 @@ fn metadata_grid(
     });
 }
 
-fn format_port(port: &PodContainerPort) -> String {
-    let protocol = match port.protocol {
+fn protocol_label(protocol: TransportProtocol) -> &'static str {
+    match protocol {
         TransportProtocol::Tcp => "TCP",
         TransportProtocol::Udp => "UDP",
         TransportProtocol::Sctp => "SCTP",
-    };
-    let name = port
-        .name
-        .as_deref()
-        .map_or_else(String::new, |name| format!(" {name}"));
-    let host = port
-        .host_port
-        .map_or_else(String::new, |host| format!(" host:{host}"));
-    format!(
-        "{} {}/{protocol}{name}{host}",
-        present(&port.container_name),
-        port.container_port
-    )
+    }
 }
 
 fn optional(value: Option<&str>) -> String {

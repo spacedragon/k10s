@@ -20,8 +20,9 @@ use crate::ui::RowIdentity;
 use crate::ui::dialogs::DialogAction;
 use crate::ui::{ConnectionState as ShellConnectionState, InfrastructureLoad, UiShell};
 use crate::ui::{
-    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
-    ResourceAction, ResourceFeed, SafeUiError, WindowFreshness,
+    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PortForwardRetryErrors,
+    PrimaryDetailState, RelationState, ResourceAction, ResourceFeed, SafeUiError, WindowFreshness,
+    port_forward_start_authorization, retry_start_request,
 };
 use crate::workspace::{
     NamespaceScope, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent, WorkspaceSnapshot,
@@ -147,7 +148,10 @@ pub struct K10sApp {
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
-    pending_port_forwards: Vec<PendingRequest>,
+    pending_port_forwards: Vec<PendingPortForward>,
+    next_port_forward_issuance: u64,
+    latest_focused_port_forward_issuance: Option<u64>,
+    port_forward_retry_errors: PortForwardRetryErrors,
     port_forward_error: Option<String>,
     port_forward_switch_prompt: Option<String>,
     port_forward_switch_after_stop: Option<String>,
@@ -294,6 +298,20 @@ struct DetailLifecycleSource {
     entries: BTreeMap<ResourceIdentity, DetailLifecycleEvent>,
 }
 
+#[derive(Debug)]
+struct PendingPortForward {
+    request: PendingRequest,
+    intent: PendingPortForwardIntent,
+    issuance: Option<u64>,
+}
+
+#[derive(Debug)]
+enum PendingPortForwardIntent {
+    StartModal(crate::ui::PortForwardModalGeneration),
+    Retry(Box<k10s_protocol::PortForwardSession>),
+    Stop,
+}
+
 /// Semantic Service detail projection for the web host.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebServiceDetail {
@@ -384,6 +402,9 @@ impl K10sApp {
             namespace_rejected_context: None,
             port_forward_list: None,
             pending_port_forwards: Vec::new(),
+            next_port_forward_issuance: 1,
+            latest_focused_port_forward_issuance: None,
+            port_forward_retry_errors: PortForwardRetryErrors::default(),
             port_forward_error: None,
             port_forward_switch_prompt: None,
             port_forward_switch_after_stop: None,
@@ -534,10 +555,28 @@ impl K10sApp {
         self.reconcile_selected_resource_streams();
     }
 
-    /// Whether the authenticated server negotiated desktop Service port forwarding.
+    /// Whether the authenticated server negotiated Service port forwarding.
     #[must_use]
     pub fn port_forward_available(&self) -> bool {
-        self.client.port_forward_available()
+        self.service_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated Service port forwarding.
+    #[must_use]
+    pub fn service_port_forward_available(&self) -> bool {
+        self.client.service_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated Pod port forwarding.
+    #[must_use]
+    pub fn pod_port_forward_available(&self) -> bool {
+        self.client.pod_port_forward_available()
+    }
+
+    /// Whether the authenticated server negotiated either port-forward target.
+    #[must_use]
+    pub fn any_port_forward_available(&self) -> bool {
+        self.client.any_port_forward_available()
     }
 
     pub fn set_external_shell_availability(
@@ -586,12 +625,30 @@ impl K10sApp {
         self.client.port_forward_sessions()
     }
 
+    /// Application-owned presentation error for a retained failed session.
+    /// This never mutates or replaces the authoritative session snapshot.
+    #[must_use]
+    pub fn port_forward_retry_error(
+        &self,
+        session_id: &k10s_protocol::PortForwardSessionId,
+    ) -> Option<&str> {
+        self.port_forward_retry_errors.get(session_id)
+    }
+
     /// Render the approved default-egui shell for the current connection view.
     pub fn render_ui(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.host_error {
             ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error.message());
         }
         self.finish_port_forward_list();
+        self.finish_port_forward_requests();
+        let sessions = self
+            .client
+            .port_forward_sessions()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.port_forward_retry_errors.reconcile(&sessions);
         let (connection, contexts): (ShellConnectionState, &[Context]) = match &self.view {
             AppView::Connecting => (ShellConnectionState::Connecting, &[]),
             AppView::Ready { contexts, .. } => {
@@ -639,36 +696,8 @@ impl K10sApp {
             return;
         }
         for action in self.shell.drain_port_forward_actions() {
-            self.port_forward_error = None;
-            let query = match action {
-                crate::ui::PortForwardAction::Start {
-                    service,
-                    port,
-                    local_port,
-                } => Query::PortForwardStart(k10s_protocol::PortForwardStartRequest {
-                    service,
-                    port,
-                    local_port,
-                }),
-                crate::ui::PortForwardAction::Stop(id) => {
-                    match k10s_protocol::PortForwardSessionId::try_new(id) {
-                        Ok(id) => Query::PortForwardStop(id),
-                        Err(_) => continue,
-                    }
-                }
-            };
-            if let Ok(request) = self.client.begin(query) {
-                self.pending_port_forwards.push(request);
-            }
+            self.process_port_forward_action(ui.ctx(), action);
         }
-        self.pending_port_forwards.retain(|request| {
-            if self.client.is_pending(request) {
-                true
-            } else {
-                let _ = self.client.take(request.clone());
-                false
-            }
-        });
         let selected_after = self.client.local_ui().selected_context.clone();
         let mut confirm_switch = false;
         let mut cancel_switch = false;
@@ -716,7 +745,11 @@ impl K10sApp {
                 .collect();
             for session_id in session_ids {
                 if let Ok(request) = self.client.begin(Query::PortForwardStop(session_id)) {
-                    self.pending_port_forwards.push(request);
+                    self.pending_port_forwards.push(PendingPortForward {
+                        request,
+                        intent: PendingPortForwardIntent::Stop,
+                        issuance: None,
+                    });
                 }
             }
             self.port_forward_switch_after_stop = Some(to);
@@ -803,6 +836,89 @@ impl K10sApp {
         });
         if let Err(error) = request_result {
             self.terminal_failure(error.to_string());
+        }
+    }
+
+    fn process_port_forward_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::ui::PortForwardAction,
+    ) {
+        self.port_forward_error = None;
+        match action {
+            crate::ui::PortForwardAction::OpenStart {
+                target,
+                remote_label,
+                initial_local_port,
+            } => {
+                self.shell
+                    .open_port_forward_start(target, remote_label, initial_local_port);
+            }
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            } => {
+                if let Err(reason) =
+                    port_forward_start_authorization(&self.build_resource_feed(), request.target())
+                {
+                    self.shell.port_forward_start_failed_for(generation, reason);
+                    return;
+                }
+                match self.client.begin(Query::PortForwardStart(request)) {
+                    Ok(request) => {
+                        let issuance = self.allocate_port_forward_issuance();
+                        self.pending_port_forwards.push(PendingPortForward {
+                            request,
+                            intent: PendingPortForwardIntent::StartModal(generation),
+                            issuance: Some(issuance),
+                        });
+                    }
+                    Err(error) => self
+                        .shell
+                        .port_forward_start_failed(safe_port_forward_client_error(&error)),
+                }
+            }
+            crate::ui::PortForwardAction::Stop(id) => {
+                if let Ok(id) = k10s_protocol::PortForwardSessionId::try_new(id)
+                    && let Ok(request) = self.client.begin(Query::PortForwardStop(id))
+                {
+                    self.pending_port_forwards.push(PendingPortForward {
+                        request,
+                        intent: PendingPortForwardIntent::Stop,
+                        issuance: None,
+                    });
+                }
+            }
+            crate::ui::PortForwardAction::Retry(id) => {
+                let source = self
+                    .client
+                    .port_forward_sessions()
+                    .into_iter()
+                    .find(|session| session.id == id)
+                    .cloned();
+                if let Some(source) = source {
+                    match retry_start_request(&source) {
+                        Ok(start) => match self.client.begin(Query::PortForwardStart(start)) {
+                            Ok(request) => {
+                                let issuance = self.allocate_port_forward_issuance();
+                                self.pending_port_forwards.push(PendingPortForward {
+                                    request,
+                                    intent: PendingPortForwardIntent::Retry(Box::new(source)),
+                                    issuance: Some(issuance),
+                                });
+                            }
+                            Err(error) => self
+                                .port_forward_retry_errors
+                                .record(&source, safe_port_forward_client_error(&error)),
+                        },
+                        Err(message) => self.port_forward_retry_errors.record(&source, message),
+                    }
+                }
+            }
+            crate::ui::PortForwardAction::FocusSession(id) => {
+                self.shell.focus_port_forward_session(id.as_str());
+            }
+            crate::ui::PortForwardAction::CopyAddress(address) => ctx.copy_text(address),
         }
     }
 
@@ -1067,6 +1183,7 @@ impl K10sApp {
                     crate::workspace::WindowContent::Services(service) => {
                         service.detail.as_ref().map(|detail| &detail.identity)
                     }
+                    crate::workspace::WindowContent::PortForwards(_) => None,
                 })?;
         Some((identity, self.details.get(identity)))
     }
@@ -1258,6 +1375,7 @@ impl K10sApp {
                     match error {
                         ClientError::SequenceGap { .. } => {
                             self.shell.yaml_editors_mut().connection_lost();
+                            self.reset_port_forward_ui(Some("Server state changed; submit again"));
                             self.enter_resource_recovery();
                             self.recovering = true;
                             self.bootstrap = self.client.take_rebuilt_bootstrap();
@@ -1370,14 +1488,38 @@ impl K10sApp {
                             if stream_request_id.as_ref().is_some_and(|id| {
                                 self.pending_port_forwards
                                     .iter()
-                                    .any(|request| request.id() == id)
+                                    .any(|pending| pending.request.id() == id)
                             }) =>
                         {
-                            if let Some(id) = stream_request_id.as_ref() {
+                            let pending = stream_request_id.as_ref().and_then(|id| {
                                 self.pending_port_forwards
-                                    .retain(|request| request.id() != id);
+                                    .iter()
+                                    .position(|pending| pending.request.id() == id)
+                                    .map(|index| self.pending_port_forwards.remove(index))
+                            });
+                            if let Some(pending) = pending {
+                                match pending.intent {
+                                    PendingPortForwardIntent::StartModal(generation) => {
+                                        self.shell.port_forward_start_failed_for(
+                                            generation,
+                                            server_error.safe_message.clone(),
+                                        )
+                                    }
+                                    PendingPortForwardIntent::Retry(source)
+                                        if is_local_port_conflict(server_error) =>
+                                    {
+                                        self.port_forward_retry_errors.local_port_conflict(&source);
+                                    }
+                                    PendingPortForwardIntent::Retry(source) => {
+                                        self.port_forward_retry_errors
+                                            .record(&source, server_error.safe_message.clone());
+                                    }
+                                    PendingPortForwardIntent::Stop => {
+                                        self.port_forward_error =
+                                            Some(server_error.safe_message.clone());
+                                    }
+                                }
                             }
-                            self.port_forward_error = Some(server_error.safe_message.clone());
                         }
                         // A vanished object's detail query is dropped
                         // quietly: the pinned window keeps rendering its
@@ -1633,6 +1775,7 @@ impl K10sApp {
                     self.shell.yaml_editors_mut().connection_lost();
                 }
                 if applied && server_rebuild_requested {
+                    self.reset_port_forward_ui(Some("Server state changed; submit again"));
                     self.enter_resource_recovery();
                     self.recovering = true;
                     self.view = AppView::Connecting;
@@ -1722,17 +1865,23 @@ impl K10sApp {
                                 context: selected.clone(),
                             });
                     }
+                    let reconstructing_port_forward_list = self.recovering;
                     self.recovering = false;
-                    if self.client.port_forward_available() {
+                    if self.client.any_port_forward_available() {
                         let _ = self
                             .client
                             .subscribe_port_forward_sessions()
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.port_forward_list = Some(
-                            self.client
-                                .begin(Query::PortForwardList)
-                                .map_err(|error| AppEventError::Terminal(error.to_string()))?,
+                            if reconstructing_port_forward_list {
+                                self.client.begin_port_forward_reconstruction()
+                            } else {
+                                self.client.begin(Query::PortForwardList)
+                            }
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?,
                         );
+                    } else {
+                        self.port_forward_list = None;
                     }
                     if let Some(context) = selected {
                         // A switch left awaiting its answer from an older
@@ -1863,6 +2012,22 @@ impl K10sApp {
         }
     }
 
+    fn allocate_port_forward_issuance(&mut self) -> u64 {
+        let issuance = self.next_port_forward_issuance;
+        self.next_port_forward_issuance = self.next_port_forward_issuance.saturating_add(1);
+        issuance
+    }
+
+    fn focus_successful_port_forward(&mut self, issuance: u64, session_id: &str) {
+        if self
+            .latest_focused_port_forward_issuance
+            .is_none_or(|latest| issuance > latest)
+        {
+            self.latest_focused_port_forward_issuance = Some(issuance);
+            self.shell.focus_port_forward_session(session_id);
+        }
+    }
+
     /// Send queued frames only through an opened transport.
     ///
     /// Before the handshake completes every browser-side send fails with
@@ -1909,6 +2074,51 @@ impl K10sApp {
         {
             let _ = self.client.take(request);
             self.port_forward_list = None;
+        }
+    }
+
+    fn finish_port_forward_requests(&mut self) {
+        let completed = self
+            .pending_port_forwards
+            .iter()
+            .enumerate()
+            .filter(|(_, pending)| !self.client.is_pending(&pending.request))
+            .map(|(index, _)| index)
+            .rev()
+            .collect::<Vec<_>>();
+        let completed = completed
+            .into_iter()
+            .map(|index| self.pending_port_forwards.remove(index))
+            .collect::<Vec<_>>();
+        for pending in completed.into_iter().rev() {
+            let issuance = pending.issuance;
+            let Some(result) = self.client.take(pending.request) else {
+                continue;
+            };
+            match (pending.intent, result) {
+                (
+                    PendingPortForwardIntent::StartModal(generation),
+                    QueryResult::PortForwardStarted(response),
+                ) => {
+                    self.shell.port_forward_start_completed_for(generation);
+                    self.focus_successful_port_forward(
+                        issuance.expect("start requests carry issuance order"),
+                        response.session.id.as_str(),
+                    );
+                }
+                (
+                    PendingPortForwardIntent::Retry(source),
+                    QueryResult::PortForwardStarted(response),
+                ) => {
+                    self.port_forward_retry_errors.retry_succeeded(&source.id);
+                    self.focus_successful_port_forward(
+                        issuance.expect("retry requests carry issuance order"),
+                        response.session.id.as_str(),
+                    );
+                }
+                (PendingPortForwardIntent::Stop, QueryResult::PortForwardStopped(_)) => {}
+                _ => {}
+            }
         }
     }
 
@@ -2026,10 +2236,12 @@ impl K10sApp {
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
+        self.port_forward_list = None;
         // An unanswered switch request died with the transport; the selection
         // stays where it was and a retry needs a fresh user action.
         self.pending_switch = None;
         self.failed_switch = None;
+        self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.teardown_stream_sessions();
         self.shell.yaml_editors_mut().connection_lost();
         // Server-issued details are stale after recovery and every in-flight
@@ -2330,11 +2542,29 @@ impl K10sApp {
             relations: self.relations.clone().into_iter().collect(),
             metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
+            pod_port_forward_available: self.client.pod_port_forward_available(),
+            port_forward_list_state: if self.client.port_forward_reconstructing() {
+                crate::ui::PortForwardListState::Reconstructing
+            } else if self.port_forward_list.is_some() {
+                crate::ui::PortForwardListState::Loading
+            } else {
+                crate::ui::PortForwardListState::Ready
+            },
             port_forward_sessions: self
                 .client
                 .port_forward_sessions()
                 .into_iter()
                 .cloned()
+                .collect(),
+            port_forward_retry_errors: self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .filter_map(|session| {
+                    self.port_forward_retry_errors
+                        .get(&session.id)
+                        .map(|message| (session.id.clone(), message.to_owned()))
+                })
                 .collect(),
             port_forward_error: self.port_forward_error.clone(),
         }
@@ -3030,6 +3260,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             identity == Some(wanted)
         })
@@ -3050,6 +3281,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|detail| detail.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             if let Some(identity) = identity {
                 tracked.insert(identity.clone());
@@ -3279,6 +3511,7 @@ impl K10sApp {
                     .detail
                     .as_ref()
                     .and_then(|d| d.identity.as_row_identity()),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             };
             if let Some(identity) = identity
                 && !pinned.iter().any(|known| known == identity)
@@ -3683,6 +3916,7 @@ impl K10sApp {
         self.transport_open = false;
         self.revoke_external_shell();
         self.teardown_stream_sessions();
+        self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.view = AppView::Failed { message };
     }
 
@@ -3700,6 +3934,7 @@ impl K10sApp {
                 crate::workspace::WindowContent::Detail(detail) => Some(detail),
                 crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             })?;
         let identity = k10s_ui_row_identity(&detail.identity)?;
         let runtime = self
@@ -3749,6 +3984,15 @@ impl K10sApp {
     }
 
     fn retire_resource_context(&mut self) {
+        for pending in std::mem::take(&mut self.pending_port_forwards) {
+            if self.client.is_pending(&pending.request) {
+                let _ = self.client.cancel(&pending.request);
+            } else {
+                let _ = self.client.take(pending.request.clone());
+                let _ = self.client.take_failure(pending.request);
+            }
+        }
+        self.reset_port_forward_ui(None);
         for identity in self.detail_requests.keys().cloned().collect::<Vec<_>>() {
             self.cancel_detail_request(&identity);
         }
@@ -3765,6 +4009,17 @@ impl K10sApp {
         self.metrics.clear();
         self.metric_checked_at.clear();
         self.resource_generation = self.resource_generation.wrapping_add(1);
+    }
+
+    fn reset_port_forward_ui(&mut self, modal_error: Option<&str>) {
+        self.pending_port_forwards.clear();
+        self.port_forward_retry_errors.clear();
+        self.port_forward_error = None;
+        if let Some(message) = modal_error {
+            self.shell.port_forward_start_failed(message);
+        } else {
+            self.shell.dismiss_port_forward_start();
+        }
     }
 
     /// Close every dedicated stream session and mark log tools disconnected.
@@ -4120,6 +4375,7 @@ impl K10sApp {
                 crate::workspace::WindowContent::Detail(detail) => Some(detail),
                 crate::workspace::WindowContent::Resource(resource) => resource.detail.as_ref(),
                 crate::workspace::WindowContent::Services(service) => service.detail.as_ref(),
+                crate::workspace::WindowContent::PortForwards(_) => None,
             })
             .is_some_and(|detail| detail.active_tab == crate::workspace::DetailTab::Logs);
         active
@@ -4477,6 +4733,22 @@ enum AppEventError {
     Terminal(String),
 }
 
+fn safe_port_forward_client_error(error: &ClientError) -> String {
+    match error {
+        ClientError::Server(error) => error.safe_message.clone(),
+        ClientError::InvalidState(_) => "Port forwarding is not available right now".to_owned(),
+        _ => "Could not start the port forward; try again".to_owned(),
+    }
+}
+
+fn is_local_port_conflict(error: &k10s_protocol::ErrorFrame) -> bool {
+    error.code == ErrorCode::Conflict
+        && error
+            .safe_message
+            .to_ascii_lowercase()
+            .contains("local port")
+}
+
 impl Drop for K10sApp {
     fn drop(&mut self) {
         self.client.application_close();
@@ -4500,11 +4772,14 @@ mod tests {
     use k10s_protocol::{
         BackendRevision, BootstrapResponse, ClientFrame, ClientKind, ContainerMetrics, Context,
         ErrorCode, ErrorFrame, ErrorScope, Event, GroupVersionKind, MetricsAvailability,
-        PodMetrics, ProtocolVersion, RequestId, ResourceCapabilities, ResourceChanged,
-        ResourceDetailResponse, ResourceGone, ResourceIdentity, ResourceListRow,
-        ResourceMetricsResponse, ResourceSnapshotPage, ResumeStatus, Retryability, ServerFrame,
-        ServerKind, SessionId, SnapshotBegin, SnapshotChunk, SnapshotEnd, Subscribed,
-        SubscriptionId, SubscriptionSelector, ValidationTicket, Welcome, YamlOutcome, buffer_hash,
+        PodMetrics, PortForwardFailure, PortForwardFailureCategory, PortForwardPodTarget,
+        PortForwardSession, PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
+        PortForwardStartResponse, PortForwardTarget, ProtocolVersion, RequestId,
+        ResourceCapabilities, ResourceChanged, ResourceDetailResponse, ResourceGone,
+        ResourceIdentity, ResourceListRow, ResourceMetricsResponse, ResourceSnapshotPage,
+        ResumeStatus, Retryability, ServerFrame, ServerKind, SessionId, SnapshotBegin,
+        SnapshotChunk, SnapshotEnd, Subscribed, SubscriptionId, SubscriptionSelector,
+        ValidationTicket, Welcome, YamlOutcome, buffer_hash,
     };
 
     use super::{
@@ -5771,6 +6046,96 @@ mod tests {
     }
 
     #[test]
+    fn sequence_gap_retires_port_forward_correlations_and_reenables_the_modal() {
+        let source = failed_port_forward("pending-start", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&source.target);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "18080".into();
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target, 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(2),
+                payload: serde_json::json!({"kind":"bootstrapStatus","payload":null}),
+            }),
+            101,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.pending_port_forwards.is_empty());
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert!(!modal.pending);
+        assert_eq!(modal.local_port_draft, "18080");
+        assert_eq!(
+            modal.error.as_deref(),
+            Some("Server state changed; submit again")
+        );
+    }
+
+    #[test]
+    fn explicit_resync_retires_port_forward_correlations_and_reenables_the_modal() {
+        let source = failed_port_forward("pending-start", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&source.target);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "18080".into();
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target, 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::ResyncRequired,
+                request_id: None,
+                subscription_id: None,
+                sequence: Some(1),
+                payload: serde_json::json!({"reason": "journal unavailable"}),
+            }),
+            101,
+            0,
+        )
+        .unwrap();
+
+        assert!(app.pending_port_forwards.is_empty());
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert!(!modal.pending);
+        assert_eq!(modal.local_port_draft, "18080");
+        assert_eq!(
+            modal.error.as_deref(),
+            Some("Server state changed; submit again")
+        );
+    }
+
+    #[test]
     fn after_reconnect_error_advances_backoff_only_once() {
         let error = ErrorFrame::new(
             ErrorCode::Internal,
@@ -5857,6 +6222,821 @@ mod tests {
 
     pub(super) fn ready_app() -> (K10sApp, Rc<RefCell<FactoryState>>) {
         ready_app_with_minor(k10s_protocol::PROTOCOL_MINOR)
+    }
+
+    fn ready_app_with_port_forward_capabilities() -> (K10sApp, Rc<RefCell<FactoryState>>) {
+        let mut bootstrap = BootstrapResponse::fixture();
+        bootstrap.capabilities.extend([
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.into(),
+            k10s_protocol::CAPABILITY_POD_PORT_FORWARD.into(),
+        ]);
+        let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap);
+        let (mut app, state) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+            ]),
+            overflowed: false,
+        }]);
+        app.poll_at(100, 0);
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        (app, state)
+    }
+
+    #[test]
+    fn initial_port_forward_list_request_projects_loading_until_authority_completes() {
+        let (mut app, _) = ready_app_with_port_forward_capabilities();
+
+        assert!(app.port_forward_list.is_some());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Loading
+        );
+
+        let request = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        let feed = app.build_resource_feed();
+        assert_eq!(
+            feed.port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
+        assert!(feed.port_forward_sessions.is_empty());
+    }
+
+    #[test]
+    fn stale_initial_port_forward_list_transfers_to_one_reconstructing_replacement() {
+        let (mut app, state) = ready_app_with_port_forward_capabilities();
+        let initial = app.port_forward_list.clone().unwrap();
+        while app.client.take_outbound().is_some() {}
+        state.borrow_mut().sent.clear();
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(k10s_protocol::PortForwardStartResponse {
+                    session: failed_port_forward("pf-newer", 6),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                initial.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 5,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        assert!(app.port_forward_list.is_none());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+        let sent_replacements = state
+            .borrow()
+            .sent
+            .iter()
+            .filter(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .count();
+        let queued_replacements = std::iter::from_fn(|| app.client.take_outbound())
+            .filter(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .count();
+        assert_eq!(sent_replacements + queued_replacements, 1);
+    }
+
+    #[test]
+    fn reconnect_port_forward_list_request_projects_reconstruction_until_completion() {
+        let mut bootstrap = BootstrapResponse::fixture();
+        bootstrap.capabilities.extend([
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.into(),
+            k10s_protocol::CAPABILITY_POD_PORT_FORWARD.into(),
+        ]);
+        let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap);
+        let (mut app, _) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+            ]),
+            overflowed: false,
+        }]);
+        app.recovering = true;
+
+        app.poll_at(100, 0);
+
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.port_forward_list.is_some());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+
+        let request = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
+    }
+
+    #[test]
+    fn client_owned_lag_reconstruction_projects_until_its_replacement_list_completes() {
+        let (mut app, _) = ready_app_with_port_forward_capabilities();
+        let initial = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                initial.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+        let subscription = app
+            .client
+            .subscribe_port_forward_sessions()
+            .unwrap()
+            .unwrap();
+        let lag = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Internal,
+                "session stream lagged; refresh sessions",
+                Retryability::AfterRefresh,
+                ErrorScope::Subscription,
+                "port-forward-lag",
+            ))
+            .unwrap(),
+        };
+
+        app.client.apply(lag).unwrap();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+        let replacement = std::iter::from_fn(|| app.client.take_outbound())
+            .find(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .and_then(|frame| frame.request_id)
+            .unwrap();
+        app.client
+            .apply(ServerFrame::response(
+                replacement,
+                k10s_protocol::PortForwardListResponse {
+                    revision: 1,
+                    sessions: Vec::new(),
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
+    }
+
+    fn ready_app_with_authorized_pod_port_forward(
+        target: &PortForwardTarget,
+    ) -> (K10sApp, Rc<RefCell<FactoryState>>) {
+        let PortForwardTarget::Pod { identity, .. } = target else {
+            panic!("fixture requires a Pod port-forward target");
+        };
+        let (mut app, state) = ready_app_with_port_forward_capabilities();
+        let initial_port_forward_list = app.port_forward_list.clone().unwrap();
+        app.client
+            .apply(ServerFrame::response(
+                initial_port_forward_list.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            ))
+            .unwrap();
+        app.finish_port_forward_list();
+        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|retained| retained.live.id().clone())
+            .expect("Pod list owns an authoritative subscription");
+        complete_resource_snapshot(
+            &mut app,
+            &subscription,
+            1,
+            vec![deployment_row(identity.clone(), 1)],
+            true,
+        );
+        let detail = deployment_detail_fixture(identity);
+        app.details.insert(identity.clone(), detail.clone());
+        app.primary_details
+            .insert(identity.clone(), PrimaryDetailState::Loaded(detail));
+        assert!(
+            crate::ui::port_forward_start_authorization(&app.build_resource_feed(), target).is_ok(),
+            "fixture must establish current exact Pod authority"
+        );
+        (app, state)
+    }
+
+    fn failed_port_forward(id: &str, revision: u64) -> PortForwardSession {
+        let identity = ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: "web-0".into(),
+            uid: "uid-pod".into(),
+        };
+        PortForwardSession {
+            id: PortForwardSessionId::try_new(id).unwrap(),
+            target: PortForwardTarget::Pod {
+                identity,
+                container_name: "web".into(),
+                remote_port: 8_080,
+            },
+            requested_local_port: 18_080,
+            pod: PortForwardPodTarget {
+                namespace: "default".into(),
+                name: "web-0".into(),
+                uid: "uid-pod".into(),
+            },
+            pod_port: 8_080,
+            local_addr: String::new(),
+            state: PortForwardSessionState::Failed,
+            failure: Some(PortForwardFailure {
+                category: PortForwardFailureCategory::LocalPortInUse,
+                message: "local port 18080 is already in use".into(),
+            }),
+            revision,
+        }
+    }
+
+    #[test]
+    fn forged_start_action_without_exact_current_authority_fails_closed() {
+        let (mut app, _) = ready_app_with_port_forward_capabilities();
+        let target = failed_port_forward("forged", 1).target;
+        let generation = app
+            .shell
+            .open_port_forward_start(target.clone(), "web · 8080/TCP", 8_080);
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(target, 18_080).unwrap();
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+
+        assert!(app.pending_port_forwards.is_empty());
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert!(!modal.pending);
+        assert_eq!(
+            modal.error.as_deref(),
+            Some("Port forwarding requires live, matching resource details")
+        );
+    }
+
+    #[test]
+    fn direct_start_dispatch_rechecks_port_forward_list_authority() {
+        for list_state in [
+            crate::ui::PortForwardListState::Loading,
+            crate::ui::PortForwardListState::Reconstructing,
+        ] {
+            let target = failed_port_forward("authority", 1).target;
+            let (mut app, _) = ready_app_with_authorized_pod_port_forward(&target);
+            let list = match list_state {
+                crate::ui::PortForwardListState::Loading => {
+                    app.client.begin(Query::PortForwardList).unwrap()
+                }
+                crate::ui::PortForwardListState::Reconstructing => {
+                    app.client.begin_port_forward_reconstruction().unwrap()
+                }
+                crate::ui::PortForwardListState::Ready => unreachable!(),
+            };
+            app.port_forward_list = Some(list);
+            assert_eq!(
+                app.build_resource_feed().port_forward_list_state,
+                list_state
+            );
+
+            let generation =
+                app.shell
+                    .open_port_forward_start(target.clone(), "web · 8080/TCP", 8_080);
+            app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+            let request = PortForwardStartRequest::try_target(target, 18_080).unwrap();
+
+            app.process_port_forward_action(
+                &egui::Context::default(),
+                crate::ui::PortForwardAction::Start {
+                    request,
+                    generation,
+                },
+            );
+
+            assert!(app.pending_port_forwards.is_empty());
+            let modal = app.shell.port_forward_start_modal().unwrap();
+            assert!(!modal.pending);
+            assert_eq!(
+                modal.error.as_deref(),
+                Some("Port-forward sessions are still loading")
+            );
+        }
+    }
+
+    #[test]
+    fn modal_start_error_and_success_are_routed_to_the_originating_dialog() {
+        let failed = failed_port_forward("new-session", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&failed.target);
+        let generation =
+            app.shell
+                .open_port_forward_start(failed.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "18080".into();
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(failed.target.clone(), 18_080).unwrap();
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request: request.clone(),
+                generation,
+            },
+        );
+        let rejected = app.pending_port_forwards[0].request.clone();
+        let error = ErrorFrame::new(
+            ErrorCode::Conflict,
+            "local port 18080 is already in use",
+            Retryability::UserAction,
+            ErrorScope::Request,
+            "start-error",
+        );
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(rejected.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(error).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert_eq!(modal.local_port_draft, "18080");
+        assert!(!modal.pending);
+
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        let accepted = app.pending_port_forwards[0].request.clone();
+        let mut active = failed;
+        active.state = PortForwardSessionState::Active;
+        active.failure = None;
+        active.local_addr = "127.0.0.1:18080".into();
+        active.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                accepted.id().clone(),
+                PortForwardStartResponse {
+                    session: active.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        assert!(app.shell.port_forward_start_modal().is_none());
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .unwrap();
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some(active.id.as_str())
+        );
+    }
+
+    #[test]
+    fn cancelled_modal_start_success_preserves_reopened_modal_and_focuses_session() {
+        let source = failed_port_forward("new-session", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&source.target);
+        let first_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "first", 8_080);
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation: first_generation,
+            },
+        );
+        let accepted = app.pending_port_forwards[0].request.clone();
+
+        app.shell.dismiss_port_forward_start();
+        let reopened_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "second", 9_090);
+        app.shell
+            .port_forward_start_modal_mut()
+            .unwrap()
+            .local_port_draft = "19090".into();
+
+        let mut active = source;
+        active.state = PortForwardSessionState::Active;
+        active.failure = None;
+        active.local_addr = "127.0.0.1:18080".into();
+        active.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                accepted.id().clone(),
+                PortForwardStartResponse {
+                    session: active.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        let modal = app.shell.port_forward_start_modal().unwrap();
+        assert_eq!(modal.generation, reopened_generation);
+        assert_eq!(modal.remote_label, "second");
+        assert_eq!(modal.local_port_draft, "19090");
+        assert!(!modal.pending);
+        assert_eq!(modal.error, None);
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .expect("successful starts activate the port-forward manager");
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some(active.id.as_str())
+        );
+    }
+
+    #[test]
+    fn context_switch_retires_same_poll_completed_port_forward_result() {
+        let source = failed_port_forward("new-session", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&source.target);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        let completed = app.pending_port_forwards[0].request.clone();
+        let mut active = source;
+        active.state = PortForwardSessionState::Active;
+        active.failure = None;
+        active.local_addr = "127.0.0.1:18080".into();
+        active.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                completed.id().clone(),
+                PortForwardStartResponse { session: active },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(!app.client.is_pending(&completed));
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_workspace_event(WorkspaceEvent::ContextSwitched {
+            to: "next-context".into(),
+        });
+
+        assert!(app.pending_port_forwards.is_empty());
+        assert!(
+            app.client.take(completed).is_none(),
+            "context retirement consumes the completed result budget entry"
+        );
+    }
+
+    #[test]
+    fn newest_issued_success_keeps_focus_when_older_completion_arrives_later() {
+        let source = failed_port_forward("source", 7);
+        let (mut app, _) = ready_app_with_authorized_pod_port_forward(&source.target);
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+
+        let first_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "first", 18_080);
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request: request.clone(),
+                generation: first_generation,
+            },
+        );
+        let first = app.pending_port_forwards[0].request.clone();
+
+        let second_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "second", 18_080);
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation: second_generation,
+            },
+        );
+        let second = app.pending_port_forwards[1].request.clone();
+
+        let mut first_session = source.clone();
+        first_session.id = PortForwardSessionId::try_new("first-session").unwrap();
+        first_session.state = PortForwardSessionState::Active;
+        first_session.failure = None;
+        first_session.local_addr = "127.0.0.1:18080".into();
+        first_session.revision = 8;
+        let mut second_session = first_session.clone();
+        second_session.id = PortForwardSessionId::try_new("second-session").unwrap();
+        second_session.local_addr = "127.0.0.1:18081".into();
+        second_session.revision = 9;
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                second.id().clone(),
+                PortForwardStartResponse {
+                    session: second_session.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                first.id().clone(),
+                PortForwardStartResponse {
+                    session: first_session,
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .unwrap();
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some(second_session.id.as_str())
+        );
+    }
+
+    #[test]
+    fn retry_conflict_is_an_app_overlay_and_later_success_clears_it() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("failed", 7);
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(PortForwardStartResponse {
+                    session: source.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+        let frame = app.client.take_outbound().expect("retry request is queued");
+        let k10s_protocol::ClientPayload::Request(wire) = frame.decode_payload().unwrap() else {
+            panic!("retry must queue a request");
+        };
+        let retry: PortForwardStartRequest = serde_json::from_value(wire.payload).unwrap();
+        assert_eq!(retry.target(), &source.target);
+        assert_eq!(retry.local_port(), source.requested_local_port);
+        let rejected = app.pending_port_forwards[0].request.clone();
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(rejected.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "local port 18080 is already in use",
+                    Retryability::UserAction,
+                    ErrorScope::Request,
+                    "retry-error",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            app.port_forward_retry_error(&source.id),
+            Some(crate::ui::RETRY_LOCAL_PORT_GUIDANCE)
+        );
+        assert_eq!(app.client.port_forward_sessions(), vec![&source]);
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+        let accepted = app.pending_port_forwards[0].request.clone();
+        let mut replacement = source.clone();
+        replacement.id = PortForwardSessionId::try_new("replacement").unwrap();
+        replacement.state = PortForwardSessionState::Active;
+        replacement.failure = None;
+        replacement.local_addr = "127.0.0.1:18080".into();
+        replacement.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                accepted.id().clone(),
+                PortForwardStartResponse {
+                    session: replacement.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        assert_eq!(app.port_forward_retry_error(&source.id), None);
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .unwrap();
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some("replacement")
+        );
+    }
+
+    #[test]
+    fn retry_server_rejection_is_scoped_to_its_source_row() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("failed", 7);
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(PortForwardStartResponse {
+                    session: source.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+        let rejected = app.pending_port_forwards[0].request.clone();
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(rejected.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Unauthorized,
+                    "access denied by policy",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "retry-forbidden",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.port_forward_retry_error(&source.id),
+            Some("access denied by policy")
+        );
+        assert_eq!(app.port_forward_error, None);
+    }
+
+    #[test]
+    fn retry_local_dispatch_rejection_is_scoped_to_its_source_row() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("failed", 7);
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(PortForwardStartResponse {
+                    session: source.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        app.client.application_close();
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+
+        assert!(app.pending_port_forwards.is_empty());
+        assert_eq!(
+            app.port_forward_retry_error(&source.id),
+            Some("Port forwarding is not available right now")
+        );
+        assert_eq!(app.port_forward_error, None);
     }
 
     fn ready_app_with_minor(minor: u16) -> (K10sApp, Rc<RefCell<FactoryState>>) {

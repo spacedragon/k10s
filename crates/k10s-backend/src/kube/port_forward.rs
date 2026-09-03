@@ -19,7 +19,8 @@ use kube::api::{Api, ListParams};
 
 use crate::port::BackendError;
 use crate::port_forward::{
-    PortForwardRequest, PortForwardSeam, PortForwardStream, RejectionCategory, ResolvedPortForward,
+    PortForwardPortSelector, PortForwardRequest, PortForwardSeam, PortForwardStream,
+    PortForwardTarget, RejectionCategory, ResolvedPortForward,
 };
 
 /// Rejection helper carrying a stable category.
@@ -96,17 +97,131 @@ fn pod_api(client: kube::Client, namespace: &str) -> Api<k8s_openapi::api::core:
     Api::namespaced(client, namespace)
 }
 
+async fn resolve_pod_target(
+    client: kube::Client,
+    context: String,
+    identity: k10s_protocol::ResourceIdentity,
+    container_name: &str,
+    remote_port: u16,
+) -> Result<ResolvedPortForward, BackendError> {
+    let namespace = identity
+        .namespace
+        .expect("validated Pod targets have a namespace");
+    let pod = pod_api(client, &namespace)
+        .get(&identity.name)
+        .await
+        .map_err(|error| match sanitize_api_error(&error) {
+            BackendError::NotFound => rejected(
+                RejectionCategory::VanishedResource,
+                "the pod does not exist",
+            ),
+            BackendError::Forbidden => {
+                rejected(RejectionCategory::Forbidden, "reading the pod was denied")
+            }
+            other => other,
+        })?;
+    let Some(pod_uid) = pod.uid() else {
+        return Err(rejected(
+            RejectionCategory::VanishedResource,
+            "the pod has no uid",
+        ));
+    };
+    if pod_uid != identity.uid {
+        return Err(rejected(
+            RejectionCategory::VanishedResource,
+            "the pod was recreated; retry with the fresh identity",
+        ));
+    }
+
+    let container = pod
+        .spec
+        .as_ref()
+        .and_then(|spec| {
+            spec.containers
+                .iter()
+                .find(|container| container.name == container_name)
+        })
+        .ok_or_else(|| {
+            rejected(
+                RejectionCategory::UnsupportedPod,
+                "the pod does not declare the requested regular container",
+            )
+        })?;
+    let declared_tcp = container.ports.iter().flatten().any(|declared| {
+        u16::try_from(declared.container_port).ok() == Some(remote_port)
+            && declared.protocol.as_deref().unwrap_or("TCP") == "TCP"
+    });
+    if !declared_tcp {
+        return Err(rejected(
+            RejectionCategory::UnsupportedPod,
+            "the container does not declare the requested TCP port",
+        ));
+    }
+
+    Ok(ResolvedPortForward {
+        context,
+        namespace,
+        target_uid: pod_uid.clone(),
+        source_port: remote_port,
+        pod_name: identity.name,
+        pod_uid,
+        pod_port: remote_port,
+    })
+}
+
 impl PortForwardSeam for KubePortForwardSeam {
     fn resolve<'a>(
         &'a self,
         request: PortForwardRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedPortForward, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            let client = self.client(&request.context).await?;
+            let invalid_category = match &request.target {
+                PortForwardTarget::Service { .. } => RejectionCategory::UnsupportedService,
+                PortForwardTarget::Pod { .. } => RejectionCategory::UnsupportedPod,
+            };
+            request
+                .target
+                .validate()
+                .map_err(|message| rejected(invalid_category, message))?;
+            let identity_context = match &request.target {
+                PortForwardTarget::Service { identity, .. }
+                | PortForwardTarget::Pod { identity, .. } => &identity.context,
+            };
+            if identity_context != &request.context {
+                return Err(rejected(
+                    RejectionCategory::ContextTransition,
+                    "the target context no longer matches the active context",
+                ));
+            }
+
+            let context = request.context;
+            let client = self.client(&context).await?;
+            let (identity, port) = match request.target {
+                PortForwardTarget::Service { identity, port } => (identity, port),
+                PortForwardTarget::Pod {
+                    identity,
+                    container_name,
+                    remote_port,
+                } => {
+                    return resolve_pod_target(
+                        client,
+                        context,
+                        identity,
+                        &container_name,
+                        remote_port,
+                    )
+                    .await;
+                }
+            };
+            let namespace = identity
+                .namespace
+                .expect("validated Service targets have a namespace");
+            let service_name = identity.name;
+            let target_uid = identity.uid;
 
             // 1+2. Fetch the exact Service and verify its live UID.
-            let service = service_api(client.clone(), &request.namespace)
-                .get(&request.service_name)
+            let service = service_api(client.clone(), &namespace)
+                .get(&service_name)
                 .await
                 .map_err(|error| match sanitize_api_error(&error) {
                     BackendError::NotFound => rejected(
@@ -125,7 +240,7 @@ impl PortForwardSeam for KubePortForwardSeam {
                     "the service has no uid",
                 ));
             };
-            if service_uid != request.service_uid {
+            if service_uid != target_uid {
                 return Err(rejected(
                     RejectionCategory::VanishedResource,
                     "the service was recreated; retry with the fresh identity",
@@ -144,11 +259,11 @@ impl PortForwardSeam for KubePortForwardSeam {
                 .ports
                 .iter()
                 .flatten()
-                .filter(|declared| match &request.port {
-                    crate::port_forward::PortForwardPortSelection::Name(name) => {
-                        declared.name.as_deref() == Some(name)
+                .filter(|declared| match &port {
+                    PortForwardPortSelector::Name { name } => {
+                        declared.name.as_deref() == Some(name.as_str())
                     }
-                    crate::port_forward::PortForwardPortSelection::Number(number) => {
+                    PortForwardPortSelector::Number { number } => {
                         u16::try_from(declared.port).ok() == Some(*number)
                     }
                 })
@@ -169,11 +284,11 @@ impl PortForwardSeam for KubePortForwardSeam {
             }
 
             // 4+5. Scope slices by label AND owning Service UID.
-            let slices = endpoint_slice_api(client.clone(), &request.namespace)
-                .list(&ListParams::default().labels(&format!(
-                    "kubernetes.io/service-name={}",
-                    request.service_name
-                )))
+            let slices = endpoint_slice_api(client.clone(), &namespace)
+                .list(
+                    &ListParams::default()
+                        .labels(&format!("kubernetes.io/service-name={}", service_name)),
+                )
                 .await
                 .map_err(|error| match sanitize_api_error(&error) {
                     BackendError::NotFound => rejected(
@@ -193,7 +308,7 @@ impl PortForwardSeam for KubePortForwardSeam {
                     slice
                         .owner_references()
                         .iter()
-                        .any(|owner| owner.uid == request.service_uid)
+                        .any(|owner| owner.uid == target_uid)
                 })
                 .collect();
 
@@ -247,7 +362,7 @@ impl PortForwardSeam for KubePortForwardSeam {
                     let same_namespace = target_ref
                         .get("namespace")
                         .and_then(|ns| ns.as_str())
-                        .is_none_or(|ns| ns == request.namespace);
+                        .is_none_or(|ns| ns == namespace);
                     if !(is_pod && same_namespace) {
                         continue;
                     }
@@ -277,7 +392,7 @@ impl PortForwardSeam for KubePortForwardSeam {
             // resolve the numeric container port from the declared
             // Service targetPort against that Pod's declared container
             // ports.
-            let pod = pod_api(client, &request.namespace)
+            let pod = pod_api(client, &namespace)
                 .get(&pod_name)
                 .await
                 .map_err(|error| match sanitize_api_error(&error) {
@@ -316,10 +431,10 @@ impl PortForwardSeam for KubePortForwardSeam {
             };
 
             Ok(ResolvedPortForward {
-                context: request.context,
-                namespace: request.namespace,
-                service_uid: request.service_uid,
-                service_port: service_port_number,
+                context,
+                namespace,
+                target_uid,
+                source_port: service_port_number,
                 pod_name,
                 pod_uid,
                 pod_port,
@@ -334,6 +449,26 @@ impl PortForwardSeam for KubePortForwardSeam {
         Box::pin(async move {
             let client = self.client(&resolved.context).await?;
             let pods: Api<k8s_openapi::api::core::v1::Pod> = pod_api(client, &resolved.namespace);
+            let pod =
+                pods.get(&resolved.pod_name).await.map_err(|error| {
+                    match sanitize_api_error(&error) {
+                        BackendError::NotFound => rejected(
+                            RejectionCategory::VanishedResource,
+                            "the resolved pod no longer exists",
+                        ),
+                        BackendError::Forbidden => rejected(
+                            RejectionCategory::Forbidden,
+                            "revalidating the resolved pod was denied",
+                        ),
+                        other => other,
+                    }
+                })?;
+            if pod.uid().as_deref() != Some(resolved.pod_uid.as_str()) {
+                return Err(rejected(
+                    RejectionCategory::VanishedResource,
+                    "the resolved pod was replaced",
+                ));
+            }
             let mut forwarder = pods
                 .portforward(&resolved.pod_name, &[resolved.pod_port])
                 .await

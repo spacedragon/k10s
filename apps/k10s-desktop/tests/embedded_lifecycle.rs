@@ -78,7 +78,9 @@ fn app_bootstraps_over_the_exact_control_websocket() {
         &["dev-local".to_owned(), "prod-readonly".to_owned()]
     );
     assert_eq!(app.connection_url(), server.control_url());
-    assert!(app.port_forward_available());
+    assert!(app.service_port_forward_available());
+    assert!(app.pod_port_forward_available());
+    assert!(app.any_port_forward_available());
     assert!(app.connection_url().ends_with(CONTROL_PATH));
     let rendered = app.render_text();
     assert!(rendered.contains(server_instance_id));

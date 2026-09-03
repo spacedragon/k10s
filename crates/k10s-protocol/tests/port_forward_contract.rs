@@ -8,9 +8,10 @@
 use std::collections::BTreeMap;
 
 use k10s_protocol::{
-    BackendRevision, CAPABILITY_SERVICE_PORT_FORWARD, GroupVersionKind, PortForwardFailureCategory,
-    PortForwardListResponse, PortForwardPodTarget, PortForwardSession, PortForwardSessionEvent,
-    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
+    BackendRevision, CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD,
+    GroupVersionKind, PROTOCOL_MINOR, PortForwardFailureCategory, PortForwardListResponse,
+    PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent,
+    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest, PortForwardTarget,
     REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
     ResourceChanged, ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection,
     ResourceSnapshotPage, ServerFrame, ServerKind, ServicePort, ServiceProjection,
@@ -33,6 +34,16 @@ fn service_identity() -> ResourceIdentity {
         namespace: Some("default".into()),
         name: "web-frontend".into(),
         uid: "uid-svc-1".into(),
+    }
+}
+
+fn pod_identity() -> ResourceIdentity {
+    ResourceIdentity {
+        context: "dev-local".into(),
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        namespace: Some("default".into()),
+        name: "web-frontend-7d9f8-abcde".into(),
+        uid: "uid-pod-1".into(),
     }
 }
 
@@ -330,17 +341,40 @@ fn port_forward_requests_use_the_documented_kind_strings() {
     assert_eq!(REQUEST_PORT_FORWARD_STOP, "portForward.stop");
     assert_eq!(REQUEST_PORT_FORWARD_LIST, "portForward.list");
     assert_eq!(CAPABILITY_SERVICE_PORT_FORWARD, "service.portForward");
+    assert_eq!(CAPABILITY_POD_PORT_FORWARD, "pod.portForward");
 }
 
 #[test]
-fn start_requests_carry_exact_service_identity_and_port_selector() {
-    let named = PortForwardStartRequest {
-        service: service_identity(),
-        port: k10s_protocol::PortForwardPortSelector::Name {
+fn port_forward_targets_round_trip() {
+    let service = PortForwardTarget::Service {
+        identity: service_identity(),
+        port: PortForwardPortSelector::Name {
             name: "http".into(),
         },
-        local_port: 0,
     };
+    assert_eq!(round_trip(&service)["kind"], json!("service"));
+
+    let pod = PortForwardTarget::Pod {
+        identity: pod_identity(),
+        container_name: "web".into(),
+        remote_port: 8080,
+    };
+    let encoded = round_trip(&pod);
+    assert_eq!(encoded["kind"], json!("pod"));
+    assert_eq!(encoded["containerName"], json!("web"));
+    assert_eq!(encoded["remotePort"], json!(8080));
+}
+
+#[test]
+fn service_start_requests_keep_the_legacy_wire_shape() {
+    let named = PortForwardStartRequest::try_service(
+        service_identity(),
+        PortForwardPortSelector::Name {
+            name: "http".into(),
+        },
+        0,
+    )
+    .unwrap();
     let encoded = round_trip(&named);
     assert_eq!(encoded["service"]["uid"], json!("uid-svc-1"));
     assert_eq!(
@@ -350,50 +384,223 @@ fn start_requests_carry_exact_service_identity_and_port_selector() {
     assert_eq!(encoded["port"], json!({"kind": "name", "name": "http"}));
     assert_eq!(encoded["localPort"], json!(0));
 
-    let numeric = PortForwardStartRequest {
-        port: k10s_protocol::PortForwardPortSelector::Number { number: 8443 },
-        local_port: u16::MAX,
-        ..named.clone()
-    };
+    assert!(encoded.get("target").is_none());
+
+    let numeric = PortForwardStartRequest::try_service(
+        service_identity(),
+        PortForwardPortSelector::Number { number: 8443 },
+        u16::MAX,
+    )
+    .unwrap();
     let encoded = round_trip(&numeric);
     assert_eq!(encoded["port"], json!({"kind": "number", "number": 8443}));
     assert_eq!(encoded["localPort"], json!(65535));
-    assert_eq!(
-        serde_json::from_value::<PortForwardStartRequest>(
-            json!({"localPort": 0, "port": numeric.port, "service": named.service})
-        )
-        .unwrap()
-        .local_port,
-        0
-    );
+    assert_eq!(numeric.local_port(), u16::MAX);
 
     assert!(named.validate().is_ok());
+}
 
-    let wrong_kind = PortForwardStartRequest {
-        service: ResourceIdentity {
-            gvk: GroupVersionKind::core("v1", "Pod"),
-            ..service_identity()
+#[test]
+fn legacy_service_start_json_decodes_into_a_typed_target() {
+    let decoded: PortForwardStartRequest = serde_json::from_value(json!({
+        "service": service_identity(),
+        "port": {"kind": "number", "number": 80},
+        "localPort": 0
+    }))
+    .unwrap();
+
+    assert_eq!(decoded.local_port(), 0);
+    assert!(matches!(
+        decoded.target(),
+        PortForwardTarget::Service {
+            port: PortForwardPortSelector::Number { number: 80 },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn target_discriminated_service_start_json_decodes_and_reencodes_legacy() {
+    let decoded: PortForwardStartRequest = serde_json::from_value(json!({
+        "target": {
+            "kind": "service",
+            "identity": service_identity(),
+            "port": {"kind": "name", "name": "http"}
         },
-        ..named.clone()
-    };
-    assert!(wrong_kind.validate().is_err());
+        "localPort": 8443
+    }))
+    .unwrap();
 
-    let missing_uid = PortForwardStartRequest {
-        service: ResourceIdentity {
+    assert!(matches!(
+        decoded.target(),
+        PortForwardTarget::Service {
+            port: PortForwardPortSelector::Name { name },
+            ..
+        } if name == "http"
+    ));
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap(),
+        json!({
+            "service": service_identity(),
+            "port": {"kind": "name", "name": "http"},
+            "localPort": 8443
+        })
+    );
+}
+
+#[test]
+fn pod_start_requests_use_the_target_discriminated_wire_shape() {
+    let target = PortForwardTarget::Pod {
+        identity: pod_identity(),
+        container_name: "web".into(),
+        remote_port: 8080,
+    };
+    let request = PortForwardStartRequest::try_target(target.clone(), 8081).unwrap();
+    let encoded = round_trip(&request);
+
+    assert_eq!(encoded["target"]["kind"], json!("pod"));
+    assert_eq!(encoded["target"]["remotePort"], json!(8080));
+    assert_eq!(encoded["localPort"], json!(8081));
+    assert!(encoded.get("service").is_none());
+    assert_eq!(request.target(), &target);
+}
+
+#[test]
+fn targets_validate_exact_identity_and_required_target_fields() {
+    let valid_pod = PortForwardStartRequest::try_target(
+        PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "web".into(),
+            remote_port: 8080,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(valid_pod.validate().is_ok());
+
+    for invalid_identity in [
+        ResourceIdentity {
+            gvk: GroupVersionKind::core("v1", "Service"),
+            ..pod_identity()
+        },
+        ResourceIdentity {
+            namespace: None,
+            ..pod_identity()
+        },
+        ResourceIdentity {
             uid: String::new(),
-            ..service_identity()
+            ..pod_identity()
         },
-        ..named
-    };
-    assert!(missing_uid.validate().is_err());
+    ] {
+        let request = PortForwardStartRequest::try_target(
+            PortForwardTarget::Pod {
+                identity: invalid_identity,
+                container_name: "web".into(),
+                remote_port: 8080,
+            },
+            0,
+        );
+        assert!(request.is_err());
+    }
+
+    let missing_container = PortForwardStartRequest::try_target(
+        PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: String::new(),
+            remote_port: 8080,
+        },
+        0,
+    );
+    assert!(missing_container.is_err());
+
+    for invalid_service in [
+        PortForwardTarget::Service {
+            identity: ResourceIdentity {
+                gvk: GroupVersionKind::core("v1", "Pod"),
+                ..service_identity()
+            },
+            port: PortForwardPortSelector::Number { number: 80 },
+        },
+        PortForwardTarget::Service {
+            identity: ResourceIdentity {
+                namespace: None,
+                ..service_identity()
+            },
+            port: PortForwardPortSelector::Number { number: 80 },
+        },
+        PortForwardTarget::Service {
+            identity: ResourceIdentity {
+                uid: String::new(),
+                ..service_identity()
+            },
+            port: PortForwardPortSelector::Number { number: 80 },
+        },
+        PortForwardTarget::Service {
+            identity: service_identity(),
+            port: PortForwardPortSelector::Name {
+                name: String::new(),
+            },
+        },
+    ] {
+        assert!(PortForwardStartRequest::try_target(invalid_service, 0).is_err());
+    }
+}
+
+#[test]
+fn zero_pod_remote_port_is_rejected() {
+    let request = PortForwardStartRequest::try_target(
+        PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "web".into(),
+            remote_port: 0,
+        },
+        0,
+    );
+
+    assert_eq!(
+        request,
+        Err("the Pod target remote port must be greater than zero")
+    );
+}
+
+#[test]
+fn invalid_pod_remote_port_is_rejected_during_decode() {
+    let zero: Result<PortForwardStartRequest, _> = serde_json::from_value(json!({
+        "target": {
+            "kind": "pod",
+            "identity": pod_identity(),
+            "containerName": "web",
+            "remotePort": 0
+        },
+        "localPort": 0
+    }));
+    assert!(
+        zero.unwrap_err()
+            .to_string()
+            .contains("remote port must be greater than zero")
+    );
+
+    let overflow: Result<PortForwardStartRequest, _> = serde_json::from_value(json!({
+        "target": {
+            "kind": "pod",
+            "identity": pod_identity(),
+            "containerName": "web",
+            "remotePort": 65_536
+        },
+        "localPort": 0
+    }));
+    assert!(overflow.is_err());
 }
 
 #[test]
 fn session_snapshots_are_complete_and_typed() {
     let active = PortForwardSession {
         id: PortForwardSessionId::try_new("pf-1").unwrap(),
-        service: service_identity(),
-        service_port: 80,
+        target: PortForwardTarget::Service {
+            identity: service_identity(),
+            port: PortForwardPortSelector::Number { number: 80 },
+        },
+        requested_local_port: 0,
         pod: PortForwardPodTarget {
             namespace: "default".into(),
             name: "web-frontend-7d9f8-abcde".into(),
@@ -411,7 +618,8 @@ fn session_snapshots_are_complete_and_typed() {
     assert_eq!(encoded["state"], json!("active"));
     assert_eq!(encoded["pod"]["name"], json!("web-frontend-7d9f8-abcde"));
     assert_eq!(encoded["podPort"], json!(8080));
-    assert_eq!(encoded["servicePort"], json!(80));
+    assert_eq!(encoded["target"]["kind"], json!("service"));
+    assert_eq!(encoded["requestedLocalPort"], json!(0));
     assert!(encoded.get("failure").is_none());
 
     let failed = PortForwardSession {
@@ -442,6 +650,134 @@ fn session_snapshots_are_complete_and_typed() {
 }
 
 #[test]
+fn generalized_pod_sessions_round_trip_directly_and_in_wrappers() {
+    let session = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-pod").unwrap(),
+        target: PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "web".into(),
+            remote_port: 8080,
+        },
+        requested_local_port: 8081,
+        pod: PortForwardPodTarget {
+            namespace: "default".into(),
+            name: "web-frontend-7d9f8-abcde".into(),
+            uid: "uid-pod-1".into(),
+        },
+        pod_port: 8080,
+        local_addr: "127.0.0.1:8081".into(),
+        state: PortForwardSessionState::Active,
+        failure: None,
+        revision: 12,
+    };
+
+    let encoded = round_trip(&session);
+    assert_eq!(encoded["target"]["kind"], json!("pod"));
+    assert_eq!(encoded["target"]["containerName"], json!("web"));
+    assert_eq!(encoded["requestedLocalPort"], json!(8081));
+
+    let list = PortForwardListResponse {
+        revision: 12,
+        sessions: vec![session.clone()],
+    };
+    assert_eq!(
+        round_trip(&list)["sessions"][0]["target"]["kind"],
+        json!("pod")
+    );
+
+    let event = PortForwardSessionEvent {
+        revision: 12,
+        session,
+    };
+    assert_eq!(
+        round_trip(&event)["session"]["target"]["kind"],
+        json!("pod")
+    );
+}
+
+#[test]
+fn legacy_service_session_json_decodes_into_the_generalized_model() {
+    let legacy = json!({
+        "id": "pf-legacy",
+        "service": service_identity(),
+        "servicePort": 80,
+        "pod": {
+            "namespace": "default",
+            "name": "web-frontend-7d9f8-abcde",
+            "uid": "uid-pod-1"
+        },
+        "podPort": 8080,
+        "localAddr": "127.0.0.1:45621",
+        "state": "active",
+        "revision": 3
+    });
+
+    let decoded: PortForwardSession = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.requested_local_port, 45621);
+    assert_eq!(
+        decoded.target,
+        PortForwardTarget::Service {
+            identity: service_identity(),
+            port: PortForwardPortSelector::Number { number: 80 },
+        }
+    );
+    assert_eq!(decoded.pod_port, 8080);
+
+    let generalized = serde_json::to_value(decoded).unwrap();
+    assert_eq!(generalized["target"]["kind"], json!("service"));
+    assert_eq!(generalized["requestedLocalPort"], json!(45621));
+    assert!(generalized.get("service").is_none());
+    assert!(generalized.get("servicePort").is_none());
+}
+
+#[test]
+fn prior_minor_wire_projection_filters_pods_and_uses_legacy_service_fields() {
+    let service = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-service").unwrap(),
+        target: PortForwardTarget::Service {
+            identity: service_identity(),
+            port: PortForwardPortSelector::Name {
+                name: "http".into(),
+            },
+        },
+        requested_local_port: 0,
+        pod: PortForwardPodTarget {
+            namespace: "default".into(),
+            name: "web-pod".into(),
+            uid: "uid-web-pod".into(),
+        },
+        pod_port: 8080,
+        local_addr: "127.0.0.1:32000".into(),
+        state: PortForwardSessionState::Active,
+        failure: None,
+        revision: 9,
+    };
+    let pod = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-pod").unwrap(),
+        target: PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "app".into(),
+            remote_port: 8080,
+        },
+        ..service.clone()
+    };
+
+    let legacy = service
+        .wire_value_for_minor(PROTOCOL_MINOR - 1, Some(80))
+        .expect("Service remains visible to old clients");
+    assert!(legacy.get("service").is_some());
+    assert_eq!(legacy["servicePort"], json!(80));
+    assert!(legacy.get("target").is_none());
+    assert!(pod.wire_value_for_minor(PROTOCOL_MINOR - 1, None).is_none());
+
+    let current = pod
+        .wire_value_for_minor(PROTOCOL_MINOR, None)
+        .expect("current clients receive Pods");
+    assert_eq!(current["target"]["kind"], json!("pod"));
+    assert_eq!(current["requestedLocalPort"], json!(0));
+}
+
+#[test]
 fn empty_session_ids_never_decode() {
     let raw = json!("");
     let decoded: Result<PortForwardSessionId, _> = serde_json::from_value(raw);
@@ -460,8 +796,11 @@ fn stop_and_list_payloads_round_trip() {
     let stopped = k10s_protocol::PortForwardStopResponse {
         session: Some(PortForwardSession {
             id: PortForwardSessionId::try_new("pf-1").unwrap(),
-            service: service_identity(),
-            service_port: 80,
+            target: PortForwardTarget::Service {
+                identity: service_identity(),
+                port: PortForwardPortSelector::Number { number: 80 },
+            },
+            requested_local_port: 0,
             pod: PortForwardPodTarget {
                 namespace: "default".into(),
                 name: "web-1".into(),
@@ -484,8 +823,11 @@ fn stop_and_list_payloads_round_trip() {
         revision: 10,
         sessions: vec![PortForwardSession {
             id: PortForwardSessionId::try_new("pf-2").unwrap(),
-            service: service_identity(),
-            service_port: 443,
+            target: PortForwardTarget::Service {
+                identity: service_identity(),
+                port: PortForwardPortSelector::Number { number: 443 },
+            },
+            requested_local_port: 0,
             pod: PortForwardPodTarget {
                 namespace: "default".into(),
                 name: "web-2".into(),
@@ -522,6 +864,7 @@ fn failure_categories_use_the_safe_stable_strings() {
             PortForwardFailureCategory::UnsupportedService,
             "unsupportedService",
         ),
+        (PortForwardFailureCategory::UnsupportedPod, "unsupportedPod"),
         (
             PortForwardFailureCategory::ContextTransition,
             "contextTransition",
@@ -549,8 +892,11 @@ fn sessions_subscription_uses_a_dedicated_selector_and_snapshot_events() {
         revision: 11,
         session: PortForwardSession {
             id: PortForwardSessionId::try_new("pf-3").unwrap(),
-            service: service_identity(),
-            service_port: 80,
+            target: PortForwardTarget::Service {
+                identity: service_identity(),
+                port: PortForwardPortSelector::Number { number: 80 },
+            },
+            requested_local_port: 0,
             pod: PortForwardPodTarget {
                 namespace: "default".into(),
                 name: "web-3".into(),

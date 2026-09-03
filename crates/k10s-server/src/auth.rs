@@ -80,15 +80,20 @@ pub(crate) fn authenticate(
             client_major: hello.protocol_major,
         });
     }
+    let protocol = ProtocolVersion {
+        major: PROTOCOL_MAJOR,
+        minor: hello.protocol_minor.min(PROTOCOL_MINOR),
+    };
     Ok(Negotiated {
-        protocol: ProtocolVersion {
-            major: PROTOCOL_MAJOR,
-            minor: hello.protocol_minor.min(PROTOCOL_MINOR),
-        },
+        protocol,
         capabilities: hello
             .capabilities
             .iter()
             .filter(|item| config.capabilities.contains(item))
+            .filter(|item| {
+                item.as_str() != k10s_protocol::CAPABILITY_POD_PORT_FORWARD
+                    || protocol.minor >= k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR
+            })
             .cloned()
             .collect(),
     })

@@ -8,9 +8,9 @@ use futures_util::{SinkExt, StreamExt};
 use k10s_protocol::{
     ClientKind, GroupVersionKind, PortForwardListResponse, PortForwardSessionState,
     PortForwardStartRequest, PortForwardStartResponse, PortForwardStopRequest,
-    PortForwardStopResponse, REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START,
-    REQUEST_PORT_FORWARD_STOP, ResourceIdentity, ServerFrame, ServerKind, ServerPayload,
-    SubscriptionSelector,
+    PortForwardStopResponse, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
+    REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP, ResourceIdentity, ServerFrame,
+    ServerKind, ServerPayload, SubscriptionSelector,
 };
 use k10s_server::{ServerConfig, spawn_loopback};
 use serde_json::json;
@@ -20,19 +20,47 @@ type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn service() -> ResourceIdentity {
+    service_named("web-frontend")
+}
+
+fn service_named(name: &str) -> ResourceIdentity {
     ResourceIdentity {
         context: "dev-local".into(),
         gvk: GroupVersionKind::core("v1", "Service"),
         namespace: Some("default".into()),
-        name: "web-frontend".into(),
-        uid: "uid-dev-local-service-default-web-frontend".into(),
+        name: name.into(),
+        uid: format!("uid-dev-local-service-default-{name}"),
+    }
+}
+
+fn pod() -> ResourceIdentity {
+    pod_named("web-frontend-7d9f8-00001")
+}
+
+fn pod_named(name: &str) -> ResourceIdentity {
+    ResourceIdentity {
+        context: "dev-local".into(),
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        namespace: Some("default".into()),
+        name: name.into(),
+        uid: format!("uid-dev-local-pod-default-{name}"),
     }
 }
 
 async fn spawn(capability: bool) -> k10s_server::ServerHandle {
+    spawn_with_capabilities(capability, capability).await
+}
+
+async fn spawn_with_capabilities(
+    service_capability: bool,
+    pod_capability: bool,
+) -> k10s_server::ServerHandle {
     let mut capabilities = vec!["logs.tail".to_owned()];
-    if capability {
+    if service_capability {
         capabilities.push(k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned());
+    }
+    if pod_capability {
+        capabilities.push(k10s_protocol::CAPABILITY_POD_PORT_FORWARD.to_owned());
     }
     spawn_loopback(
         ServerConfig {
@@ -50,6 +78,28 @@ async fn spawn(capability: bool) -> k10s_server::ServerHandle {
 }
 
 async fn connect_authenticated(server: &k10s_server::ServerHandle) -> Ws {
+    connect_with_minor(server, k10s_protocol::PROTOCOL_MINOR).await
+}
+
+async fn connect_with_minor(server: &k10s_server::ServerHandle, minor: u16) -> Ws {
+    connect_with_minor_and_capabilities(server, minor, &["service.portForward", "pod.portForward"])
+        .await
+        .0
+}
+
+async fn connect_with_minor_and_welcome(
+    server: &k10s_server::ServerHandle,
+    minor: u16,
+) -> (Ws, ServerFrame) {
+    connect_with_minor_and_capabilities(server, minor, &["service.portForward", "pod.portForward"])
+        .await
+}
+
+async fn connect_with_minor_and_capabilities(
+    server: &k10s_server::ServerHandle,
+    minor: u16,
+    capabilities: &[&str],
+) -> (Ws, ServerFrame) {
     let (mut ws, _) = connect_async(format!(
         "ws://{}{}",
         server.addr(),
@@ -60,7 +110,12 @@ async fn connect_authenticated(server: &k10s_server::ServerHandle) -> Ws {
     ws.send(Message::Text(
         json!({
             "kind":"hello",
-            "payload":{"protocolMajor":1,"protocolMinor":2,"capabilities":[],"accessToken":"secret"}
+            "payload":{
+                "protocolMajor":1,
+                "protocolMinor":minor,
+                "capabilities": capabilities,
+                "accessToken":"secret"
+            }
         })
         .to_string()
         .into(),
@@ -70,7 +125,7 @@ async fn connect_authenticated(server: &k10s_server::ServerHandle) -> Ws {
     let welcome: ServerFrame =
         serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(welcome.kind, ServerKind::Welcome);
-    ws
+    (ws, welcome)
 }
 
 async fn request(ws: &mut Ws, id: &str, kind: &str, payload: serde_json::Value) {
@@ -96,22 +151,102 @@ async fn receive_frame(ws: &mut Ws) -> ServerFrame {
     serde_json::from_str(&message.into_text().unwrap()).unwrap()
 }
 
+async fn cancel_request(ws: &mut Ws, id: &str) {
+    ws.send(Message::Text(
+        json!({"kind":"cancelRequest","requestId":id,"payload":null})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_start_never_reports_cancelled_after_active_commits() {
+    let server = spawn(true).await;
+    let mut ws = connect_authenticated(&server).await;
+
+    for attempt in 0..16 {
+        let start_id = format!("racing-start-{attempt}");
+        request(
+            &mut ws,
+            &start_id,
+            REQUEST_PORT_FORWARD_START,
+            serde_json::to_value(
+                PortForwardStartRequest::try_service(
+                    service(),
+                    k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .await;
+        cancel_request(&mut ws, &start_id).await;
+        let outcome = receive_frame(&mut ws).await;
+
+        let list_id = format!("racing-list-{attempt}");
+        request(&mut ws, &list_id, REQUEST_PORT_FORWARD_LIST, json!({})).await;
+        let listed: PortForwardListResponse = receive_frame(&mut ws)
+            .await
+            .decode_response_payload()
+            .unwrap();
+        let active = listed.sessions.iter().find(|session| {
+            session.state == PortForwardSessionState::Active
+                && matches!(&session.target, PortForwardTarget::Service { identity, .. } if identity.uid == service().uid)
+        });
+        match outcome.kind {
+            ServerKind::Response => {
+                let started: PortForwardStartResponse = outcome.decode_response_payload().unwrap();
+                assert_eq!(active.map(|session| &session.id), Some(&started.session.id));
+                let stop_id = format!("racing-stop-{attempt}");
+                request(
+                    &mut ws,
+                    &stop_id,
+                    REQUEST_PORT_FORWARD_STOP,
+                    serde_json::to_value(PortForwardStopRequest {
+                        session_id: started.session.id,
+                    })
+                    .unwrap(),
+                )
+                .await;
+                assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Response);
+            }
+            ServerKind::Error => {
+                assert_eq!(outcome.payload["code"], json!("cancelled"));
+                assert!(active.is_none(), "Cancelled cannot hide committed Active");
+            }
+            kind => panic!("unexpected start outcome: {kind:?}"),
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn start_list_and_stop_round_trip_over_the_control_socket() {
     let server = spawn(true).await;
-    let mut ws = connect_authenticated(&server).await;
+    let (mut ws, welcome) =
+        connect_with_minor_and_welcome(&server, k10s_protocol::PROTOCOL_MINOR).await;
+    assert_eq!(
+        welcome.payload["capabilities"],
+        json!(["service.portForward", "pod.portForward"])
+    );
 
     request(
         &mut ws,
         "start-1",
         REQUEST_PORT_FORWARD_START,
-        serde_json::to_value(PortForwardStartRequest {
-            service: service(),
-            port: k10s_protocol::PortForwardPortSelector::Name {
-                name: "http".into(),
-            },
-            local_port: 0,
-        })
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+                0,
+            )
+            .unwrap(),
+        )
         .unwrap(),
     )
     .await;
@@ -123,20 +258,23 @@ async fn start_list_and_stop_round_trip_over_the_control_socket() {
     let started: PortForwardStartResponse = frame.decode_response_payload().unwrap();
     assert_eq!(started.session.state, PortForwardSessionState::Active);
     assert!(started.session.local_addr.starts_with("127.0.0.1:"));
-    assert_eq!(started.session.service_port, 80);
+    assert_eq!(started.session.pod_port, 80);
 
     // Duplicate start focuses the existing session.
     request(
         &mut ws,
         "start-2",
         REQUEST_PORT_FORWARD_START,
-        serde_json::to_value(PortForwardStartRequest {
-            service: service(),
-            port: k10s_protocol::PortForwardPortSelector::Name {
-                name: "http".into(),
-            },
-            local_port: 0,
-        })
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+                0,
+            )
+            .unwrap(),
+        )
         .unwrap(),
     )
     .await;
@@ -145,6 +283,34 @@ async fn start_list_and_stop_round_trip_over_the_control_socket() {
         .decode_response_payload()
         .unwrap();
     assert_eq!(focused.session.id, started.session.id);
+
+    request(
+        &mut ws,
+        "start-pod",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod(),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let pod_started: PortForwardStartResponse = receive_frame(&mut ws)
+        .await
+        .decode_response_payload()
+        .unwrap();
+    assert!(matches!(
+        pod_started.session.target,
+        PortForwardTarget::Pod { .. }
+    ));
+    assert_eq!(pod_started.session.requested_local_port, 0);
 
     // List reconstructs state after a fresh connection ("reconnect").
     drop(ws);
@@ -160,8 +326,19 @@ async fn start_list_and_stop_round_trip_over_the_control_socket() {
         .await
         .decode_response_payload()
         .unwrap();
-    assert_eq!(listed.sessions.len(), 1);
-    assert_eq!(listed.sessions[0].id, started.session.id);
+    assert_eq!(listed.sessions.len(), 2);
+    assert!(
+        listed
+            .sessions
+            .iter()
+            .any(|session| session.id == started.session.id)
+    );
+    assert!(
+        listed
+            .sessions
+            .iter()
+            .any(|session| session.id == pod_started.session.id)
+    );
 
     // Stop is idempotent by session ID.
     request(
@@ -216,6 +393,25 @@ async fn start_list_and_stop_round_trip_over_the_control_socket() {
         .unwrap();
     assert!(unknown.session.is_none());
 
+    request(
+        &mut reconnected,
+        "stop-pod",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: pod_started.session.id,
+        })
+        .unwrap(),
+    )
+    .await;
+    let pod_stopped: PortForwardStopResponse = receive_frame(&mut reconnected)
+        .await
+        .decode_response_payload()
+        .unwrap();
+    assert_eq!(
+        pod_stopped.session.unwrap().state,
+        PortForwardSessionState::Stopped
+    );
+
     server.shutdown().await.unwrap();
 }
 
@@ -242,11 +438,14 @@ async fn sessions_subscription_streams_snapshots_and_disabled_servers_reject() {
         &mut ws,
         "start-ev",
         REQUEST_PORT_FORWARD_START,
-        serde_json::to_value(PortForwardStartRequest {
-            service: service(),
-            port: k10s_protocol::PortForwardPortSelector::Number { number: 80 },
-            local_port: 0,
-        })
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                0,
+            )
+            .unwrap(),
+        )
         .unwrap(),
     )
     .await;
@@ -267,16 +466,21 @@ async fn sessions_subscription_streams_snapshots_and_disabled_servers_reject() {
     // A server without the capability rejects both requests and the
     // subscription even when a client sends them manually.
     let disabled = spawn(false).await;
-    let mut ws = connect_authenticated(&disabled).await;
+    let (mut ws, welcome) =
+        connect_with_minor_and_welcome(&disabled, k10s_protocol::PROTOCOL_MINOR).await;
+    assert_eq!(welcome.payload["capabilities"], json!([]));
     request(
         &mut ws,
         "denied-start",
         REQUEST_PORT_FORWARD_START,
-        serde_json::to_value(PortForwardStartRequest {
-            service: service(),
-            port: k10s_protocol::PortForwardPortSelector::Number { number: 80 },
-            local_port: 0,
-        })
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                0,
+            )
+            .unwrap(),
+        )
         .unwrap(),
     )
     .await;
@@ -298,6 +502,36 @@ async fn sessions_subscription_streams_snapshots_and_disabled_servers_reject() {
     let denied = receive_frame(&mut ws).await;
     assert_eq!(denied.kind, ServerKind::Error);
     disabled.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sessions_subscription_periodically_sends_an_authoritative_snapshot() {
+    let server = spawn(true).await;
+    let mut ws = connect_authenticated(&server).await;
+    ws.send(Message::Text(
+        json!({
+            "kind": "subscribe",
+            "subscriptionId": "pf-reconcile",
+            "payload": SubscriptionSelector::PortForwardSessions,
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receive_frame(&mut ws).await.kind, ServerKind::Subscribed);
+
+    let frame = tokio::time::timeout(Duration::from_secs(3), receive_frame(&mut ws))
+        .await
+        .expect("the subscription should reconcile without another lifecycle event");
+    let ServerPayload::Event(event) = frame.decode_payload().unwrap() else {
+        panic!("expected snapshot event");
+    };
+    assert_eq!(event.event_kind, k10s_protocol::PORT_FORWARD_EVENT_SNAPSHOT);
+    let snapshot: PortForwardListResponse = serde_json::from_value(event.payload).unwrap();
+    assert!(snapshot.sessions.is_empty());
+
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -339,14 +573,17 @@ async fn malformed_and_unvalidated_start_payloads_fail_without_binding() {
         &mut ws,
         "stale-uid",
         REQUEST_PORT_FORWARD_START,
-        serde_json::to_value(PortForwardStartRequest {
-            service: ResourceIdentity {
-                uid: "uid-from-a-past-life".into(),
-                ..service()
-            },
-            port: k10s_protocol::PortForwardPortSelector::Number { number: 80 },
-            local_port: 0,
-        })
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                ResourceIdentity {
+                    uid: "uid-from-a-past-life".into(),
+                    ..service()
+                },
+                k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                0,
+            )
+            .unwrap(),
+        )
         .unwrap(),
     )
     .await;
@@ -354,6 +591,536 @@ async fn malformed_and_unvalidated_start_payloads_fail_without_binding() {
     assert_eq!(error.kind, ServerKind::Error);
     assert_eq!(error.payload["code"], json!("notFound"));
 
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn prior_minor_clients_use_legacy_service_shapes_and_never_see_pods() {
+    let server = spawn(true).await;
+    let mut current = connect_authenticated(&server).await;
+    request(
+        &mut current,
+        "current-service",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let current_service = receive_frame(&mut current).await;
+    assert!(current_service.payload["session"].get("target").is_some());
+    let current_service_id = current_service.payload["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    request(
+        &mut current,
+        "current-pod",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod(),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let current_pod = receive_frame(&mut current).await;
+    assert_eq!(
+        current_pod.payload["session"]["target"]["kind"],
+        json!("pod")
+    );
+    let current_pod_id = current_pod.payload["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (mut legacy, welcome) =
+        connect_with_minor_and_welcome(&server, k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR - 1)
+            .await;
+    assert_eq!(
+        welcome.payload["capabilities"],
+        json!(["service.portForward"])
+    );
+    request(
+        &mut legacy,
+        "legacy-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    let list = receive_frame(&mut legacy).await;
+    assert_eq!(list.payload["sessions"].as_array().unwrap().len(), 1);
+    let legacy_service = &list.payload["sessions"][0];
+    assert!(legacy_service.get("service").is_some());
+    assert_eq!(legacy_service["servicePort"], json!(80));
+    assert!(legacy_service.get("target").is_none());
+    request(
+        &mut legacy,
+        "legacy-stop-pod",
+        REQUEST_PORT_FORWARD_STOP,
+        json!({"sessionId": current_pod_id}),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut legacy).await.kind, ServerKind::Error);
+
+    legacy
+        .send(Message::Text(
+            json!({
+                "kind": "subscribe",
+                "subscriptionId": "legacy-pf",
+                "payload": SubscriptionSelector::PortForwardSessions,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_frame(&mut legacy).await.kind,
+        ServerKind::Subscribed
+    );
+
+    request(
+        &mut current,
+        "current-pod-2",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod_named("web-frontend-7d9f8-00002"),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let _ = receive_frame(&mut current).await;
+    request(
+        &mut current,
+        "current-service-2",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service_named("api-server"),
+                k10s_protocol::PortForwardPortSelector::Number { number: 443 },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let _ = receive_frame(&mut current).await;
+
+    let event = receive_frame(&mut legacy).await;
+    assert_eq!(event.kind, ServerKind::Event);
+    let session = &event.payload["payload"]["session"];
+    assert_eq!(session["service"]["name"], json!("api-server"));
+    assert!(session.get("target").is_none());
+
+    request(
+        &mut current,
+        "stop-retained-service",
+        REQUEST_PORT_FORWARD_STOP,
+        json!({"sessionId": current_service_id}),
+    )
+    .await;
+    let _ = receive_frame(&mut current).await;
+    request(
+        &mut legacy,
+        "legacy-terminal-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    let terminal_list = loop {
+        let frame = receive_frame(&mut legacy).await;
+        if frame.kind == ServerKind::Response {
+            break frame;
+        }
+    };
+    let retained = terminal_list.payload["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == json!(current_service_id))
+        .expect("stopped Service remains visible in legacy form");
+    assert_eq!(retained["state"], json!("stopped"));
+    assert!(retained.get("service").is_some());
+    assert!(retained.get("target").is_none());
+    assert!(retained.get("failure").is_none());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn old_minor_can_start_legacy_service_but_cannot_start_pod() {
+    let server = spawn(true).await;
+    let mut legacy = connect_with_minor(&server, k10s_protocol::PROTOCOL_MINOR - 1).await;
+    request(
+        &mut legacy,
+        "legacy-service",
+        REQUEST_PORT_FORWARD_START,
+        json!({
+            "service": service(),
+            "port": {"kind": "name", "name": "http"},
+            "localPort": 0
+        }),
+    )
+    .await;
+    let started = receive_frame(&mut legacy).await;
+    assert_eq!(started.kind, ServerKind::Response);
+    assert!(started.payload["session"].get("service").is_some());
+    assert!(started.payload["session"].get("target").is_none());
+
+    request(
+        &mut legacy,
+        "legacy-pod",
+        REQUEST_PORT_FORWARD_START,
+        json!({
+            "target": {
+                "kind": "pod",
+                "identity": pod(),
+                "containerName": "app",
+                "remotePort": 8080
+            },
+            "localPort": 0
+        }),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut legacy).await.kind, ServerKind::Error);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pod_start_requires_the_pod_capability_even_when_service_is_enabled() {
+    let server = spawn_with_capabilities(true, false).await;
+    let mut ws = connect_authenticated(&server).await;
+    request(
+        &mut ws,
+        "denied-pod",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod(),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let denied = receive_frame(&mut ws).await;
+    assert_eq!(denied.kind, ServerKind::Error);
+    assert_eq!(denied.payload["code"], json!("unsupportedMessage"));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn list_and_stop_are_filtered_and_authorized_by_target_capability() {
+    let server = spawn(true).await;
+    let mut admin = connect_authenticated(&server).await;
+    request(
+        &mut admin,
+        "seed-service",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let service_session: PortForwardStartResponse = receive_frame(&mut admin)
+        .await
+        .decode_response_payload()
+        .unwrap();
+    request(
+        &mut admin,
+        "seed-pod",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod(),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let pod_session: PortForwardStartResponse = receive_frame(&mut admin)
+        .await
+        .decode_response_payload()
+        .unwrap();
+
+    let (mut service_only, _) = connect_with_minor_and_capabilities(
+        &server,
+        k10s_protocol::PROTOCOL_MINOR,
+        &["service.portForward"],
+    )
+    .await;
+    request(
+        &mut service_only,
+        "service-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    let service_list = receive_frame(&mut service_only).await;
+    assert_eq!(
+        service_list.payload["sessions"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        service_list.payload["sessions"][0]["target"]["kind"],
+        json!("service")
+    );
+    request(
+        &mut service_only,
+        "service-stop-pod",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: pod_session.session.id.clone(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        receive_frame(&mut service_only).await.kind,
+        ServerKind::Error
+    );
+
+    let (mut pod_only, _) = connect_with_minor_and_capabilities(
+        &server,
+        k10s_protocol::PROTOCOL_MINOR,
+        &["pod.portForward"],
+    )
+    .await;
+    request(
+        &mut pod_only,
+        "pod-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    let pod_list = receive_frame(&mut pod_only).await;
+    assert_eq!(pod_list.payload["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pod_list.payload["sessions"][0]["target"]["kind"],
+        json!("pod")
+    );
+    request(
+        &mut pod_only,
+        "pod-stop-service",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: service_session.session.id.clone(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut pod_only).await.kind, ServerKind::Error);
+
+    request(
+        &mut service_only,
+        "service-stop-service",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: service_session.session.id.clone(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        receive_frame(&mut service_only).await.kind,
+        ServerKind::Response
+    );
+    request(
+        &mut pod_only,
+        "pod-stop-pod",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: pod_session.session.id.clone(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        receive_frame(&mut pod_only).await.kind,
+        ServerKind::Response
+    );
+
+    let (mut neither, _) =
+        connect_with_minor_and_capabilities(&server, k10s_protocol::PROTOCOL_MINOR, &[]).await;
+    request(
+        &mut neither,
+        "no-list",
+        REQUEST_PORT_FORWARD_LIST,
+        json!({}),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut neither).await.kind, ServerKind::Error);
+    request(
+        &mut neither,
+        "no-stop",
+        REQUEST_PORT_FORWARD_STOP,
+        serde_json::to_value(PortForwardStopRequest {
+            session_id: k10s_protocol::PortForwardSessionId::try_new("pf-unknown").unwrap(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(receive_frame(&mut neither).await.kind, ServerKind::Error);
+    neither
+        .send(Message::Text(
+            json!({
+                "kind": "subscribe",
+                "subscriptionId": "no-subscription",
+                "payload": SubscriptionSelector::PortForwardSessions,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive_frame(&mut neither).await.kind, ServerKind::Error);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn current_minor_session_events_follow_the_negotiated_capability_matrix() {
+    let server = spawn(true).await;
+    let (mut service_only, _) = connect_with_minor_and_capabilities(
+        &server,
+        k10s_protocol::PROTOCOL_MINOR,
+        &["service.portForward"],
+    )
+    .await;
+    let (mut pod_only, _) = connect_with_minor_and_capabilities(
+        &server,
+        k10s_protocol::PROTOCOL_MINOR,
+        &["pod.portForward"],
+    )
+    .await;
+    let mut both = connect_authenticated(&server).await;
+    for (socket, id) in [
+        (&mut service_only, "service-events"),
+        (&mut pod_only, "pod-events"),
+        (&mut both, "both-events"),
+    ] {
+        socket
+            .send(Message::Text(
+                json!({
+                    "kind": "subscribe",
+                    "subscriptionId": id,
+                    "payload": SubscriptionSelector::PortForwardSessions,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(receive_frame(socket).await.kind, ServerKind::Subscribed);
+    }
+
+    let mut admin = connect_authenticated(&server).await;
+    request(
+        &mut admin,
+        "event-service",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_service(
+                service(),
+                k10s_protocol::PortForwardPortSelector::Number { number: 80 },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let _ = receive_frame(&mut admin).await;
+    let service_event = receive_frame(&mut service_only).await;
+    assert_eq!(
+        service_event.payload["payload"]["session"]["target"]["kind"],
+        json!("service")
+    );
+    let both_service = receive_frame(&mut both).await;
+    assert_eq!(
+        both_service.payload["payload"]["session"]["target"]["kind"],
+        json!("service")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), receive_frame(&mut pod_only))
+            .await
+            .is_err()
+    );
+
+    request(
+        &mut admin,
+        "event-pod",
+        REQUEST_PORT_FORWARD_START,
+        serde_json::to_value(
+            PortForwardStartRequest::try_target(
+                PortForwardTarget::Pod {
+                    identity: pod(),
+                    container_name: "app".into(),
+                    remote_port: 8_080,
+                },
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await;
+    let _ = receive_frame(&mut admin).await;
+    let pod_event = receive_frame(&mut pod_only).await;
+    assert_eq!(
+        pod_event.payload["payload"]["session"]["target"]["kind"],
+        json!("pod")
+    );
+    let both_pod = receive_frame(&mut both).await;
+    assert_eq!(
+        both_pod.payload["payload"]["session"]["target"]["kind"],
+        json!("pod")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), receive_frame(&mut service_only))
+            .await
+            .is_err()
+    );
     server.shutdown().await.unwrap();
 }
 

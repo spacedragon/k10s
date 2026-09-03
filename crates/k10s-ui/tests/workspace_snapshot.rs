@@ -27,7 +27,10 @@ fn v1_literal_migrates_explicit_namespace_and_defaults_to_all_namespaces() {
     let raw = r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":"prod","search":"web","filters":{"phase":"Running"},"sort":null,"split_ratio":0.4,"detail_visible":false,"custom_kind":"g/v/K"}},{"kind":"nodes","title":"Nodes","geometry":{"position":[3.0,4.0],"size":[800.0,600.0],"collapsed":false},"z":2,"view":{"namespace":null,"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
     assert_eq!(loaded.migrated_from, Some(1));
-    assert_eq!(loaded.snapshot.version, 3);
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
     assert!(!loaded.snapshot.free_window_resizing);
     assert_eq!(loaded.snapshot.windows[0].geometry.position, [1.0, 2.0]);
     assert_eq!(loaded.snapshot.windows[0].geometry.size, [800.0, 600.0]);
@@ -61,7 +64,10 @@ fn v2_literal_migrates_geometry_view_and_defaults_free_resize_off() {
     let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
 
     assert_eq!(loaded.migrated_from, Some(2));
-    assert_eq!(loaded.snapshot.version, 3);
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
     assert!(!loaded.snapshot.free_window_resizing);
     let window = &loaded.snapshot.windows[0];
     assert_eq!(window.geometry.position, [23.0, 41.0]);
@@ -136,6 +142,22 @@ fn versioned_snapshot_schemas_reject_cross_version_namespace_fields() {
 
     let v2_wrong = r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"overview","title":"Overview","geometry":{"position":[1.0,2.0],"size":[800.0,600.0],"collapsed":false},"z":1,"view":{"namespace":{"kind":"namespace","value":"prod"},"search":"","filters":{},"sort":null,"split_ratio":0.5,"detail_visible":true,"custom_kind":null}}]}"#;
     assert!(serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(v2_wrong).is_err());
+}
+
+#[test]
+fn pre_v4_snapshots_reject_the_v4_only_port_forwards_kind() {
+    let snapshots = [
+        r#"{"version":1,"next_id":2,"next_z":3,"windows":[{"kind":"port_forwards","title":"Port Forwards","geometry":{"position":[1.0,2.0],"size":[840.0,560.0],"collapsed":false},"z":1,"view":null}]}"#,
+        r#"{"version":2,"next_id":2,"next_z":3,"windows":[{"kind":"port_forwards","title":"Port Forwards","geometry":{"position":[1.0,2.0],"size":[840.0,560.0],"collapsed":false},"z":1,"view":null}]}"#,
+        r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":false,"windows":[{"kind":"port_forwards","title":"Port Forwards","geometry":{"position":[1.0,2.0],"size":[840.0,560.0],"collapsed":false},"z":1,"view":null}]}"#,
+    ];
+
+    for snapshot in snapshots {
+        assert!(
+            serde_json::from_str::<k10s_ui::workspace::LoadedWorkspaceSnapshot>(snapshot).is_err(),
+            "legacy schemas must not accept Port Forwards"
+        );
+    }
 }
 
 #[test]
@@ -313,6 +335,133 @@ fn snapshot_captures_open_windows_geometry_and_view_settings() {
     // Compatibility field remains serialized, but integrated Detail cannot
     // be hidden independently of selection.
     assert!(view.detail_visible);
+}
+
+#[test]
+fn port_forward_window_persists_only_geometry_sort_and_focused_session() {
+    let mut workspace = WorkspaceState::<TestIdentity>::new();
+    let opened = workspace.apply(WorkspaceCommand::ActivateLauncherItem(
+        LauncherItem::PortForwards,
+    ));
+    let id = opened
+        .into_iter()
+        .find_map(|event| match event {
+            k10s_ui::workspace::WorkspaceEvent::Opened(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    workspace.apply(WorkspaceCommand::SetGeometry(
+        id,
+        k10s_ui::workspace::WindowGeom {
+            position: [91.0, 47.0],
+            size: [930.0, 610.0],
+            collapsed: true,
+        },
+    ));
+    workspace.apply(WorkspaceCommand::SetPortForwardSort(
+        id,
+        Some(SortSpec {
+            column: "TARGET".into(),
+            ascending: false,
+        }),
+    ));
+    workspace.apply(WorkspaceCommand::FocusPortForwardSession(
+        id,
+        "pf-focused".into(),
+    ));
+
+    let snapshot = workspace.snapshot();
+    let encoded = serde_json::to_value(&snapshot).unwrap();
+    let persisted = snapshot
+        .windows
+        .iter()
+        .find(|window| window.kind == PersistedWindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(persisted.geometry.position, [91.0, 47.0]);
+    let view = persisted.port_forward_view.as_ref().unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "TARGET");
+    assert_eq!(view.focused_session.as_deref(), Some("pf-focused"));
+    assert!(!encoded.to_string().contains("sessions"));
+    assert!(!encoded.to_string().contains("modal"));
+
+    let decoded: k10s_ui::workspace::WorkspaceSnapshot = serde_json::from_value(encoded).unwrap();
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&decoded).unwrap();
+    let window = restored
+        .windows()
+        .iter()
+        .find(|window| window.kind == k10s_ui::workspace::WindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(window.geometry, persisted.geometry);
+    let view = restored.port_forward_state(window.id).unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "TARGET");
+    assert_eq!(view.focused_session.as_deref(), Some("pf-focused"));
+}
+
+#[test]
+fn restore_keeps_only_the_first_healthy_port_forwards_singleton() {
+    let raw = r#"{"version":4,"next_id":3,"next_z":4,"free_window_resizing":false,"windows":[{"kind":"port_forwards","title":"Port Forwards","geometry":{"position":[11.0,12.0],"size":[840.0,560.0],"collapsed":false},"z":1,"view":null,"port_forward_view":{"sort":{"column":"STATUS","ascending":true},"focused_session":"first"}},{"kind":"port_forwards","title":"Duplicate Port Forwards","geometry":{"position":[91.0,92.0],"size":[930.0,610.0],"collapsed":true},"z":2,"view":null,"port_forward_view":{"sort":{"column":"TARGET","ascending":false},"focused_session":"second"}}]}"#;
+    let snapshot: k10s_ui::workspace::WorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&snapshot).unwrap();
+    let port_forwards = restored
+        .windows()
+        .iter()
+        .filter(|window| window.kind == k10s_ui::workspace::WindowKind::PortForwards)
+        .collect::<Vec<_>>();
+
+    assert_eq!(port_forwards.len(), 1);
+    assert_eq!(port_forwards[0].title, "Port Forwards");
+    assert_eq!(port_forwards[0].geometry.position, [11.0, 12.0]);
+    let view = restored.port_forward_state(port_forwards[0].id).unwrap();
+    assert_eq!(view.sort.as_ref().unwrap().column, "STATUS");
+    assert_eq!(view.focused_session.as_deref(), Some("first"));
+}
+
+#[test]
+fn v3_snapshot_migrates_without_port_forward_window_state() {
+    let raw = r#"{"version":3,"next_id":2,"next_z":3,"free_window_resizing":true,"windows":[{"kind":"services","title":"Services","geometry":{"position":[31.0,42.0],"size":[910.0,620.0],"collapsed":true},"z":1,"view":{"namespace_scope":{"kind":"namespace","value":"payments"},"search":"api","filters":{},"sort":{"column":"PORT","ascending":false},"split_ratio":0.37,"detail_visible":false,"custom_kind":null}}]}"#;
+    let loaded: k10s_ui::workspace::LoadedWorkspaceSnapshot = serde_json::from_str(raw).unwrap();
+    assert_eq!(loaded.migrated_from, Some(3));
+    assert_eq!(
+        loaded.snapshot.version,
+        k10s_ui::workspace::SNAPSHOT_VERSION
+    );
+    assert!(loaded.snapshot.free_window_resizing);
+    let persisted = &loaded.snapshot.windows[0];
+    assert_eq!(persisted.geometry.position, [31.0, 42.0]);
+    assert_eq!(persisted.geometry.size, [910.0, 620.0]);
+    assert!(persisted.geometry.collapsed);
+    assert!(persisted.port_forward_view.is_none());
+    let persisted_view = persisted.view.as_ref().unwrap();
+    assert_eq!(
+        persisted_view.namespace_scope,
+        NamespaceScope::Namespace("payments".into())
+    );
+    assert_eq!(persisted_view.search, "api");
+    assert_eq!(persisted_view.sort.as_ref().unwrap().column, "PORT");
+    assert!(!persisted_view.sort.as_ref().unwrap().ascending);
+    assert_eq!(persisted_view.split_ratio, 0.37);
+
+    let restored = WorkspaceState::<TestIdentity>::from_snapshot(&loaded.snapshot).unwrap();
+    assert!(restored.free_window_resizing());
+    let services = restored
+        .windows()
+        .iter()
+        .find(|window| window.kind == k10s_ui::workspace::WindowKind::Services)
+        .unwrap();
+    assert_eq!(services.geometry, persisted.geometry);
+    let service = restored.service_state(services.id).unwrap();
+    assert_eq!(
+        service.namespace_scope,
+        NamespaceScope::Namespace("payments".into())
+    );
+    assert_eq!(service.search, "api");
+    assert_eq!(service.sort.as_ref().unwrap().column, "PORT");
+    assert!(!service.sort.as_ref().unwrap().ascending);
+    assert_eq!(service.split_ratio, 0.37);
+    assert!(service.detail_visible);
+    assert!(service.selection.is_none());
+    assert!(service.detail.is_none());
+    assert!(service.port_drafts.is_empty());
 }
 
 #[test]

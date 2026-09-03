@@ -55,11 +55,12 @@ pub use operation::{
     YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
 };
 pub use port_forward::{
-    CAPABILITY_SERVICE_PORT_FORWARD, PORT_FORWARD_EVENT_SESSION, PortForwardFailure,
+    CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD, GENERALIZED_PORT_FORWARD_MINOR,
+    PORT_FORWARD_EVENT_SESSION, PORT_FORWARD_EVENT_SNAPSHOT, PortForwardFailure,
     PortForwardFailureCategory, PortForwardListRequest, PortForwardListResponse,
     PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent,
     PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
-    PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse,
+    PortForwardStartResponse, PortForwardStopRequest, PortForwardStopResponse, PortForwardTarget,
     REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
 };
 pub use resource::{
@@ -96,5 +97,6 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// v1.4 added exact-identity resource watches for dedicated Detail authority.
 /// v1.5 added context-scoped Kubernetes API transport traffic telemetry.
 /// v1.6 retired active embedded exec while retaining a one-minor legacy
-/// decode tombstone for major-version-1 clients.
+/// decode tombstone for major-version-1 clients, and added generalized
+/// Service and Pod port-forward targets.
 pub const PROTOCOL_MINOR: u16 = 6;

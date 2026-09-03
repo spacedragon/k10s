@@ -160,6 +160,18 @@ pub struct DetailAuthority {
     pub lifecycle: DetailLifecycle,
 }
 
+/// Authority state of the global port-forward session reconstruction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PortForwardListState {
+    /// The first authoritative list has not completed yet.
+    Loading,
+    /// A reconnected transport is rebuilding the authoritative list.
+    Reconstructing,
+    /// The latest list completed; an empty session vector is authoritative.
+    #[default]
+    Ready,
+}
+
 impl DetailAuthority {
     #[must_use]
     pub fn mutations_allowed(&self) -> bool {
@@ -211,8 +223,15 @@ pub struct ResourceFeed {
     pub relations: HashMap<ResourceIdentity, RelationState>,
     /// Exact identity-matched resource and container metrics for detail panes.
     pub metrics: HashMap<ResourceIdentity, k10s_protocol::ResourceMetricsResponse>,
+    /// Whether the negotiated server accepts Service port-forward targets.
     pub port_forward_available: bool,
+    /// Whether the negotiated server accepts Pod port-forward targets.
+    pub pod_port_forward_available: bool,
+    pub port_forward_list_state: PortForwardListState,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
+    /// Application-owned safe retry errors keyed to their authoritative row.
+    pub port_forward_retry_errors:
+        std::collections::BTreeMap<k10s_protocol::PortForwardSessionId, String>,
     pub port_forward_error: Option<String>,
 }
 

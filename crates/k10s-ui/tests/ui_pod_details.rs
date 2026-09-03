@@ -14,8 +14,8 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, DetailLifecycle, PrimaryDetailState, ResourceFeed,
-        SafeUiError, UiShell, WindowFreshness, tools::LogsPhase,
+        ConnectionState, DetailAuthority, DetailLifecycle, PortForwardListState,
+        PrimaryDetailState, ResourceFeed, SafeUiError, UiShell, WindowFreshness, tools::LogsPhase,
     },
     workspace::{DetailTab, WindowContent, WindowGeom, WindowKind, WorkspaceCommand},
 };
@@ -97,6 +97,274 @@ fn projection_healthy_uses_only_typed_fields_and_exact_container_metrics() {
     assert!(tops.len() >= 2, "constrained metadata labels must wrap");
     assert!(detail.query_by_label("SENTINEL SUMMARY").is_none());
     assert!(detail.query_by_label("SENTINEL MANIFEST").is_none());
+}
+
+#[test]
+fn declared_pod_ports_render_in_spec_order_and_open_the_exact_typed_target() {
+    let mut response = healthy_detail();
+    let identity = response.identity.clone();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.ports = vec![
+        PodContainerPort {
+            container_name: "web".into(),
+            name: Some("http".into()),
+            container_port: 8080,
+            host_port: None,
+            protocol: TransportProtocol::Tcp,
+        },
+        PodContainerPort {
+            container_name: "sidecar".into(),
+            name: Some("metrics".into()),
+            container_port: 9090,
+            host_port: None,
+            protocol: TransportProtocol::Udp,
+        },
+        PodContainerPort {
+            container_name: "sidecar".into(),
+            name: None,
+            container_port: 9443,
+            host_port: None,
+            protocol: TransportProtocol::Tcp,
+        },
+        PodContainerPort {
+            container_name: "web".into(),
+            name: Some("sync".into()),
+            container_port: 7443,
+            host_port: None,
+            protocol: TransportProtocol::Sctp,
+        },
+    ];
+    let mut harness = harness(1_100.0, response);
+    harness.state_mut().feed.pod_port_forward_available = true;
+    harness.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness.run_steps(4);
+
+    let detail = pod_window(&harness);
+    detail.get_by_label("PORTS · 4");
+    let rows = [
+        detail
+            .get_by_role_and_label(Role::Label, "Port http · web · 8080 · TCP")
+            .rect(),
+        detail
+            .get_by_role_and_label(Role::Label, "Port metrics · sidecar · 9090 · UDP")
+            .rect(),
+        detail
+            .get_by_role_and_label(Role::Label, "Port — · sidecar · 9443 · TCP")
+            .rect(),
+        detail
+            .get_by_role_and_label(Role::Label, "Port sync · web · 7443 · SCTP")
+            .rect(),
+    ];
+    assert!(
+        rows[0].top() < rows[1].top()
+            && rows[1].top() < rows[2].top()
+            && rows[2].top() < rows[3].top()
+    );
+    detail.get_by_role_and_label(Role::Button, "Port Forward http on container web port 8080");
+    assert!(
+        detail
+            .query_by_role_and_label(
+                Role::Button,
+                "Port Forward metrics on container sidecar port 9090",
+            )
+            .is_none(),
+        "UDP remains read-only"
+    );
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Port Forward sync on container web port 7443",)
+            .is_none(),
+        "SCTP remains read-only"
+    );
+
+    detail
+        .get_by_role_and_label(
+            Role::Button,
+            "Port Forward unnamed port on container sidecar port 9443",
+        )
+        .click();
+    harness.run_steps(2);
+    assert!(matches!(
+        harness
+            .state_mut()
+            .shell
+            .drain_port_forward_actions()
+            .as_slice(),
+        [k10s_ui::ui::PortForwardAction::OpenStart {
+            target: k10s_protocol::PortForwardTarget::Pod {
+                identity: target_identity,
+                container_name,
+                remote_port: 9443,
+            },
+            initial_local_port: 9443,
+            ..
+        }] if target_identity == &identity && container_name == "sidecar"
+    ));
+}
+
+#[test]
+fn service_port_forward_capability_does_not_enable_pod_actions() {
+    let response = healthy_detail();
+    let identity = response.identity.clone();
+    let mut harness = harness(1_100.0, response);
+    harness.state_mut().feed.port_forward_available = true;
+    harness.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    harness.run_steps(4);
+
+    let detail = pod_window(&harness);
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Port Forward")
+            .is_none(),
+        "service.portForward must not authorize a Pod target"
+    );
+    detail.get_by_label("Port forwarding is available in the desktop application");
+}
+
+#[test]
+fn pod_port_forward_action_requires_live_matching_loaded_authority() {
+    let identity = pod_identity("web-0");
+    let stale_authority = DetailAuthority {
+        freshness: WindowFreshness::StaleRetrying {
+            last_sync_age: "30s".into(),
+            retry_in: "2s".into(),
+            attempt: 1,
+        },
+        lifecycle: DetailLifecycle::Present,
+    };
+
+    let mut stale = harness(1_100.0, healthy_detail());
+    stale.state_mut().feed.pod_port_forward_available = true;
+    stale
+        .state_mut()
+        .feed
+        .detail_authority
+        .insert(identity.clone(), stale_authority);
+    stale.run_steps(3);
+    let stale_window = pod_window(&stale);
+    let start = stale_window
+        .get_by_role_and_label(Role::Button, "Port Forward http on container web port 8080");
+    assert!(start.accesskit_node().is_disabled());
+    stale_window.get_by_label("Port forwarding requires live, matching resource details");
+    assert!(
+        stale_window
+            .query_by_label("Port forwarding is available in the desktop application")
+            .is_none()
+    );
+    stale.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::ReadyEmpty,
+            lifecycle: DetailLifecycle::Gone,
+        },
+    );
+    stale.run_steps(3);
+    assert!(
+        pod_window(&stale)
+            .query_by_role_and_label(Role::Button, "Port Forward")
+            .is_none()
+    );
+
+    let mut loading = harness(1_100.0, healthy_detail());
+    loading.state_mut().feed.pod_port_forward_available = true;
+    loading
+        .state_mut()
+        .feed
+        .primary_details
+        .insert(identity.clone(), PrimaryDetailState::Loading);
+    loading.run_steps(3);
+    assert!(
+        pod_window(&loading)
+            .query_by_role_and_label(Role::Button, "Port Forward")
+            .is_none()
+    );
+
+    let mut mismatched = healthy_detail();
+    mismatched.identity = pod_identity("other");
+    let mut mismatch = harness(1_100.0, healthy_detail());
+    mismatch.state_mut().feed.pod_port_forward_available = true;
+    mismatch
+        .state_mut()
+        .feed
+        .details
+        .insert(identity.clone(), mismatched);
+    mismatch.state_mut().feed.detail_authority.insert(
+        identity,
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
+    mismatch.run_steps(3);
+    assert!(
+        pod_window(&mismatch)
+            .query_by_role_and_label(Role::Button, "Port Forward")
+            .is_none()
+    );
+}
+
+#[test]
+fn pod_port_forward_actions_wait_for_authoritative_session_list() {
+    for (state, status) in [
+        (
+            PortForwardListState::Loading,
+            "Loading port-forward sessions…",
+        ),
+        (
+            PortForwardListState::Reconstructing,
+            "Reconstructing port-forward sessions…",
+        ),
+    ] {
+        let identity = pod_identity("web-0");
+        let mut harness = harness(1_100.0, healthy_detail());
+        harness.state_mut().feed.pod_port_forward_available = true;
+        harness.state_mut().feed.port_forward_list_state = state;
+        harness.state_mut().feed.detail_authority.insert(
+            identity,
+            DetailAuthority {
+                freshness: WindowFreshness::Live {
+                    last_sync_age: "just now".into(),
+                },
+                lifecycle: DetailLifecycle::Present,
+            },
+        );
+        harness.run_steps(3);
+
+        let detail = pod_window(&harness);
+        detail.get_by_label(status);
+        assert!(
+            detail
+                .query_by_label("Port forwarding is available in the desktop application")
+                .is_none(),
+            "{state:?} is native authority loss, not capability absence"
+        );
+        assert!(
+            detail
+                .query_by_role_and_label(Role::Button, "Port Forward")
+                .is_none(),
+            "{state:?} must suppress stale start controls"
+        );
+    }
 }
 
 #[test]
@@ -183,7 +451,9 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
         .iter()
         .find_map(|window| match &window.content {
             WindowContent::Detail(detail) => Some(detail.active_tab),
-            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => None,
         })
         .expect("dedicated Pod detail remains open");
     assert_eq!(active_tab, DetailTab::Logs);
@@ -798,7 +1068,9 @@ fn pod_interaction_owner_navigation_uses_only_the_verified_exact_identity() {
         .iter()
         .filter_map(|window| match &window.content {
             WindowContent::Detail(detail) => Some(detail.identity.clone()),
-            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(identities.len(), 2);

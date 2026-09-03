@@ -934,7 +934,9 @@ fn owner_shortcut_opens_only_the_active_details_verified_owner() {
         .iter()
         .filter_map(|window| match &window.content {
             WindowContent::Detail(detail) => Some(detail.identity.name.as_str()),
-            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => None,
         })
         .collect::<Vec<_>>();
     assert!(pinned_names.contains(&"web-owner"));
@@ -1733,7 +1735,9 @@ fn detail_window(
 fn pinned_identity(workspace: &WorkspaceState<ResourceIdentity>) -> &ResourceIdentity {
     match &detail_window(workspace).content {
         WindowContent::Detail(detail) => &detail.identity,
-        WindowContent::Resource(_) | WindowContent::Services(_) => {
+        WindowContent::Resource(_)
+        | WindowContent::Services(_)
+        | WindowContent::PortForwards(_) => {
             panic!("detail windows pin a single identity")
         }
     }
@@ -1771,6 +1775,9 @@ fn detail_tab(
                 .as_ref()
                 .expect("integrated service detail is open")
                 .active_tab
+        }
+        WindowContent::PortForwards(_) => {
+            panic!("port forwards windows do not own resource details")
         }
     }
 }
@@ -2104,7 +2111,9 @@ fn deployment_related_tab_renders_resolved_traversal_rows() {
         .filter(|window| window.kind == WindowKind::Detail)
         .map(|window| match &window.content {
             WindowContent::Detail(detail) => detail.identity.clone(),
-            WindowContent::Resource(_) | WindowContent::Services(_) => {
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => {
                 panic!("detail windows pin a single identity")
             }
         })
@@ -2308,7 +2317,9 @@ fn tabs_stay_independent_between_integrated_and_pinned_views() {
                 "the pinned view must not inherit the integrated tab"
             );
         }
-        WindowContent::Resource(_) | WindowContent::Services(_) => {
+        WindowContent::Resource(_)
+        | WindowContent::Services(_)
+        | WindowContent::PortForwards(_) => {
             panic!("detail windows pin a single identity")
         }
     }
@@ -2551,7 +2562,9 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     harness.run_steps(2);
     let active_tab = match &detail_window(harness.state().shell.workspace()).content {
         WindowContent::Detail(detail) => detail.active_tab,
-        WindowContent::Resource(_) | WindowContent::Services(_) => unreachable!(),
+        WindowContent::Resource(_)
+        | WindowContent::Services(_)
+        | WindowContent::PortForwards(_) => unreachable!(),
     };
     assert_eq!(active_tab, WorkspaceDetailTab::Events);
 

@@ -40,8 +40,8 @@ pub use port::{
     StreamRouteKind, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
 };
 pub use port_forward::{
-    PortForwardConnector, PortForwardPortSelection, PortForwardRequest, PortForwardSeam,
-    PortForwardStream, RejectionCategory, ResolvedPortForward,
+    PortForwardConnector, PortForwardPortSelector, PortForwardRequest, PortForwardSeam,
+    PortForwardStream, PortForwardTarget, RejectionCategory, ResolvedPortForward,
 };
 pub use runtime::{
     BackendMode, ContextRegistry, ExecPluginPreparation, KubePreparation, PreparedBackend,
