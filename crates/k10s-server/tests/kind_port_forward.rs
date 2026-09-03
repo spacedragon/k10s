@@ -1,4 +1,4 @@
-//! Real kind Service -> EndpointSlice -> Pod port-forward lifecycle.
+//! Real kind Service and direct Pod port-forward lifecycle.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use k10s_backend::{BackendMode, Query, build_kernel};
 use k10s_protocol::{
-    GroupVersionKind, PortForwardPortSelector, PortForwardTarget, ResourceIdentity,
+    GroupVersionKind, PortForwardPortSelector, PortForwardSessionState, PortForwardTarget,
+    ResourceIdentity,
 };
 use k10s_server::port_forward::{PortForwardManager, StopOutcome};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,12 +37,26 @@ fn kubectl(args: &[&str]) -> String {
         "kubectl failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap()
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+async fn exchange_http(local_addr: &str) {
+    let mut socket = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+    socket
+        .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), socket.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&response).contains("k10s-port-forward-ok"));
 }
 
 #[tokio::test]
 #[ignore = "requires tests/kind/cluster.sh up"]
-async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() {
+async fn real_service_and_pod_forwards_share_management_and_release_ports() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/kind/port-forward.yaml");
     kubectl(&["apply", "-f", fixture.to_str().unwrap()]);
@@ -51,10 +66,25 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
         "deployment/port-forward-echo",
         "--timeout=120s",
     ]);
-    let uid = kubectl(&[
+    let service_uid = kubectl(&[
         "get",
         "service",
         "port-forward-echo",
+        "-o",
+        "jsonpath={.metadata.uid}",
+    ]);
+    let pod_name = kubectl(&[
+        "get",
+        "pod",
+        "-l",
+        "app=port-forward-echo",
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ]);
+    let pod_uid = kubectl(&[
+        "get",
+        "pod",
+        pod_name.as_str(),
         "-o",
         "jsonpath={.metadata.uid}",
     ]);
@@ -77,54 +107,114 @@ async fn real_service_forwards_http_and_releases_automatic_and_explicit_ports() 
     let cancel = CancellationToken::new();
     let (events, _) = tokio::sync::broadcast::channel(64);
     let manager = PortForwardManager::new(connector, cancel, events);
-    let identity = ResourceIdentity {
+    let service_identity = ResourceIdentity {
         context: context.clone(),
         gvk: GroupVersionKind::core("v1", "Service"),
         namespace: Some("default".into()),
         name: "port-forward-echo".into(),
-        uid,
+        uid: service_uid,
+    };
+    let pod_identity = ResourceIdentity {
+        context: context.clone(),
+        gvk: GroupVersionKind::core("v1", "Pod"),
+        namespace: Some("default".into()),
+        name: pod_name,
+        uid: pod_uid,
     };
 
     let explicit_port = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
     };
-    for requested in [0_u16, explicit_port] {
-        let session = manager
-            .start(
-                PortForwardTarget::Service {
-                    identity: identity.clone(),
-                    port: PortForwardPortSelector::Name {
-                        name: "http".into(),
-                    },
+    let automatic_service = manager
+        .start(
+            PortForwardTarget::Service {
+                identity: service_identity.clone(),
+                port: PortForwardPortSelector::Name {
+                    name: "http".into(),
                 },
-                requested,
-                context.clone(),
-            )
-            .await
-            .unwrap();
-        let mut socket = tokio::net::TcpStream::connect(&session.local_addr)
-            .await
-            .unwrap();
-        socket
-            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(15), socket.read_to_end(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(String::from_utf8_lossy(&response).contains("k10s-port-forward-ok"));
-        let local = session.local_addr.clone();
-        assert!(matches!(
-            manager.stop(session.id.as_str()).await,
-            StopOutcome::Stopped(_)
-        ));
-        assert!(
-            std::net::TcpListener::bind(local).is_ok(),
-            "Stop releases the local port"
-        );
-    }
+            },
+            0,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    exchange_http(&automatic_service.local_addr).await;
+    let automatic_service_local = automatic_service.local_addr.clone();
+    assert!(matches!(
+        manager.stop(automatic_service.id.as_str()).await,
+        StopOutcome::Stopped(_)
+    ));
+    assert!(
+        std::net::TcpListener::bind(automatic_service_local).is_ok(),
+        "Stop releases the automatically assigned Service port"
+    );
+
+    let service = manager
+        .start(
+            PortForwardTarget::Service {
+                identity: service_identity,
+                port: PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+            },
+            explicit_port,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    exchange_http(&service.local_addr).await;
+
+    let pod = manager
+        .start(
+            PortForwardTarget::Pod {
+                identity: pod_identity,
+                container_name: "echo".into(),
+                remote_port: 8_080,
+            },
+            0,
+            context,
+        )
+        .await
+        .unwrap();
+    exchange_http(&pod.local_addr).await;
+    exchange_http(&pod.local_addr).await;
+    assert_eq!(
+        manager.session(pod.id.as_str()).await.unwrap().state,
+        PortForwardSessionState::Active,
+        "separate completed connections leave the Pod session active"
+    );
+
+    let sessions = manager.list().await;
+    assert!(
+        sessions
+            .iter()
+            .any(|session| matches!(session.target, PortForwardTarget::Service { .. }))
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| matches!(session.target, PortForwardTarget::Pod { .. }))
+    );
+
+    let pod_local = pod.local_addr.clone();
+    assert!(matches!(
+        manager.stop(pod.id.as_str()).await,
+        StopOutcome::Stopped(_)
+    ));
+    assert!(
+        std::net::TcpListener::bind(pod_local).is_ok(),
+        "Stop releases the direct Pod listener"
+    );
+
+    let service_local = service.local_addr.clone();
+    assert!(matches!(
+        manager.stop(service.id.as_str()).await,
+        StopOutcome::Stopped(_)
+    ));
+    assert!(
+        std::net::TcpListener::bind(service_local).is_ok(),
+        "Stop releases the explicit Service listener"
+    );
     manager.shutdown().await;
 }

@@ -60,12 +60,28 @@ columns. The field defaults to absent; legacy payloads decode unchanged and
 Port-forward sessions use three request kinds — `portForward.start`,
 `portForward.stop`, and `portForward.list` — plus a bounded
 `portForwardSessions` subscription whose events carry complete session
-snapshots with monotonic revisions. Start requires the exact core/v1 Service
-identity including UID, a port selector by name or number, and a local port of
-`0..=65535` where `0` lets the OS assign one. Stop is idempotent by session ID.
-Servers advertise `service.portForward` only when the feature is enabled;
-disabled servers reject every port-forward request regardless of advertised
-capabilities.
+snapshots with monotonic revisions. A shared session manager owns all Pod and
+Service sessions, so limits, listing, stop, retention, and lifecycle cleanup
+apply to the combined set. The global Port Forwards window consumes this same
+authoritative list and event stream.
+
+Service starts require the exact core/v1 Service identity including UID and a
+declared port selector by name or number. Pod starts require the exact core/v1
+Pod identity including UID, a named regular container, and a declared numeric
+TCP port on that container. The local port field is `0..=65535`; `0` requests
+automatic allocation. Stop is idempotent by session ID.
+
+The desktop server advertises both `service.portForward` and
+`pod.portForward`; disabled standalone and web servers advertise neither and
+reject every port-forward request regardless of a client's capabilities. The
+manager's terminal snapshots are retained for 30 seconds, subject to its hard
+count bound. A context switch stops and joins all Pod and Service sessions
+before committing the new context, while shutdown cancels and joins them and
+closes every listener.
+
+Added in minor `6`: start targets and current session snapshots distinguish
+Service and Pod variants. A minor-`5` client retains the legacy Service wire
+shape and never receives Pod sessions.
 
 Added in minor `4`: resource-watch selectors may carry an exact `name` and
 `uid` alongside their context, GVK, and namespace. Dedicated Pod and Deployment

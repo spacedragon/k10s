@@ -21,32 +21,63 @@ fn normalized(document: &str) -> String {
 
 #[test]
 fn desktop_port_forward_security_contract_is_documented() {
-    let docs = normalized(&format!(
-        "{} {} {} {}",
-        read("README.md"),
-        read("docs/configuration.md"),
-        read("docs/security.md"),
-        read("docs/troubleshooting.md")
-    ));
+    let protocol = normalized(&read("docs/protocol.md"));
+    let configuration = normalized(&read("docs/configuration.md"));
+    let security = normalized(&read("docs/security.md"));
+    let troubleshooting = normalized(&read("docs/troubleshooting.md"));
+
     for required in [
-        "desktop",
-        "127.0.0.1",
-        "services",
-        "endpointslices",
-        "pods",
-        "pods/portforward",
-        "16",
-        "32",
-        "8",
-        "ExternalName",
-        "UDP",
+        "`service.portForward`",
+        "`pod.portForward`",
+        "exact core/v1 Pod identity including UID",
+        "regular container",
+        "declared numeric TCP port",
+        "shared session manager",
+        "Pod and Service sessions",
+        "terminal snapshots are retained for 30 seconds",
         "context switch",
-        "local port is in use",
-        "no ready endpoint",
+        "shutdown",
     ] {
         assert!(
-            docs.contains(required),
-            "missing port-forward documentation: {required}"
+            protocol.contains(required),
+            "protocol guide is missing port-forward contract: {required}"
+        );
+    }
+
+    for required in [
+        "desktop-only",
+        "standalone server and browser deployment advertise neither",
+        "`127.0.0.1`",
+        "Blank or `0` selects an available local port",
+        "explicit port must be in `1..=65535`",
+        "16 active sessions",
+        "32 accepted connections globally",
+        "8 per session",
+        "global Port Forwards window manages both Pod and Service sessions",
+    ] {
+        assert!(
+            configuration.contains(required),
+            "configuration guide is missing port-forward contract: {required}"
+        );
+    }
+
+    for required in [
+        "exact core/v1 Pod identity and UID",
+        "named regular container",
+        "declared numeric TCP port",
+        "`get` on `pods`",
+        "`create` on `pods/portforward`",
+    ] {
+        assert!(
+            security.contains(required),
+            "security guide is missing port-forward contract: {required}"
+        );
+    }
+
+    for required in ["local port is in use", "no ready endpoint"] {
+        assert!(
+            troubleshooting.contains(required),
+            "troubleshooting guide is missing port-forward contract: {required}"
         );
     }
 }
