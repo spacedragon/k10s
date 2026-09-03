@@ -1,6 +1,6 @@
 //! Resilient states of the connected UI prototype: loading, empty,
 //! filtered-empty, stale, forbidden metrics, conflicts, gone resources,
-//! unavailable GVKs after a context switch, disconnected logs, active-shell
+//! unavailable GVKs after a context switch, disconnected logs, external-shell
 //! guards, textual status, focus order, and minimum-size non-overlap.
 //!
 //! Every state is fed through [`ResourceFeed`] / [`InfrastructureResponse`]
@@ -24,8 +24,8 @@ use k10s_ui::{
         UiShell, WindowFreshness, tools::LogsAction,
     },
     workspace::{
-        BlockReason, BlockResolution, LauncherItem, WindowGeom, WindowId, WindowKind,
-        WorkloadKind as WorkspaceWorkload, WorkspaceCommand, WorkspaceEvent,
+        LauncherItem, WindowGeom, WindowId, WindowKind, WorkloadKind as WorkspaceWorkload,
+        WorkspaceCommand, WorkspaceEvent,
     },
 };
 
@@ -1046,11 +1046,11 @@ fn disconnected_logs_keep_their_history_and_reconnect_explicitly() {
 }
 
 // ---------------------------------------------------------------------------
-// Active-shell navigation guards
+// External shell navigation
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_active_shell_blocks_closing_and_context_switches_until_resolved() {
+fn external_shell_never_blocks_window_close() {
     let mut harness = harness();
     harness.state_mut().feed.lists.insert(
         WorkspaceWorkload::Pods,
@@ -1066,47 +1066,13 @@ fn an_active_shell_blocks_closing_and_context_switches_until_resolved() {
         .state_mut()
         .shell
         .apply_workspace_command(WorkspaceCommand::SelectRow(id, identity));
-    harness
+    let events: Vec<_> = harness
         .state_mut()
         .shell
-        .apply_workspace_command(WorkspaceCommand::ConnectShell(id));
-
-    // Closing a window with a live terminal parks the navigation.
-    let blocked: Vec<_> = harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::CloseWindow(id))
-        .into_iter()
-        .map(|event| match event {
-            WorkspaceEvent::Blocked(pending) => pending,
-            other => panic!("expected a block, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(blocked.len(), 1);
-    assert_eq!(blocked[0].blockers.len(), 1);
-    assert_eq!(blocked[0].blockers[0].reason, BlockReason::ConnectedShell);
-    assert!(
-        harness.state().shell.workspace().window(id).is_some(),
-        "a guarded window stays open while the navigation waits"
-    );
-
-    // Any further command is held back while a navigation pends.
-    let held = harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(LauncherItem::Nodes));
-    assert!(held.is_empty(), "commands queue behind the pending guard");
-
-    // Disconnecting resolves the blocker and commits the close.
-    let events = harness
-        .state_mut()
-        .shell
-        .apply_workspace_command(WorkspaceCommand::ResolveBlock(
-            BlockResolution::DisconnectShell { window: id },
-        ));
+        .apply_workspace_command(WorkspaceCommand::CloseWindow(id));
     assert!(events.iter().any(|event| matches!(
         event,
-        WorkspaceEvent::Closed(closed) if *closed == id
+        WorkspaceEvent::Closed(closed) if closed == &id
     )));
     assert!(harness.state().shell.workspace().window(id).is_none());
 }

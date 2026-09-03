@@ -510,11 +510,15 @@ fn external_shell() {
         },
     );
     run_steps(&mut harness);
+    let pod_window = common::workload_window(&harness, "Pods");
     assert!(
-        common::workload_window(&harness, "Pods")
-            .query_by_label("Open shell")
+        pod_window
+            .query_by_role_and_label(Role::Button, "Tab Shell")
             .is_none()
     );
+    assert!(pod_window.query_by_label("Connect shell").is_none());
+    assert!(pod_window.query_by_label("s shell").is_none());
+    assert!(pod_window.query_by_label("Open shell").is_none());
 
     harness
         .state_mut()

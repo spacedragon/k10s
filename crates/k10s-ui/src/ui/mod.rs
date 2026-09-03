@@ -275,16 +275,6 @@ where
         self.streams.logs.drain_actions()
     }
 
-    /// Drain every queued explicit shell-connect request.
-    pub fn drain_shell_connects(&mut self) -> Vec<(WindowId, k10s_protocol::StreamTarget)> {
-        self.streams.shells.drain_connects()
-    }
-
-    /// Drain every queued stdin/resize action of live terminals.
-    pub fn drain_shell_actions(&mut self) -> Vec<(WindowId, tools::ShellAction)> {
-        self.streams.shells.drain_actions()
-    }
-
     /// Render one frame. All mutations are queued while immutable workspace
     /// state is being rendered, then applied after every panel and window.
     pub fn show(

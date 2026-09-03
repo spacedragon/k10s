@@ -269,7 +269,6 @@ Window
                     Button label="Tab Events"
                     Button label="Tab YAML"
                     Button label="Tab Logs"
-                    Button label="Tab Shell"
                 Unknown label="Detail tabs row"
                 GenericContainer
                   GenericContainer
@@ -282,8 +281,8 @@ Window
                       Label value="Structured details unavailable"
                         TextRun value="Structured details unavailable"
                 GenericContainer
-                  Label value="l logs · s shell · y yaml · e events · c copy name · Esc clear selection"
-                    TextRun value="l logs · s shell · y yaml · e events · c copy name · Esc clear selection"
+                  Label value="l logs · y yaml · e events · c copy name · Esc clear selection"
+                    TextRun value="l logs · y yaml · e events · c copy name · Esc clear selection"
     Splitter
     Splitter
     Splitter

@@ -1,5 +1,4 @@
-//! Navigation guards: pending navigations blocked by dirty YAML or a
-//! connected shell, plus the resolutions that release them.
+//! Navigation guards for pending navigations blocked by dirty YAML.
 
 use super::WorkspaceCommand;
 use super::window::WindowId;
@@ -9,8 +8,6 @@ use super::window::WindowId;
 pub enum BlockReason {
     /// The detail holds an unsaved YAML edit buffer.
     DirtyYaml,
-    /// The detail has a connected shell session.
-    ConnectedShell,
 }
 
 /// One blocking detail state, keyed by its window.
@@ -35,8 +32,6 @@ pub struct PendingNavigation<I> {
 pub enum BlockResolution {
     /// Discard the dirty YAML buffer of `window`.
     DiscardYaml { window: WindowId },
-    /// Disconnect the shell session of `window`.
-    DisconnectShell { window: WindowId },
     /// Abort the navigation entirely; nothing changes.
     Cancel,
 }

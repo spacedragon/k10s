@@ -825,7 +825,7 @@ fn pod_interaction_lifecycle_states_keep_shared_frame_semantics() {
     let detail = pod_window(&loading);
     detail.get_by_label("Loading details");
     detail.get_by_label("Status ● —");
-    detail.get_by_label("l logs · s shell · y yaml · e events · c copy name · Esc clear selection");
+    detail.get_by_label("l logs · y yaml · e events · c copy name · Esc clear selection");
 
     loading.state_mut().feed.primary_details.insert(
         identity.clone(),
@@ -964,11 +964,11 @@ fn pod_interaction_non_overview_tools_stay_on_existing_router_flows() {
         LogsPhase::Connecting
     );
 
-    detail
-        .get_by_role_and_label(Role::Button, "Tab Shell")
-        .click();
-    harness.run_steps(3);
-    pod_window(&harness).get_by_role_and_label(Role::Button, "Connect shell");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Tab Shell")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1011,21 +1011,10 @@ fn pod_runtime_tabs_use_only_typed_container_and_failure_data() {
     harness.get_by_label("sidecar");
     assert!(harness.query_by_label("legacy-manifest").is_none());
 
-    pod_window(&harness)
-        .get_by_role_and_label(Role::Button, "Tab Shell")
-        .click();
-    harness.run_steps(3);
-    assert_eq!(
-        harness
-            .state()
-            .shell
-            .stream_stores()
-            .shells
-            .get(window_id)
-            .expect("typed Pod runtime creates the shell target")
-            .target()
-            .container,
-        "web"
+    assert!(
+        pod_window(&harness)
+            .query_by_role_and_label(Role::Button, "Tab Shell")
+            .is_none()
     );
 }
 
@@ -1060,26 +1049,10 @@ fn pod_runtime_tabs_fail_closed_without_typed_projection() {
         "legacy manifest data must not create a log target"
     );
 
-    detail
-        .get_by_role_and_label(Role::Button, "Tab Shell")
-        .click();
-    harness.run_steps(3);
-    let detail = pod_window(&harness);
-    detail.get_by_label("Pod runtime details unavailable");
     assert!(
         detail
-            .query_by_role_and_label(Role::Button, "Connect shell")
+            .query_by_role_and_label(Role::Button, "Tab Shell")
             .is_none()
-    );
-    assert!(
-        harness
-            .state()
-            .shell
-            .stream_stores()
-            .shells
-            .get(window_id)
-            .is_none(),
-        "legacy manifest data must not create a shell target"
     );
 }
 

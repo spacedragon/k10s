@@ -3,7 +3,7 @@
 //! A snapshot captures everything that can be restored without live cluster
 //! data: which windows are open, their geometry and z-order, and the per-list
 //! view settings (namespace filter, search, filters, sort, split). Row
-//! selections, dedicated detail windows, YAML buffers, shells, dialogs, and
+//! selections, dedicated detail windows, YAML buffers, dialogs, and
 //! navigation guards are deliberately excluded — they pin resource identities
 //! that may no longer exist after a restart.
 
@@ -452,7 +452,7 @@ where
     I: Clone + Eq + std::hash::Hash + std::fmt::Debug,
 {
     /// Snapshot the workspace for persistence. Detail windows and every
-    /// selection/detail/YAML/shell/dialog state are excluded (see module docs).
+    /// selection/detail/YAML/dialog state are excluded (see module docs).
     #[must_use]
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         let mut windows = Vec::new();

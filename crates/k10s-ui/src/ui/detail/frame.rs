@@ -1082,7 +1082,6 @@ mod tests {
             DetailTab::Pods,
             DetailTab::Yaml,
             DetailTab::Logs,
-            DetailTab::Shell,
         ] {
             assert!(!super::uses_shared_body_scroll(tab));
         }
@@ -1479,9 +1478,7 @@ mod tests {
             .click();
         harness.run_steps(2);
         harness
-            .get_by_label(
-                "l logs · s shell · y yaml · e events · c copy name · Esc clear selection",
-            )
+            .get_by_label("l logs · y yaml · e events · c copy name · Esc clear selection")
             .click();
         harness.run_steps(2);
         assert!(

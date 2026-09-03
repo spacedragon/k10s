@@ -45,7 +45,6 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
             DetailTab::Events,
             DetailTab::Yaml,
             DetailTab::Logs,
-            DetailTab::Shell,
         ],
         Some(WorkloadKind::Deployment | WorkloadKind::ReplicaSet | WorkloadKind::StatefulSet) => &[
             DetailTab::Overview,
@@ -72,7 +71,6 @@ fn tab_label(tab: DetailTab) -> &'static str {
         DetailTab::Yaml => "YAML",
         DetailTab::Events => "Events",
         DetailTab::Logs => "Logs",
-        DetailTab::Shell => "Shell",
     }
 }
 
@@ -80,7 +78,6 @@ fn shortcut_tab(key: egui::Key) -> Option<DetailTab> {
     match key {
         egui::Key::L => Some(DetailTab::Logs),
         egui::Key::P => Some(DetailTab::Pods),
-        egui::Key::S => Some(DetailTab::Shell),
         egui::Key::Y => Some(DetailTab::Yaml),
         egui::Key::E => Some(DetailTab::Events),
         _ => None,
@@ -131,15 +128,8 @@ fn shortcut_labels_for(
     gvk: &GroupVersionKind,
     has_verified_owner: bool,
 ) -> &'static [&'static str] {
-    const POD: &[&str] = &["l logs", "s shell", "y yaml", "e events", "c copy name"];
-    const POD_OWNER: &[&str] = &[
-        "l logs",
-        "s shell",
-        "y yaml",
-        "e events",
-        "c copy name",
-        "o owner",
-    ];
+    const POD: &[&str] = &["l logs", "y yaml", "e events", "c copy name"];
+    const POD_OWNER: &[&str] = &["l logs", "y yaml", "e events", "c copy name", "o owner"];
     const CONTROLLER: &[&str] = &["p pods", "l logs", "y yaml", "e events", "c copy name"];
     const CONTROLLER_OWNER: &[&str] = &[
         "p pods",
@@ -153,7 +143,7 @@ fn shortcut_labels_for(
     const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
 
     let tabs = tabs_for_kind(gvk);
-    if tabs.contains(&DetailTab::Logs) && tabs.contains(&DetailTab::Shell) {
+    if tabs.contains(&DetailTab::Logs) && WorkloadKind::from_gvk(gvk) == Some(WorkloadKind::Pod) {
         if has_verified_owner { POD_OWNER } else { POD }
     } else if tabs.contains(&DetailTab::Pods) {
         if has_verified_owner {
@@ -215,7 +205,6 @@ pub(super) fn show<I>(
             [
                 egui::Key::L,
                 egui::Key::P,
-                egui::Key::S,
                 egui::Key::Y,
                 egui::Key::E,
                 egui::Key::C,
@@ -616,19 +605,6 @@ fn show_generic_body<I: RowIdentity>(
                 tools::logs::show_aggregate(ui, window_id, &mut streams.logs, &targets);
             }
         }
-        DetailTab::Shell => {
-            let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view)
-            else {
-                ui.label("Pod runtime details unavailable");
-                return;
-            };
-            tools::shell::show(
-                ui,
-                window_id,
-                &mut streams.shells,
-                stream_target(detail, runtime.default_container()),
-            );
-        }
     }
 }
 
@@ -917,7 +893,7 @@ mod tests {
     fn detail_shortcuts_map_to_investigation_tabs() {
         assert_eq!(shortcut_tab(egui::Key::L), Some(DetailTab::Logs));
         assert_eq!(shortcut_tab(egui::Key::P), Some(DetailTab::Pods));
-        assert_eq!(shortcut_tab(egui::Key::S), Some(DetailTab::Shell));
+        assert_eq!(shortcut_tab(egui::Key::S), None);
         assert_eq!(shortcut_tab(egui::Key::Y), Some(DetailTab::Yaml));
         assert_eq!(shortcut_tab(egui::Key::E), Some(DetailTab::Events));
         assert_eq!(shortcut_tab(egui::Key::Enter), None);
@@ -927,7 +903,6 @@ mod tests {
             DetailTab::Events,
             DetailTab::Yaml,
             DetailTab::Logs,
-            DetailTab::Shell,
         ];
         assert_eq!(
             shortcut_for_key(egui::Key::C, &pod_tabs, false),
