@@ -216,6 +216,9 @@ pub struct ResourceFeed {
     /// Whether the negotiated server accepts Pod port-forward targets.
     pub pod_port_forward_available: bool,
     pub port_forward_sessions: Vec<k10s_protocol::PortForwardSession>,
+    /// Application-owned safe retry errors keyed to their authoritative row.
+    pub port_forward_retry_errors:
+        std::collections::BTreeMap<k10s_protocol::PortForwardSessionId, String>,
     pub port_forward_error: Option<String>,
 }
 

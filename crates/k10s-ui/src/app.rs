@@ -2542,6 +2542,16 @@ impl K10sApp {
                 .into_iter()
                 .cloned()
                 .collect(),
+            port_forward_retry_errors: self
+                .client
+                .port_forward_sessions()
+                .into_iter()
+                .filter_map(|session| {
+                    self.port_forward_retry_errors
+                        .get(&session.id)
+                        .map(|message| (session.id.clone(), message.to_owned()))
+                })
+                .collect(),
             port_forward_error: self.port_forward_error.clone(),
         }
     }

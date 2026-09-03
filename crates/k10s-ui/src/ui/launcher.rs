@@ -29,11 +29,24 @@ impl Default for LauncherState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PortForwardInventory {
+    available: bool,
+    live: usize,
+}
+
+impl PortForwardInventory {
+    pub(super) fn new(available: bool, live: usize) -> Self {
+        Self { available, live }
+    }
+}
+
 pub(super) fn show<I>(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState<I>,
     response: Option<&k10s_protocol::InfrastructureResponse>,
     load: InfrastructureLoad,
+    port_forwards: PortForwardInventory,
     state: &mut LauncherState,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
@@ -103,6 +116,7 @@ pub(super) fn show<I>(
                 inventory.count(response.map(|value| value.launcher.network)),
                 &mut state.network_open,
                 &query,
+                port_forwards,
                 workspace,
                 queued,
             );
@@ -175,17 +189,20 @@ fn group_with_services<I>(
     badge: InventoryBadge,
     open: &mut bool,
     query: &str,
+    port_forwards: PortForwardInventory,
     workspace: &WorkspaceState<I>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) where
     I: Clone + Eq + Hash + Debug,
 {
     let service_matches = query.is_empty() || "services".contains(query);
+    let port_forward_matches =
+        port_forwards.available && (query.is_empty() || "port forwards".contains(query));
     let visible: Vec<_> = WorkloadKind::NETWORK
         .into_iter()
         .filter(|kind| query.is_empty() || kind.title().to_ascii_lowercase().contains(query))
         .collect();
-    if !query.is_empty() && !service_matches && visible.is_empty() {
+    if !query.is_empty() && !service_matches && !port_forward_matches && visible.is_empty() {
         return;
     }
     let reveal = !query.is_empty();
@@ -195,11 +212,54 @@ fn group_with_services<I>(
             if service_matches {
                 singleton(ui, workspace, queued, LauncherItem::Services, "Services");
             }
+            if port_forward_matches {
+                singleton_with_count(
+                    ui,
+                    workspace,
+                    queued,
+                    LauncherItem::PortForwards,
+                    "Port Forwards",
+                    port_forwards.live,
+                );
+            }
             for kind in visible {
                 resource(ui, workspace, queued, kind, None);
             }
         });
     }
+}
+
+fn singleton_with_count<I>(
+    ui: &mut egui::Ui,
+    workspace: &WorkspaceState<I>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+    item: LauncherItem,
+    label: &'static str,
+    count: usize,
+) where
+    I: Clone + Eq + Hash + Debug,
+{
+    ui.horizontal(|ui| {
+        let available = (ui.available_width() - 44.0).max(48.0);
+        let highlighted = workspace.launcher_highlight(item);
+        let button = ui.add_sized(
+            [available, 18.0],
+            egui::Button::selectable(highlighted, label),
+        );
+        if button
+            .on_hover_text(if highlighted {
+                "Focus window"
+            } else {
+                "Open window"
+            })
+            .clicked()
+        {
+            queued.push(WorkspaceCommand::ActivateLauncherItem(item));
+        }
+        let badge = ui.monospace(count.to_string());
+        let accessible = format!("{count} live Port Forwards");
+        badge.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
+    });
 }
 
 fn group_header(

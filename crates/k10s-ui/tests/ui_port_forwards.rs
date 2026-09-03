@@ -117,6 +117,491 @@ fn failed_session(id: &str, revision: u64) -> PortForwardSession {
     }
 }
 
+fn session(
+    id: &str,
+    target: PortForwardTarget,
+    state: PortForwardSessionState,
+    local_addr: &str,
+) -> PortForwardSession {
+    let (pod, pod_port) = match &target {
+        PortForwardTarget::Service { .. } => (
+            PortForwardPodTarget {
+                namespace: "default".into(),
+                name: "web-backing-0".into(),
+                uid: "uid-backing-pod".into(),
+            },
+            8_080,
+        ),
+        PortForwardTarget::Pod {
+            identity,
+            remote_port,
+            ..
+        } => (
+            PortForwardPodTarget {
+                namespace: identity.namespace.clone().unwrap_or_default(),
+                name: identity.name.clone(),
+                uid: identity.uid.clone(),
+            },
+            *remote_port,
+        ),
+    };
+    PortForwardSession {
+        id: PortForwardSessionId::try_new(id).unwrap(),
+        target,
+        requested_local_port: 18_080,
+        pod,
+        pod_port,
+        local_addr: local_addr.into(),
+        state,
+        failure: (state == PortForwardSessionState::Failed).then(|| PortForwardFailure {
+            category: PortForwardFailureCategory::VanishedResource,
+            message: "safe failure: upstream pod disappeared".into(),
+        }),
+        revision: 1,
+    }
+}
+
+struct ManagementFixture {
+    shell: UiShell<ResourceIdentity>,
+    feed: ResourceFeed,
+    connection: ConnectionState,
+}
+
+fn render_management(ui: &mut egui::Ui, fixture: &mut ManagementFixture) {
+    let mut selected = Some("dev-local".to_owned());
+    fixture.shell.show_with_resources(
+        ui,
+        fixture.connection,
+        &[],
+        &mut selected,
+        None,
+        &fixture.feed,
+    );
+}
+
+fn management_harness(sessions: Vec<PortForwardSession>) -> Harness<'static, ManagementFixture> {
+    let mut shell = UiShell::new();
+    let opened = shell.apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+        LauncherItem::PortForwards,
+    ));
+    let window = opened
+        .iter()
+        .find_map(|event| match event {
+            WorkspaceEvent::Opened(window) => Some(*window),
+            _ => None,
+        })
+        .unwrap();
+    shell.apply_workspace_command(WorkspaceCommand::SetGeometry(
+        window,
+        k10s_ui::workspace::WindowGeom {
+            position: [0.0, 0.0],
+            size: [1_000.0, 600.0],
+            collapsed: false,
+        },
+    ));
+    Harness::builder()
+        .with_size(egui::vec2(1_280.0, 800.0))
+        .with_pixels_per_point(1.0)
+        .build_ui_state(
+            render_management,
+            ManagementFixture {
+                shell,
+                feed: ResourceFeed {
+                    port_forward_available: true,
+                    pod_port_forward_available: true,
+                    port_forward_sessions: sessions,
+                    ..ResourceFeed::default()
+                },
+                connection: ConnectionState::Connected,
+            },
+        )
+}
+
+#[test]
+fn manager_projects_mixed_targets_with_complete_columns_and_stable_row_ids() {
+    let service = session(
+        "pf-service",
+        service_target(),
+        PortForwardSessionState::Active,
+        "127.0.0.1:18080",
+    );
+    let pod = session(
+        "pf-pod",
+        pod_target(),
+        PortForwardSessionState::Starting,
+        "",
+    );
+    let harness = management_harness(vec![service, pod]);
+
+    for column in [
+        "Target",
+        "Namespace",
+        "Remote",
+        "Local address",
+        "Status",
+        "Actions",
+    ] {
+        harness.get_by_label(column);
+    }
+    harness.get_by_label("Service web");
+    harness.get_by_label("port 80 · backing Pod web-backing-0:8080");
+    harness.get_by_label("Pod web-0");
+    harness.get_by_label("container web · port 8080");
+    harness.get_by_label("Port forward session pf-service");
+    harness.get_by_label("Port forward session pf-pod");
+}
+
+#[test]
+fn manager_maps_actions_strictly_by_state_and_preserves_safe_failures_verbatim() {
+    let mut stopping = session(
+        "pf-stopping",
+        pod_target(),
+        PortForwardSessionState::Stopping,
+        "127.0.0.1:18081",
+    );
+    stopping.revision = 2;
+    let failed = session(
+        "pf-failed",
+        pod_target(),
+        PortForwardSessionState::Failed,
+        "",
+    );
+    let stopped = session(
+        "pf-stopped",
+        service_target(),
+        PortForwardSessionState::Stopped,
+        "127.0.0.1:18082",
+    );
+    let mut harness = management_harness(vec![stopping, failed, stopped]);
+    harness.run_steps(3);
+
+    harness.get_by_label("Port forward session pf-stopping");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::Button, "Stop port forward pf-stopping")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.get_by_label("Port forward session pf-failed");
+    harness.get_by_label("safe failure: upstream pod disappeared");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Stop port forward pf-failed")
+            .is_none()
+    );
+    let retry = harness.get_by_role_and_label(Role::Button, "Retry port forward pf-failed");
+    assert!(!retry.accesskit_node().is_disabled());
+    retry.scroll_to_me();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::Button, "Retry port forward pf-failed")
+        .click();
+    harness.step();
+    assert_eq!(
+        harness.state_mut().shell.drain_port_forward_actions(),
+        vec![PortForwardAction::Retry(
+            PortForwardSessionId::try_new("pf-failed").unwrap()
+        )]
+    );
+
+    harness.get_by_label("Port forward session pf-stopped");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Copy address for pf-stopped")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Stop port forward pf-stopped")
+            .is_none()
+    );
+}
+
+#[test]
+fn local_address_enables_copy_and_starting_and_active_enable_stop() {
+    for state in [
+        PortForwardSessionState::Starting,
+        PortForwardSessionState::Active,
+    ] {
+        let id = if state == PortForwardSessionState::Starting {
+            "pf-starting"
+        } else {
+            "pf-active"
+        };
+        let mut harness =
+            management_harness(vec![session(id, pod_target(), state, "127.0.0.1:18080")]);
+        harness.run_steps(3);
+        let row_label = format!("Port forward session {id}");
+        harness.get_by_label(&row_label);
+        harness
+            .get_by_role_and_label(Role::Button, &format!("Copy address for {id}"))
+            .click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().shell.drain_port_forward_actions(),
+            vec![PortForwardAction::CopyAddress("127.0.0.1:18080".into())]
+        );
+        harness
+            .get_by_role_and_label(Role::Button, &format!("Stop port forward {id}"))
+            .click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().shell.drain_port_forward_actions(),
+            vec![PortForwardAction::Stop(id.into())]
+        );
+    }
+
+    let harness = management_harness(vec![session(
+        "pf-no-address",
+        pod_target(),
+        PortForwardSessionState::Starting,
+        "",
+    )]);
+    harness.get_by_label("Port forward session pf-no-address");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Copy address for pf-no-address")
+            .is_none()
+    );
+}
+
+#[test]
+fn manager_empty_and_connection_states_are_honest() {
+    let mut harness = management_harness(Vec::new());
+    harness.get_by_label("No port forwards yet. Start one from Pod Ports or Service Ports.");
+
+    harness.state_mut().feed.port_forward_available = false;
+    harness.state_mut().feed.pod_port_forward_available = false;
+    harness.run_steps(2);
+    harness.get_by_label("Port forwarding is unavailable on this connection.");
+
+    harness.state_mut().connection = ConnectionState::Failed;
+    harness.run_steps(2);
+    harness.get_by_label("Disconnected. Existing port-forward sessions are unavailable.");
+
+    harness.state_mut().connection = ConnectionState::Connecting;
+    harness.run_steps(2);
+    harness.get_by_label("Reconnecting to port-forward sessions…");
+}
+
+#[test]
+fn focused_rows_are_consumed_and_stale_focus_is_cleared_without_panicking() {
+    let mut harness = management_harness(vec![session(
+        "pf-focus",
+        pod_target(),
+        PortForwardSessionState::Active,
+        "127.0.0.1:18080",
+    )]);
+    harness
+        .state_mut()
+        .shell
+        .focus_port_forward_session("pf-focus");
+    harness.run_steps(4);
+    let manager = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .port_forward_state(manager.id)
+            .unwrap()
+            .focused_session,
+        None
+    );
+
+    harness
+        .state_mut()
+        .shell
+        .focus_port_forward_session("pf-stale");
+    harness.run_steps(4);
+    let manager = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::PortForwards)
+        .unwrap();
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .port_forward_state(manager.id)
+            .unwrap()
+            .focused_session,
+        None
+    );
+}
+
+#[test]
+fn authoritative_omission_removes_a_terminal_row() {
+    let mut harness = management_harness(vec![session(
+        "pf-terminal",
+        service_target(),
+        PortForwardSessionState::Stopped,
+        "127.0.0.1:18080",
+    )]);
+    harness.get_by_label("Port forward session pf-terminal");
+
+    harness.state_mut().feed.port_forward_sessions.clear();
+    harness.run_steps(3);
+
+    assert!(
+        harness
+            .query_by_label("Port forward session pf-terminal")
+            .is_none()
+    );
+    harness.get_by_label("No port forwards yet. Start one from Pod Ports or Service Ports.");
+}
+
+#[test]
+fn manager_sort_has_a_deterministic_session_id_tiebreaker() {
+    let mut harness = management_harness(vec![
+        session(
+            "pf-z",
+            pod_target(),
+            PortForwardSessionState::Active,
+            "127.0.0.1:18081",
+        ),
+        session(
+            "pf-a",
+            pod_target(),
+            PortForwardSessionState::Active,
+            "127.0.0.1:18080",
+        ),
+    ]);
+    let manager = harness
+        .state()
+        .shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::PortForwards)
+        .unwrap()
+        .id;
+    harness
+        .state_mut()
+        .shell
+        .apply_workspace_command(WorkspaceCommand::SetPortForwardSort(
+            manager,
+            Some(k10s_ui::workspace::SortSpec {
+                column: "namespace".into(),
+                ascending: true,
+            }),
+        ));
+    harness.run_steps(3);
+
+    assert!(
+        harness
+            .get_by_label("Port forward session pf-a")
+            .rect()
+            .top()
+            < harness
+                .get_by_label("Port forward session pf-z")
+                .rect()
+                .top()
+    );
+}
+
+#[test]
+fn retry_error_overlay_is_attached_to_its_authoritative_failed_row() {
+    let failed = session(
+        "pf-overlay",
+        pod_target(),
+        PortForwardSessionState::Failed,
+        "",
+    );
+    let mut harness = management_harness(vec![failed.clone()]);
+    harness
+        .state_mut()
+        .feed
+        .port_forward_retry_errors
+        .insert(failed.id, "retry safely rejected".into());
+    harness.run_steps(3);
+
+    harness.get_by_label("Port forward session pf-overlay");
+    harness.get_by_label("retry safely rejected");
+}
+
+#[test]
+fn launcher_gates_the_singleton_and_counts_only_live_sessions() {
+    let sessions = vec![
+        session(
+            "starting",
+            pod_target(),
+            PortForwardSessionState::Starting,
+            "",
+        ),
+        session(
+            "active",
+            pod_target(),
+            PortForwardSessionState::Active,
+            "127.0.0.1:18080",
+        ),
+        session(
+            "stopping",
+            service_target(),
+            PortForwardSessionState::Stopping,
+            "127.0.0.1:18081",
+        ),
+        session("failed", pod_target(), PortForwardSessionState::Failed, ""),
+        session(
+            "stopped",
+            service_target(),
+            PortForwardSessionState::Stopped,
+            "127.0.0.1:18082",
+        ),
+    ];
+    let mut harness = management_harness(sessions);
+    harness.get_by_label("3 live Port Forwards");
+
+    harness.state_mut().feed.port_forward_available = false;
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Port Forwards");
+    harness.state_mut().feed.port_forward_available = true;
+    harness.state_mut().feed.pod_port_forward_available = false;
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Port Forwards");
+
+    let filter = harness.get_by_role_and_label(Role::TextInput, "Filter resources…");
+    filter.click();
+    filter.type_text("forward");
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Port Forwards");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Port Forwards")
+        .click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .filter(|window| window.kind == WindowKind::PortForwards)
+            .count(),
+        1
+    );
+
+    harness.state_mut().feed.port_forward_available = false;
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Port Forwards")
+            .is_none()
+    );
+}
+
 #[test]
 fn modal_prefills_the_remote_port() {
     let modal = PortForwardStartModal::new(pod_target(), "web · 8080/TCP", 8_080);

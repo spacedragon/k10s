@@ -2,13 +2,93 @@
 
 use std::collections::BTreeMap;
 
-use egui::{RichText, TextEdit, WidgetInfo, WidgetType};
+use egui::{RichText, ScrollArea, TextEdit, WidgetInfo, WidgetType};
 use k10s_protocol::{
     PortForwardSession, PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest,
     PortForwardTarget,
 };
 
 use super::PortForwardAction;
+use crate::workspace::{PortForwardWindowState, SortSpec, WindowId, WorkspaceCommand};
+
+const MANAGEMENT_COLUMNS: [super::responsive_table::ColumnSpec; 6] = [
+    super::responsive_table::ColumnSpec::elastic("target", 140.0),
+    super::responsive_table::ColumnSpec::required("namespace", 100.0),
+    super::responsive_table::ColumnSpec::required("remote", 220.0),
+    super::responsive_table::ColumnSpec::required("local", 132.0),
+    super::responsive_table::ColumnSpec::required("status", 82.0),
+    super::responsive_table::ColumnSpec::required("actions", 164.0),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagementColumn {
+    Target,
+    Namespace,
+    Remote,
+    Local,
+    Status,
+    Actions,
+}
+
+impl ManagementColumn {
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "target" => Some(Self::Target),
+            "namespace" => Some(Self::Namespace),
+            "remote" => Some(Self::Remote),
+            "local" => Some(Self::Local),
+            "status" => Some(Self::Status),
+            "actions" => Some(Self::Actions),
+            _ => None,
+        }
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Namespace => "namespace",
+            Self::Remote => "remote",
+            Self::Local => "local",
+            Self::Status => "status",
+            Self::Actions => "actions",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Target => "Target",
+            Self::Namespace => "Namespace",
+            Self::Remote => "Remote",
+            Self::Local => "Local address",
+            Self::Status => "Status",
+            Self::Actions => "Actions",
+        }
+    }
+}
+
+struct TargetPresentation<'a> {
+    kind: &'static str,
+    name: &'a str,
+    namespace: &'a str,
+    target: String,
+    remote: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionAction {
+    Stop,
+    DisabledStop,
+    Retry,
+    None,
+}
+
+struct SessionPresentation {
+    label: &'static str,
+    color: egui::Color32,
+    rank: u8,
+    action: SessionAction,
+    live: bool,
+}
 
 pub(crate) const PORT_FORWARD_AUTHORITY_UNAVAILABLE: &str =
     "Port forwarding requires live, matching resource details";
@@ -180,7 +260,7 @@ pub fn retry_start_request(
     PortForwardStartRequest::try_target(session.target.clone(), session.requested_local_port)
 }
 
-pub(super) fn show(
+pub(super) fn show_start_modal(
     ctx: &egui::Context,
     modal: &mut Option<PortForwardStartModal>,
     actions: &mut Vec<PortForwardAction>,
@@ -255,6 +335,380 @@ pub(super) fn show(
     if cancel {
         *modal = None;
     }
+}
+
+pub(super) fn show_manager<I>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    state: &PortForwardWindowState,
+    feed: &super::ResourceFeed,
+    connection: super::ConnectionState,
+    actions: &mut Vec<PortForwardAction>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    match connection {
+        super::ConnectionState::Failed => {
+            ui.label("Disconnected. Existing port-forward sessions are unavailable.");
+            clear_focus_if_needed(window_id, state, queued);
+            return;
+        }
+        super::ConnectionState::Connecting => {
+            ui.label("Reconnecting to port-forward sessions…");
+            clear_focus_if_needed(window_id, state, queued);
+            return;
+        }
+        super::ConnectionState::Connected => {}
+    }
+    if !feed.port_forward_available && !feed.pod_port_forward_available {
+        ui.label("Port forwarding is unavailable on this connection.");
+        clear_focus_if_needed(window_id, state, queued);
+        return;
+    }
+    if let Some(error) = &feed.port_forward_error {
+        ui.label(RichText::new(error).color(super::theme::WARNING));
+    }
+    if feed.port_forward_sessions.is_empty() {
+        ui.label("No port forwards yet. Start one from Pod Ports or Service Ports.");
+        clear_focus_if_needed(window_id, state, queued);
+        return;
+    }
+
+    let mut sessions = feed.port_forward_sessions.iter().collect::<Vec<_>>();
+    sort_sessions(&mut sessions, state.sort.as_ref());
+    let spacing = ui.spacing().item_spacing.x;
+    let available = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .width();
+    let columns = super::responsive_table::resolve_columns(
+        &MANAGEMENT_COLUMNS,
+        available,
+        spacing,
+        &std::collections::BTreeSet::new(),
+    );
+    let focus = state.focused_session.as_deref();
+    ScrollArea::both()
+        .id_salt(("k10s.port-forward.sessions", window_id.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for column in &columns.visible {
+                    if let Some(column_kind) = ManagementColumn::from_key(column.key) {
+                        super::responsive_table::sized_cell(ui, column.width, false, |ui| {
+                            sort_header(ui, window_id, column_kind, state.sort.as_ref(), queued);
+                        });
+                    }
+                }
+            });
+            ui.separator();
+            for session in sessions {
+                let focused = focus == Some(session.id.as_str());
+                ui.push_id(session.id.as_str(), |ui| {
+                    let response = egui::Frame::new()
+                        .fill(if focused {
+                            super::theme::SELECTED_ROW
+                        } else if session.state == PortForwardSessionState::Stopped {
+                            ui.visuals().faint_bg_color
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .inner_margin(egui::Margin::symmetric(4, 5))
+                        .show(ui, |ui| {
+                            if session.state == PortForwardSessionState::Stopped {
+                                ui.visuals_mut().override_text_color =
+                                    Some(super::theme::MUTED_TEXT);
+                            }
+                            ui.horizontal(|ui| {
+                                for column in &columns.visible {
+                                    if let Some(column_kind) =
+                                        ManagementColumn::from_key(column.key)
+                                    {
+                                        super::responsive_table::sized_cell(
+                                            ui,
+                                            column.width,
+                                            false,
+                                            |ui| {
+                                                session_cell(
+                                                    ui,
+                                                    column_kind,
+                                                    session,
+                                                    feed.port_forward_retry_errors
+                                                        .get(&session.id)
+                                                        .map(String::as_str),
+                                                    actions,
+                                                );
+                                            },
+                                        );
+                                    }
+                                }
+                            });
+                        })
+                        .response;
+                    let row_label = format!("Port forward session {}", session.id);
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Other, true, row_label.clone())
+                    });
+                    if focused {
+                        response.scroll_to_me(Some(egui::Align::Center));
+                    }
+                });
+            }
+        });
+    if focus.is_some() {
+        queued.push(WorkspaceCommand::ClearPortForwardSessionFocus(window_id));
+    }
+}
+
+fn clear_focus_if_needed<I>(
+    window_id: WindowId,
+    state: &PortForwardWindowState,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    if state.focused_session.is_some() {
+        queued.push(WorkspaceCommand::ClearPortForwardSessionFocus(window_id));
+    }
+}
+
+fn session_cell(
+    ui: &mut egui::Ui,
+    column: ManagementColumn,
+    session: &PortForwardSession,
+    retry_error: Option<&str>,
+    actions: &mut Vec<PortForwardAction>,
+) {
+    match column {
+        ManagementColumn::Target => {
+            let value = target_presentation(session).target;
+            let color = (session.state == PortForwardSessionState::Stopped)
+                .then_some(super::theme::MUTED_TEXT);
+            ui.vertical(|ui| {
+                let response = ui.add(
+                    egui::Label::new(color.map_or_else(
+                        || RichText::new(&value),
+                        |color| RichText::new(&value).color(color),
+                    ))
+                    .truncate(),
+                );
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, value.clone()));
+            });
+        }
+        ManagementColumn::Namespace => {
+            ui.label(target_presentation(session).namespace);
+        }
+        ManagementColumn::Remote => {
+            super::responsive_table::elided_label(ui, target_presentation(session).remote, 30);
+        }
+        ManagementColumn::Local => {
+            ui.monospace(if session.local_addr.is_empty() {
+                "—"
+            } else {
+                session.local_addr.as_str()
+            });
+        }
+        ManagementColumn::Status => {
+            let presentation = session_presentation(session.state);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(presentation.label).color(presentation.color));
+                if let Some(failure) = &session.failure {
+                    ui.scope(|ui| {
+                        ui.visuals_mut().override_text_color = Some(super::theme::WARNING);
+                        super::responsive_table::elided_label(ui, failure.message.clone(), 10);
+                    });
+                }
+                if let Some(error) = retry_error {
+                    ui.scope(|ui| {
+                        ui.visuals_mut().override_text_color = Some(super::theme::WARNING);
+                        super::responsive_table::elided_label(ui, error.to_owned(), 10);
+                    });
+                }
+            });
+        }
+        ManagementColumn::Actions => session_actions(ui, session, actions),
+    }
+}
+
+fn session_actions(
+    ui: &mut egui::Ui,
+    session: &PortForwardSession,
+    actions: &mut Vec<PortForwardAction>,
+) {
+    let presentation = session_presentation(session.state);
+    if presentation.action == SessionAction::None {
+        return;
+    }
+    if !session.local_addr.is_empty() {
+        let copy = ui.small_button("Copy");
+        let label = format!("Copy address for {}", session.id);
+        copy.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+        if copy.clicked() {
+            actions.push(PortForwardAction::CopyAddress(session.local_addr.clone()));
+        }
+    }
+    match presentation.action {
+        SessionAction::Stop => {
+            let stop = ui.small_button("Stop");
+            let label = format!("Stop port forward {}", session.id);
+            stop.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+            if stop.clicked() {
+                actions.push(PortForwardAction::Stop(session.id.to_string()));
+            }
+        }
+        SessionAction::DisabledStop => {
+            let stop = ui.add_enabled(false, egui::Button::new("Stop"));
+            let label = format!("Stop port forward {}", session.id);
+            stop.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+        }
+        SessionAction::Retry => {
+            let retry = ui.small_button("Retry");
+            let label = format!("Retry port forward {}", session.id);
+            retry.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
+            if retry.clicked() {
+                actions.push(PortForwardAction::Retry(session.id.clone()));
+            }
+        }
+        SessionAction::None => {}
+    }
+}
+
+fn sort_header<I>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    column: ManagementColumn,
+    sort: Option<&SortSpec>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    if column == ManagementColumn::Actions {
+        ui.label(column.title());
+        return;
+    }
+    let active = sort.is_some_and(|sort| sort.column == column.key());
+    let ascending = sort.map(|sort| sort.ascending).unwrap_or(true);
+    ui.horizontal(|ui| {
+        ui.label(column.title());
+        let button = ui.small_button(if active {
+            if ascending { "↑" } else { "↓" }
+        } else {
+            "↕"
+        });
+        let accessible = format!("Sort port forwards by {}", column.key());
+        button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
+        if button.clicked() {
+            queued.push(WorkspaceCommand::SetPortForwardSort(
+                window_id,
+                Some(SortSpec {
+                    column: column.key().to_owned(),
+                    ascending: if active { !ascending } else { true },
+                }),
+            ));
+        }
+    });
+}
+
+fn sort_sessions(sessions: &mut [&PortForwardSession], sort: Option<&SortSpec>) {
+    let column = sort
+        .and_then(|sort| ManagementColumn::from_key(&sort.column))
+        .unwrap_or(ManagementColumn::Target);
+    let ascending = sort.map(|sort| sort.ascending).unwrap_or(true);
+    sessions.sort_by(|left, right| {
+        let left_target = target_presentation(left);
+        let right_target = target_presentation(right);
+        let order = match column {
+            ManagementColumn::Namespace => left_target.namespace.cmp(right_target.namespace),
+            ManagementColumn::Remote => left_target.remote.cmp(&right_target.remote),
+            ManagementColumn::Local => left.local_addr.cmp(&right.local_addr),
+            ManagementColumn::Status => session_presentation(left.state)
+                .rank
+                .cmp(&session_presentation(right.state).rank),
+            ManagementColumn::Target | ManagementColumn::Actions => {
+                (left_target.kind, left_target.name).cmp(&(right_target.kind, right_target.name))
+            }
+        }
+        .then_with(|| left.id.cmp(&right.id));
+        if ascending { order } else { order.reverse() }
+    });
+}
+
+fn target_presentation(session: &PortForwardSession) -> TargetPresentation<'_> {
+    match &session.target {
+        PortForwardTarget::Service { identity, port } => {
+            let remote = port_selector_label(port);
+            TargetPresentation {
+                kind: "Service",
+                name: &identity.name,
+                namespace: identity.namespace.as_deref().unwrap_or("—"),
+                target: format!("Service {}", identity.name),
+                remote: format!(
+                    "port {} · backing Pod {}:{}",
+                    remote, session.pod.name, session.pod_port
+                ),
+            }
+        }
+        PortForwardTarget::Pod {
+            identity,
+            container_name,
+            remote_port,
+        } => {
+            let remote = remote_port.to_string();
+            TargetPresentation {
+                kind: "Pod",
+                name: &identity.name,
+                namespace: identity.namespace.as_deref().unwrap_or("—"),
+                target: format!("Pod {}", identity.name),
+                remote: format!("container {} · port {}", container_name, remote),
+            }
+        }
+    }
+}
+
+fn port_selector_label(selector: &k10s_protocol::PortForwardPortSelector) -> String {
+    match selector {
+        k10s_protocol::PortForwardPortSelector::Number { number } => number.to_string(),
+        k10s_protocol::PortForwardPortSelector::Name { name } => name.clone(),
+    }
+}
+
+fn session_presentation(state: PortForwardSessionState) -> SessionPresentation {
+    match state {
+        PortForwardSessionState::Starting => SessionPresentation {
+            label: "Starting",
+            color: super::theme::CONNECTING,
+            rank: 0,
+            action: SessionAction::Stop,
+            live: true,
+        },
+        PortForwardSessionState::Active => SessionPresentation {
+            label: "Active",
+            color: super::theme::HEALTHY,
+            rank: 1,
+            action: SessionAction::Stop,
+            live: true,
+        },
+        PortForwardSessionState::Stopping => SessionPresentation {
+            label: "Stopping",
+            color: super::theme::WARNING,
+            rank: 2,
+            action: SessionAction::DisabledStop,
+            live: true,
+        },
+        PortForwardSessionState::Failed => SessionPresentation {
+            label: "Failed",
+            color: super::theme::DANGER,
+            rank: 3,
+            action: SessionAction::Retry,
+            live: false,
+        },
+        PortForwardSessionState::Stopped => SessionPresentation {
+            label: "Stopped",
+            color: super::theme::MUTED_TEXT,
+            rank: 4,
+            action: SessionAction::None,
+            live: false,
+        },
+    }
+}
+
+pub(super) fn is_live_session_state(state: PortForwardSessionState) -> bool {
+    session_presentation(state).live
 }
 
 fn target_details(ui: &mut egui::Ui, target: &PortForwardTarget) {

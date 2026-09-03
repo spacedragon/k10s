@@ -32,6 +32,7 @@ pub(super) fn show_canvas<I>(
     feed: &resource_window::ResourceFeed,
     context_namespace: Option<&str>,
     connection: ConnectionState,
+    port_forward_actions: &mut Vec<super::PortForwardAction>,
     resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
@@ -71,6 +72,7 @@ where
             load,
             context_namespace,
             connection,
+            port_forward_actions,
             resource_actions,
             queued,
         );
@@ -126,6 +128,7 @@ fn show_window<I>(
     load: InfrastructureLoad,
     context_namespace: Option<&str>,
     connection: ConnectionState,
+    port_forward_actions: &mut Vec<super::PortForwardAction>,
     resource_actions: &mut Vec<super::ResourceAction>,
     queued: &mut Vec<WorkspaceCommand<I>>,
 ) -> bool
@@ -186,11 +189,13 @@ where
     // Workload windows render from a mutable clone of their list state and
     // queue the resulting commands; the workspace stays immutable during
     // rendering.
-    let (mut resource_state, mut service_state, detail_state) = match &state.content {
-        WindowContent::Resource(resource) => (Some(resource.clone()), None, None),
-        WindowContent::Services(service) => (None, Some(service.clone()), None),
-        WindowContent::Detail(detail) => (None, None, Some(detail.clone())),
-        WindowContent::PortForwards(_) => (None, None, None),
+    let (mut resource_state, mut service_state, detail_state, port_forward_state) = match &state
+        .content
+    {
+        WindowContent::Resource(resource) => (Some(resource.clone()), None, None, None),
+        WindowContent::Services(service) => (None, Some(service.clone()), None, None),
+        WindowContent::Detail(detail) => (None, None, Some(detail.clone()), None),
+        WindowContent::PortForwards(port_forward) => (None, None, None, Some(port_forward.clone())),
     };
 
     let title = match &state.content {
@@ -311,7 +316,20 @@ where
                         false
                     }
                 }
-                WindowKind::PortForwards => false,
+                WindowKind::PortForwards => {
+                    if let Some(port_forward) = port_forward_state.as_ref() {
+                        super::port_forward::show_manager(
+                            ui,
+                            state.id,
+                            port_forward,
+                            feed,
+                            connection,
+                            port_forward_actions,
+                            queued,
+                        );
+                    }
+                    false
+                }
                 WindowKind::Workload(_) => {
                     unreachable!("workload windows render through resource_window")
                 }

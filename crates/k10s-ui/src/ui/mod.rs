@@ -103,6 +103,7 @@ pub struct UiShell<I> {
     port_forward_start_modal: Option<PortForwardStartModal>,
     next_port_forward_modal_generation: u64,
     pending_port_forward_session_focus: Option<String>,
+    pending_port_forward_window_raise: Option<WindowId>,
     port_forward_actions: Vec<PortForwardAction>,
     resource_actions: Vec<ResourceAction>,
     external_shell_availability: ExternalShellAvailability,
@@ -190,6 +191,7 @@ where
             port_forward_start_modal: None,
             next_port_forward_modal_generation: 1,
             pending_port_forward_session_focus: None,
+            pending_port_forward_window_raise: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
             external_shell_availability: ExternalShellAvailability::Unavailable,
@@ -351,6 +353,7 @@ where
                     window, session_id,
                 ));
             self.pending_port_forward_session_focus = None;
+            self.pending_port_forward_window_raise = Some(window);
         }
         events
     }
@@ -654,6 +657,13 @@ where
                     &self.workspace,
                     selected_response,
                     load,
+                    launcher::PortForwardInventory::new(
+                        feed.port_forward_available || feed.pod_port_forward_available,
+                        feed.port_forward_sessions
+                            .iter()
+                            .filter(|session| port_forward::is_live_session_state(session.state))
+                            .count(),
+                    ),
                     &mut self.launcher,
                     &mut queued,
                 );
@@ -682,6 +692,7 @@ where
                     feed,
                     selected_namespace,
                     connection,
+                    &mut self.port_forward_actions,
                     &mut self.resource_actions,
                     &mut queued,
                 );
@@ -714,7 +725,7 @@ where
         let port_forward_unavailable = self.port_forward_start_modal.as_ref().and_then(|modal| {
             port_forward::port_forward_start_authorization(feed, &modal.target).err()
         });
-        port_forward::show(
+        port_forward::show_start_modal(
             ui.ctx(),
             &mut self.port_forward_start_modal,
             &mut self.port_forward_actions,
@@ -780,6 +791,9 @@ where
             if let WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) = event {
                 ui.ctx().move_to_top(window::layer_id(id));
             }
+        }
+        if let Some(window) = self.pending_port_forward_window_raise.take() {
+            ui.ctx().move_to_top(window::layer_id(window));
         }
         refresh_requested
     }

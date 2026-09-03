@@ -47,7 +47,7 @@ impl ResultGroup {
     fn result_limit(self) -> usize {
         match self {
             Self::ResourceJumps => 30,
-            Self::ListWindows => 3,
+            Self::ListWindows => 4,
             Self::Commands => 7,
         }
     }
@@ -296,7 +296,15 @@ fn search(query: &str, contexts: &[Context], feed: &ResourceFeed) -> Vec<Palette
             )
         )
     {
-        for (label, item, aliases) in list_candidates() {
+        let mut candidates = list_candidates().to_vec();
+        if feed.port_forward_available || feed.pod_port_forward_available {
+            candidates.push((
+                "Port Forwards",
+                LauncherItem::PortForwards,
+                &["pf", "port-forward", "port-forwards"],
+            ));
+        }
+        for (label, item, aliases) in candidates {
             if prefix.is_some_and(|p| !aliases.contains(&p)) {
                 continue;
             }
