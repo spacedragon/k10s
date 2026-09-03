@@ -591,10 +591,17 @@ fn table_cell(
         || RichText::new(value),
         |color| RichText::new(value).color(color),
     );
-    let response = ui.add_sized(
-        [width, ui.spacing().interact_size.y],
-        egui::Label::new(text).truncate().halign(egui::Align::Min),
-    );
+    let height = ui.spacing().interact_size.y;
+    let response = ui
+        .allocate_ui_with_layout(
+            egui::vec2(width, height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(egui::vec2(width, height));
+                ui.add(egui::Label::new(text).truncate().halign(egui::Align::Min))
+            },
+        )
+        .inner;
     if let Some(accessible) = accessible {
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
         response.on_hover_text(value)
@@ -721,11 +728,11 @@ fn metadata_grid(
     ui.push_id(id, |ui| {
         for (label, value) in rows {
             ui.horizontal(|ui| {
-                ui.add_space(34.0);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(160.0, 24.0),
+                    egui::vec2(140.0, 24.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
+                        ui.set_min_size(egui::vec2(140.0, 24.0));
                         ui.label(RichText::new(*label).weak());
                     },
                 );
@@ -733,6 +740,7 @@ fn metadata_grid(
                     egui::vec2(ui.available_width(), 24.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
+                        ui.set_min_size(egui::vec2(ui.available_width(), 24.0));
                         ui.add(egui::Label::new(value.as_str()).truncate())
                             .on_hover_text(value.as_str());
                     },

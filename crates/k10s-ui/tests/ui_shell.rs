@@ -142,7 +142,7 @@ fn assert_rect_matches_geometry(
 
 fn choose_secondary_context(harness: &mut Harness<'_, ShellFixture>) {
     harness
-        .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+        .get_by_role_and_label(Role::ComboBox, "Context")
         .click();
     harness.run_steps(4);
     harness
@@ -190,11 +190,9 @@ fn initial_shell_has_compact_top_bar_fixed_launcher_and_only_overview() {
     for command in ["Tile", "Cascade", "Focus"] {
         harness.get_by_role_and_label(Role::Button, command);
     }
-    let version = format!("k10s v{}", env!("CARGO_PKG_VERSION"));
-    harness.get_by_label(&version);
-    harness.get_by_label("Connected");
+    harness.get_by_label("Connection status: Connected");
     harness.get_by_role_and_label(Role::Button, "Refresh");
-    let context = harness.get_by_role_and_label(Role::ComboBox, "Kubernetes context");
+    let context = harness.get_by_role_and_label(Role::ComboBox, "Context");
     assert_eq!(context.value().as_deref(), Some(PRIMARY_CONTEXT));
     assert_eq!(harness.state().shell.workspace().context(), PRIMARY_CONTEXT);
 
@@ -241,7 +239,7 @@ fn shell_bands_and_top_bar_remain_non_overlapping_at_supported_viewports() {
                 .get_by_role_and_label(Role::Button, "Refresh")
                 .rect(),
             harness
-                .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+                .get_by_role_and_label(Role::ComboBox, "Context")
                 .rect(),
         ];
         let top = controls
@@ -566,7 +564,7 @@ fn unavailable_context_stays_visible_but_cannot_dispatch_and_shows_reason() {
     harness.run_steps(2);
 
     harness
-        .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+        .get_by_role_and_label(Role::ComboBox, "Context")
         .click();
     harness.run_steps(4);
     let disabled = harness.get_by_label(SECONDARY_CONTEXT);
@@ -936,7 +934,7 @@ fn context_selector_commits_global_context_after_rendering() {
     );
     assert_eq!(
         harness
-            .get_by_role_and_label(Role::ComboBox, "Kubernetes context")
+            .get_by_role_and_label(Role::ComboBox, "Context")
             .value()
             .as_deref(),
         Some(SECONDARY_CONTEXT)

@@ -9662,7 +9662,11 @@ mod tests {
             more.click();
         }
         harness.step();
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾ ⏵");
+        assert!(
+            harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Columns ▾ ⏵")
+                .is_none()
+        );
         harness.get_by_role_and_label(egui::accesskit::Role::Button, "Refresh list");
     }
 

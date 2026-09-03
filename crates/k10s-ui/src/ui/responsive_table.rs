@@ -24,6 +24,7 @@ impl ColumnSpec {
 
     /// Whether the user may hide this column from the toolbar Columns menu.
     #[must_use]
+    #[allow(dead_code)]
     pub const fn is_hideable(&self) -> bool {
         self.hide_priority.is_some()
     }

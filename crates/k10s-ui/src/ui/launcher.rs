@@ -47,7 +47,8 @@ pub(super) fn show<I>(
                 .color(super::theme::ACCENT),
         );
         ui.vertical(|ui| {
-            ui.label(RichText::new("k10s").size(16.0).strong());
+            ui.label(RichText::new("k10s").size(16.0).strong())
+                .on_hover_text(format!("k10s v{}", env!("CARGO_PKG_VERSION")));
             ui.label(
                 RichText::new("KUBERNETES CONSOLE")
                     .small()

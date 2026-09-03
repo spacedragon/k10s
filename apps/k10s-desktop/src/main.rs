@@ -16,12 +16,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         DesktopApp::launch()?
     };
-    // A canvas large enough for the default Overview window plus headroom
-    // for launcher and top bar so nothing is clipped on first launch.
+    let title = format!("k10s v{}", env!("CARGO_PKG_VERSION"));
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title(&title)
+            .with_inner_size([1280.0, 800.0]),
         ..eframe::NativeOptions::default()
     };
-    eframe::run_native("k10s", options, Box::new(move |_| Ok(Box::new(app))))?;
+    eframe::run_native(&title, options, Box::new(move |_| Ok(Box::new(app))))?;
     Ok(())
 }
