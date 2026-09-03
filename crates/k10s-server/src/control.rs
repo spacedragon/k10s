@@ -597,6 +597,7 @@ pub(crate) async fn serve_socket(
                 let task_correlations = operation_correlations.clone();
                 let task_protocol = negotiated_protocol;
                 let task_capabilities = negotiated_capabilities.clone();
+                let task_server_capabilities = config.capabilities.clone();
                 let task_port_forward = task_state;
                 let task_session_id = session_id.clone();
                 let queue_capacity = config.outbound_queue_capacity;
@@ -662,17 +663,72 @@ pub(crate) async fn serve_socket(
                             Ok(Some(ParsedRequest::PortForward(op))) => {
                                 // Capability absence is enforced here and at
                                 // advertisement time; never through panics.
+                                let required_capability = match &op {
+                                    PortForwardOp::Start { target, .. } => match target.as_ref() {
+                                        k10s_protocol::PortForwardTarget::Pod { .. } => {
+                                            Some(k10s_protocol::CAPABILITY_POD_PORT_FORWARD)
+                                        }
+                                        k10s_protocol::PortForwardTarget::Service { .. } => {
+                                            Some(k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD)
+                                        }
+                                    },
+                                    PortForwardOp::Stop { .. } | PortForwardOp::List => None,
+                                };
+                                let pod_on_legacy_minor = matches!(
+                                    &op,
+                                    PortForwardOp::Start { target, .. }
+                                        if matches!(
+                                            target.as_ref(),
+                                            k10s_protocol::PortForwardTarget::Pod { .. }
+                                        )
+                                ) && task_protocol.minor
+                                    < k10s_protocol::GENERALIZED_PORT_FORWARD_MINOR;
+                                let capability_enabled = required_capability.map_or_else(
+                                    || {
+                                        task_capabilities.iter().any(|capability| {
+                                            capability
+                                                == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
+                                                || capability
+                                                    == k10s_protocol::CAPABILITY_POD_PORT_FORWARD
+                                        })
+                                    },
+                                    |required| {
+                                        task_capabilities
+                                            .iter()
+                                            .any(|capability| capability == required)
+                                            && task_server_capabilities
+                                                .iter()
+                                                .any(|capability| capability == required)
+                                    },
+                                );
                                 match task_port_forward.clone() {
                                     None => Err(RequestFailure::Backend(
-                                        BackendError::unsupported("service.portForward"),
+                                        BackendError::unsupported(
+                                            required_capability.unwrap_or("portForward"),
+                                        ),
                                     )),
+                                    Some(_) if pod_on_legacy_minor => Err(RequestFailure::Backend(
+                                        BackendError::unsupported(
+                                            k10s_protocol::CAPABILITY_POD_PORT_FORWARD,
+                                        ),
+                                    )),
+                                    Some(_) if !capability_enabled =>
+                                    {
+                                        Err(RequestFailure::Backend(BackendError::unsupported(
+                                            required_capability.expect("guard checked Some"),
+                                        )))
+                                    }
                                     Some(manager) =>
                                     // Cancellation-aware like every other request.
                                     {
                                         tokio::select! {
                                             () = request_cancel.cancelled() =>
                                                 Err(RequestFailure::Backend(BackendError::Cancelled)),
-                                            outcome = dispatch_port_forward(&manager, op) => outcome,
+                                            outcome = dispatch_port_forward(
+                                                &manager,
+                                                op,
+                                                task_protocol.minor,
+                                            ) => outcome,
                                         }
                                     }
                                 }
@@ -986,6 +1042,8 @@ pub(crate) async fn serve_socket(
                                 let task_subscription = subscription_id.clone();
                                 let task_done = forwarder_done_tx.clone();
                                 let forwarder_task_id = task_id;
+                                let task_manager = Arc::clone(manager);
+                                let task_protocol_minor = negotiated_protocol.minor;
                                 let mut events = manager.subscribe().await;
                                 request_tasks.spawn(async move {
                                     loop {
@@ -1025,13 +1083,26 @@ pub(crate) async fn serve_socket(
                                                 break;
                                             }
                                         };
+                                        let source_port = task_manager
+                                            .resolved_source_port(event.session.id.as_str())
+                                            .await;
+                                        let Some(session) = event
+                                            .session
+                                            .wire_value_for_minor(task_protocol_minor, source_port)
+                                        else {
+                                            continue;
+                                        };
+                                        let projected_event = serde_json::json!({
+                                            "revision": event.revision,
+                                            "session": session,
+                                        });
                                         if enqueue_delta(
                                             &task_outbound,
                                             &task_subscription,
                                             event.session.id.as_str(),
                                             k10s_protocol::PORT_FORWARD_EVENT_SESSION,
                                             event.revision,
-                                            &event,
+                                            &projected_event,
                                             &task_counter,
                                         )
                                         .is_err()
@@ -1309,8 +1380,7 @@ enum ParsedRequest {
 #[derive(Debug, Clone)]
 enum PortForwardOp {
     Start {
-        identity: k10s_protocol::ResourceIdentity,
-        selection: k10s_backend::PortForwardPortSelection,
+        target: Box<k10s_protocol::PortForwardTarget>,
         local_port: u16,
         context: String,
     },
@@ -1617,20 +1687,17 @@ fn parse_request(
                         .validate()
                         .map_err(|reason| reason.to_owned())
                         .map(|_| {
-                            let context = parsed.service.context.clone();
-                            let selection = match parsed.port {
-                                k10s_protocol::PortForwardPortSelector::Name { name } => {
-                                    k10s_backend::PortForwardPortSelection::Name(name)
-                                }
-                                k10s_protocol::PortForwardPortSelector::Number { number } => {
-                                    k10s_backend::PortForwardPortSelection::Number(number)
+                            let (target, local_port) = parsed.into_parts();
+                            let context = match &target {
+                                k10s_protocol::PortForwardTarget::Service { identity, .. }
+                                | k10s_protocol::PortForwardTarget::Pod { identity, .. } => {
+                                    identity.context.clone()
                                 }
                             };
                             Some(ParsedRequest::PortForward(PortForwardOp::Start {
                                 context,
-                                identity: parsed.service,
-                                selection,
-                                local_port: parsed.local_port,
+                                target: Box::new(target),
+                                local_port,
                             }))
                         })
                 })
@@ -1686,22 +1753,25 @@ fn allocate_sequence(counter: &AtomicU64) -> Option<u64> {
 async fn dispatch_port_forward(
     manager: &PortForwardManager,
     op: PortForwardOp,
+    protocol_minor: u16,
 ) -> Result<RequestOutcome, RequestFailure> {
     match op {
         PortForwardOp::Start {
-            identity,
-            selection,
+            target,
             local_port,
             context,
         } => {
-            let outcome = manager
-                .start(identity, selection, local_port, context)
-                .await;
+            let outcome = manager.start(*target, local_port, context).await;
             match outcome {
-                Ok(session) => Ok(RequestOutcome::PortForward(
-                    serde_json::to_value(k10s_protocol::PortForwardStartResponse { session })
-                        .expect("start response serializes"),
-                )),
+                Ok(session) => {
+                    let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                    let session = session
+                        .wire_value_for_minor(protocol_minor, source_port)
+                        .expect("a started session is visible to its compatible client");
+                    Ok(RequestOutcome::PortForward(serde_json::json!({
+                        "session": session
+                    })))
+                }
                 Err(rejected) => Err(RequestFailure::Backend(BackendError::PortForward {
                     category: rejection_from_failure(rejected.category),
                     message: rejected.message,
@@ -1709,12 +1779,11 @@ async fn dispatch_port_forward(
             }
         }
         PortForwardOp::Stop { session_id } => Ok(match manager.stop(&session_id).await {
-            crate::port_forward::StopOutcome::Stopped(session) => RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardStopResponse {
-                    session: Some(session),
-                })
-                .expect("stop response serializes"),
-            ),
+            crate::port_forward::StopOutcome::Stopped(session) => {
+                let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                let session = session.wire_value_for_minor(protocol_minor, source_port);
+                RequestOutcome::PortForward(serde_json::json!({ "session": session }))
+            }
             crate::port_forward::StopOutcome::AlreadyTerminal => RequestOutcome::PortForward(
                 serde_json::to_value(k10s_protocol::PortForwardStopResponse { session: None })
                     .expect("stop response serializes"),
@@ -1722,9 +1791,15 @@ async fn dispatch_port_forward(
         }),
         PortForwardOp::List => {
             let (revision, sessions) = manager.list_snapshot().await;
+            let mut projected = Vec::with_capacity(sessions.len());
+            for session in sessions {
+                let source_port = manager.resolved_source_port(session.id.as_str()).await;
+                if let Some(session) = session.wire_value_for_minor(protocol_minor, source_port) {
+                    projected.push(session);
+                }
+            }
             Ok(RequestOutcome::PortForward(
-                serde_json::to_value(k10s_protocol::PortForwardListResponse { revision, sessions })
-                    .expect("list response serializes"),
+                serde_json::json!({ "revision": revision, "sessions": projected }),
             ))
         }
     }
@@ -1742,6 +1817,7 @@ fn rejection_from_failure(
         F::LocalPortInUse => k10s_backend::RejectionCategory::LocalPortInUse,
         F::VanishedResource => k10s_backend::RejectionCategory::VanishedResource,
         F::UnsupportedService => k10s_backend::RejectionCategory::UnsupportedService,
+        F::UnsupportedPod => k10s_backend::RejectionCategory::UnsupportedPod,
         F::ContextTransition => k10s_backend::RejectionCategory::ContextTransition,
         F::TransportClosed => k10s_backend::RejectionCategory::TransportClosed,
     }
@@ -1756,9 +1832,11 @@ fn port_forward_error_code(category: k10s_backend::RejectionCategory) -> ErrorCo
     match category {
         C::UnavailableEndpoint | C::VanishedResource => ErrorCode::NotFound,
         C::Forbidden => ErrorCode::Unauthorized,
-        C::LocalPortInUse | C::UnsupportedService | C::ContextTransition | C::TransportClosed => {
-            ErrorCode::Conflict
-        }
+        C::LocalPortInUse
+        | C::UnsupportedService
+        | C::UnsupportedPod
+        | C::ContextTransition
+        | C::TransportClosed => ErrorCode::Conflict,
     }
 }
 

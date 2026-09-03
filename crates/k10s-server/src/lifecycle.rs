@@ -521,13 +521,12 @@ pub async fn run_with_assets(
         force: CancellationToken::new(),
     };
     let startup_readiness_delay = config.startup_readiness_delay;
-    // The bounded port-forward manager activates only for servers that
-    // advertise `service.portForward`; standalone and web never do.
-    let port_forward = if config
-        .capabilities
-        .iter()
-        .any(|capability| capability == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD)
-    {
+    // One bounded manager owns both target kinds whenever either capability
+    // is enabled; standalone and web configure neither.
+    let port_forward = if config.capabilities.iter().any(|capability| {
+        capability == k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD
+            || capability == k10s_protocol::CAPABILITY_POD_PORT_FORWARD
+    }) {
         kernel.port_forward_connector().map(|connector| {
             let (events_tx, _) = tokio::sync::broadcast::channel(64);
             Arc::new(crate::port_forward::PortForwardManager::new(

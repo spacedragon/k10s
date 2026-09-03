@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 
 use k10s_protocol::{
     BackendRevision, CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD,
-    GroupVersionKind, PortForwardFailureCategory, PortForwardListResponse, PortForwardPodTarget,
-    PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent, PortForwardSessionId,
-    PortForwardSessionState, PortForwardStartRequest, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
-    REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP, ResourceChanged, ResourceDetailResponse,
-    ResourceIdentity, ResourceListRow, ResourceProjection, ResourceSnapshotPage, ServerFrame,
-    ServerKind, ServicePort, ServiceProjection, SubscriptionSelector, TargetPort,
-    TransportProtocol, decode_server_frame,
+    GroupVersionKind, PROTOCOL_MINOR, PortForwardFailureCategory, PortForwardListResponse,
+    PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent,
+    PortForwardSessionId, PortForwardSessionState, PortForwardStartRequest, PortForwardTarget,
+    REQUEST_PORT_FORWARD_LIST, REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,
+    ResourceChanged, ResourceDetailResponse, ResourceIdentity, ResourceListRow, ResourceProjection,
+    ResourceSnapshotPage, ServerFrame, ServerKind, ServicePort, ServiceProjection,
+    SubscriptionSelector, TargetPort, TransportProtocol, decode_server_frame,
 };
 use serde_json::{Value, json};
 
@@ -728,6 +728,53 @@ fn legacy_service_session_json_decodes_into_the_generalized_model() {
     assert_eq!(generalized["requestedLocalPort"], json!(45621));
     assert!(generalized.get("service").is_none());
     assert!(generalized.get("servicePort").is_none());
+}
+
+#[test]
+fn prior_minor_wire_projection_filters_pods_and_uses_legacy_service_fields() {
+    let service = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-service").unwrap(),
+        target: PortForwardTarget::Service {
+            identity: service_identity(),
+            port: PortForwardPortSelector::Name {
+                name: "http".into(),
+            },
+        },
+        requested_local_port: 0,
+        pod: PortForwardPodTarget {
+            namespace: "default".into(),
+            name: "web-pod".into(),
+            uid: "uid-web-pod".into(),
+        },
+        pod_port: 8080,
+        local_addr: "127.0.0.1:32000".into(),
+        state: PortForwardSessionState::Active,
+        failure: None,
+        revision: 9,
+    };
+    let pod = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-pod").unwrap(),
+        target: PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "app".into(),
+            remote_port: 8080,
+        },
+        ..service.clone()
+    };
+
+    let legacy = service
+        .wire_value_for_minor(PROTOCOL_MINOR - 1, Some(80))
+        .expect("Service remains visible to old clients");
+    assert!(legacy.get("service").is_some());
+    assert_eq!(legacy["servicePort"], json!(80));
+    assert!(legacy.get("target").is_none());
+    assert!(pod.wire_value_for_minor(PROTOCOL_MINOR - 1, None).is_none());
+
+    let current = pod
+        .wire_value_for_minor(PROTOCOL_MINOR, None)
+        .expect("current clients receive Pods");
+    assert_eq!(current["target"]["kind"], json!("pod"));
+    assert_eq!(current["requestedLocalPort"], json!(0));
 }
 
 #[test]

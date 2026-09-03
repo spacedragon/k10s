@@ -29,6 +29,9 @@ pub const REQUEST_PORT_FORWARD_LIST: &str = "portForward.list";
 /// Envelope event kind carrying a [`PortForwardSessionEvent`].
 pub const PORT_FORWARD_EVENT_SESSION: &str = "portForward.session";
 
+/// First protocol minor whose session snapshots use generalized targets.
+pub const GENERALIZED_PORT_FORWARD_MINOR: u16 = 6;
+
 /// Which declared Service port a start request forwards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -406,6 +409,61 @@ pub struct PortForwardSession {
     pub failure: Option<PortForwardFailure>,
     /// Monotonic snapshot revision of this session.
     pub revision: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyServiceSessionRef<'a> {
+    id: &'a PortForwardSessionId,
+    service: &'a ResourceIdentity,
+    service_port: u16,
+    pod: &'a PortForwardPodTarget,
+    pod_port: u16,
+    local_addr: &'a str,
+    state: PortForwardSessionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: &'a Option<PortForwardFailure>,
+    revision: u64,
+}
+
+impl PortForwardSession {
+    /// Encode this snapshot for a negotiated protocol minor.
+    ///
+    /// Prior-minor clients receive only the legacy Service shape. `None`
+    /// filters Pod sessions before they can reach an older decoder. The
+    /// manager supplies the resolved declared Service port because a named
+    /// selector intentionally does not duplicate that numeric resolution in
+    /// the generalized model.
+    pub fn wire_value_for_minor(
+        &self,
+        protocol_minor: u16,
+        resolved_service_port: Option<u16>,
+    ) -> Option<serde_json::Value> {
+        if protocol_minor >= GENERALIZED_PORT_FORWARD_MINOR {
+            return Some(serde_json::to_value(self).expect("session serializes"));
+        }
+        let PortForwardTarget::Service { identity, port } = &self.target else {
+            return None;
+        };
+        let service_port = resolved_service_port.or(match port {
+            PortForwardPortSelector::Number { number } => Some(*number),
+            PortForwardPortSelector::Name { .. } => None,
+        })?;
+        Some(
+            serde_json::to_value(LegacyServiceSessionRef {
+                id: &self.id,
+                service: identity,
+                service_port,
+                pod: &self.pod,
+                pod_port: self.pod_port,
+                local_addr: &self.local_addr,
+                state: self.state,
+                failure: &self.failure,
+                revision: self.revision,
+            })
+            .expect("legacy Service session serializes"),
+        )
+    }
 }
 
 #[derive(Deserialize)]

@@ -20,12 +20,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use k10s_backend::{
-    BackendError, PortForwardConnector, PortForwardPortSelection, PortForwardRequest,
-    RejectionCategory, ResolvedPortForward,
+    BackendError, PortForwardConnector, PortForwardRequest, RejectionCategory, ResolvedPortForward,
 };
 use k10s_protocol::{
     PortForwardFailure, PortForwardFailureCategory, PortForwardPodTarget, PortForwardSession,
-    PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState, ResourceIdentity,
+    PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState, PortForwardTarget,
 };
 
 /// Hard limit of active sessions per embedded server.
@@ -68,10 +67,9 @@ pub enum StopOutcome {
 /// Authoritative internal state of one session.
 struct SessionInner {
     id: String,
-    identity: ResourceIdentity,
-    /// Original port selection so named and numeric duplicates both focus.
-    selector: PortForwardPortSelection,
-    service_port: u16,
+    target: PortForwardTarget,
+    target_key: TargetKey,
+    requested_local_port: u16,
     local_addr: std::net::SocketAddr,
     resolved: ResolvedPortForward,
     state: PortForwardSessionState,
@@ -85,6 +83,21 @@ struct SessionInner {
     pumps: TaskTracker,
     cancel: CancellationToken,
     accept_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Stable active-session equivalence. The local port is intentionally absent:
+/// repeated starts focus an existing target regardless of bind preference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetKey {
+    Service {
+        uid: String,
+        source_port: u16,
+    },
+    Pod {
+        uid: String,
+        container_name: String,
+        remote_port: u16,
+    },
 }
 
 /// Global live-connection budget shared without the manager lock so data
@@ -170,8 +183,8 @@ impl PortForwardManager {
     }
 
     /// Start one session: resolve exactly once, bind loopback, publish
-    /// Active. A duplicate Service UID + Service-port identity focuses the
-    /// existing session instead of creating a second listener.
+    /// Active. A duplicate stable Service or Pod target focuses the existing
+    /// session instead of creating a second listener.
     ///
     /// Publication validates the request against the committed context and
     /// the gate epoch: starts carrying a retired context or racing a switch
@@ -179,14 +192,20 @@ impl PortForwardManager {
     /// context-transition error.
     pub async fn start(
         &self,
-        identity: ResourceIdentity,
-        selection: PortForwardPortSelection,
-        local_port: u16,
+        target: PortForwardTarget,
+        requested_local_port: u16,
         requested_context: String,
     ) -> Result<PortForwardSession, StartRejected> {
+        if let Err(message) = target.validate() {
+            let category = match target {
+                PortForwardTarget::Service { .. } => PortForwardFailureCategory::UnsupportedService,
+                PortForwardTarget::Pod { .. } => PortForwardFailureCategory::UnsupportedPod,
+            };
+            return Err(StartRejected::new(category, message));
+        }
         let observed_epoch = {
             let state = self.state.lock().await;
-            if let Some(existing) = Self::find_in_state(&state, &identity, &selection, None).await {
+            if let Some(existing) = Self::find_exact_requested_target(&state, &target).await {
                 return Ok(existing);
             }
             state.epoch
@@ -199,32 +218,24 @@ impl PortForwardManager {
         }
 
         // Resolve before binding; failures never touch local resources.
-        let Some(namespace) = identity.namespace.clone() else {
-            return Err(StartRejected::new(
-                PortForwardFailureCategory::UnsupportedService,
-                "cluster-scoped objects cannot be forwarded",
-            ));
-        };
         let request = PortForwardRequest {
             context: requested_context.clone(),
-            namespace,
-            service_name: identity.name.clone(),
-            service_uid: identity.uid.clone(),
-            port: selection.clone(),
+            target: target.clone(),
         };
-        let resolved = match self.connector.resolve_service_port(request).await {
+        let resolved = match self.connector.resolve(request).await {
             Ok(resolved) => resolved,
             Err(error) => return Err(Self::map_backend_error(error)),
         };
+        let target_key = TargetKey::from_resolved(&target, &resolved);
 
         // Bind only 127.0.0.1 before reporting success; port 0 asks the OS.
-        let bind_addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, local_port));
+        let bind_addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, requested_local_port));
         let listener = match TcpListener::bind(bind_addr).await {
             Ok(listener) => listener,
             Err(_) => {
                 return Err(StartRejected::new(
                     PortForwardFailureCategory::LocalPortInUse,
-                    format!("local port {local_port} is already in use"),
+                    format!("local port {requested_local_port} is already in use"),
                 ));
             }
         };
@@ -262,9 +273,7 @@ impl PortForwardManager {
                 "the maximum number of port-forward sessions is active",
             ));
         }
-        if let Some(existing) =
-            Self::find_in_state(&state, &identity, &selection, Some(resolved.service_port)).await
-        {
+        if let Some(existing) = Self::find_key_in_state(&state, &target_key).await {
             return Ok(existing);
         }
 
@@ -276,14 +285,11 @@ impl PortForwardManager {
             )
         })?;
         let session_cancel = self.cancel.child_token();
-        // The declared Service port comes from resolution so named
-        // selections retain their declared port identity.
-        let service_port = resolved.service_port;
         let inner = Arc::new(Mutex::new(SessionInner {
             id: id.clone(),
-            identity,
-            selector: selection.clone(),
-            service_port,
+            target,
+            target_key,
+            requested_local_port,
             local_addr,
             resolved,
             state: PortForwardSessionState::Active,
@@ -362,7 +368,7 @@ impl PortForwardManager {
         };
         Self::join_session_tasks(accept_handle, &inner).await;
         let snapshot = {
-            let mut state = self.state.lock().await;
+            let state = self.state.lock().await;
             let mut guard = inner.lock().await;
             let _publication = self.publication.gate.lock().await;
             guard.revision = self.publication.next.fetch_add(1, Ordering::AcqRel);
@@ -371,7 +377,6 @@ impl PortForwardManager {
                 revision: snapshot.revision,
                 session: snapshot.clone(),
             });
-            state.sessions.remove(session_id);
             snapshot
         };
         StopOutcome::Stopped(snapshot)
@@ -401,6 +406,16 @@ impl PortForwardManager {
     /// diagnostics, then pruned here under the manager lock.
     pub async fn list(&self) -> Vec<PortForwardSession> {
         self.list_snapshot().await.1
+    }
+
+    /// Return the resolved declared source port retained for compatibility
+    /// encoding of a session snapshot.
+    pub async fn resolved_source_port(&self, session_id: &str) -> Option<u16> {
+        let inner = {
+            let state = self.state.lock().await;
+            state.sessions.get(session_id).cloned()
+        }?;
+        Some(inner.lock().await.resolved.source_port)
     }
 
     /// Capture retained sessions together with a manager-global watermark.
@@ -468,7 +483,6 @@ impl PortForwardManager {
                 session: snapshot,
             });
             drop(guard);
-            state.sessions.remove(&id);
             joins.push((inner, handle));
         }
         // Keep the manager gate held across drains and the backend commit:
@@ -524,20 +538,10 @@ impl PortForwardManager {
         }
     }
 
-    /// Lock-free variant for callers already holding the manager lock.
-    ///
-    /// Duplicates are exact-selector matches or the same declared Service
-    /// port reached through either selection form.
-    async fn find_in_state(
+    async fn find_exact_requested_target(
         state: &ManagerState,
-        identity: &ResourceIdentity,
-        selection: &PortForwardPortSelection,
-        resolved_service_port: Option<u16>,
+        target: &PortForwardTarget,
     ) -> Option<PortForwardSession> {
-        let wanted_number = match selection {
-            PortForwardPortSelection::Name(name) => name.parse::<u16>().ok(),
-            PortForwardPortSelection::Number(number) => Some(*number),
-        };
         for inner in state.sessions.values() {
             let guard = inner.lock().await;
             if matches!(
@@ -548,10 +552,24 @@ impl PortForwardManager {
                 // create a fresh session instead of focusing a dead one.
                 continue;
             }
-            let same_selector = &guard.selector == selection
-                || wanted_number.is_some_and(|n| n == guard.service_port)
-                || resolved_service_port == Some(guard.service_port);
-            if &guard.identity == identity && same_selector {
+            if targets_have_same_requested_identity(&guard.target, target) {
+                return Some(snapshot_of(&guard));
+            }
+        }
+        None
+    }
+
+    async fn find_key_in_state(
+        state: &ManagerState,
+        target_key: &TargetKey,
+    ) -> Option<PortForwardSession> {
+        for inner in state.sessions.values() {
+            let guard = inner.lock().await;
+            if !matches!(
+                guard.state,
+                PortForwardSessionState::Stopped | PortForwardSessionState::Failed
+            ) && &guard.target_key == target_key
+            {
                 return Some(snapshot_of(&guard));
             }
         }
@@ -608,6 +626,7 @@ impl PortForwardManager {
                     RejectionCategory::UnsupportedService => {
                         PortForwardFailureCategory::UnsupportedService
                     }
+                    RejectionCategory::UnsupportedPod => PortForwardFailureCategory::UnsupportedPod,
                     RejectionCategory::TransportClosed => {
                         PortForwardFailureCategory::TransportClosed
                     }
@@ -647,8 +666,8 @@ impl PortForwardManager {
 fn snapshot_of(session: &SessionInner) -> PortForwardSession {
     PortForwardSession {
         id: PortForwardSessionId::try_new(session.id.clone()).expect("stored ids are valid"),
-        service: session.identity.clone(),
-        service_port: session.service_port,
+        target: session.target.clone(),
+        requested_local_port: session.requested_local_port,
         pod: PortForwardPodTarget {
             namespace: session.resolved.namespace.clone(),
             name: session.resolved.pod_name.clone(),
@@ -659,6 +678,61 @@ fn snapshot_of(session: &SessionInner) -> PortForwardSession {
         state: session.state,
         failure: session.failure.clone(),
         revision: session.revision,
+    }
+}
+
+impl TargetKey {
+    fn from_resolved(target: &PortForwardTarget, resolved: &ResolvedPortForward) -> Self {
+        match target {
+            PortForwardTarget::Service { identity, .. } => Self::Service {
+                uid: identity.uid.clone(),
+                source_port: resolved.source_port,
+            },
+            PortForwardTarget::Pod {
+                identity,
+                container_name,
+                remote_port,
+            } => Self::Pod {
+                uid: identity.uid.clone(),
+                container_name: container_name.clone(),
+                remote_port: *remote_port,
+            },
+        }
+    }
+}
+
+fn targets_have_same_requested_identity(
+    left: &PortForwardTarget,
+    right: &PortForwardTarget,
+) -> bool {
+    match (left, right) {
+        (
+            PortForwardTarget::Service {
+                identity: left_identity,
+                port: left_port,
+            },
+            PortForwardTarget::Service {
+                identity: right_identity,
+                port: right_port,
+            },
+        ) => left_identity.uid == right_identity.uid && left_port == right_port,
+        (
+            PortForwardTarget::Pod {
+                identity: left_identity,
+                container_name: left_container,
+                remote_port: left_port,
+            },
+            PortForwardTarget::Pod {
+                identity: right_identity,
+                container_name: right_container,
+                remote_port: right_port,
+            },
+        ) => {
+            left_identity.uid == right_identity.uid
+                && left_container == right_container
+                && left_port == right_port
+        }
+        _ => false,
     }
 }
 

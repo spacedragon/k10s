@@ -55,10 +55,10 @@ pub use operation::{
     YamlDiagnostic, YamlOutcome, YamlValidateRequest, buffer_hash,
 };
 pub use port_forward::{
-    CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD, PORT_FORWARD_EVENT_SESSION,
-    PortForwardFailure, PortForwardFailureCategory, PortForwardListRequest,
-    PortForwardListResponse, PortForwardPodTarget, PortForwardPortSelector, PortForwardSession,
-    PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState,
+    CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD, GENERALIZED_PORT_FORWARD_MINOR,
+    PORT_FORWARD_EVENT_SESSION, PortForwardFailure, PortForwardFailureCategory,
+    PortForwardListRequest, PortForwardListResponse, PortForwardPodTarget, PortForwardPortSelector,
+    PortForwardSession, PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState,
     PortForwardStartRequest, PortForwardStartResponse, PortForwardStopRequest,
     PortForwardStopResponse, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
     REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP,

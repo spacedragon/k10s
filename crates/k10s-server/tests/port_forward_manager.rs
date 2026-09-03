@@ -9,7 +9,10 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use k10s_backend::{BackendError, PortForwardConnector, PortForwardRequest, RejectionCategory};
-use k10s_protocol::{GroupVersionKind, PortForwardSessionState, ResourceIdentity};
+use k10s_protocol::{
+    GroupVersionKind, PortForwardPortSelector, PortForwardSessionState, PortForwardTarget,
+    ResourceIdentity,
+};
 
 use k10s_server::port_forward::PortForwardManager;
 
@@ -21,6 +24,50 @@ fn identity(name: &str) -> ResourceIdentity {
         name: name.into(),
         uid: format!("uid-{name}"),
     }
+}
+
+fn service_target(name: &str, port: PortForwardPortSelector) -> PortForwardTarget {
+    PortForwardTarget::Service {
+        identity: identity(name),
+        port,
+    }
+}
+
+fn pod_target(name: &str, container: &str, port: u16) -> PortForwardTarget {
+    PortForwardTarget::Pod {
+        identity: ResourceIdentity {
+            context: "dev-local".into(),
+            gvk: GroupVersionKind::core("v1", "Pod"),
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        },
+        container_name: container.into(),
+        remote_port: port,
+    }
+}
+
+#[tokio::test]
+async fn pod_duplicate_key_ignores_requested_local_port() {
+    let seam = ScriptedSeam::new(&["web-pod"]);
+    let (manager, _) = manager_for(seam).await;
+
+    let first = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .expect("Pod start succeeds");
+    let focused = manager
+        .start(
+            pod_target("web-pod", "app", 8_080),
+            32_001,
+            "dev-local".into(),
+        )
+        .await
+        .expect("same Pod key focuses regardless of requested local port");
+
+    assert_eq!(focused.id, first.id);
+    assert_eq!(first.requested_local_port, 0);
+    assert!(matches!(first.target, PortForwardTarget::Pod { .. }));
 }
 
 /// A scripted seam: resolution succeeds for allowed names, otherwise a
@@ -49,7 +96,7 @@ impl ScriptedSeam {
     }
 
     async fn add_peer_channel(&self) -> mpsc::Receiver<tokio::io::DuplexStream> {
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(64);
         self.peers.lock().await.push(tx);
         rx
     }
@@ -68,29 +115,43 @@ impl k10s_backend::PortForwardSeam for ScriptedSeam {
         >,
     > {
         Box::pin(async move {
-            let ok = self
-                .allowed
-                .lock()
-                .unwrap()
-                .contains(request.service_name.as_str());
+            let is_pod = matches!(&request.target, PortForwardTarget::Pod { .. });
+            let (name, uid, source_port, namespace) = match &request.target {
+                PortForwardTarget::Service { identity, port } => (
+                    identity.name.clone(),
+                    identity.uid.clone(),
+                    match port {
+                        PortForwardPortSelector::Number { number } => *number,
+                        PortForwardPortSelector::Name { name } => name.parse().unwrap_or(80),
+                    },
+                    identity.namespace.clone().unwrap(),
+                ),
+                PortForwardTarget::Pod {
+                    identity,
+                    remote_port,
+                    ..
+                } => (
+                    identity.name.clone(),
+                    identity.uid.clone(),
+                    *remote_port,
+                    identity.namespace.clone().unwrap(),
+                ),
+            };
+            let ok = self.allowed.lock().unwrap().contains(name.as_str());
             if !ok {
                 return Err(BackendError::PortForward {
                     category: RejectionCategory::UnavailableEndpoint,
                     message: "scripted rejection".into(),
                 });
             }
-            let service_port = match request.port {
-                k10s_backend::PortForwardPortSelection::Number(number) => number,
-                k10s_backend::PortForwardPortSelection::Name(name) => name.parse().unwrap_or(80),
-            };
             Ok(k10s_backend::ResolvedPortForward {
                 context: request.context,
-                namespace: request.namespace,
-                service_uid: request.service_uid,
-                service_port,
-                pod_name: "pinned-pod".into(),
-                pod_uid: "uid-pinned".into(),
-                pod_port: 8_080,
+                namespace,
+                target_uid: uid.clone(),
+                source_port,
+                pod_name: if is_pod { name } else { "pinned-pod".into() },
+                pod_uid: if is_pod { uid } else { "uid-pinned".into() },
+                pod_port: if is_pod { source_port } else { 8_080 },
             })
         })
     }
@@ -136,8 +197,7 @@ async fn publication_revisions_follow_wire_order_during_start_failure_race() {
     let (manager, _) = manager_for(seam).await;
     let first = manager
         .start(
-            identity("first"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("first", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -150,8 +210,7 @@ async fn publication_revisions_follow_wire_order_during_start_failure_race() {
     let start_second = tokio::spawn(async move {
         racing_manager
             .start(
-                identity("second"),
-                k10s_backend::PortForwardPortSelection::Number(80),
+                service_target("second", PortForwardPortSelector::Number { number: 80 }),
                 0,
                 "dev-local".into(),
             )
@@ -203,8 +262,7 @@ async fn binds_loopback_with_os_assigned_ports_and_reports_active() {
 
     let session = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -230,8 +288,7 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
 
     let first = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -245,8 +302,7 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
 
     let error = manager
         .start(
-            identity("other"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("other", PortForwardPortSelector::Number { number: 80 }),
             occupied,
             "dev-local".into(),
         )
@@ -259,8 +315,7 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
     // Duplicate Service UID + Service-port focuses instead of duplicating.
     let focused = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -269,8 +324,12 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
     assert_eq!(focused.id, first.id);
     let focused_by_name = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Name("http".into()),
+            service_target(
+                "web",
+                PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+            ),
             0,
             "dev-local".into(),
         )
@@ -282,6 +341,118 @@ async fn explicit_occupied_ports_fail_and_duplicate_starts_focus() {
 }
 
 #[tokio::test]
+async fn service_and_pod_sessions_share_the_same_session_limit() {
+    let names: Vec<String> = (0..=k10s_server::port_forward::MAX_SESSIONS)
+        .map(|index| format!("target-{index}"))
+        .collect();
+    let allowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let seam = ScriptedSeam::new(&allowed);
+    let (manager, _) = manager_for(seam).await;
+
+    for (index, name) in names
+        .iter()
+        .take(k10s_server::port_forward::MAX_SESSIONS)
+        .enumerate()
+    {
+        let target = if index % 2 == 0 {
+            service_target(name, PortForwardPortSelector::Number { number: 80 })
+        } else {
+            pod_target(name, "app", 8_080)
+        };
+        manager
+            .start(target, 0, "dev-local".into())
+            .await
+            .expect("the combined budget admits each slot");
+    }
+
+    let overflow = manager
+        .start(
+            pod_target(names.last().unwrap(), "app", 8_080),
+            0,
+            "dev-local".into(),
+        )
+        .await
+        .expect_err("the next target of either kind exceeds the shared limit");
+    assert_eq!(
+        overflow.category,
+        k10s_protocol::PortForwardFailureCategory::UnavailableEndpoint
+    );
+}
+
+#[tokio::test]
+async fn service_and_pod_sessions_share_the_global_connection_limit() {
+    let seam = ScriptedSeam::new(&["service-a", "service-b", "pod-a", "pod-b"]);
+    let _peers = seam.add_peer_channel().await;
+    let (manager, _) = manager_for(seam).await;
+    let mut addresses = Vec::new();
+    for target in [
+        service_target("service-a", PortForwardPortSelector::Number { number: 80 }),
+        pod_target("pod-a", "app", 8_080),
+        service_target("service-b", PortForwardPortSelector::Number { number: 80 }),
+        pod_target("pod-b", "app", 8_080),
+    ] {
+        let session = manager.start(target, 0, "dev-local".into()).await.unwrap();
+        addresses.push(session.local_addr.parse().unwrap());
+    }
+    let mut connections = Vec::new();
+    for index in 0..k10s_server::port_forward::MAX_TOTAL_CONNECTIONS {
+        connections.push(
+            tokio::net::TcpStream::connect(addresses[index % addresses.len()])
+                .await
+                .unwrap(),
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut overflow = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(2), overflow.read(&mut byte))
+        .await
+        .expect("overflow connection is closed promptly")
+        .unwrap();
+    assert_eq!(read, 0);
+    drop(connections);
+}
+
+#[tokio::test]
+async fn failed_snapshot_is_retained_and_does_not_block_a_new_start() {
+    let seam = ScriptedSeam::new(&["web-pod"]);
+    let failures = seam.failure_switch();
+    let (manager, _) = manager_for(seam).await;
+    let mut events = manager.subscribe().await;
+    let failed = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .unwrap();
+    failures.store(true, std::sync::atomic::Ordering::Release);
+    let addr = failed.local_addr.parse().unwrap();
+    for _ in 0..3 {
+        tokio::net::TcpStream::connect(addr).await.unwrap();
+    }
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if event.session.id == failed.id && event.session.state == PortForwardSessionState::Failed {
+            break;
+        }
+    }
+
+    failures.store(false, std::sync::atomic::Ordering::Release);
+    let retried = manager
+        .start(pod_target("web-pod", "app", 8_080), 0, "dev-local".into())
+        .await
+        .expect("terminal snapshots do not satisfy duplicate focus");
+    assert_ne!(retried.id, failed.id);
+    let listed = manager.list().await;
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|session| {
+        session.id == failed.id && session.state == PortForwardSessionState::Failed
+    }));
+}
+
+#[tokio::test]
 async fn stop_is_idempotent_and_data_flows_bidirectionally() {
     let seam = ScriptedSeam::new(&["web"]);
     let mut peers = seam.add_peer_channel().await;
@@ -289,8 +460,7 @@ async fn stop_is_idempotent_and_data_flows_bidirectionally() {
 
     let session = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -320,6 +490,9 @@ async fn stop_is_idempotent_and_data_flows_bidirectionally() {
         manager.stop(session.id.as_str()).await,
         k10s_server::port_forward::StopOutcome::AlreadyTerminal
     );
+    let retained = manager.list().await;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].state, PortForwardSessionState::Stopped);
 
     // The bound port is released immediately after stop.
     let rebound = tokio::net::TcpListener::bind(addr).await;
@@ -333,30 +506,32 @@ async fn context_transition_stops_every_session_and_advances_the_epoch_once() {
     let mut events = manager.subscribe().await;
 
     for name in ["a", "b"] {
+        let target = if name == "a" {
+            service_target(name, PortForwardPortSelector::Number { number: 80 })
+        } else {
+            pod_target(name, "app", 8_080)
+        };
         let _ = manager
-            .start(
-                identity(name),
-                k10s_backend::PortForwardPortSelection::Number(80),
-                0,
-                "dev-local".into(),
-            )
+            .start(target, 0, "dev-local".into())
             .await
             .expect("start");
     }
     let epoch_before = manager.epoch().await;
     manager.begin_context_transition("prod".to_owned()).await;
     assert_eq!(manager.epoch().await, epoch_before + 1, "one epoch step");
+    let retained = manager.list().await;
+    assert_eq!(retained.len(), 2, "the drain retains both target kinds");
     assert!(
-        manager.list().await.is_empty(),
-        "the drain removed every session"
+        retained
+            .iter()
+            .all(|session| session.state == PortForwardSessionState::Stopped)
     );
     while events.try_recv().is_ok() {}
 
     // Starts carrying the retired context abort without binding anything.
     let error = manager
         .start(
-            identity("a"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("a", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -373,8 +548,7 @@ async fn failed_context_commit_keeps_the_authoritative_context() {
     let (manager, _) = manager_for(seam).await;
     let first = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -386,8 +560,7 @@ async fn failed_context_commit_keeps_the_authoritative_context() {
     assert_eq!(result, Err("backend rejected"));
     let retried = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -402,8 +575,7 @@ async fn shutdown_cancels_sessions_and_releases_their_ports() {
     let (manager, cancel) = manager_for(seam).await;
     let session = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Number(80),
+            service_target("web", PortForwardPortSelector::Number { number: 80 }),
             0,
             "dev-local".into(),
         )
@@ -430,14 +602,24 @@ async fn stop_joins_active_pumps_and_closes_their_local_connections() {
 
     let session = manager
         .start(
-            identity("web"),
-            k10s_backend::PortForwardPortSelection::Name("http".into()),
+            service_target(
+                "web",
+                PortForwardPortSelector::Name {
+                    name: "http".into(),
+                },
+            ),
             0,
             "dev-local".into(),
         )
         .await
         .expect("named start keeps declared identity");
-    assert_eq!(session.service_port, 80, "declared identity from Name");
+    assert!(matches!(
+        session.target,
+        PortForwardTarget::Service {
+            port: PortForwardPortSelector::Name { ref name },
+            ..
+        } if name == "http"
+    ));
 
     let addr: std::net::SocketAddr = session.local_addr.parse().unwrap();
     let mut local = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -485,8 +667,7 @@ async fn context_transition_and_shutdown_drain_live_pumps_without_deadlock() {
         let (manager, cancel) = manager_for(seam).await;
         let session = manager
             .start(
-                identity("web"),
-                k10s_backend::PortForwardPortSelection::Number(80),
+                service_target("web", PortForwardPortSelector::Number { number: 80 }),
                 0,
                 "dev-local".into(),
             )
