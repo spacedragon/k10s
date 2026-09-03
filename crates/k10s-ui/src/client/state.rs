@@ -16,8 +16,9 @@ use k10s_protocol::{
     ResourceListRow, ResourceMetricsResponse, ResourceRefRequest, ResourceRelationsResponse,
     ResourceTypesRequest, ResourceTypesResponse, ResumeStatus, Retryability, ScaleRequest,
     ServerFrame, ServerKind, ServerPayload, SessionId, StreamTarget, StreamTicketRequest,
-    StreamTicketResponse, Subscribe, SubscriptionId, SubscriptionSelector, TRAFFIC_EVENT_UPDATED, TrafficSample,
-    TrafficWatchSpec, Unsubscribe, YamlApplyRequest, YamlOutcome, YamlValidateRequest,
+    StreamTicketResponse, Subscribe, SubscriptionId, SubscriptionSelector, TRAFFIC_EVENT_UPDATED,
+    TrafficSample, TrafficWatchSpec, Unsubscribe, YamlApplyRequest, YamlOutcome,
+    YamlValidateRequest,
 };
 
 /// Client connection lifecycle.
@@ -1257,10 +1258,12 @@ impl ClientState {
     fn apply_session(&mut self, session: PortForwardSession) {
         let revision = session.revision;
         let session_id = session.id.as_str().to_owned();
-        let is_newer = self.port_forward_sessions.get(&session_id).map_or(
-            revision > self.port_forward_list_revision,
-            |current| revision > current.revision,
-        );
+        let is_newer = self
+            .port_forward_sessions
+            .get(&session_id)
+            .map_or(revision > self.port_forward_list_revision, |current| {
+                revision > current.revision
+            });
         if is_newer {
             self.port_forward_sessions.insert(session_id, session);
         }
