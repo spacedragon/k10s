@@ -83,12 +83,15 @@ pub struct PortForwardRetryErrors {
 }
 
 impl PortForwardRetryErrors {
+    /// Store one safe retry rejection on its originating failed row.
+    pub fn record(&mut self, session: &PortForwardSession, message: impl Into<String>) {
+        self.errors
+            .insert(session.id.clone(), (session.revision, message.into()));
+    }
+
     /// Store the retry-only local-port conflict guidance for a failed row.
     pub fn local_port_conflict(&mut self, session: &PortForwardSession) {
-        self.errors.insert(
-            session.id.clone(),
-            (session.revision, RETRY_LOCAL_PORT_GUIDANCE.to_owned()),
-        );
+        self.record(session, RETRY_LOCAL_PORT_GUIDANCE);
     }
 
     /// Remove an overlay after a later retry succeeds.

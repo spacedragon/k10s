@@ -12,7 +12,9 @@ use k10s_ui::{
         PortForwardAction, PortForwardRetryErrors, PortForwardStartModal, UiShell,
         retry_start_request,
     },
-    workspace::WindowKind,
+    workspace::{
+        BlockResolution, LauncherItem, WindowKind, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
+    },
 };
 
 fn pod_identity() -> ResourceIdentity {
@@ -207,6 +209,58 @@ fn success_and_duplicate_success_close_the_modal_and_focus_the_returned_session(
             Some(session_id)
         );
     }
+}
+
+#[test]
+fn successful_start_focus_replays_after_dirty_yaml_guard_resolution() {
+    let mut shell: UiShell<ResourceIdentity> = UiShell::new();
+    let opened = shell.apply_workspace_command(WorkspaceCommand::ActivateLauncherItem(
+        LauncherItem::Workload(WorkloadKind::Pods),
+    ));
+    let pods = opened
+        .iter()
+        .find_map(|event| match event {
+            WorkspaceEvent::Opened(window) => Some(*window),
+            _ => None,
+        })
+        .unwrap();
+    shell.apply_workspace_command(WorkspaceCommand::SelectRow(pods, pod_identity()));
+    shell.apply_workspace_command(WorkspaceCommand::BeginYamlEdit(pods));
+    assert!(matches!(
+        shell
+            .apply_workspace_command(WorkspaceCommand::CloseWindow(pods))
+            .as_slice(),
+        [WorkspaceEvent::Blocked(_)]
+    ));
+
+    shell.focus_port_forward_session("started-during-guard");
+    assert!(
+        shell
+            .workspace()
+            .windows()
+            .iter()
+            .all(|window| window.kind != WindowKind::PortForwards)
+    );
+
+    shell.apply_workspace_command(WorkspaceCommand::ResolveBlock(
+        BlockResolution::DiscardYaml { window: pods },
+    ));
+
+    let manager = shell
+        .workspace()
+        .windows()
+        .iter()
+        .find(|window| window.kind == WindowKind::PortForwards)
+        .expect("the completed start focus is replayed after the guard resolves");
+    assert_eq!(
+        shell
+            .workspace()
+            .port_forward_state(manager.id)
+            .unwrap()
+            .focused_session
+            .as_deref(),
+        Some("started-during-guard")
+    );
 }
 
 #[test]

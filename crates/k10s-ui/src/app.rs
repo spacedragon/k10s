@@ -149,6 +149,8 @@ pub struct K10sApp {
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
     pending_port_forwards: Vec<PendingPortForward>,
+    next_port_forward_issuance: u64,
+    latest_focused_port_forward_issuance: Option<u64>,
     port_forward_retry_errors: PortForwardRetryErrors,
     port_forward_error: Option<String>,
     port_forward_switch_prompt: Option<String>,
@@ -300,6 +302,7 @@ struct DetailLifecycleSource {
 struct PendingPortForward {
     request: PendingRequest,
     intent: PendingPortForwardIntent,
+    issuance: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -399,6 +402,8 @@ impl K10sApp {
             namespace_rejected_context: None,
             port_forward_list: None,
             pending_port_forwards: Vec::new(),
+            next_port_forward_issuance: 1,
+            latest_focused_port_forward_issuance: None,
             port_forward_retry_errors: PortForwardRetryErrors::default(),
             port_forward_error: None,
             port_forward_switch_prompt: None,
@@ -743,6 +748,7 @@ impl K10sApp {
                     self.pending_port_forwards.push(PendingPortForward {
                         request,
                         intent: PendingPortForwardIntent::Stop,
+                        issuance: None,
                     });
                 }
             }
@@ -852,10 +858,14 @@ impl K10sApp {
                 request,
                 generation,
             } => match self.client.begin(Query::PortForwardStart(request)) {
-                Ok(request) => self.pending_port_forwards.push(PendingPortForward {
-                    request,
-                    intent: PendingPortForwardIntent::StartModal(generation),
-                }),
+                Ok(request) => {
+                    let issuance = self.allocate_port_forward_issuance();
+                    self.pending_port_forwards.push(PendingPortForward {
+                        request,
+                        intent: PendingPortForwardIntent::StartModal(generation),
+                        issuance: Some(issuance),
+                    });
+                }
                 Err(error) => self
                     .shell
                     .port_forward_start_failed(safe_port_forward_client_error(&error)),
@@ -867,6 +877,7 @@ impl K10sApp {
                     self.pending_port_forwards.push(PendingPortForward {
                         request,
                         intent: PendingPortForwardIntent::Stop,
+                        issuance: None,
                     });
                 }
             }
@@ -877,14 +888,23 @@ impl K10sApp {
                     .into_iter()
                     .find(|session| session.id == id)
                     .cloned();
-                if let Some(source) = source
-                    && let Ok(start) = retry_start_request(&source)
-                    && let Ok(request) = self.client.begin(Query::PortForwardStart(start))
-                {
-                    self.pending_port_forwards.push(PendingPortForward {
-                        request,
-                        intent: PendingPortForwardIntent::Retry(Box::new(source)),
-                    });
+                if let Some(source) = source {
+                    match retry_start_request(&source) {
+                        Ok(start) => match self.client.begin(Query::PortForwardStart(start)) {
+                            Ok(request) => {
+                                let issuance = self.allocate_port_forward_issuance();
+                                self.pending_port_forwards.push(PendingPortForward {
+                                    request,
+                                    intent: PendingPortForwardIntent::Retry(Box::new(source)),
+                                    issuance: Some(issuance),
+                                });
+                            }
+                            Err(error) => self
+                                .port_forward_retry_errors
+                                .record(&source, safe_port_forward_client_error(&error)),
+                        },
+                        Err(message) => self.port_forward_retry_errors.record(&source, message),
+                    }
                 }
             }
             crate::ui::PortForwardAction::FocusSession(id) => {
@@ -1482,8 +1502,11 @@ impl K10sApp {
                                     {
                                         self.port_forward_retry_errors.local_port_conflict(&source);
                                     }
-                                    PendingPortForwardIntent::Retry(_)
-                                    | PendingPortForwardIntent::Stop => {
+                                    PendingPortForwardIntent::Retry(source) => {
+                                        self.port_forward_retry_errors
+                                            .record(&source, server_error.safe_message.clone());
+                                    }
+                                    PendingPortForwardIntent::Stop => {
                                         self.port_forward_error =
                                             Some(server_error.safe_message.clone());
                                     }
@@ -1975,6 +1998,22 @@ impl K10sApp {
         }
     }
 
+    fn allocate_port_forward_issuance(&mut self) -> u64 {
+        let issuance = self.next_port_forward_issuance;
+        self.next_port_forward_issuance = self.next_port_forward_issuance.saturating_add(1);
+        issuance
+    }
+
+    fn focus_successful_port_forward(&mut self, issuance: u64, session_id: &str) {
+        if self
+            .latest_focused_port_forward_issuance
+            .is_none_or(|latest| issuance > latest)
+        {
+            self.latest_focused_port_forward_issuance = Some(issuance);
+            self.shell.focus_port_forward_session(session_id);
+        }
+    }
+
     /// Send queued frames only through an opened transport.
     ///
     /// Before the handshake completes every browser-side send fails with
@@ -2033,8 +2072,12 @@ impl K10sApp {
             .map(|(index, _)| index)
             .rev()
             .collect::<Vec<_>>();
-        for index in completed {
-            let pending = self.pending_port_forwards.remove(index);
+        let completed = completed
+            .into_iter()
+            .map(|index| self.pending_port_forwards.remove(index))
+            .collect::<Vec<_>>();
+        for pending in completed.into_iter().rev() {
+            let issuance = pending.issuance;
             let Some(result) = self.client.take(pending.request) else {
                 continue;
             };
@@ -2042,16 +2085,22 @@ impl K10sApp {
                 (
                     PendingPortForwardIntent::StartModal(generation),
                     QueryResult::PortForwardStarted(response),
-                ) => self
-                    .shell
-                    .port_forward_start_succeeded_for(generation, response.session.id.as_str()),
+                ) => {
+                    self.shell.port_forward_start_completed_for(generation);
+                    self.focus_successful_port_forward(
+                        issuance.expect("start requests carry issuance order"),
+                        response.session.id.as_str(),
+                    );
+                }
                 (
                     PendingPortForwardIntent::Retry(source),
                     QueryResult::PortForwardStarted(response),
                 ) => {
                     self.port_forward_retry_errors.retry_succeeded(&source.id);
-                    self.shell
-                        .focus_port_forward_session(response.session.id.as_str());
+                    self.focus_successful_port_forward(
+                        issuance.expect("retry requests carry issuance order"),
+                        response.session.id.as_str(),
+                    );
                 }
                 (PendingPortForwardIntent::Stop, QueryResult::PortForwardStopped(_)) => {}
                 _ => {}
@@ -3903,7 +3952,12 @@ impl K10sApp {
 
     fn retire_resource_context(&mut self) {
         for pending in std::mem::take(&mut self.pending_port_forwards) {
-            let _ = self.client.cancel(&pending.request);
+            if self.client.is_pending(&pending.request) {
+                let _ = self.client.cancel(&pending.request);
+            } else {
+                let _ = self.client.take(pending.request.clone());
+                let _ = self.client.take_failure(pending.request);
+            }
         }
         self.reset_port_forward_ui(None);
         for identity in self.detail_requests.keys().cloned().collect::<Vec<_>>() {
@@ -6326,6 +6380,133 @@ mod tests {
     }
 
     #[test]
+    fn context_switch_retires_same_poll_completed_port_forward_result() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("new-session", 7);
+        let generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "web · 8080/TCP", 8_080);
+        app.shell.port_forward_start_modal_mut().unwrap().pending = true;
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation,
+            },
+        );
+        let completed = app.pending_port_forwards[0].request.clone();
+        let mut active = source;
+        active.state = PortForwardSessionState::Active;
+        active.failure = None;
+        active.local_addr = "127.0.0.1:18080".into();
+        active.revision = 8;
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                completed.id().clone(),
+                PortForwardStartResponse { session: active },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(!app.client.is_pending(&completed));
+        assert_eq!(app.pending_port_forwards.len(), 1);
+
+        app.handle_workspace_event(WorkspaceEvent::ContextSwitched {
+            to: "next-context".into(),
+        });
+
+        assert!(app.pending_port_forwards.is_empty());
+        assert!(
+            app.client.take(completed).is_none(),
+            "context retirement consumes the completed result budget entry"
+        );
+    }
+
+    #[test]
+    fn newest_issued_success_keeps_focus_when_older_completion_arrives_later() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("source", 7);
+        let request = PortForwardStartRequest::try_target(source.target.clone(), 18_080).unwrap();
+
+        let first_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "first", 18_080);
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request: request.clone(),
+                generation: first_generation,
+            },
+        );
+        let first = app.pending_port_forwards[0].request.clone();
+
+        let second_generation =
+            app.shell
+                .open_port_forward_start(source.target.clone(), "second", 18_080);
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Start {
+                request,
+                generation: second_generation,
+            },
+        );
+        let second = app.pending_port_forwards[1].request.clone();
+
+        let mut first_session = source.clone();
+        first_session.id = PortForwardSessionId::try_new("first-session").unwrap();
+        first_session.state = PortForwardSessionState::Active;
+        first_session.failure = None;
+        first_session.local_addr = "127.0.0.1:18080".into();
+        first_session.revision = 8;
+        let mut second_session = first_session.clone();
+        second_session.id = PortForwardSessionId::try_new("second-session").unwrap();
+        second_session.local_addr = "127.0.0.1:18081".into();
+        second_session.revision = 9;
+
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                second.id().clone(),
+                PortForwardStartResponse {
+                    session: second_session.clone(),
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                first.id().clone(),
+                PortForwardStartResponse {
+                    session: first_session,
+                },
+            )),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_requests();
+
+        let manager = app
+            .workspace()
+            .windows()
+            .iter()
+            .find(|window| window.kind == crate::workspace::WindowKind::PortForwards)
+            .unwrap();
+        assert_eq!(
+            app.workspace()
+                .port_forward_state(manager.id)
+                .unwrap()
+                .focused_session
+                .as_deref(),
+            Some(second_session.id.as_str())
+        );
+    }
+
+    #[test]
     fn retry_conflict_is_an_app_overlay_and_later_success_clears_it() {
         let (mut app, _) = ready_app();
         let source = failed_port_forward("failed", 7);
@@ -6415,6 +6596,80 @@ mod tests {
                 .as_deref(),
             Some("replacement")
         );
+    }
+
+    #[test]
+    fn retry_server_rejection_is_scoped_to_its_source_row() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("failed", 7);
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(PortForwardStartResponse {
+                    session: source.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+        let rejected = app.pending_port_forwards[0].request.clone();
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(rejected.id().clone()),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Unauthorized,
+                    "access denied by policy",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "retry-forbidden",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.port_forward_retry_error(&source.id),
+            Some("access denied by policy")
+        );
+        assert_eq!(app.port_forward_error, None);
+    }
+
+    #[test]
+    fn retry_local_dispatch_rejection_is_scoped_to_its_source_row() {
+        let (mut app, _) = ready_app();
+        let source = failed_port_forward("failed", 7);
+        app.client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(PortForwardStartResponse {
+                    session: source.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        app.client.application_close();
+
+        app.process_port_forward_action(
+            &egui::Context::default(),
+            crate::ui::PortForwardAction::Retry(source.id.clone()),
+        );
+
+        assert!(app.pending_port_forwards.is_empty());
+        assert_eq!(
+            app.port_forward_retry_error(&source.id),
+            Some("Port forwarding is not available right now")
+        );
+        assert_eq!(app.port_forward_error, None);
     }
 
     fn ready_app_with_minor(minor: u16) -> (K10sApp, Rc<RefCell<FactoryState>>) {

@@ -101,6 +101,7 @@ pub struct UiShell<I> {
     requested_context: Option<(String, ContextRequestOrigin)>,
     port_forward_start_modal: Option<PortForwardStartModal>,
     next_port_forward_modal_generation: u64,
+    pending_port_forward_session_focus: Option<String>,
     port_forward_actions: Vec<PortForwardAction>,
     resource_actions: Vec<ResourceAction>,
     external_shell_availability: ExternalShellAvailability,
@@ -187,6 +188,7 @@ where
             requested_context: None,
             port_forward_start_modal: None,
             next_port_forward_modal_generation: 1,
+            pending_port_forward_session_focus: None,
             port_forward_actions: Vec::new(),
             resource_actions: Vec::new(),
             external_shell_availability: ExternalShellAvailability::Unavailable,
@@ -220,7 +222,9 @@ where
         &mut self,
         command: WorkspaceCommand<I>,
     ) -> Vec<WorkspaceEvent<I>> {
-        self.workspace.apply(command)
+        let mut events = self.workspace.apply(command);
+        events.extend(self.replay_pending_port_forward_session_focus());
+        events
     }
 
     /// Drain the context a switch was requested toward, if any, together
@@ -306,6 +310,14 @@ where
         generation: PortForwardModalGeneration,
         session_id: &str,
     ) {
+        self.port_forward_start_completed_for(generation);
+        self.focus_port_forward_session(session_id);
+    }
+
+    pub(crate) fn port_forward_start_completed_for(
+        &mut self,
+        generation: PortForwardModalGeneration,
+    ) {
         if self
             .port_forward_start_modal
             .as_ref()
@@ -313,25 +325,33 @@ where
         {
             self.port_forward_start_modal = None;
         }
-        self.focus_port_forward_session(session_id);
     }
 
     /// Open/focus the singleton manager and one authoritative session row.
     pub fn focus_port_forward_session(&mut self, session_id: &str) {
+        self.pending_port_forward_session_focus = Some(session_id.to_owned());
+        let _ = self.replay_pending_port_forward_session_focus();
+    }
+
+    fn replay_pending_port_forward_session_focus(&mut self) -> Vec<WorkspaceEvent<I>> {
+        let Some(session_id) = self.pending_port_forward_session_focus.clone() else {
+            return Vec::new();
+        };
         let events = self.workspace.apply(WorkspaceCommand::ActivateLauncherItem(
             crate::workspace::LauncherItem::PortForwards,
         ));
-        let window = events.into_iter().find_map(|event| match event {
-            WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(id),
+        let window = events.iter().find_map(|event| match event {
+            WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => Some(*id),
             _ => None,
         });
         if let Some(window) = window {
             self.workspace
                 .apply(WorkspaceCommand::FocusPortForwardSession(
-                    window,
-                    session_id.to_owned(),
+                    window, session_id,
                 ));
+            self.pending_port_forward_session_focus = None;
         }
+        events
     }
 
     pub fn drain_resource_actions(&mut self) -> Vec<ResourceAction> {
@@ -763,6 +783,11 @@ where
                 }
             }
             ui.ctx().request_repaint();
+        }
+        for event in self.replay_pending_port_forward_session_focus() {
+            if let WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) = event {
+                ui.ctx().move_to_top(window::layer_id(id));
+            }
         }
         refresh_requested
     }
