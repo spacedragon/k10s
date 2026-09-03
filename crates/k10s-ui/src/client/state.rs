@@ -6,10 +6,11 @@ use k10s_protocol::{
     DeleteRequest, ErrorCode, ErrorFrame, ErrorScope, Hello, INFRASTRUCTURE_EVENT_UPDATED,
     InfrastructureRequest, InfrastructureResponse, InfrastructureWatchSpec, OperationAccepted,
     OperationId, OperationProgress, OperationStatus, OperationStatusRequest,
-    OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    PortForwardListResponse, PortForwardSession, PortForwardSessionEvent, PortForwardSessionId,
-    PortForwardSessionState, PortForwardStartRequest, PortForwardStartResponse,
-    PortForwardStopRequest, PortForwardStopResponse, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
+    OperationStatusResponse, PORT_FORWARD_EVENT_SESSION, PORT_FORWARD_EVENT_SNAPSHOT,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, PortForwardListResponse, PortForwardSession,
+    PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState,
+    PortForwardStartRequest, PortForwardStartResponse, PortForwardStopRequest,
+    PortForwardStopResponse, PortForwardTarget, REQUEST_PORT_FORWARD_LIST,
     REQUEST_PORT_FORWARD_START, REQUEST_PORT_FORWARD_STOP, REQUEST_RESOURCE_RELATIONS,
     RESOURCE_EVENT_CHANGED, RESOURCE_EVENT_GONE, Request, RequestId, ResourceDetailResponse,
     ResourceIdentity, ResourceListRequest, ResourceListResponse, ResourceListRow,
@@ -755,11 +756,16 @@ pub struct ClientState {
     /// complete snapshots on the bounded `portForwardSessions` stream and
     /// reconstructed via `portForward.list` after reconnects.
     port_forward_sessions: BTreeMap<String, PortForwardSession>,
-    /// Highest manager-global revision covered by an authoritative list,
-    /// response snapshot, or event envelope. Individual events must be
-    /// strictly newer so a list omission at revision R acts as a tombstone
-    /// against delayed events through R.
-    port_forward_revision: u64,
+    /// Highest manager-global revision covered by an authoritative list.
+    /// A list omission at revision R acts as a tombstone against delayed
+    /// events or responses through R. Session updates are otherwise ordered
+    /// independently by each session's embedded revision.
+    port_forward_list_revision: u64,
+    /// Highest manager-global revision observed on the ordered subscription
+    /// feed. This prevents an older in-flight list from replacing state that
+    /// a newer event already established without coupling query responses for
+    /// unrelated sessions to that global ordering.
+    port_forward_feed_revision: u64,
     /// Desired subscription presence for the bounded session stream.
     port_forward_subscribed: Option<SubscriptionId>,
     /// Current authoritative replacement list. The exact request ID prevents
@@ -853,7 +859,8 @@ impl ClientState {
             traffic: HashMap::new(),
             server_bootstrap: None,
             port_forward_sessions: BTreeMap::new(),
-            port_forward_revision: 0,
+            port_forward_list_revision: 0,
+            port_forward_feed_revision: 0,
             port_forward_subscribed: None,
             port_forward_reconstruction: None,
             internal_port_forward_reconstruction: None,
@@ -1249,19 +1256,21 @@ impl ClientState {
 
     /// Apply one session snapshot under its monotonic revision.
     fn apply_session(&mut self, session: PortForwardSession) {
-        if session.revision <= self.port_forward_revision {
-            return; // stale, reordered, or duplicated delivery
+        let session_id = session.id.as_str().to_owned();
+        let is_newer = self.port_forward_sessions.get(&session_id).map_or(
+            session.revision > self.port_forward_list_revision,
+            |current| session.revision > current.revision,
+        );
+        if is_newer {
+            self.port_forward_sessions.insert(session_id, session);
         }
-        self.port_forward_revision = session.revision;
-        self.port_forward_sessions
-            .insert(session.id.as_str().to_owned(), session);
     }
 
     /// Apply a subscription event using its manager-global envelope revision
     /// as the ordering authority. The embedded session revision still guards
     /// that session against regression if an inconsistent snapshot arrives.
     fn apply_session_event(&mut self, event: PortForwardSessionEvent) {
-        if event.revision <= self.port_forward_revision {
+        if event.revision <= self.port_forward_feed_revision {
             return; // covered by an equal/newer list or event
         }
 
@@ -1271,30 +1280,41 @@ impl ClientState {
             .port_forward_sessions
             .get(&session_id)
             .is_none_or(|current| session.revision > current.revision);
-        self.port_forward_revision = self
-            .port_forward_revision
-            .max(event.revision)
-            .max(session.revision);
         if snapshot_is_newer {
             self.port_forward_sessions.insert(session_id, session);
         }
+        self.port_forward_feed_revision = event.revision;
     }
 
     /// Apply an authoritative reconstruction snapshot. Equal revisions still
     /// replace state so an omission at the current watermark removes expired
     /// terminal sessions; only strictly older lists are ignored.
     fn apply_port_forward_list(&mut self, response: &PortForwardListResponse) -> bool {
-        if response.revision < self.port_forward_revision {
+        if response.revision < self.port_forward_feed_revision {
             return false;
         }
-        self.port_forward_sessions.clear();
-        let mut max_revision = response.revision;
+
+        let listed_ids = response
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str().to_owned())
+            .collect::<HashSet<_>>();
+        self.port_forward_sessions.retain(|session_id, session| {
+            listed_ids.contains(session_id) || session.revision > response.revision
+        });
         for session in &response.sessions {
-            max_revision = max_revision.max(session.revision);
-            self.port_forward_sessions
-                .insert(session.id.as_str().to_owned(), session.clone());
+            let session_id = session.id.as_str().to_owned();
+            let should_replace = self
+                .port_forward_sessions
+                .get(&session_id)
+                .is_none_or(|current| session.revision >= current.revision);
+            if should_replace {
+                self.port_forward_sessions
+                    .insert(session_id, session.clone());
+            }
         }
-        self.port_forward_revision = max_revision;
+        self.port_forward_list_revision = response.revision;
+        self.port_forward_feed_revision = response.revision;
         true
     }
 
@@ -2174,6 +2194,17 @@ impl ClientState {
                     }
                     Ok(())
                 }
+                PORT_FORWARD_EVENT_SNAPSHOT => {
+                    let response: PortForwardListResponse =
+                        serde_json::from_value(event.payload)
+                            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+                    let owned = self.port_forward_subscribed.as_ref()
+                        == self.owned_subscription(&frame).as_ref();
+                    if owned {
+                        let _ = self.apply_port_forward_list(&response);
+                    }
+                    Ok(())
+                }
                 RESOURCE_EVENT_GONE => {
                     let delta: k10s_protocol::ResourceGone = serde_json::from_value(event.payload)
                         .map_err(|error| ClientError::Protocol(error.to_string()))?;
@@ -2438,7 +2469,8 @@ impl ClientState {
         self.completed.clear();
         self.completed_failures.clear();
         self.port_forward_sessions.clear();
-        self.port_forward_revision = 0;
+        self.port_forward_list_revision = 0;
+        self.port_forward_feed_revision = 0;
         self.port_forward_reconstruction = None;
         self.internal_port_forward_reconstruction = None;
         self.rebuilt_bootstrap = None;

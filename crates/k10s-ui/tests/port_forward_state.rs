@@ -375,6 +375,77 @@ fn stale_revisions_do_not_regress_retained_terminal_sessions() {
 }
 
 #[test]
+fn reordered_start_responses_for_different_sessions_are_both_retained() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+
+    for (id, revision) in [("pf-newer", 2), ("pf-older", 1)] {
+        client
+            .apply_port_forward_response(
+                k10s_protocol::REQUEST_PORT_FORWARD_START,
+                &serde_json::to_value(k10s_protocol::PortForwardStartResponse {
+                    session: service_session(id, PortForwardSessionState::Active, revision),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let ids = client
+        .port_forward_sessions()
+        .into_iter()
+        .map(|session| session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["pf-newer", "pf-older"]);
+}
+
+#[test]
+fn reordered_stop_response_survives_a_newer_response_for_another_session() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
+            &serde_json::to_value(k10s_protocol::PortForwardListResponse {
+                revision: 1,
+                sessions: vec![
+                    service_session("pf-a", PortForwardSessionState::Active, 1),
+                    service_session("pf-b", PortForwardSessionState::Active, 1),
+                ],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_START,
+            &serde_json::to_value(k10s_protocol::PortForwardStartResponse {
+                session: service_session("pf-a", PortForwardSessionState::Active, 3),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_STOP,
+            &serde_json::to_value(k10s_protocol::PortForwardStopResponse {
+                session: Some(service_session("pf-b", PortForwardSessionState::Stopped, 2)),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    let stopped = client
+        .port_forward_sessions()
+        .into_iter()
+        .find(|session| session.id.as_str() == "pf-b")
+        .unwrap();
+    assert_eq!(stopped.state, PortForwardSessionState::Stopped);
+    assert_eq!(stopped.revision, 2);
+}
+
+#[test]
 fn explicit_connect_registers_a_fresh_port_forward_subscription() {
     let mut client =
         ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
@@ -824,6 +895,55 @@ fn authoritative_list_omission_rejects_equal_or_stale_events_but_accepts_newer_e
         .unwrap();
     assert_eq!(client.port_forward_sessions().len(), 1);
     assert_eq!(client.port_forward_sessions()[0].revision, 6);
+}
+
+#[test]
+fn authoritative_subscription_snapshot_removes_expired_terminal_rows() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+
+    client
+        .apply_port_forward_response(
+            k10s_protocol::REQUEST_PORT_FORWARD_LIST,
+            &serde_json::to_value(k10s_protocol::PortForwardListResponse {
+                revision: 5,
+                sessions: vec![service_session(
+                    "pf-expired",
+                    PortForwardSessionState::Stopped,
+                    5,
+                )],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    client
+        .apply(ServerFrame {
+            kind: ServerKind::Event,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: Some(1),
+            payload: serde_json::to_value(Event {
+                event_kind: k10s_protocol::PORT_FORWARD_EVENT_SNAPSHOT.into(),
+                revision: None,
+                payload: serde_json::to_value(k10s_protocol::PortForwardListResponse {
+                    revision: 5,
+                    sessions: vec![],
+                })
+                .unwrap(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+
+    assert!(
+        client.port_forward_sessions().is_empty(),
+        "an authoritative stream snapshot must remove an expired terminal row"
+    );
 }
 
 #[test]
