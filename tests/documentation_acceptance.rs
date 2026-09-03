@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use k10s_protocol::{
     CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD, CONTROL_PATH, EXEC_PATH,
-    LOGS_PATH, PROTOCOL_MINOR,
+    LOGS_PATH, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 use k10s_server::ServerConfig;
 use k10s_server::port_forward::{
@@ -41,8 +41,10 @@ fn desktop_port_forward_security_contract_is_documented() {
         }
     }
     assert!(
-        protocol.contains(&format!("minor `{PROTOCOL_MINOR}`")),
-        "protocol guide's current minor must match the implementation"
+        protocol.contains(&format!(
+            "current protocol is major `{PROTOCOL_MAJOR}`, minor `{PROTOCOL_MINOR}`"
+        )),
+        "protocol guide's current version must match the implementation"
     );
     for required in [
         "exact core/v1 Pod identity including UID",
@@ -309,7 +311,7 @@ fn operational_contracts_have_acceptance_coverage() {
     let deployment = read("docs/deployment.md");
     let security = read("docs/security.md");
     let troubleshooting = read("docs/troubleshooting.md");
-    let protocol = read("docs/protocol.md");
+    let protocol = normalized(&read("docs/protocol.md"));
 
     for required in [
         "`K10S_ACCESS_TOKEN_FILE` wins over `K10S_ACCESS_TOKEN`",
@@ -340,13 +342,14 @@ fn operational_contracts_have_acceptance_coverage() {
         assert!(security.contains(required), "missing contract: {required}");
     }
     assert!(troubleshooting.contains("correlation ID"));
-    for required in [
-        "major `1`".to_owned(),
-        format!("minor `0..={PROTOCOL_MINOR}`"),
-        "`resyncRequired`".to_owned(),
-    ] {
-        assert!(protocol.contains(&required), "missing contract: {required}");
-    }
+    let negotiation = format!(
+        "Supported negotiation is major `{PROTOCOL_MAJOR}` with peer minor `0..={PROTOCOL_MINOR}`"
+    );
+    assert!(
+        protocol.contains(&negotiation),
+        "missing contract: {negotiation}"
+    );
+    assert!(protocol.contains("`resyncRequired`"));
 
     for route in [CONTROL_PATH, LOGS_PATH, EXEC_PATH] {
         assert!(
