@@ -762,6 +762,10 @@ pub struct ClientState {
     port_forward_revision: u64,
     /// Desired subscription presence for the bounded session stream.
     port_forward_subscribed: Option<SubscriptionId>,
+    /// Client-owned replacement list started after the session stream lags.
+    /// The exact request ID prevents unrelated list traffic from claiming
+    /// reconstruction is complete.
+    port_forward_reconstruction: Option<RequestId>,
     server_state_invalid: bool,
     local_ui: LocalUiState,
     session_id: Option<SessionId>,
@@ -848,6 +852,7 @@ impl ClientState {
             port_forward_sessions: BTreeMap::new(),
             port_forward_revision: 0,
             port_forward_subscribed: None,
+            port_forward_reconstruction: None,
             server_state_invalid: true,
             local_ui: LocalUiState::default(),
             session_id: None,
@@ -1170,14 +1175,27 @@ impl ClientState {
         &mut self,
         _request_id: impl Into<String>,
     ) -> Result<(), ClientError> {
-        let _ = self.begin(Query::PortForwardList)?;
+        let _ = self.begin_port_forward_reconstruction()?;
         Ok(())
+    }
+
+    /// Start an authoritative replacement list and retain its exact lifecycle.
+    pub fn begin_port_forward_reconstruction(&mut self) -> Result<PendingRequest, ClientError> {
+        let request = self.begin(Query::PortForwardList)?;
+        self.port_forward_reconstruction = Some(request.id().clone());
+        Ok(request)
     }
 
     /// Current authoritative session snapshots, sorted by session ID.
     #[must_use]
     pub fn port_forward_sessions(&self) -> Vec<&PortForwardSession> {
         self.port_forward_sessions.values().collect()
+    }
+
+    /// Whether a client-triggered replacement list is rebuilding the session feed.
+    #[must_use]
+    pub fn port_forward_reconstructing(&self) -> bool {
+        self.port_forward_reconstruction.is_some()
     }
 
     /// Apply a completed start/list/stop response payload.
@@ -1196,7 +1214,7 @@ impl ClientState {
             REQUEST_PORT_FORWARD_LIST => {
                 let response: PortForwardListResponse = serde_json::from_value(payload.clone())
                     .map_err(|error| ClientError::Protocol(error.to_string()))?;
-                self.apply_port_forward_list(&response);
+                let _ = self.apply_port_forward_list(&response);
                 Ok(())
             }
             REQUEST_PORT_FORWARD_STOP => {
@@ -1247,9 +1265,9 @@ impl ClientState {
     /// Apply an authoritative reconstruction snapshot. Equal revisions still
     /// replace state so an omission at the current watermark removes expired
     /// terminal sessions; only strictly older lists are ignored.
-    fn apply_port_forward_list(&mut self, response: &PortForwardListResponse) {
+    fn apply_port_forward_list(&mut self, response: &PortForwardListResponse) -> bool {
         if response.revision < self.port_forward_revision {
-            return;
+            return false;
         }
         self.port_forward_sessions.clear();
         let mut max_revision = response.revision;
@@ -1259,6 +1277,7 @@ impl ClientState {
                 .insert(session.id.as_str().to_owned(), session.clone());
         }
         self.port_forward_revision = max_revision;
+        true
     }
 
     /// Subscribe to coalesced infrastructure telemetry for one context.
@@ -1810,7 +1829,11 @@ impl ClientState {
                     let response: PortForwardListResponse = frame
                         .decode_response_payload()
                         .map_err(|error| ClientError::Protocol(error.message))?;
-                    self.apply_port_forward_list(&response);
+                    if self.apply_port_forward_list(&response)
+                        && self.port_forward_reconstruction.as_ref() == Some(&id)
+                    {
+                        self.port_forward_reconstruction = None;
+                    }
                     QueryResult::PortForwardList(Box::new(response))
                 }
                 PendingAction::Query(Query::ResourceList(_)) => {
@@ -2266,7 +2289,9 @@ impl ClientState {
                 let selector = serde_json::to_value(SubscriptionSelector::PortForwardSessions)
                     .map_err(|encode| ClientError::Protocol(encode.to_string()))?;
                 self.queue_subscribe(id, selector)?;
-                let _ = self.begin(Query::PortForwardList)?;
+                if self.port_forward_reconstruction.is_none() {
+                    let _ = self.begin_port_forward_reconstruction()?;
+                }
                 Ok(())
             }
             ServerPayload::Error(error) => {
@@ -2295,6 +2320,9 @@ impl ClientState {
                                 | Query::ResourceMetrics(_)
                         )
                     );
+                    if self.port_forward_reconstruction.as_ref() == Some(id) {
+                        self.port_forward_reconstruction = None;
+                    }
                     pending.cancelled
                 } else {
                     false
@@ -2364,6 +2392,7 @@ impl ClientState {
         self.completed_failures.clear();
         self.port_forward_sessions.clear();
         self.port_forward_revision = 0;
+        self.port_forward_reconstruction = None;
         self.rebuilt_bootstrap = None;
         // Request IDs belong to the lost transport generation. The guarded
         // keys remain unverified and rebuild_server_state schedules fresh

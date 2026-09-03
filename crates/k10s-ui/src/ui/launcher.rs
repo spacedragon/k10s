@@ -32,11 +32,11 @@ impl Default for LauncherState {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PortForwardInventory {
     available: bool,
-    live: usize,
+    live: Option<usize>,
 }
 
 impl PortForwardInventory {
-    pub(super) fn new(available: bool, live: usize) -> Self {
+    pub(super) fn new(available: bool, live: Option<usize>) -> Self {
         Self { available, live }
     }
 }
@@ -235,7 +235,7 @@ fn singleton_with_count<I>(
     queued: &mut Vec<WorkspaceCommand<I>>,
     item: LauncherItem,
     label: &'static str,
-    count: usize,
+    count: Option<usize>,
 ) where
     I: Clone + Eq + Hash + Debug,
 {
@@ -256,9 +256,11 @@ fn singleton_with_count<I>(
         {
             queued.push(WorkspaceCommand::ActivateLauncherItem(item));
         }
-        let badge = ui.monospace(count.to_string());
-        let accessible = format!("{count} live Port Forwards");
-        badge.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
+        if let Some(count) = count {
+            let badge = ui.monospace(count.to_string());
+            let accessible = format!("{count} live Port Forwards");
+            badge.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, accessible.clone()));
+        }
     });
 }
 

@@ -148,7 +148,6 @@ pub struct K10sApp {
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
-    port_forward_list_reconstructing: bool,
     pending_port_forwards: Vec<PendingPortForward>,
     next_port_forward_issuance: u64,
     latest_focused_port_forward_issuance: Option<u64>,
@@ -402,7 +401,6 @@ impl K10sApp {
             namespace_catalog: NamespaceCatalogState::NotDemanded,
             namespace_rejected_context: None,
             port_forward_list: None,
-            port_forward_list_reconstructing: false,
             pending_port_forwards: Vec::new(),
             next_port_forward_issuance: 1,
             latest_focused_port_forward_issuance: None,
@@ -1875,14 +1873,15 @@ impl K10sApp {
                             .subscribe_port_forward_sessions()
                             .map_err(|error| AppEventError::Terminal(error.to_string()))?;
                         self.port_forward_list = Some(
-                            self.client
-                                .begin(Query::PortForwardList)
-                                .map_err(|error| AppEventError::Terminal(error.to_string()))?,
+                            if reconstructing_port_forward_list {
+                                self.client.begin_port_forward_reconstruction()
+                            } else {
+                                self.client.begin(Query::PortForwardList)
+                            }
+                            .map_err(|error| AppEventError::Terminal(error.to_string()))?,
                         );
-                        self.port_forward_list_reconstructing = reconstructing_port_forward_list;
                     } else {
                         self.port_forward_list = None;
-                        self.port_forward_list_reconstructing = false;
                     }
                     if let Some(context) = selected {
                         // A switch left awaiting its answer from an older
@@ -2075,7 +2074,6 @@ impl K10sApp {
         {
             let _ = self.client.take(request);
             self.port_forward_list = None;
-            self.port_forward_list_reconstructing = false;
         }
     }
 
@@ -2239,7 +2237,6 @@ impl K10sApp {
         self.bootstrap = None;
         self.infrastructure_request = None;
         self.port_forward_list = None;
-        self.port_forward_list_reconstructing = false;
         // An unanswered switch request died with the transport; the selection
         // stays where it was and a retry needs a fresh user action.
         self.pending_switch = None;
@@ -2546,12 +2543,10 @@ impl K10sApp {
             metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
             pod_port_forward_available: self.client.pod_port_forward_available(),
-            port_forward_list_state: if self.port_forward_list.is_some() {
-                if self.port_forward_list_reconstructing {
-                    crate::ui::PortForwardListState::Reconstructing
-                } else {
-                    crate::ui::PortForwardListState::Loading
-                }
+            port_forward_list_state: if self.client.port_forward_reconstructing() {
+                crate::ui::PortForwardListState::Reconstructing
+            } else if self.port_forward_list.is_some() {
+                crate::ui::PortForwardListState::Loading
             } else {
                 crate::ui::PortForwardListState::Ready
             },
@@ -6323,6 +6318,71 @@ mod tests {
         )
         .unwrap();
         app.finish_port_forward_list();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
+    }
+
+    #[test]
+    fn client_owned_lag_reconstruction_projects_until_its_replacement_list_completes() {
+        let (mut app, _) = ready_app_with_port_forward_capabilities();
+        let initial = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                initial.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+        let subscription = app
+            .client
+            .subscribe_port_forward_sessions()
+            .unwrap()
+            .unwrap();
+        let lag = ServerFrame {
+            kind: ServerKind::Error,
+            request_id: None,
+            subscription_id: Some(subscription.id().clone()),
+            sequence: None,
+            payload: serde_json::to_value(ErrorFrame::new(
+                ErrorCode::Internal,
+                "session stream lagged; refresh sessions",
+                Retryability::AfterRefresh,
+                ErrorScope::Subscription,
+                "port-forward-lag",
+            ))
+            .unwrap(),
+        };
+
+        app.client.apply(lag).unwrap();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+        let replacement = std::iter::from_fn(|| app.client.take_outbound())
+            .find(|frame| {
+                request_kind(frame).as_deref() == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+            })
+            .and_then(|frame| frame.request_id)
+            .unwrap();
+        app.client
+            .apply(ServerFrame::response(
+                replacement,
+                k10s_protocol::PortForwardListResponse {
+                    revision: 1,
+                    sessions: Vec::new(),
+                },
+            ))
+            .unwrap();
 
         assert_eq!(
             app.build_resource_feed().port_forward_list_state,

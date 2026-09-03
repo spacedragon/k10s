@@ -88,6 +88,7 @@ pub enum WorkspaceCommand<I> {
     SetSort(WindowId, Option<SortSpec>),
     SetPortForwardSort(WindowId, Option<SortSpec>),
     FocusPortForwardSession(WindowId, String),
+    ConsumePortForwardSessionScroll(WindowId),
     ClearPortForwardSessionFocus(WindowId),
     SetSplitRatio(WindowId, f32),
     /// Give the integrated detail the full content area while remembering
@@ -436,12 +437,20 @@ where
             }
             WorkspaceCommand::FocusPortForwardSession(id, session_id) => {
                 self.with_port_forward_mut(id, |state| {
-                    state.focused_session = Some(session_id);
+                    state.focused_session = Some(session_id.clone());
+                    state.scroll_to_session = Some(session_id);
                 });
                 Vec::new()
             }
+            WorkspaceCommand::ConsumePortForwardSessionScroll(id) => {
+                self.with_port_forward_mut(id, |state| state.scroll_to_session = None);
+                Vec::new()
+            }
             WorkspaceCommand::ClearPortForwardSessionFocus(id) => {
-                self.with_port_forward_mut(id, |state| state.focused_session = None);
+                self.with_port_forward_mut(id, |state| {
+                    state.focused_session = None;
+                    state.scroll_to_session = None;
+                });
                 Vec::new()
             }
             WorkspaceCommand::SetSplitRatio(id, ratio) => {

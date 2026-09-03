@@ -349,19 +349,16 @@ pub(super) fn show_manager<I>(
     match connection {
         super::ConnectionState::Failed => {
             ui.label("Disconnected. Existing port-forward sessions are unavailable.");
-            clear_focus_if_needed(window_id, state, queued);
             return;
         }
         super::ConnectionState::Connecting => {
             ui.label("Reconnecting to port-forward sessions…");
-            clear_focus_if_needed(window_id, state, queued);
             return;
         }
         super::ConnectionState::Connected => {}
     }
     if !feed.port_forward_available && !feed.pod_port_forward_available {
         ui.label("Port forwarding is unavailable on this connection.");
-        clear_focus_if_needed(window_id, state, queued);
         return;
     }
     match feed.port_forward_list_state {
@@ -380,7 +377,7 @@ pub(super) fn show_manager<I>(
     }
     if feed.port_forward_sessions.is_empty() {
         ui.label("No port forwards yet. Start one from Pod Ports or Service Ports.");
-        clear_focus_if_needed(window_id, state, queued);
+        clear_stale_focus_if_needed(window_id, state, queued);
         return;
     }
 
@@ -398,6 +395,9 @@ pub(super) fn show_manager<I>(
         &std::collections::BTreeSet::new(),
     );
     let focus = state.focused_session.as_deref();
+    let scroll_to = state.scroll_to_session.as_deref();
+    let mut focus_found = false;
+    let mut scroll_consumed = false;
     ScrollArea::both()
         .id_salt(("k10s.port-forward.sessions", window_id.0))
         .show(ui, |ui| {
@@ -413,8 +413,9 @@ pub(super) fn show_manager<I>(
             ui.separator();
             for session in sessions {
                 let focused = focus == Some(session.id.as_str());
+                focus_found |= focused;
                 ui.push_id(session.id.as_str(), |ui| {
-                    let response = egui::Frame::new()
+                    let frame_response = egui::Frame::new()
                         .fill(if focused {
                             super::theme::SELECTED_ROW
                         } else if session.state == PortForwardSessionState::Stopped {
@@ -453,22 +454,37 @@ pub(super) fn show_manager<I>(
                             );
                         })
                         .response;
+                    let response = ui.interact(
+                        frame_response.rect,
+                        ui.make_persistent_id("accessible-row"),
+                        egui::Sense::focusable_noninteractive(),
+                    );
                     let row_label = format!("Port forward session {}", session.id);
                     response.widget_info(|| {
-                        WidgetInfo::labeled(WidgetType::Other, true, row_label.clone())
+                        WidgetInfo::selected(
+                            WidgetType::SelectableLabel,
+                            true,
+                            focused,
+                            row_label.clone(),
+                        )
                     });
-                    if focused {
+                    if scroll_to == Some(session.id.as_str()) {
+                        response.request_focus();
                         response.scroll_to_me(Some(egui::Align::Center));
+                        scroll_consumed = true;
                     }
                 });
             }
         });
-    if focus.is_some() {
+    if scroll_consumed {
+        queued.push(WorkspaceCommand::ConsumePortForwardSessionScroll(window_id));
+    }
+    if focus.is_some() && !focus_found {
         queued.push(WorkspaceCommand::ClearPortForwardSessionFocus(window_id));
     }
 }
 
-fn clear_focus_if_needed<I>(
+fn clear_stale_focus_if_needed<I>(
     window_id: WindowId,
     state: &PortForwardWindowState,
     queued: &mut Vec<WorkspaceCommand<I>>,

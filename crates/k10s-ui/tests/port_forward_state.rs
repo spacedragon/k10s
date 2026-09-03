@@ -2,9 +2,10 @@
 //! session storage, monotonic revisions, and reconnect reconstruction.
 
 use k10s_protocol::{
-    BootstrapResponse, Event, GroupVersionKind, PortForwardPodTarget, PortForwardPortSelector,
-    PortForwardSession, PortForwardSessionEvent, PortForwardSessionId, PortForwardSessionState,
-    PortForwardTarget, ResourceIdentity, ServerFrame, ServerKind,
+    BootstrapResponse, ErrorCode, ErrorFrame, ErrorScope, Event, GroupVersionKind,
+    PortForwardPodTarget, PortForwardPortSelector, PortForwardSession, PortForwardSessionEvent,
+    PortForwardSessionId, PortForwardSessionState, PortForwardTarget, ResourceIdentity,
+    Retryability, ServerFrame, ServerKind, SubscriptionId,
 };
 use k10s_ui::client::{ClientConfig, ClientState, ConnectTarget};
 
@@ -47,6 +48,54 @@ fn welcome() -> ServerFrame {
         })
         .unwrap(),
     }
+}
+
+fn subscription_lag(subscription: &SubscriptionId) -> ServerFrame {
+    ServerFrame {
+        kind: ServerKind::Error,
+        request_id: None,
+        subscription_id: Some(subscription.clone()),
+        sequence: None,
+        payload: serde_json::to_value(ErrorFrame::new(
+            ErrorCode::Internal,
+            "session stream lagged; refresh sessions",
+            Retryability::AfterRefresh,
+            ErrorScope::Subscription,
+            "port-forward-lag",
+        ))
+        .unwrap(),
+    }
+}
+
+fn request_failure(request_id: k10s_protocol::RequestId) -> ServerFrame {
+    ServerFrame {
+        kind: ServerKind::Error,
+        request_id: Some(request_id),
+        subscription_id: None,
+        sequence: None,
+        payload: serde_json::to_value(ErrorFrame::new(
+            ErrorCode::Timeout,
+            "could not reconstruct port-forward sessions",
+            Retryability::AfterRefresh,
+            ErrorScope::Request,
+            "port-forward-list",
+        ))
+        .unwrap(),
+    }
+}
+
+fn take_port_forward_list_request(client: &mut ClientState) -> k10s_protocol::RequestId {
+    std::iter::from_fn(|| client.take_outbound())
+        .find(|frame| {
+            frame.kind == k10s_protocol::ClientKind::Request
+                && frame
+                    .payload
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(k10s_protocol::REQUEST_PORT_FORWARD_LIST)
+        })
+        .and_then(|frame| frame.request_id)
+        .expect("lag recovery list request")
 }
 
 fn service_identity() -> ResourceIdentity {
@@ -452,6 +501,64 @@ fn reconnect_resubscribes_and_reconstructs_sessions_from_an_authoritative_list()
     let sessions = client.port_forward_sessions();
     assert_eq!(sessions.len(), 1, "no duplicate sessions after reconnect");
     assert_eq!(sessions[0].revision, 5);
+}
+
+#[test]
+fn subscription_lag_exposes_reconstruction_until_the_replacement_list_applies() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+    while client.take_outbound().is_some() {}
+
+    client.apply(subscription_lag(subscription.id())).unwrap();
+    assert!(client.port_forward_reconstructing());
+    let list_request = take_port_forward_list_request(&mut client);
+
+    client
+        .apply(ServerFrame::response(
+            list_request,
+            k10s_protocol::PortForwardListResponse {
+                revision: 5,
+                sessions: vec![service_session(
+                    "pf-recovered",
+                    PortForwardSessionState::Active,
+                    5,
+                )],
+            },
+        ))
+        .unwrap();
+
+    assert!(!client.port_forward_reconstructing());
+    assert_eq!(
+        client.port_forward_sessions()[0].id.as_str(),
+        "pf-recovered"
+    );
+}
+
+#[test]
+fn subscription_lag_reconstruction_clears_on_list_failure_and_disconnect() {
+    let mut client =
+        ready_client_with_capabilities(&[k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD]);
+    let subscription = client
+        .subscribe_port_forward_sessions()
+        .unwrap()
+        .expect("session stream");
+    while client.take_outbound().is_some() {}
+
+    client.apply(subscription_lag(subscription.id())).unwrap();
+    let failed_request = take_port_forward_list_request(&mut client);
+    assert!(client.port_forward_reconstructing());
+    assert!(client.apply(request_failure(failed_request)).is_err());
+    assert!(!client.port_forward_reconstructing());
+
+    while client.take_outbound().is_some() {}
+    client.apply(subscription_lag(subscription.id())).unwrap();
+    assert!(client.port_forward_reconstructing());
+    client.transport_lost(1_000, 0);
+    assert!(!client.port_forward_reconstructing());
 }
 
 #[test]

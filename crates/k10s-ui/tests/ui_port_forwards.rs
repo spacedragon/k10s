@@ -1,6 +1,6 @@
 //! Shared port-forward start modal and application-owned presentation behavior.
 
-use egui::accesskit::Role;
+use egui::accesskit::{Role, Toggled};
 use egui_kittest::{
     Harness,
     kittest::{NodeT as _, Queryable as _},
@@ -439,7 +439,7 @@ fn long_failure_and_retry_messages_are_visible_verbatim_in_row_details() {
 }
 
 #[test]
-fn focused_rows_are_consumed_and_stale_focus_is_cleared_without_panicking() {
+fn focused_row_selection_persists_and_receives_accessibility_focus() {
     let mut harness = management_harness(vec![session(
         "pf-focus",
         pod_target(),
@@ -451,6 +451,9 @@ fn focused_rows_are_consumed_and_stale_focus_is_cleared_without_panicking() {
         .shell
         .focus_port_forward_session("pf-focus");
     harness.run_steps(4);
+    let row = harness.get_by_label("Port forward session pf-focus");
+    assert!(row.is_focused());
+    assert_eq!(row.accesskit_node().toggled(), Some(Toggled::True));
     let manager = harness
         .state()
         .shell
@@ -458,23 +461,70 @@ fn focused_rows_are_consumed_and_stale_focus_is_cleared_without_panicking() {
         .windows()
         .iter()
         .find(|window| window.kind == WindowKind::PortForwards)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(
         harness
             .state()
             .shell
             .workspace()
-            .port_forward_state(manager.id)
+            .port_forward_state(manager)
             .unwrap()
-            .focused_session,
-        None
+            .focused_session
+            .as_deref(),
+        Some("pf-focus")
     );
+}
 
+#[test]
+fn newly_focused_offscreen_row_scrolls_once_and_remains_selected() {
+    let sessions = (0..30)
+        .map(|index| {
+            session(
+                &format!("pf-{index:02}"),
+                pod_target(),
+                PortForwardSessionState::Active,
+                &format!("127.0.0.1:{}", 18_000 + index),
+            )
+        })
+        .collect();
+    let mut harness = management_harness(sessions);
+    harness
+        .state_mut()
+        .shell
+        .focus_port_forward_session("pf-29");
+    harness.run_steps(5);
+
+    let window_rect = harness
+        .get_by_role_and_label(Role::Window, "Port Forwards")
+        .rect();
+    let row = harness.get_by_label("Port forward session pf-29");
+    assert!(row.is_focused());
+    assert!(!row.accesskit_node().is_hidden());
+    assert!(window_rect.intersects(row.rect()));
+
+    for _ in 0..8 {
+        row.scroll_up();
+    }
+    harness.run_steps(5);
+
+    let row = harness.get_by_label("Port forward session pf-29");
+    assert!(
+        row.accesskit_node().is_hidden() || !window_rect.intersects(row.rect()),
+        "the consumed one-shot request must not force the selected row back into view"
+    );
+    assert_eq!(row.accesskit_node().toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn stale_focus_survives_non_authoritative_states_and_clears_when_ready() {
+    let mut harness = management_harness(Vec::new());
     harness
         .state_mut()
         .shell
         .focus_port_forward_session("pf-stale");
-    harness.run_steps(4);
+    harness.state_mut().connection = ConnectionState::Failed;
+    harness.run_steps(3);
     let manager = harness
         .state()
         .shell
@@ -482,17 +532,71 @@ fn focused_rows_are_consumed_and_stale_focus_is_cleared_without_panicking() {
         .windows()
         .iter()
         .find(|window| window.kind == WindowKind::PortForwards)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(
         harness
             .state()
             .shell
             .workspace()
-            .port_forward_state(manager.id)
+            .port_forward_state(manager)
+            .unwrap()
+            .focused_session
+            .as_deref(),
+        Some("pf-stale")
+    );
+
+    harness.state_mut().connection = ConnectionState::Connected;
+    harness.state_mut().feed.port_forward_list_state = PortForwardListState::Reconstructing;
+    harness.run_steps(3);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .port_forward_state(manager)
+            .unwrap()
+            .focused_session
+            .as_deref(),
+        Some("pf-stale")
+    );
+
+    harness.state_mut().feed.port_forward_list_state = PortForwardListState::Ready;
+    harness.run_steps(3);
+    assert_eq!(
+        harness
+            .state()
+            .shell
+            .workspace()
+            .port_forward_state(manager)
             .unwrap()
             .focused_session,
         None
     );
+}
+
+#[test]
+fn reconstructing_hides_retained_row_actions_and_launcher_count() {
+    let mut harness = management_harness(vec![session(
+        "pf-retained",
+        pod_target(),
+        PortForwardSessionState::Active,
+        "127.0.0.1:18080",
+    )]);
+    harness.get_by_label("1 live Port Forwards");
+    harness.get_by_role_and_label(Role::Button, "Stop port forward pf-retained");
+
+    harness.state_mut().feed.port_forward_list_state = PortForwardListState::Reconstructing;
+    harness.run_steps(3);
+
+    harness.get_by_label("Reconstructing port-forward sessions…");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Stop port forward pf-retained")
+            .is_none()
+    );
+    assert!(harness.query_by_label("1 live Port Forwards").is_none());
+    assert!(harness.query_by_label("0 live Port Forwards").is_none());
 }
 
 #[test]

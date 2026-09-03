@@ -293,6 +293,9 @@ fn search(query: &str, contexts: &[Context], feed: &ResourceFeed) -> Vec<Palette
                     | "svc"
                     | "service"
                     | "services"
+                    | "pf"
+                    | "port-forward"
+                    | "port-forwards"
             )
         )
     {
@@ -414,6 +417,12 @@ fn split_prefix(query: &str) -> (Option<&str>, &str) {
         Some("service")
     } else if first.eq_ignore_ascii_case("services") {
         Some("services")
+    } else if first.eq_ignore_ascii_case("pf") {
+        Some("pf")
+    } else if first.eq_ignore_ascii_case("port-forward") {
+        Some("port-forward")
+    } else if first.eq_ignore_ascii_case("port-forwards") {
+        Some("port-forwards")
     } else if first.eq_ignore_ascii_case("ctx") {
         Some("ctx")
     } else if first.eq_ignore_ascii_case("ns") {
@@ -434,7 +443,7 @@ fn prefix_allows_row(prefix: Option<&str>, row: &ResourceListRow) -> bool {
         Some("po" | "pod" | "pods") => row.identity.gvk.kind == "Pod",
         Some("deploy" | "deployment" | "deployments") => row.identity.gvk.kind == "Deployment",
         Some("svc" | "service" | "services") => row.identity.gvk.kind == "Service",
-        Some("ctx" | "ns") => false,
+        Some("ctx" | "ns" | "pf" | "port-forward" | "port-forwards") => false,
         Some(_) => true,
     }
 }

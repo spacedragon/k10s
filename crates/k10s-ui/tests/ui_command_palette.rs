@@ -295,3 +295,32 @@ fn port_forwards_is_searchable_and_modified_enter_keeps_it_singleton() {
         1
     );
 }
+
+#[test]
+fn port_forward_alias_prefixes_activate_the_singleton_with_compound_terms() {
+    for query in ["pf forward", "port-forward port", "port-forwards forward"] {
+        let mut harness = harness();
+        harness.state_mut().feed.pod_port_forward_available = true;
+        open_palette(&mut harness);
+        harness
+            .get_by_role_and_label(Role::TextInput, "Command palette search")
+            .type_text(query);
+        harness.run_steps(2);
+        harness.get_by_role_and_label(Role::Button, "Port Forwards; Open or focus list window");
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(4);
+
+        assert_eq!(
+            harness
+                .state()
+                .shell
+                .workspace()
+                .windows()
+                .iter()
+                .filter(|window| window.kind == WindowKind::PortForwards)
+                .count(),
+            1,
+            "alias query {query:?} activates Port Forwards"
+        );
+    }
+}

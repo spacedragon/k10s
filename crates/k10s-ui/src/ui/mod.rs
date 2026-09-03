@@ -659,10 +659,14 @@ where
                     load,
                     launcher::PortForwardInventory::new(
                         feed.port_forward_available || feed.pod_port_forward_available,
-                        feed.port_forward_sessions
-                            .iter()
-                            .filter(|session| port_forward::is_live_session_state(session.state))
-                            .count(),
+                        (feed.port_forward_list_state == PortForwardListState::Ready).then(|| {
+                            feed.port_forward_sessions
+                                .iter()
+                                .filter(|session| {
+                                    port_forward::is_live_session_state(session.state)
+                                })
+                                .count()
+                        }),
                     ),
                     &mut self.launcher,
                     &mut queued,

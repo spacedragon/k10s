@@ -9,5 +9,8 @@ use super::SortSpec;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PortForwardWindowState {
     pub sort: Option<SortSpec>,
+    /// Persistent selected row, retained across renders and snapshots.
     pub focused_session: Option<String>,
+    /// Transient request to focus and reveal a newly selected row once.
+    pub scroll_to_session: Option<String>,
 }

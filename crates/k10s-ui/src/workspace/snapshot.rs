@@ -62,6 +62,7 @@ impl From<PersistedPortForwardView> for PortForwardWindowState {
         Self {
             sort: view.sort,
             focused_session: view.focused_session,
+            scroll_to_session: None,
         }
     }
 }
