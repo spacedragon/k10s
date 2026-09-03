@@ -1000,14 +1000,17 @@ fn main() {{
         program: "/bin/sh".into(),
     };
     let script_path = dir.join("rendered.ps1");
-    fs::write(
-        &script_path,
+    let write_script = |body: String| {
+        let mut encoded = vec![0xEF, 0xBB, 0xBF];
+        encoded.extend_from_slice(body.as_bytes());
+        fs::write(&script_path, encoded).unwrap();
+    };
+    write_script(
         KubectlExecCommand::new(&descriptor, exec_target.clone())
             .unwrap()
             .render_powershell()
             .unwrap(),
-    )
-    .unwrap();
+    );
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-File"])
         .arg(&script_path)
@@ -1069,14 +1072,12 @@ fn main() {{
         selected_target.generation = 1;
         selected_target.uid = "uid-1".into();
         selected_target.pod = pod.into();
-        fs::write(
-            &script_path,
+        write_script(
             KubectlExecCommand::new(&descriptor, selected_target)
                 .unwrap()
                 .render_powershell()
                 .unwrap(),
-        )
-        .unwrap();
+        );
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-File"])
             .arg(&script_path)
