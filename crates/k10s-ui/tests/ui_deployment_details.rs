@@ -202,18 +202,17 @@ fn open_integrated_deployment(
                 .rect();
             assert_rect_within(owner, rect, 1.0, item);
         }
-        let columns = harness
-            .root()
-            .children_recursive()
-            .find(|node| {
-                node.accesskit_node().role() == Role::Button
-                    && node
-                        .accesskit_node()
-                        .label()
-                        .is_some_and(|label| label.contains("Columns ▾"))
-            })
-            .expect("Columns control in list overflow");
-        assert_rect_within(owner, columns.rect(), 1.0, "Columns menu");
+        let columns = harness.root().children_recursive().find(|node| {
+            node.accesskit_node().role() == Role::Button
+                && node
+                    .accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.contains("Columns ▾"))
+        });
+        assert!(
+            columns.is_none(),
+            "Columns menu must not be present in list overflow"
+        );
         harness.get_by_label_contains("Age shown as relative");
         harness
             .get_by_role_and_label(Role::Button, "More list controls")

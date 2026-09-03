@@ -124,6 +124,27 @@ pub(super) fn show(
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
             show_traffic(ui, connection, traffic, compact);
 
+            ui.push_id("k10s.top_bar.refresh", |ui| {
+                let label = if connection == ConnectionState::Connected {
+                    "Refresh"
+                } else {
+                    "Retry"
+                };
+                let height = ui.spacing().interact_size.y;
+                let response = ui.add_sized(
+                    [28.0, height],
+                    egui::Button::new(RichText::new("↻").size(16.0).strong()),
+                );
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+                refresh = response
+                    .on_hover_text(if connection == ConnectionState::Connected {
+                        "Refresh all resources"
+                    } else {
+                        "Retry the control connection"
+                    })
+                    .clicked();
+            });
+
             ui.push_id("k10s.top_bar.context", |ui| {
                 ui.add_enabled_ui(!contexts.is_empty(), |ui| {
                     let selected_text = selected_context.unwrap_or("No contexts");
@@ -139,7 +160,7 @@ pub(super) fn show(
                     let combo = if compact {
                         ComboBox::from_id_salt("selector")
                     } else {
-                        ComboBox::new("selector", "Kubernetes context")
+                        ComboBox::new("selector", "Context")
                     };
                     let response = combo
                         .selected_text(compact_text.as_deref().unwrap_or(selected_text))
@@ -172,46 +193,21 @@ pub(super) fn show(
                             }
                         })
                         .response;
-                    response.widget_info(|| {
-                        WidgetInfo::labeled(WidgetType::ComboBox, true, "Kubernetes context")
-                    });
+                    response
+                        .widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, "Context"));
                     response.on_hover_text(selected_text);
                 });
             });
 
-            ui.push_id("k10s.top_bar.refresh", |ui| {
-                let label = if connection == ConnectionState::Connected {
-                    "Refresh"
-                } else {
-                    "Retry"
-                };
-                let response = ui.button(if compact { "↻" } else { label });
-                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
-                refresh = response
-                    .on_hover_text(if connection == ConnectionState::Connected {
-                        "Refresh all resources"
-                    } else {
-                        "Retry the control connection"
-                    })
-                    .clicked();
-            });
-
             ui.separator();
-            let version = if compact {
-                format!("v{}", env!("CARGO_PKG_VERSION"))
-            } else {
-                format!("k10s v{}", env!("CARGO_PKG_VERSION"))
-            };
-            ui.label(version).on_hover_text("Application version");
-
-            ui.separator();
-            ui.label(connection.label());
             let color = match connection {
                 ConnectionState::Connecting => theme::CONNECTING,
                 ConnectionState::Connected => theme::HEALTHY,
                 ConnectionState::Failed => ui.visuals().error_fg_color,
             };
-            let dot = ui.label(RichText::new("●").color(color));
+            let dot = ui
+                .label(RichText::new("●").color(color))
+                .on_hover_text(format!("Connection status: {}", connection.label()));
             dot.widget_info(|| {
                 WidgetInfo::labeled(
                     WidgetType::Label,

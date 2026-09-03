@@ -1296,3 +1296,91 @@ fn rfc3339_ago(seconds: u64) -> String {
         .expect("test timestamp is in Jiff's supported range")
         .to_string()
 }
+
+#[test]
+fn pod_conditions_and_placement_metadata_are_left_aligned() {
+    let mut response = healthy_detail();
+    let Some(ResourceProjection::Pod(pod)) = response.projection.as_mut() else {
+        panic!("fixture has a typed Pod projection");
+    };
+    pod.conditions = vec![
+        ResourceConditionProjection {
+            condition_type: "ContainersReady".into(),
+            status: "True".into(),
+            reason: Some("PodCompleted".into()),
+            message: None,
+            last_transition_time: Some("6d 20h".into()),
+        },
+        ResourceConditionProjection {
+            condition_type: "Initialized".into(),
+            status: "True".into(),
+            reason: Some("PodCompleted".into()),
+            message: None,
+            last_transition_time: Some("6d 20h".into()),
+        },
+        ResourceConditionProjection {
+            condition_type: "PodReadyToStartContainers".into(),
+            status: "False".into(),
+            reason: None,
+            message: None,
+            last_transition_time: Some("6d 20h".into()),
+        },
+        ResourceConditionProjection {
+            condition_type: "Ready".into(),
+            status: "False".into(),
+            reason: Some("PodCompleted".into()),
+            message: None,
+            last_transition_time: Some("6d 20h".into()),
+        },
+    ];
+    pod.priority = Some(100);
+    pod.service_account = Some("unique-sa".into());
+    let harness = harness(1_100.0, response);
+    let detail = pod_window(&harness);
+
+    // Conditions must all start at the same left edge.
+    let c1 = detail.get_by_label("ContainersReady").rect().left();
+    let c2 = detail.get_by_label("Initialized").rect().left();
+    let c3 = detail
+        .get_by_label("PodReadyToStartContainers")
+        .rect()
+        .left();
+    let c4 = detail.get_by_label("Ready").rect().left();
+    assert!((c1 - c2).abs() < 1.0, "c1 {c1} vs c2 {c2}");
+    assert!((c1 - c3).abs() < 1.0, "c1 {c1} vs c3 {c3}");
+    assert!((c1 - c4).abs() < 1.0, "c1 {c1} vs c4 {c4}");
+
+    // Placement labels must all start at the same left edge.
+    let node_lbl = detail.get_by_label("Node").rect().left();
+    let qos_lbl = detail.get_by_label("QoS class").rect().left();
+    let priority_lbl = detail.get_by_label("Priority").rect().left();
+    let sa_lbl = detail.get_by_label("Service account").rect().left();
+    let rp_lbl = detail.get_by_label("Restart policy").rect().left();
+    assert!((node_lbl - qos_lbl).abs() < 1.0);
+    assert!((node_lbl - priority_lbl).abs() < 1.0);
+    assert!((node_lbl - sa_lbl).abs() < 1.0);
+    assert!((node_lbl - rp_lbl).abs() < 1.0);
+
+    // Placement values must also all start at the same left edge.
+    let node_val = detail.get_by_label("worker-a").rect().left();
+    let qos_val = detail.get_by_label("Burstable").rect().left();
+    let priority_val = detail.get_by_label("100").rect().left();
+    let sa_val = detail.get_by_label("unique-sa").rect().left();
+    let rp_val = detail.get_by_label("Always").rect().left();
+    assert!(
+        (node_val - qos_val).abs() < 1.0,
+        "node_val {node_val} vs qos_val {qos_val}"
+    );
+    assert!(
+        (node_val - priority_val).abs() < 1.0,
+        "node_val {node_val} vs priority_val {priority_val}"
+    );
+    assert!(
+        (node_val - sa_val).abs() < 1.0,
+        "node_val {node_val} vs sa_val {sa_val}"
+    );
+    assert!(
+        (node_val - rp_val).abs() < 1.0,
+        "node_val {node_val} vs rp_val {rp_val}"
+    );
+}

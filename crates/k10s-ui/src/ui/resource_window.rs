@@ -606,7 +606,6 @@ fn show_secondary_controls<I>(
     window_id: WindowId,
     kind: WorkloadKind,
     namespaced: bool,
-    hidden_columns: &std::collections::BTreeSet<String>,
     filters_active: bool,
     compact_controls: bool,
     resource_actions: &mut Vec<super::ResourceAction>,
@@ -615,7 +614,6 @@ fn show_secondary_controls<I>(
     if kind == WorkloadKind::CustomResources && ui.button("Change resource type").clicked() {
         queued.push(WorkspaceCommand::SetCustomKind(window_id, None));
     }
-    show_columns_menu(ui, window_id, kind, namespaced, hidden_columns, queued);
     let refresh = if compact_controls {
         ui.button("Refresh list")
     } else {
@@ -652,63 +650,25 @@ fn direct_toolbar_width(
     let custom_type = if custom_resource { 150.0 } else { 0.0 };
     let reset = if filters_active { 48.0 } else { 0.0 };
     let freshness = if shows_freshness { 108.0 } else { 0.0 };
-    // Search, namespace, status, custom type, columns, refresh, reset, and
+    // Search, namespace, status, custom type, refresh, reset, and
     // freshness, plus one standard inter-control gap for each visible item.
     let controls = 1
         + usize::from(namespaced)
         + 1
         + usize::from(custom_resource)
-        + 2
+        + 1
         + usize::from(filters_active)
         + usize::from(shows_freshness);
     search
         + namespace
         + 140.0
         + custom_type
-        + 78.0
         + 32.0
         + reset
         + freshness
         + (controls.saturating_sub(1) as f32 * 8.0)
         // egui adds frame, icon, and menu-affordance padding around controls.
         + 320.0
-}
-
-/// Toolbar menu that hides and restores the table's hideable columns.
-fn show_columns_menu<I>(
-    ui: &mut egui::Ui,
-    window_id: WindowId,
-    kind: WorkloadKind,
-    namespaced: bool,
-    hidden_columns: &std::collections::BTreeSet<String>,
-    queued: &mut Vec<WorkspaceCommand<I>>,
-) {
-    ui.scope_builder(
-        egui::UiBuilder::new().id_salt(("columns", window_id.0)),
-        |ui| {
-            ui.menu_button("Columns ▾", |ui| {
-                for spec in super::resource_table::column_specs(kind, namespaced)
-                    .iter()
-                    .filter(|spec| spec.is_hideable())
-                {
-                    let visible = !hidden_columns.contains(spec.key);
-                    let title = super::resource_table::column_title(spec.key);
-                    let label = if visible {
-                        format!("✓ {title}")
-                    } else {
-                        title.to_owned()
-                    };
-                    if ui.selectable_label(visible, label).clicked() {
-                        queued.push(WorkspaceCommand::ToggleColumnVisibility(
-                            window_id,
-                            spec.key.to_owned(),
-                        ));
-                        ui.close();
-                    }
-                }
-            });
-        },
-    );
 }
 
 /// Canonical key format shared by commands and picker entries.
@@ -948,7 +908,6 @@ pub(super) fn show<I>(
                     window_id,
                     kind,
                     namespaced,
-                    &state.hidden_columns,
                     filters_active,
                     compact_controls,
                     resource_actions,
@@ -964,7 +923,6 @@ pub(super) fn show<I>(
                 window_id,
                 kind,
                 namespaced,
-                &state.hidden_columns,
                 filters_active,
                 compact_controls,
                 resource_actions,

@@ -23,15 +23,12 @@ Window
                       TextRun value="↓0B ↑0B"
                   GenericContainer
                     GenericContainer
+                      Button label="Retry"
+                  GenericContainer
+                    GenericContainer
                       GenericContainer
                         GenericContainer
-                          ComboBox label="Kubernetes context" value="dev-local"
-                  GenericContainer
-                    Button label="Retry"
-                  Label value="v0.1.4"
-                    TextRun value="v0.1.4"
-                  Label value="Connecting"
-                    TextRun value="Connecting"
+                          ComboBox label="Context" value="dev-local"
                   Label value="Connection status: Connecting"
                     TextRun value="●"
         GenericContainer
