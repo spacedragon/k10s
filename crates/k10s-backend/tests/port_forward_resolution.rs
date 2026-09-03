@@ -238,13 +238,17 @@ async fn recreated_pod_uid_is_rejected() {
 
 #[tokio::test]
 async fn pod_resolution_requires_the_named_regular_container() {
-    for container_name in ["missing", "init-only", "ephemeral-only"] {
+    for (container_name, declared_port) in [
+        ("missing", 7_070),
+        ("init-only", 7_070),
+        ("ephemeral-only", 6_060),
+    ] {
         let server = RecordedApiServer::standard();
         install_pod(&server);
         let connector = connector_for(&server);
 
         let error = connector
-            .resolve(pod_request(container_name, 7_070))
+            .resolve(pod_request(container_name, declared_port))
             .await
             .expect_err("only exact regular containers are eligible");
 
