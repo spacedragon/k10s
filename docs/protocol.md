@@ -83,6 +83,13 @@ Added in minor `6`: start targets and current session snapshots distinguish
 Service and Pod variants. A minor-`5` client retains the legacy Service wire
 shape and never receives Pod sessions.
 
+For compatibility, new and current clients always encode Service starts with
+the legacy `{service, port, localPort}` shape. The server accepts both the
+legacy and target-discriminated Service shapes. Pod starts use the
+target-discriminated shape. When decoding a legacy Service snapshot, the
+client derives `requestedLocalPort` from its bound local address. That
+conversion is lossy: automatic `0` becomes the assigned explicit port on Retry.
+
 Added in minor `4`: resource-watch selectors may carry an exact `name` and
 `uid` alongside their context, GVK, and namespace. Dedicated Pod and Deployment
 Detail windows use this selector as their independent lifecycle and mutation

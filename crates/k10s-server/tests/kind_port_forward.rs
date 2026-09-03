@@ -40,7 +40,17 @@ fn kubectl(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-async fn exchange_http(local_addr: &str) {
+fn loopback_addr(local_addr: &str) -> std::net::SocketAddr {
+    let address: std::net::SocketAddr = local_addr.parse().unwrap();
+    assert_eq!(
+        address.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "port forwards bind only to IPv4 localhost"
+    );
+    address
+}
+
+async fn exchange_http(local_addr: std::net::SocketAddr) {
     let mut socket = tokio::net::TcpStream::connect(local_addr).await.unwrap();
     socket
         .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
@@ -139,14 +149,14 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
         )
         .await
         .unwrap();
-    exchange_http(&automatic_service.local_addr).await;
-    let automatic_service_local = automatic_service.local_addr.clone();
+    let automatic_service_addr = loopback_addr(&automatic_service.local_addr);
+    exchange_http(automatic_service_addr).await;
     assert!(matches!(
         manager.stop(automatic_service.id.as_str()).await,
         StopOutcome::Stopped(_)
     ));
     assert!(
-        std::net::TcpListener::bind(automatic_service_local).is_ok(),
+        std::net::TcpListener::bind(automatic_service_addr).is_ok(),
         "Stop releases the automatically assigned Service port"
     );
 
@@ -163,7 +173,8 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
         )
         .await
         .unwrap();
-    exchange_http(&service.local_addr).await;
+    let service_addr = loopback_addr(&service.local_addr);
+    exchange_http(service_addr).await;
 
     let pod = manager
         .start(
@@ -177,8 +188,9 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
         )
         .await
         .unwrap();
-    exchange_http(&pod.local_addr).await;
-    exchange_http(&pod.local_addr).await;
+    let pod_addr = loopback_addr(&pod.local_addr);
+    exchange_http(pod_addr).await;
+    exchange_http(pod_addr).await;
     assert_eq!(
         manager.session(pod.id.as_str()).await.unwrap().state,
         PortForwardSessionState::Active,
@@ -197,24 +209,24 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
             .any(|session| matches!(session.target, PortForwardTarget::Pod { .. }))
     );
 
-    let pod_local = pod.local_addr.clone();
     assert!(matches!(
         manager.stop(pod.id.as_str()).await,
         StopOutcome::Stopped(_)
     ));
     assert!(
-        std::net::TcpListener::bind(pod_local).is_ok(),
+        std::net::TcpListener::bind(pod_addr).is_ok(),
         "Stop releases the direct Pod listener"
     );
 
-    let service_local = service.local_addr.clone();
-    assert!(matches!(
-        manager.stop(service.id.as_str()).await,
-        StopOutcome::Stopped(_)
-    ));
-    assert!(
-        std::net::TcpListener::bind(service_local).is_ok(),
-        "Stop releases the explicit Service listener"
+    assert_eq!(
+        manager.session(service.id.as_str()).await.unwrap().state,
+        PortForwardSessionState::Active,
+        "the Service session remains live for shutdown cleanup"
     );
     manager.shutdown().await;
+    assert!(manager.list().await.is_empty());
+    assert!(
+        std::net::TcpListener::bind(service_addr).is_ok(),
+        "shutdown releases the exact live Service listener"
+    );
 }

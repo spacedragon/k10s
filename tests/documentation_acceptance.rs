@@ -43,6 +43,17 @@ fn desktop_port_forward_security_contract_is_documented() {
             "protocol guide is missing port-forward contract: {required}"
         );
     }
+    for required in [
+        "current clients always encode Service starts with the legacy `{service, port, localPort}` shape",
+        "server accepts both the legacy and target-discriminated Service shapes",
+        "Pod starts use the target-discriminated shape",
+        "automatic `0` becomes the assigned explicit port on Retry",
+    ] {
+        assert!(
+            protocol.contains(required),
+            "protocol guide is missing port-forward compatibility contract: {required}"
+        );
+    }
 
     for required in [
         "desktop-only",
@@ -61,12 +72,17 @@ fn desktop_port_forward_security_contract_is_documented() {
         );
     }
 
+    assert!(
+        read("docs/security.md")
+            .lines()
+            .any(|line| line == "### Direct Pod forwarding"),
+        "security guide must give direct Pod forwarding its own RBAC section"
+    );
     for required in [
         "exact core/v1 Pod identity and UID",
         "named regular container",
         "declared numeric TCP port",
-        "`get` on `pods`",
-        "`create` on `pods/portforward`",
+        "Direct Pod forwarding requires `get` on `pods` and `create` on `pods/portforward`",
     ] {
         assert!(
             security.contains(required),

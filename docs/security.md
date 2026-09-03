@@ -89,18 +89,24 @@ kubeconfig. See [Troubleshooting](troubleshooting.md) for the correlation flow.
 Browser WebSocket origins are checked against the observed host. The server
 ignores `X-Forwarded-*` and `X-Real-IP` as trust signals. Preserve Host/Origin
 at the proxy and do not expose an unprotected upstream.
-# Desktop Pod and Service port forwarding
+
+## Desktop Pod and Service port forwarding
 
 The `service.portForward` and `pod.portForward` capabilities are desktop-only
 and are not the security boundary: disabled standalone and web servers reject
 the requests as well. Listeners are hard-coded to `127.0.0.1`.
 
+### Service forwarding
+
 Kubernetes remains authoritative. Service forwarding requires `get` on
 `services`, `list` on `endpointslices`, `get` on `pods`, and `create` on
-`pods/portforward`. Direct Pod forwarding requires `get` on `pods` and
-`create` on `pods/portforward`. Each direct request must carry the exact
-core/v1 Pod identity and UID, a named regular container, and a declared numeric
-TCP port; the server refetches and validates all of them before binding.
-ExternalName Services, UDP, SCTP, ownerless EndpointSlices, arbitrary IPs,
-non-Pod endpoints, init containers, and ephemeral containers are not
-supported.
+`pods/portforward`. ExternalName Services, UDP, SCTP, ownerless EndpointSlices,
+arbitrary IPs, and non-Pod endpoints are not supported.
+
+### Direct Pod forwarding
+
+Direct Pod forwarding requires `get` on `pods` and `create` on
+`pods/portforward`. Each direct request must carry the exact core/v1 Pod
+identity and UID, a named regular container, and a declared numeric TCP port;
+the server refetches and validates all of them before binding. UDP, SCTP, init
+containers, and ephemeral containers are not supported.
