@@ -76,7 +76,7 @@ impl PortForwardTarget {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::Service { identity, port } => {
-                validate_identity(identity, "Service")?;
+                validate_identity(identity, IdentityKind::Service)?;
                 if matches!(port, PortForwardPortSelector::Name { name } if name.is_empty()) {
                     return Err("a named port selector must not be empty");
                 }
@@ -86,7 +86,7 @@ impl PortForwardTarget {
                 container_name,
                 remote_port,
             } => {
-                validate_identity(identity, "Pod")?;
+                validate_identity(identity, IdentityKind::Pod)?;
                 if container_name.is_empty() {
                     return Err("the Pod target must name a container");
                 }
@@ -99,25 +99,39 @@ impl PortForwardTarget {
     }
 }
 
-fn validate_identity(identity: &ResourceIdentity, kind: &'static str) -> Result<(), &'static str> {
+#[derive(Clone, Copy)]
+enum IdentityKind {
+    Service,
+    Pod,
+}
+
+fn validate_identity(
+    identity: &ResourceIdentity,
+    expected: IdentityKind,
+) -> Result<(), &'static str> {
+    let (kind, wrong_kind, missing_namespace, missing_uid) = match expected {
+        IdentityKind::Service => (
+            "Service",
+            "port forwarding requires an exact core/v1 Service identity",
+            "the Service identity must carry a namespace",
+            "the Service identity must carry a UID",
+        ),
+        IdentityKind::Pod => (
+            "Pod",
+            "port forwarding requires an exact core/v1 Pod identity",
+            "the Pod identity must carry a namespace",
+            "the Pod identity must carry a UID",
+        ),
+    };
     let gvk = &identity.gvk;
     if !(gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == kind) {
-        return Err(match kind {
-            "Service" => "port forwarding requires an exact core/v1 Service identity",
-            _ => "port forwarding requires an exact core/v1 Pod identity",
-        });
+        return Err(wrong_kind);
     }
     if identity.namespace.as_deref().unwrap_or("").is_empty() {
-        return Err(match kind {
-            "Service" => "the Service identity must carry a namespace",
-            _ => "the Pod identity must carry a namespace",
-        });
+        return Err(missing_namespace);
     }
     if identity.uid.is_empty() {
-        return Err(match kind {
-            "Service" => "the Service identity must carry a UID",
-            _ => "the Pod identity must carry a UID",
-        });
+        return Err(missing_uid);
     }
     Ok(())
 }
@@ -131,27 +145,23 @@ pub struct PortForwardStartRequest {
 
 impl PortForwardStartRequest {
     /// Construct a Service request that retains the legacy Service wire shape.
-    #[must_use]
-    pub fn service(
+    pub fn try_service(
         identity: ResourceIdentity,
         port: PortForwardPortSelector,
         local_port: u16,
-    ) -> Self {
-        Self {
-            target: PortForwardTarget::Service { identity, port },
-            local_port,
-        }
+    ) -> Result<Self, &'static str> {
+        Self::try_target(PortForwardTarget::Service { identity, port }, local_port)
     }
 
-    /// Construct a request for either supported target kind.
-    #[must_use]
-    pub const fn target(target: PortForwardTarget, local_port: u16) -> Self {
-        Self { target, local_port }
+    /// Construct and validate a request for either supported target kind.
+    pub fn try_target(target: PortForwardTarget, local_port: u16) -> Result<Self, &'static str> {
+        target.validate()?;
+        Ok(Self { target, local_port })
     }
 
     /// Return the exact requested target.
     #[must_use]
-    pub const fn target_ref(&self) -> &PortForwardTarget {
+    pub const fn target(&self) -> &PortForwardTarget {
         &self.target
     }
 
@@ -230,14 +240,15 @@ impl<'de> Deserialize<'de> for PortForwardStartRequest {
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(match StartRequestWire::deserialize(deserializer)? {
+        match StartRequestWire::deserialize(deserializer)? {
             StartRequestWire::LegacyService {
                 service,
                 port,
                 local_port,
-            } => Self::service(service, port, local_port),
-            StartRequestWire::Target { target, local_port } => Self::target(target, local_port),
-        })
+            } => Self::try_service(service, port, local_port),
+            StartRequestWire::Target { target, local_port } => Self::try_target(target, local_port),
+        }
+        .map_err(serde::de::Error::custom)
     }
 }
 

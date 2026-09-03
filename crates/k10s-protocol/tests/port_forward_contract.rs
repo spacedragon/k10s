@@ -367,13 +367,14 @@ fn port_forward_targets_round_trip() {
 
 #[test]
 fn service_start_requests_keep_the_legacy_wire_shape() {
-    let named = PortForwardStartRequest::service(
+    let named = PortForwardStartRequest::try_service(
         service_identity(),
         PortForwardPortSelector::Name {
             name: "http".into(),
         },
         0,
-    );
+    )
+    .unwrap();
     let encoded = round_trip(&named);
     assert_eq!(encoded["service"]["uid"], json!("uid-svc-1"));
     assert_eq!(
@@ -385,11 +386,12 @@ fn service_start_requests_keep_the_legacy_wire_shape() {
 
     assert!(encoded.get("target").is_none());
 
-    let numeric = PortForwardStartRequest::service(
+    let numeric = PortForwardStartRequest::try_service(
         service_identity(),
         PortForwardPortSelector::Number { number: 8443 },
         u16::MAX,
-    );
+    )
+    .unwrap();
     let encoded = round_trip(&numeric);
     assert_eq!(encoded["port"], json!({"kind": "number", "number": 8443}));
     assert_eq!(encoded["localPort"], json!(65535));
@@ -409,12 +411,41 @@ fn legacy_service_start_json_decodes_into_a_typed_target() {
 
     assert_eq!(decoded.local_port(), 0);
     assert!(matches!(
-        decoded.target_ref(),
+        decoded.target(),
         PortForwardTarget::Service {
             port: PortForwardPortSelector::Number { number: 80 },
             ..
         }
     ));
+}
+
+#[test]
+fn target_discriminated_service_start_json_decodes_and_reencodes_legacy() {
+    let decoded: PortForwardStartRequest = serde_json::from_value(json!({
+        "target": {
+            "kind": "service",
+            "identity": service_identity(),
+            "port": {"kind": "name", "name": "http"}
+        },
+        "localPort": 8443
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        decoded.target(),
+        PortForwardTarget::Service {
+            port: PortForwardPortSelector::Name { name },
+            ..
+        } if name == "http"
+    ));
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap(),
+        json!({
+            "service": service_identity(),
+            "port": {"kind": "name", "name": "http"},
+            "localPort": 8443
+        })
+    );
 }
 
 #[test]
@@ -424,26 +455,27 @@ fn pod_start_requests_use_the_target_discriminated_wire_shape() {
         container_name: "web".into(),
         remote_port: 8080,
     };
-    let request = PortForwardStartRequest::target(target.clone(), 8081);
+    let request = PortForwardStartRequest::try_target(target.clone(), 8081).unwrap();
     let encoded = round_trip(&request);
 
     assert_eq!(encoded["target"]["kind"], json!("pod"));
     assert_eq!(encoded["target"]["remotePort"], json!(8080));
     assert_eq!(encoded["localPort"], json!(8081));
     assert!(encoded.get("service").is_none());
-    assert_eq!(request.target_ref(), &target);
+    assert_eq!(request.target(), &target);
 }
 
 #[test]
 fn targets_validate_exact_identity_and_required_target_fields() {
-    let valid_pod = PortForwardStartRequest::target(
+    let valid_pod = PortForwardStartRequest::try_target(
         PortForwardTarget::Pod {
             identity: pod_identity(),
             container_name: "web".into(),
             remote_port: 8080,
         },
         0,
-    );
+    )
+    .unwrap();
     assert!(valid_pod.validate().is_ok());
 
     for invalid_identity in [
@@ -460,7 +492,7 @@ fn targets_validate_exact_identity_and_required_target_fields() {
             ..pod_identity()
         },
     ] {
-        let request = PortForwardStartRequest::target(
+        let request = PortForwardStartRequest::try_target(
             PortForwardTarget::Pod {
                 identity: invalid_identity,
                 container_name: "web".into(),
@@ -468,10 +500,10 @@ fn targets_validate_exact_identity_and_required_target_fields() {
             },
             0,
         );
-        assert!(request.validate().is_err());
+        assert!(request.is_err());
     }
 
-    let missing_container = PortForwardStartRequest::target(
+    let missing_container = PortForwardStartRequest::try_target(
         PortForwardTarget::Pod {
             identity: pod_identity(),
             container_name: String::new(),
@@ -479,7 +511,7 @@ fn targets_validate_exact_identity_and_required_target_fields() {
         },
         0,
     );
-    assert!(missing_container.validate().is_err());
+    assert!(missing_container.is_err());
 
     for invalid_service in [
         PortForwardTarget::Service {
@@ -510,17 +542,13 @@ fn targets_validate_exact_identity_and_required_target_fields() {
             },
         },
     ] {
-        assert!(
-            PortForwardStartRequest::target(invalid_service, 0)
-                .validate()
-                .is_err()
-        );
+        assert!(PortForwardStartRequest::try_target(invalid_service, 0).is_err());
     }
 }
 
 #[test]
 fn zero_pod_remote_port_is_rejected() {
-    let request = PortForwardStartRequest::target(
+    let request = PortForwardStartRequest::try_target(
         PortForwardTarget::Pod {
             identity: pod_identity(),
             container_name: "web".into(),
@@ -530,9 +558,38 @@ fn zero_pod_remote_port_is_rejected() {
     );
 
     assert_eq!(
-        request.validate(),
+        request,
         Err("the Pod target remote port must be greater than zero")
     );
+}
+
+#[test]
+fn invalid_pod_remote_port_is_rejected_during_decode() {
+    let zero: Result<PortForwardStartRequest, _> = serde_json::from_value(json!({
+        "target": {
+            "kind": "pod",
+            "identity": pod_identity(),
+            "containerName": "web",
+            "remotePort": 0
+        },
+        "localPort": 0
+    }));
+    assert!(
+        zero.unwrap_err()
+            .to_string()
+            .contains("remote port must be greater than zero")
+    );
+
+    let overflow: Result<PortForwardStartRequest, _> = serde_json::from_value(json!({
+        "target": {
+            "kind": "pod",
+            "identity": pod_identity(),
+            "containerName": "web",
+            "remotePort": 65_536
+        },
+        "localPort": 0
+    }));
+    assert!(overflow.is_err());
 }
 
 #[test]
@@ -593,6 +650,52 @@ fn session_snapshots_are_complete_and_typed() {
 }
 
 #[test]
+fn generalized_pod_sessions_round_trip_directly_and_in_wrappers() {
+    let session = PortForwardSession {
+        id: PortForwardSessionId::try_new("pf-pod").unwrap(),
+        target: PortForwardTarget::Pod {
+            identity: pod_identity(),
+            container_name: "web".into(),
+            remote_port: 8080,
+        },
+        requested_local_port: 8081,
+        pod: PortForwardPodTarget {
+            namespace: "default".into(),
+            name: "web-frontend-7d9f8-abcde".into(),
+            uid: "uid-pod-1".into(),
+        },
+        pod_port: 8080,
+        local_addr: "127.0.0.1:8081".into(),
+        state: PortForwardSessionState::Active,
+        failure: None,
+        revision: 12,
+    };
+
+    let encoded = round_trip(&session);
+    assert_eq!(encoded["target"]["kind"], json!("pod"));
+    assert_eq!(encoded["target"]["containerName"], json!("web"));
+    assert_eq!(encoded["requestedLocalPort"], json!(8081));
+
+    let list = PortForwardListResponse {
+        revision: 12,
+        sessions: vec![session.clone()],
+    };
+    assert_eq!(
+        round_trip(&list)["sessions"][0]["target"]["kind"],
+        json!("pod")
+    );
+
+    let event = PortForwardSessionEvent {
+        revision: 12,
+        session,
+    };
+    assert_eq!(
+        round_trip(&event)["session"]["target"]["kind"],
+        json!("pod")
+    );
+}
+
+#[test]
 fn legacy_service_session_json_decodes_into_the_generalized_model() {
     let legacy = json!({
         "id": "pf-legacy",
@@ -619,6 +722,12 @@ fn legacy_service_session_json_decodes_into_the_generalized_model() {
         }
     );
     assert_eq!(decoded.pod_port, 8080);
+
+    let generalized = serde_json::to_value(decoded).unwrap();
+    assert_eq!(generalized["target"]["kind"], json!("service"));
+    assert_eq!(generalized["requestedLocalPort"], json!(45621));
+    assert!(generalized.get("service").is_none());
+    assert!(generalized.get("servicePort").is_none());
 }
 
 #[test]
