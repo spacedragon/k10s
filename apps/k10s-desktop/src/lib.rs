@@ -396,6 +396,7 @@ impl DesktopApp {
                     .external_shell_storage
                     .as_ref()
                     .ok_or(external_shell::StorageError::InvalidParent)?;
+                descriptor.validate_kubeconfig_snapshot()?;
                 let command = external_shell::KubectlExecCommand::new(descriptor, target)?;
                 let script = storage.create(&command)?;
                 external_shell::launch_with_adapters(&script, &self.terminal_adapters)
@@ -923,6 +924,7 @@ mod tests {
             kubectl: PathBuf::from("kubectl"),
             context: "first".to_owned(),
             kubeconfig_sources: vec![PathBuf::from("first-config")],
+            kubeconfig_digests: Vec::new(),
             environment: Default::default(),
             exec_plugins: Vec::new(),
         });
@@ -947,6 +949,7 @@ mod tests {
             kubectl: PathBuf::from("kubectl"),
             context: "third".to_owned(),
             kubeconfig_sources: vec![PathBuf::from("third-config")],
+            kubeconfig_digests: Vec::new(),
             environment: Default::default(),
             exec_plugins: Vec::new(),
         });

@@ -16,6 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use k10s_backend::KubePreparation;
+use sha2::{Digest, Sha256};
 
 /// Immutable environment view used during descriptor preparation.
 #[derive(Clone, Debug, Default)]
@@ -152,6 +153,7 @@ pub struct KubectlLaunchDescriptor {
     pub kubectl: PathBuf,
     pub context: String,
     pub kubeconfig_sources: Vec<PathBuf>,
+    pub kubeconfig_digests: Vec<[u8; 32]>,
     pub environment: BTreeMap<String, String>,
     pub exec_plugins: Vec<ResolvedExecPlugin>,
 }
@@ -196,14 +198,19 @@ impl KubectlLaunchDescriptor {
                 command: resolve_executable(&plugin.command, &path, pathext.as_deref())?,
             });
         }
-        Self::new(
+        let mut descriptor = Self::new(
             generation,
             kubectl,
             preparation.selected_context.clone(),
             preparation.source_paths.clone(),
             allowed,
             plugins,
-        )
+        )?;
+        if preparation.source_paths.len() != preparation.source_digests.len() {
+            return Err(DescriptorError::Unreproducible);
+        }
+        descriptor.kubeconfig_digests = preparation.source_digests.clone();
+        Ok(descriptor)
     }
 
     pub fn new(
@@ -249,9 +256,26 @@ impl KubectlLaunchDescriptor {
             kubectl,
             context,
             kubeconfig_sources,
+            kubeconfig_digests: Vec::new(),
             environment,
             exec_plugins,
         })
+    }
+
+    /// Refuse launch if any kubeconfig source no longer matches the exact
+    /// bytes used to prepare the embedded backend.
+    pub fn validate_kubeconfig_snapshot(&self) -> Result<(), DescriptorError> {
+        if self.kubeconfig_sources.len() != self.kubeconfig_digests.len() {
+            return Err(DescriptorError::Unreproducible);
+        }
+        for (path, expected) in self.kubeconfig_sources.iter().zip(&self.kubeconfig_digests) {
+            let bytes = std::fs::read(path).map_err(|_| DescriptorError::KubeconfigChanged)?;
+            let actual: [u8; 32] = Sha256::digest(&bytes).into();
+            if &actual != expected {
+                return Err(DescriptorError::KubeconfigChanged);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -286,6 +310,7 @@ fn is_sensitive_value(value: &str) -> bool {
 pub enum DescriptorError {
     Unreproducible,
     Unrepresentable,
+    KubeconfigChanged,
     SensitiveEnvironment(String),
     UnsupportedEnvironment(String),
     MissingExecutable(String),
@@ -296,6 +321,9 @@ impl fmt::Display for DescriptorError {
         match self {
             Self::Unreproducible => f.write_str("configuration cannot be reproduced by kubectl"),
             Self::Unrepresentable => f.write_str("configuration contains an unrepresentable value"),
+            Self::KubeconfigChanged => {
+                f.write_str("kubeconfig changed after the embedded server started")
+            }
             Self::SensitiveEnvironment(name) => write!(
                 f,
                 "sensitive environment variable {name} cannot be rendered"
@@ -513,6 +541,7 @@ pub enum StorageError {
     Io(std::io::Error),
     Randomness(getrandom::Error),
     InvalidParent,
+    Descriptor(DescriptorError),
     Render(RenderError),
     NoTerminalLauncher,
     LaunchFailed(Vec<SafeLaunchAttempt>),
@@ -527,6 +556,7 @@ impl fmt::Display for StorageError {
             Self::Randomness(_) => formatter.write_str("secure launch-name generation failed"),
             Self::InvalidParent => formatter
                 .write_str("temporary shell parent failed ownership or permission validation"),
+            Self::Descriptor(error) => write!(formatter, "external shell unavailable: {error}"),
             Self::Render(error) => write!(formatter, "shell request is invalid: {error}"),
             Self::NoTerminalLauncher => {
                 formatter.write_str("no system terminal accepted the shell launch")
@@ -560,6 +590,11 @@ impl From<getrandom::Error> for StorageError {
 impl From<RenderError> for StorageError {
     fn from(value: RenderError) -> Self {
         Self::Render(value)
+    }
+}
+impl From<DescriptorError> for StorageError {
+    fn from(value: DescriptorError) -> Self {
+        Self::Descriptor(value)
     }
 }
 

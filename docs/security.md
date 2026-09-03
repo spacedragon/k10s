@@ -51,6 +51,10 @@ configuration is in-memory, unavailable locally, depends on sensitive
 environment, or otherwise cannot be reproduced exactly. Kubeconfig contents,
 credentials, access tokens, and user resource values are never copied into a
 fallback command.
+Immediately before creating the script, Finback re-reads the ordered sources
+and refuses launch unless every cryptographic digest still matches the bytes
+used for backend preparation. The original files remain kubectl's inputs; their
+contents are never copied into the script or temporary launch directory.
 
 The private script checks the live Pod UID immediately before invoking exec.
 This preflight prevents common stale-name mistakes but is not atomic: Kubernetes

@@ -565,6 +565,7 @@ fn descriptor_rejects_non_unicode_allowed_environment_and_missing_kubectl() {
     use std::os::unix::ffi::OsStringExt;
     let preparation = KubePreparation {
         source_paths: vec!["/tmp/config".into()],
+        source_digests: vec![[0; 32]],
         selected_context: "context".into(),
         exec_plugins: Vec::new(),
         context_exec_plugins: BTreeMap::from([("context".into(), Vec::new())]),
@@ -648,6 +649,7 @@ fn descriptor_resolves_kubectl_and_exec_plugin_from_one_preparation() {
     }
     let preparation = KubePreparation {
         source_paths: vec![dir.join("first"), dir.join("second")],
+        source_digests: vec![[0; 32]; 2],
         selected_context: "same-name".into(),
         exec_plugins: vec![ExecPluginPreparation {
             command: "login-helper".into(),
@@ -687,6 +689,11 @@ fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
     assert_eq!(kube.selected_context, "same");
     assert_eq!(kube.exec_plugins[0].command, "first-helper");
 
+    let mut descriptor = descriptor();
+    descriptor.kubeconfig_sources = vec![first.clone(), kube.source_paths[1].clone()];
+    descriptor.kubeconfig_digests = kube.source_digests.clone();
+    descriptor.validate_kubeconfig_snapshot().unwrap();
+
     // A later file/environment change cannot alter the already prepared snapshot.
     fs::write(
         &first,
@@ -697,6 +704,7 @@ fn ordered_kubeconfig_snapshot_keeps_first_same_named_context_authoritative() {
         prepared.kube().unwrap().exec_plugins[0].command,
         "first-helper"
     );
+    assert!(descriptor.validate_kubeconfig_snapshot().is_err());
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -941,6 +949,7 @@ fn main() {{
     );
     let preparation = KubePreparation {
         source_paths: vec![dir.join("config")],
+        source_digests: vec![[0; 32]],
         selected_context: "context".into(),
         exec_plugins: vec![ExecPluginPreparation {
             command: "aws".into(),

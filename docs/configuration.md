@@ -45,6 +45,8 @@ structured and platform-quoted. macOS uses `open` on a private `.command` file,
 Linux uses the documented ordered terminal-adapter fallback, and Windows starts
 `powershell.exe` directly with a private `.ps1` file and new console. See
 [Security](security.md) for the UID preflight's residual race and cleanup rules.
+Immediately before launch, Finback hashes every source again and refuses the
+request if its bytes differ from the snapshot used to prepare the backend.
 
 ## Embeddable `ServerConfig`
 

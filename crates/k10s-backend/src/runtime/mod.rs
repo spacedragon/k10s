@@ -64,6 +64,7 @@ pub struct ExecPluginPreparation {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct KubePreparation {
     pub source_paths: Vec<PathBuf>,
+    pub source_digests: Vec<[u8; 32]>,
     pub selected_context: String,
     pub exec_plugins: Vec<ExecPluginPreparation>,
     pub context_exec_plugins: BTreeMap<String, Vec<ExecPluginPreparation>>,
@@ -81,6 +82,7 @@ impl KubePreparation {
             })?;
         Ok(Self {
             source_paths: self.source_paths.clone(),
+            source_digests: self.source_digests.clone(),
             selected_context: context.to_owned(),
             exec_plugins,
             context_exec_plugins: self.context_exec_plugins.clone(),
@@ -113,9 +115,9 @@ pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterErr
             kube: None,
         }),
         BackendMode::Kube { kubeconfig } => {
-            let (contexts, parsed, sources) =
+            let (contexts, parsed, sources, source_digests) =
                 crate::kube::config::load_with_source(kubeconfig.as_deref())?;
-            prepare_kube_parts(contexts, parsed, sources)
+            prepare_kube_parts(contexts, parsed, sources, source_digests)
         }
     }
 }
@@ -124,14 +126,16 @@ pub fn prepare_backend(mode: &BackendMode) -> Result<PreparedBackend, AdapterErr
 pub fn prepare_kube_backend_from_paths(
     source_paths: Vec<PathBuf>,
 ) -> Result<PreparedBackend, AdapterError> {
-    let (contexts, parsed, sources) = crate::kube::config::load_from_paths(source_paths)?;
-    prepare_kube_parts(contexts, parsed, sources)
+    let (contexts, parsed, sources, source_digests) =
+        crate::kube::config::load_from_paths(source_paths)?;
+    prepare_kube_parts(contexts, parsed, sources, source_digests)
 }
 
 fn prepare_kube_parts(
     contexts: Vec<crate::port::ContextInfo>,
     parsed: kube::config::Kubeconfig,
     sources: Vec<PathBuf>,
+    source_digests: Vec<[u8; 32]>,
 ) -> Result<PreparedBackend, AdapterError> {
     let selected_context =
         parsed
@@ -183,6 +187,7 @@ fn prepare_kube_parts(
         kernel: BackendKernel::new(adapter),
         kube: Some(KubePreparation {
             source_paths: sources,
+            source_digests,
             selected_context,
             exec_plugins,
             context_exec_plugins,

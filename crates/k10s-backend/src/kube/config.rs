@@ -10,15 +10,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kube::config::{Config, ExecInteractiveMode, Kubeconfig, KubeconfigError};
+use sha2::{Digest, Sha256};
 
 use crate::port::{AdapterError, ContextAvailability, ContextInfo};
+
+type LoadedKubeconfig = (Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>, Vec<[u8; 32]>);
 
 /// Load credential-free context summaries from an explicit kubeconfig path or
 /// standard discovery (`KUBECONFIG`, then `~/.kube/config`), along with the
 /// parsed kube-rs config that seeds per-context cluster client construction.
 pub(crate) fn load_with_source(
     explicit_path: Option<&Path>,
-) -> Result<(Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>), AdapterError> {
+) -> Result<LoadedKubeconfig, AdapterError> {
     // Freeze discovery before touching any file, then freeze every file's
     // bytes before parsing. Kernel construction and launch metadata therefore
     // cannot observe different KUBECONFIG/HOME values or a later rewrite.
@@ -26,9 +29,7 @@ pub(crate) fn load_with_source(
     load_from_paths(paths)
 }
 
-pub(crate) fn load_from_paths(
-    paths: Vec<PathBuf>,
-) -> Result<(Vec<ContextInfo>, Kubeconfig, Vec<PathBuf>), AdapterError> {
+pub(crate) fn load_from_paths(paths: Vec<PathBuf>) -> Result<LoadedKubeconfig, AdapterError> {
     if paths.is_empty() {
         return Err(AdapterError::KubeconfigNotConfigured);
     }
@@ -37,7 +38,7 @@ pub(crate) fn load_from_paths(
         .map(|path| unicode_path(path))
         .collect::<Result<Vec<_>, _>>()?
         .join(if cfg!(windows) { ";" } else { ":" });
-    let documents = paths
+    let frozen = paths
         .iter()
         .map(|path| {
             fs::read(path)
@@ -52,9 +53,13 @@ pub(crate) fn load_from_paths(
                         }
                     }
                 })
-                .and_then(|bytes| decode_kubeconfig(&bytes, path))
+                .and_then(|bytes| {
+                    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                    decode_kubeconfig(&bytes, path).map(|document| (document, digest))
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let (documents, digests): (Vec<_>, Vec<_>) = frozen.into_iter().unzip();
     let mut kubeconfig = Kubeconfig::default();
     for (path, document) in paths.iter().zip(documents) {
         let mut next =
@@ -70,7 +75,7 @@ pub(crate) fn load_from_paths(
                 detail: describe(error),
             })?;
     }
-    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths))
+    validate_and_map(&kubeconfig, &source).map(|summaries| (summaries, kubeconfig, paths, digests))
 }
 
 fn decode_kubeconfig(bytes: &[u8], path: &Path) -> Result<String, AdapterError> {
@@ -452,7 +457,7 @@ mod tests {
             let path =
                 std::env::temp_dir().join(format!("k10s-encoding-{name}-{}", std::process::id()));
             std::fs::write(&path, bytes).unwrap();
-            let (_, parsed, _) = load_from_paths(vec![path.clone()]).unwrap();
+            let (_, parsed, _, _) = load_from_paths(vec![path.clone()]).unwrap();
             assert_eq!(parsed.current_context.as_deref(), Some("exec-context"));
             std::fs::remove_file(path).unwrap();
         }
