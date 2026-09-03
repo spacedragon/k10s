@@ -198,15 +198,29 @@ async fn real_service_and_pod_forwards_share_management_and_release_ports() {
     );
 
     let sessions = manager.list().await;
+    let listed_service = sessions
+        .iter()
+        .find(|session| session.id == service.id)
+        .expect("the active explicit Service session is listed");
+    assert_eq!(listed_service.state, PortForwardSessionState::Active);
+    assert_eq!(listed_service.requested_local_port, explicit_port);
+    assert!(matches!(
+        &listed_service.target,
+        PortForwardTarget::Service { .. }
+    ));
+    let listed_pod = sessions
+        .iter()
+        .find(|session| session.id == pod.id)
+        .expect("the active direct Pod session is listed");
+    assert_eq!(listed_pod.state, PortForwardSessionState::Active);
+    assert_eq!(listed_pod.requested_local_port, 0);
+    assert!(matches!(&listed_pod.target, PortForwardTarget::Pod { .. }));
     assert!(
         sessions
             .iter()
-            .any(|session| matches!(session.target, PortForwardTarget::Service { .. }))
-    );
-    assert!(
-        sessions
-            .iter()
-            .any(|session| matches!(session.target, PortForwardTarget::Pod { .. }))
+            .any(|session| session.id == automatic_service.id
+                && session.state == PortForwardSessionState::Stopped),
+        "the retained stopped Service row cannot satisfy either active assertion"
     );
 
     assert!(matches!(

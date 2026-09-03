@@ -3,8 +3,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use k10s_protocol::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
+use k10s_protocol::{
+    CAPABILITY_POD_PORT_FORWARD, CAPABILITY_SERVICE_PORT_FORWARD, CONTROL_PATH, EXEC_PATH,
+    LOGS_PATH, PROTOCOL_MINOR,
+};
 use k10s_server::ServerConfig;
+use k10s_server::port_forward::{
+    MAX_SESSION_CONNECTIONS, MAX_SESSIONS, MAX_TOTAL_CONNECTIONS, PortForwardManager,
+};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -23,18 +29,27 @@ fn normalized(document: &str) -> String {
 fn desktop_port_forward_security_contract_is_documented() {
     let protocol = normalized(&read("docs/protocol.md"));
     let configuration = normalized(&read("docs/configuration.md"));
-    let security = normalized(&read("docs/security.md"));
+    let security_source = read("docs/security.md");
     let troubleshooting = normalized(&read("docs/troubleshooting.md"));
 
+    for capability in [CAPABILITY_SERVICE_PORT_FORWARD, CAPABILITY_POD_PORT_FORWARD] {
+        for (guide, document) in [("protocol", &protocol), ("configuration", &configuration)] {
+            assert!(
+                document.contains(&format!("`{capability}`")),
+                "{guide} guide is missing capability `{capability}`"
+            );
+        }
+    }
+    assert!(
+        protocol.contains(&format!("minor `{PROTOCOL_MINOR}`")),
+        "protocol guide's current minor must match the implementation"
+    );
     for required in [
-        "`service.portForward`",
-        "`pod.portForward`",
         "exact core/v1 Pod identity including UID",
         "regular container",
         "declared numeric TCP port",
         "shared session manager",
         "Pod and Service sessions",
-        "terminal snapshots are retained for 30 seconds",
         "context switch",
         "shutdown",
     ] {
@@ -43,10 +58,19 @@ fn desktop_port_forward_security_contract_is_documented() {
             "protocol guide is missing port-forward contract: {required}"
         );
     }
+    assert!(
+        protocol.contains(&format!(
+            "terminal snapshots are retained for {} seconds",
+            PortForwardManager::TERMINAL_RETENTION.as_secs()
+        )),
+        "protocol guide's terminal retention must match the manager"
+    );
     for required in [
-        "current clients always encode Service starts with the legacy `{service, port, localPort}` shape",
-        "server accepts both the legacy and target-discriminated Service shapes",
+        "legacy `{service, port, localPort}` shape",
+        "accepts both the legacy and target-discriminated Service shapes",
         "Pod starts use the target-discriminated shape",
+        "`requestedLocalPort`",
+        "lossy",
         "automatic `0` becomes the assigned explicit port on Retry",
     ] {
         assert!(
@@ -58,12 +82,8 @@ fn desktop_port_forward_security_contract_is_documented() {
     for required in [
         "desktop-only",
         "standalone server and browser deployment advertise neither",
-        "`127.0.0.1`",
         "Blank or `0` selects an available local port",
         "explicit port must be in `1..=65535`",
-        "16 active sessions",
-        "32 accepted connections globally",
-        "8 per session",
         "global Port Forwards window manages both Pod and Service sessions",
     ] {
         assert!(
@@ -71,21 +91,34 @@ fn desktop_port_forward_security_contract_is_documented() {
             "configuration guide is missing port-forward contract: {required}"
         );
     }
-
     assert!(
-        read("docs/security.md")
-            .lines()
-            .any(|line| line == "### Direct Pod forwarding"),
-        "security guide must give direct Pod forwarding its own RBAC section"
+        configuration.contains(&format!("`{}`", std::net::Ipv4Addr::LOCALHOST)),
+        "configuration guide must document the implementation's loopback address"
     );
+    for expected in [
+        format!("{MAX_SESSIONS} active sessions"),
+        format!("{MAX_TOTAL_CONNECTIONS} accepted connections globally"),
+        format!("{MAX_SESSION_CONNECTIONS} per session"),
+    ] {
+        assert!(
+            configuration.contains(&expected),
+            "documented port-forward limit does not match implementation: {expected}"
+        );
+    }
+
+    let direct_pod_security = security_source
+        .split_once("### Direct Pod forwarding")
+        .map(|(_, section)| normalized(section))
+        .expect("security guide must give direct Pod forwarding its own RBAC section");
     for required in [
         "exact core/v1 Pod identity and UID",
         "named regular container",
         "declared numeric TCP port",
-        "Direct Pod forwarding requires `get` on `pods` and `create` on `pods/portforward`",
+        "`get` on `pods`",
+        "`create` on `pods/portforward`",
     ] {
         assert!(
-            security.contains(required),
+            direct_pod_security.contains(required),
             "security guide is missing port-forward contract: {required}"
         );
     }
@@ -307,8 +340,12 @@ fn operational_contracts_have_acceptance_coverage() {
         assert!(security.contains(required), "missing contract: {required}");
     }
     assert!(troubleshooting.contains("correlation ID"));
-    for required in ["major `1`", "minor `0..=6`", "`resyncRequired`"] {
-        assert!(protocol.contains(required), "missing contract: {required}");
+    for required in [
+        "major `1`".to_owned(),
+        format!("minor `0..={PROTOCOL_MINOR}`"),
+        "`resyncRequired`".to_owned(),
+    ] {
+        assert!(protocol.contains(&required), "missing contract: {required}");
     }
 
     for route in [CONTROL_PATH, LOGS_PATH, EXEC_PATH] {
