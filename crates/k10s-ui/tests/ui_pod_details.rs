@@ -183,7 +183,9 @@ fn projection_crashloop_surfaces_authoritative_reason_and_last_exit() {
         .iter()
         .find_map(|window| match &window.content {
             WindowContent::Detail(detail) => Some(detail.active_tab),
-            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => None,
         })
         .expect("dedicated Pod detail remains open");
     assert_eq!(active_tab, DetailTab::Logs);
@@ -798,7 +800,9 @@ fn pod_interaction_owner_navigation_uses_only_the_verified_exact_identity() {
         .iter()
         .filter_map(|window| match &window.content {
             WindowContent::Detail(detail) => Some(detail.identity.clone()),
-            WindowContent::Resource(_) | WindowContent::Services(_) => None,
+            WindowContent::Resource(_)
+            | WindowContent::Services(_)
+            | WindowContent::PortForwards(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(identities.len(), 2);
