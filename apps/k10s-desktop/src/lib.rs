@@ -906,6 +906,7 @@ mod tests {
             [
                 "logs.tail".to_owned(),
                 k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.to_owned(),
+                k10s_protocol::CAPABILITY_POD_PORT_FORWARD.to_owned(),
             ]
         );
         assert!(
