@@ -148,6 +148,7 @@ pub struct K10sApp {
     /// Authoritative session reconstruction requested after bootstrap or
     /// reconnect; events are subscribed before this list is issued.
     port_forward_list: Option<PendingRequest>,
+    port_forward_list_reconstructing: bool,
     pending_port_forwards: Vec<PendingPortForward>,
     next_port_forward_issuance: u64,
     latest_focused_port_forward_issuance: Option<u64>,
@@ -401,6 +402,7 @@ impl K10sApp {
             namespace_catalog: NamespaceCatalogState::NotDemanded,
             namespace_rejected_context: None,
             port_forward_list: None,
+            port_forward_list_reconstructing: false,
             pending_port_forwards: Vec::new(),
             next_port_forward_issuance: 1,
             latest_focused_port_forward_issuance: None,
@@ -1865,6 +1867,7 @@ impl K10sApp {
                                 context: selected.clone(),
                             });
                     }
+                    let reconstructing_port_forward_list = self.recovering;
                     self.recovering = false;
                     if self.client.any_port_forward_available() {
                         let _ = self
@@ -1876,6 +1879,10 @@ impl K10sApp {
                                 .begin(Query::PortForwardList)
                                 .map_err(|error| AppEventError::Terminal(error.to_string()))?,
                         );
+                        self.port_forward_list_reconstructing = reconstructing_port_forward_list;
+                    } else {
+                        self.port_forward_list = None;
+                        self.port_forward_list_reconstructing = false;
                     }
                     if let Some(context) = selected {
                         // A switch left awaiting its answer from an older
@@ -2068,6 +2075,7 @@ impl K10sApp {
         {
             let _ = self.client.take(request);
             self.port_forward_list = None;
+            self.port_forward_list_reconstructing = false;
         }
     }
 
@@ -2230,6 +2238,8 @@ impl K10sApp {
         }
         self.bootstrap = None;
         self.infrastructure_request = None;
+        self.port_forward_list = None;
+        self.port_forward_list_reconstructing = false;
         // An unanswered switch request died with the transport; the selection
         // stays where it was and a retry needs a fresh user action.
         self.pending_switch = None;
@@ -2536,6 +2546,15 @@ impl K10sApp {
             metrics: self.metrics.clone().into_iter().collect(),
             port_forward_available: self.client.port_forward_available(),
             pod_port_forward_available: self.client.pod_port_forward_available(),
+            port_forward_list_state: if self.port_forward_list.is_some() {
+                if self.port_forward_list_reconstructing {
+                    crate::ui::PortForwardListState::Reconstructing
+                } else {
+                    crate::ui::PortForwardListState::Loading
+                }
+            } else {
+                crate::ui::PortForwardListState::Ready
+            },
             port_forward_sessions: self
                 .client
                 .port_forward_sessions()
@@ -6228,6 +6247,87 @@ mod tests {
         app.poll_at(100, 0);
         assert!(matches!(app.view(), AppView::Ready { .. }));
         (app, state)
+    }
+
+    #[test]
+    fn initial_port_forward_list_request_projects_loading_until_authority_completes() {
+        let (mut app, _) = ready_app_with_port_forward_capabilities();
+
+        assert!(app.port_forward_list.is_some());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Loading
+        );
+
+        let request = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        let feed = app.build_resource_feed();
+        assert_eq!(
+            feed.port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
+        assert!(feed.port_forward_sessions.is_empty());
+    }
+
+    #[test]
+    fn reconnect_port_forward_list_request_projects_reconstruction_until_completion() {
+        let mut bootstrap = BootstrapResponse::fixture();
+        bootstrap.capabilities.extend([
+            k10s_protocol::CAPABILITY_SERVICE_PORT_FORWARD.into(),
+            k10s_protocol::CAPABILITY_POD_PORT_FORWARD.into(),
+        ]);
+        let bootstrap = ServerFrame::response(RequestId::from_u128(1), bootstrap);
+        let (mut app, _) = test_app(vec![ConnectionScript {
+            events: VecDeque::from([
+                WsEvent::Opened,
+                server_message(&welcome()),
+                server_message(&bootstrap),
+            ]),
+            overflowed: false,
+        }]);
+        app.recovering = true;
+
+        app.poll_at(100, 0);
+
+        assert!(matches!(app.view(), AppView::Ready { .. }));
+        assert!(app.port_forward_list.is_some());
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Reconstructing
+        );
+
+        let request = app.port_forward_list.clone().unwrap();
+        app.handle_event(
+            server_message(&ServerFrame::response(
+                request.id().clone(),
+                k10s_protocol::PortForwardListResponse {
+                    revision: 0,
+                    sessions: Vec::new(),
+                },
+            )),
+            110,
+            0,
+        )
+        .unwrap();
+        app.finish_port_forward_list();
+
+        assert_eq!(
+            app.build_resource_feed().port_forward_list_state,
+            crate::ui::PortForwardListState::Ready
+        );
     }
 
     fn ready_app_with_authorized_pod_port_forward(

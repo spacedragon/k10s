@@ -13,7 +13,7 @@ use k10s_protocol::{
 };
 use k10s_ui::{
     ui::{
-        ConnectionState, DetailAuthority, DetailLifecycle, PortForwardAction,
+        ConnectionState, DetailAuthority, DetailLifecycle, PortForwardAction, PortForwardListState,
         PortForwardRetryErrors, PortForwardStartModal, ResourceFeed, UiShell, WindowFreshness,
         retry_start_request,
     },
@@ -382,6 +382,60 @@ fn manager_empty_and_connection_states_are_honest() {
     harness.state_mut().connection = ConnectionState::Connecting;
     harness.run_steps(2);
     harness.get_by_label("Reconnecting to port-forward sessions…");
+}
+
+#[test]
+fn connected_pending_lists_render_loading_or_reconstructing_before_empty() {
+    for (state, expected) in [
+        (
+            PortForwardListState::Loading,
+            "Loading port-forward sessions…",
+        ),
+        (
+            PortForwardListState::Reconstructing,
+            "Reconstructing port-forward sessions…",
+        ),
+    ] {
+        let mut harness = management_harness(Vec::new());
+        harness.state_mut().feed.port_forward_list_state = state;
+        harness.run_steps(3);
+
+        harness.get_by_label(expected);
+        assert!(
+            harness
+                .query_by_label("No port forwards yet. Start one from Pod Ports or Service Ports.")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn long_failure_and_retry_messages_are_visible_verbatim_in_row_details() {
+    const FAILURE: &str =
+        "safe failure: the selected backing Pod disappeared while the tunnel was being established";
+    const OVERLAY: &str =
+        "retry rejected: local address 127.0.0.1:18080 remains occupied; choose another local port";
+    let mut failed = session(
+        "pf-long-errors",
+        pod_target(),
+        PortForwardSessionState::Failed,
+        "",
+    );
+    failed.failure.as_mut().unwrap().message = FAILURE.into();
+    let mut harness = management_harness(vec![failed.clone()]);
+    harness
+        .state_mut()
+        .feed
+        .port_forward_retry_errors
+        .insert(failed.id, OVERLAY.into());
+    harness.run_steps(3);
+
+    for text in [FAILURE, OVERLAY] {
+        let visible = harness.get_by(|node| {
+            node.role() == Role::Label && node.value().as_deref() == Some(text) && !node.is_hidden()
+        });
+        assert!(visible.rect().height() > 0.0);
+    }
 }
 
 #[test]

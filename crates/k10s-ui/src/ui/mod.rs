@@ -27,8 +27,8 @@ pub use port_forward::{
     RETRY_LOCAL_PORT_GUIDANCE, retry_start_request,
 };
 pub use resource_window::{
-    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PrimaryDetailState, RelationState,
-    ResourceFeed, RowIdentity, SafeUiError, WindowFreshness,
+    DetailAuthority, DetailLifecycle, NamespaceCatalogState, PortForwardListState,
+    PrimaryDetailState, RelationState, ResourceFeed, RowIdentity, SafeUiError, WindowFreshness,
 };
 pub use service_window::{
     cluster_ip_column_label, port_compact_label, port_detail_label, ports_column_label,

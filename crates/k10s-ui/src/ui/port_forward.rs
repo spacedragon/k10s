@@ -364,6 +364,17 @@ pub(super) fn show_manager<I>(
         clear_focus_if_needed(window_id, state, queued);
         return;
     }
+    match feed.port_forward_list_state {
+        super::PortForwardListState::Loading => {
+            ui.label("Loading port-forward sessions…");
+            return;
+        }
+        super::PortForwardListState::Reconstructing => {
+            ui.label("Reconstructing port-forward sessions…");
+            return;
+        }
+        super::PortForwardListState::Ready => {}
+    }
     if let Some(error) = &feed.port_forward_error {
         ui.label(RichText::new(error).color(super::theme::WARNING));
     }
@@ -427,20 +438,19 @@ pub(super) fn show_manager<I>(
                                             column.width,
                                             false,
                                             |ui| {
-                                                session_cell(
-                                                    ui,
-                                                    column_kind,
-                                                    session,
-                                                    feed.port_forward_retry_errors
-                                                        .get(&session.id)
-                                                        .map(String::as_str),
-                                                    actions,
-                                                );
+                                                session_cell(ui, column_kind, session, actions);
                                             },
                                         );
                                     }
                                 }
                             });
+                            session_messages(
+                                ui,
+                                session,
+                                feed.port_forward_retry_errors
+                                    .get(&session.id)
+                                    .map(String::as_str),
+                            );
                         })
                         .response;
                     let row_label = format!("Port forward session {}", session.id);
@@ -472,7 +482,6 @@ fn session_cell(
     ui: &mut egui::Ui,
     column: ManagementColumn,
     session: &PortForwardSession,
-    retry_error: Option<&str>,
     actions: &mut Vec<PortForwardAction>,
 ) {
     match column {
@@ -507,23 +516,25 @@ fn session_cell(
         }
         ManagementColumn::Status => {
             let presentation = session_presentation(session.state);
-            ui.vertical(|ui| {
-                ui.label(RichText::new(presentation.label).color(presentation.color));
-                if let Some(failure) = &session.failure {
-                    ui.scope(|ui| {
-                        ui.visuals_mut().override_text_color = Some(super::theme::WARNING);
-                        super::responsive_table::elided_label(ui, failure.message.clone(), 10);
-                    });
-                }
-                if let Some(error) = retry_error {
-                    ui.scope(|ui| {
-                        ui.visuals_mut().override_text_color = Some(super::theme::WARNING);
-                        super::responsive_table::elided_label(ui, error.to_owned(), 10);
-                    });
-                }
-            });
+            ui.label(RichText::new(presentation.label).color(presentation.color));
         }
         ManagementColumn::Actions => session_actions(ui, session, actions),
+    }
+}
+
+fn session_messages(ui: &mut egui::Ui, session: &PortForwardSession, retry_error: Option<&str>) {
+    for message in session
+        .failure
+        .as_ref()
+        .map(|failure| failure.message.as_str())
+        .into_iter()
+        .chain(retry_error)
+    {
+        ui.add(
+            egui::Label::new(RichText::new(message).color(super::theme::WARNING))
+                .wrap()
+                .selectable(true),
+        );
     }
 }
 
