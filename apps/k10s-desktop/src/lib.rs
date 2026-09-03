@@ -321,8 +321,19 @@ impl DesktopApp {
         let Some(app) = self.app.as_mut() else {
             return;
         };
-        for event in app.drain_app_events() {
-            let k10s_ui::K10sAppEvent::CommittedContextChanged { context } = event;
+        let events = app.drain_app_events();
+        let (connection_changed, rebuild_context) =
+            events
+                .into_iter()
+                .fold((false, None), |_, event| match event {
+                    k10s_ui::K10sAppEvent::CommittedContextChanged { context } => {
+                        (true, Some(context))
+                    }
+                    k10s_ui::K10sAppEvent::ControlConnectionReestablished { context } => {
+                        (true, context)
+                    }
+                });
+        if connection_changed {
             app.set_external_shell_availability(
                 k10s_ui::ui::ExternalShellAvailability::Unavailable,
             );
@@ -332,12 +343,13 @@ impl DesktopApp {
                 &mut self.external_shell_descriptor,
             ) else {
                 self.terminal_adapters.clear();
-                continue;
+                return;
             };
-            let preparation = self
-                .kube_preparation
-                .as_ref()
-                .and_then(|value| value.for_context(&context).ok());
+            let preparation = rebuild_context.as_ref().and_then(|context| {
+                self.kube_preparation
+                    .as_ref()
+                    .and_then(|value| value.for_context(context).ok())
+            });
             let terminal = external_shell::probe_system_terminals(&self.shell_environment);
             let rebuilt = preparation
                 .as_ref()

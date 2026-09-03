@@ -192,6 +192,7 @@ pub struct K10sApp {
     shell: UiShell<ResourceIdentity>,
     external_shell_requests: Vec<crate::ui::ExternalShellTarget>,
     app_events: Vec<K10sAppEvent>,
+    completed_bootstrap_once: bool,
     host_error: Option<SafeUiError>,
     /// Restorable window layouts not currently active, keyed by kube context.
     workspace_layouts: BTreeMap<String, WorkspaceSnapshot>,
@@ -202,6 +203,7 @@ pub struct K10sApp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum K10sAppEvent {
     CommittedContextChanged { context: String },
+    ControlConnectionReestablished { context: Option<String> },
 }
 
 /// A window's in-flight dedicated-stream ticket request.
@@ -407,6 +409,7 @@ impl K10sApp {
             shell: UiShell::new(),
             external_shell_requests: Vec::new(),
             app_events: Vec::new(),
+            completed_bootstrap_once: false,
             host_error: None,
             workspace_layouts: BTreeMap::new(),
             clock_started: Instant::now(),
@@ -1706,11 +1709,19 @@ impl K10sApp {
                                 .map(|context| context.name.clone())
                         });
                     self.client.local_ui_mut().selected_context = selected.clone();
+                    let reestablished = self.completed_bootstrap_once;
+                    self.completed_bootstrap_once = true;
                     self.view = AppView::Ready {
                         server_instance_id,
                         context_names,
                         contexts,
                     };
+                    if reestablished {
+                        self.app_events
+                            .push(K10sAppEvent::ControlConnectionReestablished {
+                                context: selected.clone(),
+                            });
+                    }
                     self.recovering = false;
                     if self.client.port_forward_available() {
                         let _ = self
@@ -9426,6 +9437,7 @@ mod tests {
             0,
         )
         .unwrap();
+        app.drain_app_events();
         assert!(matches!(app.view(), AppView::Ready { .. }));
         assert_eq!(
             app.client.local_ui().selected_context.as_deref(),
@@ -9513,6 +9525,24 @@ mod tests {
             "the authoritative commit clears stale selection and detail state"
         );
         assert!(app.pending_switch.is_none());
+        let reconnect_events = app.drain_app_events();
+        assert_eq!(
+            reconnect_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    super::K10sAppEvent::ControlConnectionReestablished { .. }
+                ))
+                .count(),
+            1,
+            "one completed reconnect publishes exactly one typed event"
+        );
+        assert!(reconnect_events.iter().any(|event| matches!(
+            event,
+            super::K10sAppEvent::ControlConnectionReestablished { context }
+                if context.as_deref() == Some("prod-readonly")
+        )));
+        assert!(app.drain_app_events().is_empty());
         let kinds: Vec<_> = state
             .borrow()
             .sent
