@@ -8,15 +8,6 @@ Window label="Deployment · payments / checkout"
           Unknown
         GenericContainer
           GenericContainer
-            Unknown label="Detail vital strip"
-            GenericContainer
-              GenericContainer
-                Label value="Rollout ● Complete"
-                Label value="Ready · 3/3"
-                Label value="Up-to-date · 3"
-                Label value="Available · 3"
-                Label value="Strategy · RollingUpdate"
-                Label value="Age · 31d"
             GenericContainer
               GenericContainer
                 Button label="Tab Overview"
@@ -185,8 +176,25 @@ Window label="Deployment · payments / checkout"
                             Label value="Managed by · Helm · release checkout-prod (payments)"
                               TextRun value="Helm · release che…ut-prod (payments)"
             GenericContainer
-              Label value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
-                TextRun value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
+              GenericContainer
+                GenericContainer
+                  Label value="Rollout ● Complete"
+                    TextRun value="● Complete"
+                Label value="Ready · 3/3"
+                  TextRun value="READY 3 / 3"
+                Label value="Up-to-date · 3"
+                  TextRun value="UP-TO-DATE 3"
+                Label value="Available · 3"
+                  TextRun value="AVAILABLE 3"
+                Label value="Strategy · RollingUpdate"
+                  TextRun value="STRATEGY RollingUpdate"
+                Label value="Age · 31d"
+                  TextRun value="AGE 31d"
+                GenericContainer
+                  Label value="? keys"
+                    TextRun value="? keys"
+                  Label value="↻ live · just now"
+                    TextRun value="↻ live · just now"
   Splitter
   Splitter
   Splitter

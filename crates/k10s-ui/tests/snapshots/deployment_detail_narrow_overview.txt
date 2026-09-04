@@ -8,12 +8,6 @@ Window label="Deployment · payments / checkout"
           Unknown
         GenericContainer
           GenericContainer
-            Unknown label="Detail vital strip"
-            GenericContainer
-              GenericContainer
-                Label value="Rollout ▲ ReplicaSetUpdated"
-                Label value="Ready · 3/3"
-                Button label="Show more Deployment vitals"
             GenericContainer
               GenericContainer
                 Button label="Tab Overview"
@@ -108,8 +102,23 @@ Window label="Deployment · payments / checkout"
                   Label value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
                     TextRun value="ScalingReplicaSet · Scaled up replica set checkout-4 to 3 · ×2 · 2026-08-30T10:01:00Z"
             GenericContainer
-              Label value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
-                TextRun value="p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection"
+              GenericContainer
+                GenericContainer
+                  Label value="Rollout ▲ ReplicaSetUpdated"
+                    TextRun value="▲ ReplicaSetUpdated"
+                Label value="Ready · 3/3"
+                  TextRun value="READY 3 / 3"
+                Label value="Up-to-date · 3"
+                  TextRun value="UP-TO-DATE 3"
+                Label value="Available · 3"
+                  TextRun value="AVAILABLE 3"
+                Label value="Strategy · RollingUpdate"
+                  TextRun value="STRATEGY RollingUpdate"
+                Label value="Age · 31d"
+                GenericContainer
+                  Label value="? keys"
+                  Label value="↻ live · just now"
+                    TextRun value="↻ live · just now"
   Splitter
   Splitter
   Splitter

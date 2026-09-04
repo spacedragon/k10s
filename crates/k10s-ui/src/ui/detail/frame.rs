@@ -516,7 +516,11 @@ pub(super) fn show<I: RowIdentity>(
         remaining.width(),
         egui::TextStyle::Body,
     );
-    let footer_height = footer_galley.size().y + ui.spacing().item_spacing.y * 2.0 + 1.0;
+    let footer_height = if projection.vitals_in_footer {
+        28.0
+    } else {
+        footer_galley.size().y + ui.spacing().item_spacing.y * 2.0 + 1.0
+    };
     let footer_top = (remaining.bottom() - footer_height).max(remaining.top());
     let body_rect =
         egui::Rect::from_min_max(remaining.min, egui::pos2(remaining.right(), footer_top));
@@ -565,6 +569,26 @@ pub(super) fn show<I: RowIdentity>(
             .max_rect(footer_rect)
             .layout(Layout::top_down(Align::Min)),
     );
+    if projection.vitals_in_footer {
+        let margin = ui.spacing().window_margin;
+        let bg_rect = egui::Rect::from_min_max(
+            egui::pos2(footer_rect.left() - margin.left as f32, footer_rect.top()),
+            egui::pos2(
+                footer_rect.right() + margin.right as f32,
+                footer_rect.bottom() + margin.bottom as f32,
+            ),
+        );
+        ui.painter().rect_filled(
+            bg_rect,
+            egui::CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: 4,
+                se: 4,
+            },
+            egui::Color32::from_rgb(20, 20, 20),
+        );
+    }
     footer_ui.separator();
     if projection.vitals_in_footer {
         show_pod_status_footer(&mut footer_ui, &projection);
@@ -628,7 +652,7 @@ fn pod_status_footer_job(
     ui: &egui::Ui,
     projection: &DetailFrameProjection<'_>,
 ) -> (String, egui::text::LayoutJob) {
-    let font = egui::TextStyle::Body.resolve(ui.style());
+    let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
     let muted = crate::ui::theme::MUTED_TEXT;
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
@@ -641,25 +665,38 @@ fn pod_status_footer_job(
         if !plain.is_empty() {
             job.append("    ", 0.0, egui::TextFormat::simple(font.clone(), muted));
         }
-        let value = vital_value_text(vital, &vital.value);
-        let item = format!("{} {value}", vital.label.to_uppercase());
-        plain.push(item.clone());
+        let label = if vital.label == "Pod IP" {
+            "IP"
+        } else {
+            vital.label
+        };
+        let mut value = vital_value_text(vital, &vital.value);
+        if vital.label == "Ready" && value.contains('/') && !value.contains(" / ") {
+            value = value.replace('/', " / ");
+        }
+        let item = format!("{} {value}", label.to_uppercase());
+        plain.push(item);
         job.append(
-            &format!("{} ", vital.label.to_uppercase()),
+            &format!("{} ", label.to_uppercase()),
             0.0,
             egui::TextFormat::simple(font.clone(), muted),
         );
-        job.append(
-            &value,
-            0.0,
-            egui::TextFormat::simple(font.clone(), vital_color(ui.visuals(), vital.tone)),
-        );
+        let color = if vital.tone == DetailVitalTone::Neutral {
+            egui::Color32::from_rgb(226, 226, 226)
+        } else {
+            vital_color(ui.visuals(), vital.tone)
+        };
+        job.append(&value, 0.0, egui::TextFormat::simple(font.clone(), color));
     }
     if let DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) =
         projection.freshness
     {
         job.append("    ", 0.0, egui::TextFormat::simple(font.clone(), muted));
-        let sync = format!("⟳ live · {last_sync_age}");
+        let sync = if last_sync_age == "all sources live" {
+            "↻ live".to_owned()
+        } else {
+            format!("↻ live · {last_sync_age}")
+        };
         plain.push(sync.clone());
         job.append(
             &sync,
@@ -681,15 +718,39 @@ fn show_pod_status_footer(ui: &mut egui::Ui, projection: &DetailFrameProjection<
             .chain(&projection.overflow_vitals);
         if let Some(status) = vitals.next() {
             let display = vital_display(status);
+            let (fill, stroke_color, text_color) = match status.tone {
+                DetailVitalTone::Healthy => (
+                    egui::Color32::from_rgb(23, 48, 31),
+                    egui::Color32::from_rgb(47, 106, 69),
+                    crate::ui::theme::HEALTHY,
+                ),
+                DetailVitalTone::Warning => (
+                    egui::Color32::from_rgb(51, 40, 15),
+                    egui::Color32::from_rgb(106, 82, 32),
+                    crate::ui::theme::WARNING,
+                ),
+                DetailVitalTone::Danger => (
+                    egui::Color32::from_rgb(51, 27, 27),
+                    egui::Color32::from_rgb(122, 63, 63),
+                    crate::ui::theme::DANGER,
+                ),
+                DetailVitalTone::Neutral => (
+                    egui::Color32::from_rgb(33, 33, 33),
+                    egui::Color32::from_rgb(61, 61, 61),
+                    crate::ui::theme::TEXT,
+                ),
+            };
             let response = egui::Frame::new()
-                .fill(egui::Color32::from_rgb(24, 68, 43))
-                .corner_radius(12.0)
-                .inner_margin(egui::Margin::symmetric(10, 3))
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, stroke_color))
+                .corner_radius(11.0)
+                .inner_margin(egui::Margin::symmetric(9, 2))
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(vital_value_text(status, &display.visible))
                             .monospace()
-                            .color(crate::ui::theme::HEALTHY),
+                            .size(11.5)
+                            .color(text_color),
                     )
                 })
                 .inner;
@@ -699,38 +760,53 @@ fn show_pod_status_footer(ui: &mut egui::Ui, projection: &DetailFrameProjection<
         }
         for vital in vitals {
             let display = vital_display(vital);
-            let small = egui::FontId::new(10.0, egui::FontFamily::Monospace);
-            let value = egui::FontId::new(12.0, egui::FontFamily::Monospace);
+            let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
             let mut job = egui::text::LayoutJob::default();
+            let label_text = if vital.label == "Pod IP" {
+                "IP"
+            } else {
+                vital.label
+            };
+            let mut val_str = vital_value_text(vital, &display.visible);
+            if vital.label == "Ready" && val_str.contains('/') && !val_str.contains(" / ") {
+                val_str = val_str.replace('/', " / ");
+            }
             job.append(
-                &format!("{}  ", vital.label.to_uppercase()),
+                &format!("{} ", label_text.to_uppercase()),
                 0.0,
-                egui::TextFormat::simple(small, crate::ui::theme::MUTED_TEXT),
+                egui::TextFormat::simple(font.clone(), crate::ui::theme::MUTED_TEXT),
             );
-            job.append(
-                &vital_value_text(vital, &display.visible),
-                0.0,
-                egui::TextFormat::simple(value, vital_color(ui.visuals(), vital.tone)),
-            );
+            let value_color = if vital.tone == DetailVitalTone::Neutral {
+                egui::Color32::from_rgb(226, 226, 226)
+            } else {
+                vital_color(ui.visuals(), vital.tone)
+            };
+            job.append(&val_str, 0.0, egui::TextFormat::simple(font, value_color));
             let label = ui.label(job);
             label.widget_info(|| {
                 WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
             });
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
             ui.label(
                 RichText::new("? keys")
                     .monospace()
-                    .small()
+                    .size(11.5)
                     .color(crate::ui::theme::MUTED_TEXT),
             );
             if let DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) =
                 projection.freshness
             {
+                let sync_display = if last_sync_age == "all sources live" {
+                    "↻ live".to_owned()
+                } else {
+                    format!("↻ live · {last_sync_age}")
+                };
                 ui.label(
-                    RichText::new(format!("⟳ live · {last_sync_age}"))
+                    RichText::new(sync_display)
                         .monospace()
-                        .small()
+                        .size(11.5)
                         .color(crate::ui::theme::HEALTHY),
                 );
             }

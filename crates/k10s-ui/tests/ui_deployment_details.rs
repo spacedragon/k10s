@@ -1187,9 +1187,7 @@ fn deployment_layout_boundary_and_minimum_height_keep_shared_contract() {
     );
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
     assert_eq!(window.query_all_by_role(Role::ScrollView).count(), 1);
-    let footer = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
-        .rect();
+    let footer = window.get_by_label("? keys").rect();
     assert!(window.rect().contains_rect(footer));
 }
 
@@ -1264,9 +1262,7 @@ fn deployment_commands_remain_shared_capability_and_authority_driven() {
         .click();
     harness.run_steps(1);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    window.get_by_label(
-        "p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection",
-    );
+    window.get_by_label("? keys");
     assert!(window.query_by_label("Roll back…").is_none());
 
     harness.state_mut().feed.detail_authority.insert(
@@ -1421,11 +1417,9 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
 
     // The footer is fixed at the bottom of the detail window.
-    let footer_before = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
-        .rect();
+    let footer_before = window.get_by_label("? keys").rect();
     assert!(
-        footer_before.top() > window.rect().bottom() - footer_before.height() - 12.0,
+        footer_before.top() > window.rect().bottom() - footer_before.height() - 16.0,
         "footer must sit at the bottom of the detail window: footer={footer_before:?} window={:?}",
         window.rect()
     );
@@ -1452,9 +1446,7 @@ fn deployment_overview_body_stays_clipped_above_the_fixed_footer() {
     });
     harness.run_steps(2);
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · payments / checkout");
-    let footer_after = window
-        .get_by_label("p pods · l logs · y yaml · e events · c copy name · Ctrl+D delete · Esc clear selection")
-        .rect();
+    let footer_after = window.get_by_label("? keys").rect();
     assert!(
         (footer_after.center() - footer_before.center()).length() <= 1.0,
         "the footer must stay fixed while the body scrolls: before={footer_before:?} after={footer_after:?}"
