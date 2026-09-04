@@ -88,6 +88,9 @@ test('resource taxonomy opens a named built-in from its group', async ({ page })
     .getByRole('button', { name: 'Secrets', exact: true })
     .dispatchEvent('click');
   await expect(page.getByRole('table', { name: 'Secrets' })).toBeVisible();
+  // The canvas needs an additional layout frame after the resource window
+  // opens; otherwise the filter controls can be captured mid-transition.
+  await page.waitForTimeout(750);
   await expect(page).toHaveScreenshot('resource-taxonomy.png', {
     animations: 'disabled',
     fullPage: true,

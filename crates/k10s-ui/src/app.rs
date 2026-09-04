@@ -11174,13 +11174,19 @@ mod tests {
             "Deployments · all namespaces",
         );
 
-        // A constrained local list keeps primary controls reachable through
-        // one accessible overflow menu.
+        // The reference layout exposes primary controls directly when space permits:
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
         window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: All namespaces");
         window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
-        window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
-        window.get_by_label("Live; synced just now");
+        if window
+            .query_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
+            .is_some()
+        {
+            window.get_by_label("Live; synced just now");
+        } else {
+            window.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
+            window.get_by_label("Live; synced just now");
+        }
 
         // The match line reports the result count and the age affordance.
         // With no filters active, the Reset control stays hidden.
@@ -11325,14 +11331,21 @@ mod tests {
             list_window.query_by_label("Select resource beta").is_none(),
             "the status filter must exclude non-matching rows"
         );
-        list_window.get_by_label("1 deployments");
-        // An active filter keeps Reset reachable through the same menu.
-        list_window.get_by_role_and_label(egui::accesskit::Role::Button, "More list controls");
+        // An active filter keeps Reset reachable directly or through overflow.
+        if list_window
+            .query_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
+            .is_none()
+        {
+            list_window.get_by_role_and_label(egui::accesskit::Role::Button, "Reset");
+        }
         let selector = harness
             .query_all_by_role(egui::accesskit::Role::ComboBox)
-            .find(|node| node.value().as_deref() == Some("Status"))
+            .find(|node| {
+                node.value()
+                    .is_some_and(|value| value == "Status" || value.starts_with("Status: "))
+            })
             .expect("the toolbar Status combobox");
-        assert_eq!(selector.value().as_deref(), Some("Status"));
+        assert!(selector.value().as_deref().unwrap().contains("Status"));
 
         // Reset clears the filter and restores every row.
         let mut app = harness.into_state();

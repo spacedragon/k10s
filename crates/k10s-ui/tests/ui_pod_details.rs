@@ -730,18 +730,14 @@ fn pod_layout_759_is_operational_first_with_collapsed_metadata_and_vitals() {
     let events = detail.get_by_label("RECENT EVENTS").rect();
     assert!(containers.top() < events.top());
     detail.get_by_role_and_label(Role::Button, "Show Pod metadata");
-    detail.get_by_role_and_label(Role::Button, "Show more Pod vitals");
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Show more Pod vitals")
+            .is_none()
+    );
     assert!(detail.query_by_label("PLACEMENT").is_none());
-    assert!(detail.query_by_label("Node · worker-a").is_none());
-    assert!(detail.query_by_label("Pod IP · 10.244.0.9").is_none());
-
-    detail
-        .get_by_role_and_label(Role::Button, "Show more Pod vitals")
-        .click();
-    harness.run_steps(3);
-    harness.get_by_label("Node · worker-a");
-    harness.get_by_label("Pod IP · 10.244.0.9");
-    let detail = pod_window(&harness);
+    detail.get_by_label("Node · worker-a");
+    detail.get_by_label("Pod IP · 10.244.0.9");
 
     detail
         .get_by_role_and_label(Role::Button, "Show Pod metadata")
@@ -784,24 +780,14 @@ fn freely_resized_narrow_vital_strip_keeps_controls_and_freshness_reachable() {
 
     let detail = pod_window(&harness);
     assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
-    let show_more = detail.get_by_role_and_label(Role::Button, "Show more Pod vitals");
-    show_more.scroll_to_me();
-    harness.run_steps(2);
-    let detail = pod_window(&harness);
-    let show_more = detail.get_by_role_and_label(Role::Button, "Show more Pod vitals");
-    assert!(detail.rect().intersects(show_more.rect()));
-    show_more.click();
-    harness.run_steps(3);
-
-    harness.get_by_label("Node · worker-a");
-    harness.get_by_label("Pod IP · 10.244.0.9");
-    pod_window(&harness)
-        .get_by_label("Freshness · unavailable")
-        .scroll_to_me();
-    harness.run_steps(2);
-    let detail = pod_window(&harness);
-    let freshness = detail.get_by_label("Freshness · unavailable");
-    assert!(detail.rect().intersects(freshness.rect()));
+    assert!(
+        detail
+            .query_by_role_and_label(Role::Button, "Show more Pod vitals")
+            .is_none()
+    );
+    detail.get_by_label("Node · worker-a");
+    detail.get_by_label("Pod IP · 10.244.0.9");
+    detail.get_by_label("Sync ⨯ Failed");
     assert_eq!(detail.query_all_by_role(Role::ScrollView).count(), 1);
 }
 
@@ -1097,7 +1083,7 @@ fn pod_interaction_lifecycle_states_keep_shared_frame_semantics() {
     let detail = pod_window(&loading);
     detail.get_by_label("Loading details");
     detail.get_by_label("Status ● —");
-    detail.get_by_label("l logs · y yaml · e events · c copy name · Esc clear selection");
+    detail.get_by_label("? keys");
 
     loading.state_mut().feed.primary_details.insert(
         identity.clone(),
@@ -1120,7 +1106,7 @@ fn pod_interaction_lifecycle_states_keep_shared_frame_semantics() {
     );
     stale.run_steps(3);
     let detail = pod_window(&stale);
-    detail.get_by_label("Freshness · stale");
+    detail.get_by_label("Sync ▲ Stale");
     detail.get_by_label("CONTAINERS · 2");
 
     stale.state_mut().feed.detail_authority.insert(
@@ -1158,7 +1144,7 @@ fn detail_freshness_combines_primary_state_with_exact_source_authority() {
         .primary_details
         .insert(identity.clone(), PrimaryDetailState::Loading);
     harness.run_steps(3);
-    pod_window(&harness).get_by_label("Freshness · loading");
+    pod_window(&harness).get_by_label("Sync ▲ Connecting");
 
     harness.state_mut().feed.primary_details.insert(
         identity.clone(),
@@ -1166,19 +1152,14 @@ fn detail_freshness_combines_primary_state_with_exact_source_authority() {
     );
     harness.run_steps(3);
     let detail = pod_window(&harness);
-    detail.get_by_label("Freshness · unavailable");
-    assert!(
-        detail
-            .query_by_label("Freshness · live (just now)")
-            .is_none()
-    );
+    detail.get_by_label("Sync ⨯ Failed");
 
     harness.state_mut().feed.primary_details.insert(
         identity.clone(),
         PrimaryDetailState::Loaded(healthy_detail()),
     );
     harness.run_steps(3);
-    pod_window(&harness).get_by_label("Freshness · live (just now)");
+    assert!(pod_window(&harness).query_by_label("Sync").is_none());
 
     harness.state_mut().feed.detail_authority.insert(
         identity,
@@ -1189,12 +1170,7 @@ fn detail_freshness_combines_primary_state_with_exact_source_authority() {
     );
     harness.run_steps(3);
     let detail = pod_window(&harness);
-    detail.get_by_label("Freshness · gone");
-    assert!(
-        detail
-            .query_by_label("Freshness · live (just now)")
-            .is_none()
-    );
+    detail.get_by_label("Sync ⨯ Gone");
 }
 
 #[test]

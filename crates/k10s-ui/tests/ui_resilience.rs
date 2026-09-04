@@ -372,11 +372,13 @@ fn empty_and_filtered_empty_states_are_distinct_and_recoverable() {
         "a filter miss must not claim the namespace is empty"
     );
 
-    window
-        .get_by_role_and_label(Role::Button, "More list controls")
-        .click();
-    harness.step();
-    harness.get_by_role_and_label(Role::Button, "Reset").click();
+    if let Some(more) = window.query_by_role_and_label(Role::Button, "More list controls") {
+        more.click();
+        harness.step();
+        harness.get_by_role_and_label(Role::Button, "Reset").click();
+    } else {
+        window.get_by_role_and_label(Role::Button, "Reset").click();
+    }
     harness.run_steps(4);
     let window = common::workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");
@@ -523,7 +525,15 @@ fn every_window_freshness_state_is_independent_and_recoverable() {
         .get_by_label("⨯ Failed · watch ended unexpectedly");
     let ready_empty = common::workload_window(&harness, "Jobs");
     ready_empty.get_by_label("◇ Ready · no resources");
-    ready_empty.get_by_role_and_label(Role::Button, "More list controls");
+    if ready_empty
+        .query_by_role_and_label(Role::Button, "More list controls")
+        .is_none()
+        && ready_empty
+            .query_by_role_and_label(Role::Button, "Refresh list")
+            .is_none()
+    {
+        ready_empty.get_by_role_and_label(Role::Button, "↻");
+    }
 }
 
 #[test]

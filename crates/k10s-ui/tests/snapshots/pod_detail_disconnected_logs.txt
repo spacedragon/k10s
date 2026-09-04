@@ -190,14 +190,20 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace: not requested" value="Namespace"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox label="Status: all" value="Status"
-                Button label="More list controls"
+                    ComboBox label="Status: all" value="Status: all"
+                Button label="↻"
               GenericContainer
                 Label value="1 pods · 1 selected"
                   TextRun value="1 pods · 1 selected"
+                GenericContainer
+                  Label value=")"
+                    TextRun value=")"
+                  Button label="switch to absolute"
+                  Label value="Age shown as relative ("
+                    TextRun value="Age shown as relative ("
               GenericContainer
                 GenericContainer
                   Heading label="Pod · default / db-postgres-0" value="Pod"
@@ -210,15 +216,7 @@ Window
                     Button label="Clear selection"
                     Button label="Restore split"
                     Button label="Pop out ↗"
-                    Label value="Freshness · unavailable"
-                      TextRun value="⟳ unavail."
                 GenericContainer label="Detail identity row"
-                Unknown label="Detail vital strip"
-                GenericContainer
-                  GenericContainer
-                    Label value="Status ● —"
-                    Label value="Ready · —"
-                    Button label="Show more Pod vitals"
                 Label value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                   TextRun value="Scale, restart, delete, and YAML edits are disabled until this window is live"
                 GenericContainer
@@ -261,8 +259,25 @@ Window
                       Label value="kubelet started pod"
                         TextRun value="kubelet started pod"
                 GenericContainer
-                  Label value="l logs · y yaml · e events · c copy name · Esc clear selection"
-                    TextRun value="l logs · y yaml · e events · c copy name · Esc clear selection"
+                  GenericContainer
+                    GenericContainer
+                      Label value="Status ● —"
+                        TextRun value="● —"
+                    Label value="Sync ⨯ Failed"
+                      TextRun value="SYNC ⨯ Failed"
+                    Label value="Ready · —"
+                      TextRun value="READY —"
+                    Label value="Restarts · —"
+                      TextRun value="RESTARTS —"
+                    Label value="Age · —"
+                      TextRun value="AGE —"
+                    Label value="Node · —"
+                      TextRun value="NODE —"
+                    Label value="Pod IP · —"
+                      TextRun value="IP —"
+                    GenericContainer
+                      Label value="? keys"
+                        TextRun value="? keys"
     Splitter
     Splitter
     Splitter

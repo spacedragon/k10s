@@ -236,23 +236,16 @@ Window
             Unknown
           GenericContainer
             GenericContainer
-              Unknown label="Detail vital strip"
-              GenericContainer
-                GenericContainer
-                  Label value="Status ● —"
-                  Label value="Ready · —"
-                  Button label="Show more Pod vitals"
-              GenericContainer
-                Label value="Freshness · loading"
-                  TextRun value="● Loading"
               GenericContainer
                 GenericContainer
                   Button label="Tab Overview"
-                  Button label="More detail tabs"
+                  Button label="Tab Events"
+                  Button label="Tab YAML"
+                  Button label="Tab Logs"
               Unknown label="Detail tabs row"
               GenericContainer
                 GenericContainer
-                  Button label="More detail actions"
+                  Button label="Actions"
               Unknown label="Detail actions row"
               ScrollView label="Detail body"
                 GenericContainer
@@ -262,7 +255,17 @@ Window
                       Label value="Loading details"
                         TextRun value="Loading details"
               GenericContainer
-                Label value="l logs · y yaml · e events · c copy name · Esc clear selection"
+                GenericContainer
+                  GenericContainer
+                    Label value="Status ● —"
+                  Label value="Sync ▲ Connecting"
+                  Label value="Ready · —"
+                  Label value="Restarts · —"
+                  Label value="Age · —"
+                  Label value="Node · —"
+                  Label value="Pod IP · —"
+                  GenericContainer
+                    Label value="? keys"
     Splitter
     Splitter
     Splitter

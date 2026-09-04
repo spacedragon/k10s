@@ -94,6 +94,7 @@ pub(crate) struct DetailActionProjection<'a> {
     pub can_scale: bool,
     pub can_restart: bool,
     pub can_delete: bool,
+    pub shell_container_count: usize,
     pub verified_owner: Option<&'a OwnerReference>,
 }
 
@@ -111,6 +112,7 @@ pub(crate) struct DetailFrameProjection<'a> {
     pub visible_vitals: Vec<DetailVital>,
     pub overflow_vitals: Vec<DetailVital>,
     pub vital_expansion_label: Option<&'static str>,
+    pub vitals_in_footer: bool,
     /// Related-Pod count for the `Pods` tab badge, when the relation feed
     /// has resolved it. `None` renders the tab with no badge rather than a
     /// speculative zero.
@@ -242,6 +244,7 @@ impl<'a> DetailPresentationInput<'a> {
                 can_scale: capabilities.is_some_and(|caps| caps.can_scale),
                 can_restart: capabilities.is_some_and(|caps| caps.can_restart),
                 can_delete: capabilities.is_some_and(|caps| caps.can_delete),
+                shell_container_count: 0,
                 verified_owner,
             },
             shortcut_labels: super::shortcut_labels_for(
@@ -251,6 +254,7 @@ impl<'a> DetailPresentationInput<'a> {
             visible_vitals,
             overflow_vitals,
             vital_expansion_label,
+            vitals_in_footer: false,
             pod_count: None,
             delete_shortcut: super::delete_shortcut_available(self),
             expansion,

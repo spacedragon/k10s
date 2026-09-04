@@ -27,6 +27,7 @@ pub(super) fn configure_frame(
     input: &DetailPresentationInput<'_>,
     frame: &mut DetailFrameProjection<'_>,
 ) {
+    frame.vitals_in_footer = true;
     let Some(deployment) = deployment_of(input) else {
         for vital in frame
             .visible_vitals

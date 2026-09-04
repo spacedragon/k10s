@@ -568,28 +568,13 @@ fn external_shell() {
         restart_count: None,
         last_termination: None,
     });
-    let selected = StreamTarget {
-        context: CONTEXT.into(),
-        namespace: "default".into(),
-        pod: "db-postgres-0".into(),
-        uid: format!("uid-{CONTEXT}-pod-default-db-postgres-0"),
-        container: "metrics".into(),
-    };
-    harness
-        .state_mut()
-        .shell
-        .stream_stores_mut()
-        .logs
-        .ensure(id, selected)
-        .select_container("metrics");
     run_steps(&mut harness);
-    assert!(
-        common::workload_window(&harness, "Pods")
-            .children_recursive()
-            .any(|node| node.accesskit_node().value().as_deref() == Some("metrics"))
-    );
     common::workload_window(&harness, "Pods")
         .get_by_role_and_label(Role::Button, "Open shell")
+        .click();
+    run_steps(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Open shell: metrics")
         .click();
     run_steps(&mut harness);
     let actions = harness.state_mut().shell.drain_resource_actions();

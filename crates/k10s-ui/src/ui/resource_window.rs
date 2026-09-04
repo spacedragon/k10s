@@ -480,15 +480,13 @@ pub(super) fn show_namespace_combobox<I>(
                 }
             })
             .response;
-        if compact {
-            response.widget_info(|| {
-                WidgetInfo::labeled(
-                    WidgetType::ComboBox,
-                    enabled,
-                    format!("Namespace: {full_selected_text}"),
-                )
-            });
-        }
+        response.widget_info(|| {
+            WidgetInfo::labeled(
+                WidgetType::ComboBox,
+                enabled,
+                format!("Namespace: {full_selected_text}"),
+            )
+        });
     });
 }
 
@@ -541,11 +539,9 @@ fn show_status_combobox<I>(
             }
         })
         .response;
-    if compact {
-        response.widget_info(|| {
-            WidgetInfo::labeled(WidgetType::ComboBox, true, format!("Status: {selected}"))
-        });
-    }
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::ComboBox, true, format!("Status: {selected}"))
+    });
 }
 
 /// `reversed` emits the pieces back-to-front, which is what a
@@ -661,14 +657,18 @@ fn direct_toolbar_width(
     shows_freshness: bool,
 ) -> f32 {
     let search = if available_width < 760.0 {
-        100.0
+        180.0
     } else {
         200.0
     };
-    let namespace = if namespaced { 150.0 } else { 0.0 };
-    let custom_type = if custom_resource { 150.0 } else { 0.0 };
-    let reset = if filters_active { 48.0 } else { 0.0 };
-    let freshness = if shows_freshness { 108.0 } else { 0.0 };
+    // The full `Namespace: All namespaces` selector is about 205 points with
+    // the current monospace theme. Budget its painted width so a borderline
+    // toolbar selects the compact layout instead of wrapping and oscillating
+    // between two measured search widths on consecutive frames.
+    let namespace = if namespaced { 210.0 } else { 0.0 };
+    let custom_type = if custom_resource { 160.0 } else { 0.0 };
+    let reset = if filters_active { 52.0 } else { 0.0 };
+    let freshness = if shows_freshness { 115.0 } else { 0.0 };
     // Search, namespace, status, custom type, refresh, reset, and
     // freshness, plus one standard inter-control gap for each visible item.
     let controls = 1
@@ -680,14 +680,13 @@ fn direct_toolbar_width(
         + usize::from(shows_freshness);
     search
         + namespace
-        + 140.0
+        + 105.0
         + custom_type
-        + 32.0
+        + 30.0
         + reset
         + freshness
         + (controls.saturating_sub(1) as f32 * 8.0)
-        // egui adds frame, icon, and menu-affordance padding around controls.
-        + 320.0
+        + 16.0
 }
 
 /// Canonical key format shared by commands and picker entries.
@@ -870,28 +869,41 @@ pub(super) fn show<I>(
     let fixed_width_id = egui::Id::new(("k10s.resource.filters.fixed-width", window_id.0));
     let measured_fixed: Option<f32> = ui.data(|data| data.get_temp(fixed_width_id));
     let search_width = if compact_controls {
-        100.0
+        let compact_fixed = (if namespaced { 76.0 } else { 0.0 })
+            + 70.0 // status
+            + 50.0 // more
+            + (if shows_freshness { 36.0 } else { 0.0 })
+            + 16.0;
+        (available_width - compact_fixed).max(80.0)
     } else {
+        let fixed_estimate = (if namespaced { 210.0 } else { 0.0 })
+            + 105.0 // status
+            + (if kind == WorkloadKind::CustomResources { 160.0 } else { 0.0 })
+            + 30.0 // refresh
+            + (if filters_active { 52.0 } else { 0.0 })
+            + (if shows_freshness { 115.0 } else { 0.0 })
+            + 36.0;
         match measured_fixed {
             // The margin keeps a rounding error from wrapping the row.
-            Some(fixed) => (available_width - fixed - 8.0).max(200.0),
-            None => 200.0 + (available_width - toolbar_width - 8.0).max(0.0),
+            Some(fixed) => (available_width - fixed - 12.0).max(120.0),
+            None => (available_width - fixed_estimate - 12.0).max(120.0),
         }
     };
     let filter_row = ui.horizontal_wrapped(|ui| {
         if compact_controls {
             ui.spacing_mut().item_spacing.x = 0.0;
         }
-        let search_hint = format!("Search {title_lower}");
+        let search_hint = format!("⌕  Search {title_lower}…");
+        let search_label = format!("Search {title_lower}");
         let mut search = state.search.clone();
         let search_edit = ui.add(
             TextEdit::singleline(&mut search)
-                .hint_text(search_hint.clone())
+                .hint_text(search_hint)
                 .desired_width(search_width),
         );
         let search_rect = search_edit.rect;
         search_edit.widget_info(move || {
-            WidgetInfo::labeled(WidgetType::TextEdit, true, search_hint.clone())
+            WidgetInfo::labeled(WidgetType::TextEdit, true, search_label.clone())
         });
         if search_edit.changed() {
             queued.push(WorkspaceCommand::SetSearch(window_id, search));
@@ -963,15 +975,13 @@ pub(super) fn show<I>(
                     } else {
                         text
                     });
-                    if compact_controls {
-                        response.widget_info(|| {
-                            WidgetInfo::labeled(
-                                WidgetType::Label,
-                                true,
-                                format!("Live; synced {last_sync_age}"),
-                            )
-                        });
-                    }
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(
+                            WidgetType::Label,
+                            true,
+                            format!("Live; synced {last_sync_age}"),
+                        )
+                    });
                 }
                 WindowFreshness::ReadyEmpty => {
                     ui.label(RichText::new("◇ Ready · no resources").weak());

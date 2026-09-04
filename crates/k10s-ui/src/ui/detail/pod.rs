@@ -22,6 +22,7 @@ pub(super) fn configure_frame(
     input: &DetailPresentationInput<'_>,
     frame: &mut DetailFrameProjection<'_>,
 ) {
+    frame.vitals_in_footer = true;
     let status = PodDetailProjection::from_input(input).map(|pod| pod.status);
     let Some(vital) = frame
         .visible_vitals
