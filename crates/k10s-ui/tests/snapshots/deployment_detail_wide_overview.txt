@@ -18,9 +18,6 @@ Window label="Deployment · payments / checkout"
                 Label value="Strategy · RollingUpdate"
                 Label value="Age · 31d"
             GenericContainer
-              Label value="Freshness · live (just now)"
-                TextRun value="● Live"
-            GenericContainer
               GenericContainer
                 Button label="Tab Overview"
                 Button label="Tab Pods"
@@ -131,8 +128,7 @@ Window label="Deployment · payments / checkout"
                             GenericContainer
                               Label value="Image (api): ghcr.io/acme/checkout:v4"
                                 TextRun value="ghcr.io/acme/checkout:v4"
-                            GenericContainer
-                              Button label="Copy Image (api)"
+                            Button label="Copy Image (api)"
                         GenericContainer
                           GenericContainer
                             Label value="Replicas · 3 desired · 3 available"
@@ -148,8 +144,7 @@ Window label="Deployment · payments / checkout"
                             GenericContainer
                               Label value="Selector: app=checkout"
                                 TextRun value="app=checkout"
-                            GenericContainer
-                              Button label="Copy Selector"
+                            Button label="Copy Selector"
                         GenericContainer
                           Label value="Template annotations"
                             TextRun value="Template annotations"
@@ -157,8 +152,7 @@ Window label="Deployment · payments / checkout"
                             GenericContainer
                               Label value="Template annotations: checksum/config=abc123"
                                 TextRun value="checksum/config=abc123"
-                            GenericContainer
-                              Button label="Copy Template annotations"
+                            Button label="Copy Template annotations"
                         Label value="LABELS · 6"
                         GenericContainer
                           Label value="app.kubernetes.io/instance: checkout-prod"
@@ -185,8 +179,7 @@ Window label="Deployment · payments / checkout"
                           GenericContainer
                             Label value="UID · uid-deployment-checkout"
                               TextRun value="uid-depl…kout"
-                          GenericContainer
-                            Button label="Copy UID"
+                          Button label="Copy UID"
                         GenericContainer
                           GenericContainer
                             Label value="Managed by · Helm · release checkout-prod (payments)"

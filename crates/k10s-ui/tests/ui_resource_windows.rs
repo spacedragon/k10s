@@ -1150,13 +1150,17 @@ fn searchable_gvk_picker_selects_cluster_scoped_custom_resources() {
     window.get_by_label("Select resource dashboards.monitoring.example.com");
     window.get_by_label("Established");
 
-    window
-        .get_by_role_and_label(Role::Button, "More list controls")
-        .click();
-    harness.step();
-    harness
-        .get_by_role_and_label(Role::Button, "Change resource type")
-        .click();
+    if let Some(more) = window.query_by_role_and_label(Role::Button, "More list controls") {
+        more.click();
+        harness.step();
+        harness
+            .get_by_role_and_label(Role::Button, "Change resource type")
+            .click();
+    } else {
+        window
+            .get_by_role_and_label(Role::Button, "Change resource type")
+            .click();
+    }
     harness.run_steps(4);
     workload_window(&harness, "Custom Resources")
         .get_by_role_and_label(Role::TextInput, "Search resource types");
@@ -2553,11 +2557,13 @@ fn snapshot_resync_replaces_rows_while_preserving_filters_and_selection() {
     window.get_by_label("18/18 ready");
 
     // Clearing the filter reveals the rest of the resynced snapshot.
-    window
-        .get_by_role_and_label(Role::Button, "More list controls")
-        .click();
-    harness.step();
-    harness.get_by_role_and_label(Role::Button, "Reset").click();
+    if let Some(more) = window.query_by_role_and_label(Role::Button, "More list controls") {
+        more.click();
+        harness.step();
+        harness.get_by_role_and_label(Role::Button, "Reset").click();
+    } else {
+        window.get_by_role_and_label(Role::Button, "Reset").click();
+    }
     harness.run_steps(4);
     let window = workload_window(&harness, "Deployments");
     window.get_by_label("Select resource api-server");

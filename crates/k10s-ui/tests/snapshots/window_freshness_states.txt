@@ -207,16 +207,22 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace: not requested" value="Namespace"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox label="Status: all" value="Status"
-                Button label="More list controls"
+                    ComboBox label="Status: all" value="Status: all"
+                Button label="↻"
                 Label value="Live; synced 4s ago"
-                  TextRun value="● Live"
+                  TextRun value="● Live · 4s ago"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
+                GenericContainer
+                  Label value=")"
+                    TextRun value=")"
+                  Button label="switch to absolute"
+                  Label value="Age shown as relative ("
+                    TextRun value="Age shown as relative ("
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -284,10 +290,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
               GenericContainer
                 Label value="1 pods"
@@ -379,10 +385,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
               GenericContainer
                 Label value="0 statefulsets"
@@ -429,10 +435,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
               GenericContainer
                 Label value="0 daemonsets"
@@ -475,16 +481,23 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace: not requested" value="Namespace"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox label="Status: all" value="Status"
-                Button label="More list controls"
+                    ComboBox label="Status: all" value="Status: all"
+                Button label="↻"
                 Label value="◇ Ready · no resources"
-                  TextRun value="◇ Ready · no resources"
+                  TextRun value="◇ Ready · no "
+                  TextRun value="resources"
               GenericContainer
                 Label value="0 jobs"
                   TextRun value="0 jobs"
+                GenericContainer
+                  Label value=")"
+                    TextRun value=")"
+                  Button label="switch to absolute"
+                  Label value="Age shown as relative ("
+                    TextRun value="Age shown as relative ("
               GenericContainer
                 Label value="No Jobs in this view"
                   TextRun value="No Jobs in this view"
@@ -512,10 +525,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
               GenericContainer
                 Label value="1 cronjobs"
@@ -587,10 +600,10 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox value="Namespace: not requested"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox value="Status: all"
+                    ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
                 Button label="Reset"
               GenericContainer

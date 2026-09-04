@@ -190,14 +190,20 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace: not requested" value="Namespace"
+                      ComboBox label="Namespace: not requested" value="Namespace: not requested"
                 GenericContainer
                   GenericContainer
-                    ComboBox label="Status: all" value="Status"
-                Button label="More list controls"
+                    ComboBox label="Status: all" value="Status: all"
+                Button label="↻"
               GenericContainer
                 Label value="1 deployments"
                   TextRun value="1 deployments"
+                GenericContainer
+                  Label value=")"
+                    TextRun value=")"
+                  Button label="switch to absolute"
+                  Label value="Age shown as relative ("
+                    TextRun value="Age shown as relative ("
               GenericContainer
                 GenericContainer
                   GenericContainer

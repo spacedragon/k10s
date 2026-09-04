@@ -686,6 +686,8 @@ pub(crate) fn show(
         let scroll_output = log_scroll
             .id_salt(("logs.stream", window_id.0))
             .stick_to_bottom(was_following)
+            .max_height(ui.available_height())
+            .auto_shrink([true, false])
             .show(ui, |ui| {
                 // An active Find filters the retained buffer; otherwise the
                 // since/tail-filtered view is shown.
@@ -852,6 +854,8 @@ pub(crate) fn show_aggregate(
         log_scroll
             .id_salt(("logs.aggregate.stream", window_id.0))
             .stick_to_bottom(view.follows())
+            .max_height(ui.available_height())
+            .auto_shrink([true, false])
             .show(ui, |ui| {
                 let lines: Vec<&String> = if view.find().is_some() {
                     view.find_matches()
@@ -926,6 +930,36 @@ mod tests {
 
         logs.set_follow(is_at_bottom(100.0, 100.0));
         assert!(logs.follows());
+    }
+
+    #[test]
+    fn short_log_scroll_fills_the_available_view_height() {
+        let ctx = Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(240.0, 160.0))),
+            ..RawInput::default()
+        };
+        let mut heights = None;
+        let mut frame_output = ctx.run_ui(input, |ui| {
+            let available = ui.available_height();
+            let output = ScrollArea::both()
+                .max_height(available)
+                .auto_shrink([true, false])
+                .show(ui, |ui| {
+                    ui.label("one short log line");
+                });
+            heights = Some((available, output.inner_rect.height(), output.content_size.y));
+        });
+        frame_output.textures_delta.clear();
+        let (available, viewport, content) = heights.unwrap();
+        assert!(
+            viewport > content,
+            "short content must not shrink the viewport"
+        );
+        assert!(
+            (viewport - available).abs() < 1.0,
+            "log viewport {viewport} must fill available height {available}"
+        );
     }
 
     fn render_scroll(

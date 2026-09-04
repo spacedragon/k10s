@@ -25,6 +25,8 @@ pub(crate) enum DetailActionSegment {
     Restart,
     /// The `Scale…` command.
     Scale,
+    /// Native external-shell action rendered beside the overflow menu.
+    Shell,
 }
 
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
@@ -80,6 +82,14 @@ pub(super) fn show<I: RowIdentity>(
         .unwrap_or_default();
     let mut projection = input.frame_projection(expansion);
     configure(&mut projection);
+    if let Some(sync) = sync_vital(projection.freshness) {
+        let index = projection
+            .visible_vitals
+            .iter()
+            .position(|vital| vital.label == "Status")
+            .map_or(0, |index| index + 1);
+        projection.visible_vitals.insert(index, sync);
+    }
     if integrated {
         let identity = projection.identity;
         let full_title = title(identity);
@@ -133,23 +143,6 @@ pub(super) fn show<I: RowIdentity>(
                         ));
                     }
                 }
-                // Reference placement: the freshness badge sits at the right
-                // of the identity row, just left of `Pop out`. Running text
-                // (`Freshness · live (just now)`) next to the name costs the
-                // row width it does not have; the full sentence stays as the
-                // accessible label and the tooltip.
-                let full_freshness = freshness_text(projection.freshness);
-                let badge = ui.label(
-                    RichText::new(format!(
-                        "⟳ {}",
-                        compact_freshness_text(projection.freshness).to_lowercase()
-                    ))
-                    .color(freshness_color(projection.freshness)),
-                );
-                badge.widget_info(|| {
-                    WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone())
-                });
-                badge.on_hover_text(full_freshness);
             });
         });
         let identity_semantics = ui.interact(
@@ -165,28 +158,30 @@ pub(super) fn show<I: RowIdentity>(
                 node.set_label("Detail identity row");
             });
     }
-    let vitals_width = ui.available_width();
-    let wide = vitals_width >= 760.0;
-    let (vitals_rect, vitals_response) = ui.allocate_exact_size(
-        egui::vec2(vitals_width, ui.spacing().interact_size.y),
-        Sense::hover(),
-    );
-    vitals_response
-        .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail vital strip"));
-    let mut vitals_ui = ui.new_child(
-        UiBuilder::new()
-            .id_salt(("k10s.detail.vitals", window_id.0))
-            .max_rect(vitals_rect)
-            .layout(Layout::left_to_right(Align::Center)),
-    );
     let mut popup_rects = None;
-    let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
-    let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
-        + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
-    let show_all_vitals = wide && wide_minimum <= vitals_width;
-    vitals_ui.horizontal(|ui| {
-        popup_rects = show_vital_strip(ui, &mut projection, show_all_vitals);
-    });
+    if !projection.vitals_in_footer {
+        let vitals_width = ui.available_width();
+        let wide = vitals_width >= 760.0;
+        let (vitals_rect, vitals_response) = ui.allocate_exact_size(
+            egui::vec2(vitals_width, ui.spacing().interact_size.y),
+            Sense::hover(),
+        );
+        vitals_response
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail vital strip"));
+        let mut vitals_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("k10s.detail.vitals", window_id.0))
+                .max_rect(vitals_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let wide_count = projection.visible_vitals.len() + projection.overflow_vitals.len();
+        let wide_minimum = VITAL_CHIP_SANE_MIN_WIDTH * wide_count as f32
+            + ui.spacing().item_spacing.x * wide_count.saturating_sub(1) as f32;
+        let show_all_vitals = wide && wide_minimum <= vitals_width;
+        vitals_ui.horizontal(|ui| {
+            popup_rects = show_vital_strip(ui, &mut projection, show_all_vitals);
+        });
+    }
     if let Some((button_rect, popup_rect)) = popup_rects {
         let escape =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -223,15 +218,14 @@ pub(super) fn show<I: RowIdentity>(
     // Chrome budget reserved for the freshness label. The painted text is the
     // compact `● Live` form, but the budget keeps the committed thresholds so
     // the wide/compact/stacked chrome decisions do not move.
-    let full_freshness_width = if integrated { 0.0 } else { 152.0 };
-    let compact_freshness_width = if integrated { 0.0 } else { 64.0 };
     let action_count = usize::from(projection.actions.can_scale)
         + usize::from(projection.actions.can_restart)
         + usize::from(projection.actions.can_delete)
+        + usize::from(projection.actions.shell_container_count > 0)
         + 1;
-    // Budgeted from the accessible name: the `⋯`/`▾` decoration around it
-    // must not push the row into the compact layout on its own.
-    let wide_action_width = menu_button_width(ui, "Actions")
+    // Budget the complete painted label so its overflow/disclosure glyphs
+    // cannot push the leftmost action outside the semantic row.
+    let wide_action_width = menu_button_width(ui, &action_menu_label())
         + if projection.actions.can_scale {
             button_width(ui, "Scale…")
         } else {
@@ -247,9 +241,12 @@ pub(super) fn show<I: RowIdentity>(
         } else {
             0.0
         }
+        + shell_action_width(ui, projection.actions.shell_container_count)
         + gap * action_count.saturating_sub(1) as f32;
-    let compact_action_count =
-        usize::from(projection.actions.can_scale) + usize::from(projection.actions.can_delete) + 1;
+    let compact_action_count = usize::from(projection.actions.can_scale)
+        + usize::from(projection.actions.can_delete)
+        + usize::from(projection.actions.shell_container_count > 0)
+        + 1;
     let compact_action_width = menu_button_width(ui, "More")
         + if projection.actions.can_scale {
             button_width(ui, "Scale…")
@@ -261,8 +258,9 @@ pub(super) fn show<I: RowIdentity>(
         } else {
             0.0
         }
+        + shell_action_width(ui, projection.actions.shell_container_count)
         + gap * compact_action_count.saturating_sub(1) as f32;
-    let wide_tabs_width = tabs
+    let tabs_pure_width = tabs
         .iter()
         .map(|tab| {
             button_width(ui, super::tab_label(*tab))
@@ -275,12 +273,12 @@ pub(super) fn show<I: RowIdentity>(
                 }
         })
         .sum::<f32>()
-        + gap * tabs.len().saturating_sub(1) as f32
-        + full_freshness_width;
-    let compact_tabs_width = button_width(ui, super::tab_label(detail.active_tab))
-        + menu_button_width(ui, "More")
-        + gap
-        + compact_freshness_width;
+        + gap * tabs.len().saturating_sub(1) as f32;
+    let wide_tabs_width = tabs_pure_width;
+    let compact_tabs_pure_width = button_width(ui, super::tab_label(detail.active_tab))
+        + menu_button_width(ui, VITAL_OVERFLOW_GLYPH)
+        + gap;
+    let compact_tabs_width = compact_tabs_pure_width;
     let compact_chrome = wide_tabs_width + gap + wide_action_width > usable_width;
     let stacked_chrome =
         compact_chrome && compact_tabs_width + gap + compact_action_width > usable_width;
@@ -330,35 +328,7 @@ pub(super) fn show<I: RowIdentity>(
             ),
         )
     };
-    let freshness_width = if compact_chrome {
-        compact_freshness_width
-    } else {
-        full_freshness_width
-    }
-    .min(tabs_region.width());
-    let tabs_rect = egui::Rect::from_min_max(
-        tabs_region.min,
-        egui::pos2(tabs_region.right() - freshness_width, tabs_region.bottom()),
-    );
-    if !integrated {
-        let freshness_rect = egui::Rect::from_min_max(
-            egui::pos2(tabs_rect.right(), tabs_region.top()),
-            tabs_region.max,
-        );
-        let mut freshness_ui = ui.new_child(
-            UiBuilder::new()
-                .max_rect(freshness_rect)
-                .layout(Layout::right_to_left(Align::Center)),
-        );
-        freshness_ui.set_clip_rect(freshness_ui.clip_rect().intersect(freshness_rect));
-        let full_freshness = freshness_text(projection.freshness);
-        let freshness_display = format!("● {}", compact_freshness_text(projection.freshness));
-        let freshness = freshness_ui
-            .label(freshness_display)
-            .on_hover_text(full_freshness.clone());
-        freshness
-            .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, full_freshness.clone()));
-    }
+    let tabs_rect = tabs_region;
     let mut tabs_ui = ui.new_child(
         UiBuilder::new()
             .id_salt(("k10s.detail.tabs", window_id.0))
@@ -366,6 +336,14 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::left_to_right(Align::Center)),
     );
     tabs_ui.set_clip_rect(tabs_ui.clip_rect().intersect(tabs_rect));
+    let (compact_tabs, compact_actions) = if stacked_chrome {
+        (
+            tabs_rect.width() < tabs_pure_width,
+            actions_rect.width() < wide_action_width,
+        )
+    } else {
+        (compact_chrome, compact_chrome)
+    };
     let tabs_semantics = ui.interact(
         tabs_rect,
         ui.id().with(("k10s.detail.tabs.row", window_id.0)),
@@ -373,7 +351,7 @@ pub(super) fn show<I: RowIdentity>(
     );
     tabs_semantics.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Detail tabs row"));
     tabs_ui.horizontal(|ui| {
-        let compact = compact_chrome;
+        let compact = compact_tabs;
         for tab in tabs {
             if !compact || *tab == detail.active_tab {
                 let active = *tab == detail.active_tab;
@@ -391,7 +369,7 @@ pub(super) fn show<I: RowIdentity>(
             }
         }
         if compact && tabs.len() > 1 {
-            let menu = ui.menu_button("More", |ui| {
+            let menu = ui.menu_button(RichText::new(VITAL_OVERFLOW_GLYPH).monospace(), |ui| {
                 for tab in tabs {
                     if *tab == detail.active_tab {
                         continue;
@@ -413,6 +391,7 @@ pub(super) fn show<I: RowIdentity>(
             });
             menu.response
                 .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "More detail tabs"));
+            menu.response.on_hover_text("More tabs");
         }
     });
     let owner = projection.actions.verified_owner;
@@ -442,13 +421,15 @@ pub(super) fn show<I: RowIdentity>(
             Some(DetailActionSegment::Delete),
             &mut projection,
         );
-        let compact = compact_chrome;
+        let compact = compact_actions;
         let namespace = projection.identity.namespace.as_deref();
         let uid = (!projection.identity.uid.is_empty()).then_some(projection.identity.uid.as_str());
         // The overflow marker and the disclosure arrow are part of the
         // label; `Actions` stays the accessible name.
         let menu_label: WidgetText = if compact {
-            "More".into()
+            RichText::new(format!("{VITAL_OVERFLOW_GLYPH} {MENU_ARROW_GLYPH}"))
+                .monospace()
+                .into()
         } else {
             icon(action_menu_label()).into()
         };
@@ -495,6 +476,12 @@ pub(super) fn show<I: RowIdentity>(
         content(
             ui,
             input.primary,
+            Some(DetailActionSegment::Shell),
+            &mut projection,
+        );
+        content(
+            ui,
+            input.primary,
             Some(if compact {
                 DetailActionSegment::Scale
             } else {
@@ -518,8 +505,11 @@ pub(super) fn show<I: RowIdentity>(
         shortcuts.push("Ctrl+D delete");
     }
     shortcuts.push("Esc clear selection");
-    let footer_plain = shortcuts.join(" · ");
-    let footer_job = shortcut_footer_job(ui, &shortcuts);
+    let (footer_plain, footer_job) = if projection.vitals_in_footer {
+        pod_status_footer_job(ui, &projection)
+    } else {
+        (shortcuts.join(" · "), shortcut_footer_job(ui, &shortcuts))
+    };
     let footer_galley = WidgetText::from(footer_job.clone()).into_galley(
         ui,
         Some(egui::TextWrapMode::Wrap),
@@ -576,8 +566,12 @@ pub(super) fn show<I: RowIdentity>(
             .layout(Layout::top_down(Align::Min)),
     );
     footer_ui.separator();
-    let footer = footer_ui.add(egui::Label::new(footer_job).wrap());
-    footer.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, footer_plain.clone()));
+    if projection.vitals_in_footer {
+        show_pod_status_footer(&mut footer_ui, &projection);
+    } else {
+        let footer = footer_ui.add(egui::Label::new(footer_job).wrap());
+        footer.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, footer_plain.clone()));
+    }
     ui.ctx().data_mut(|data| {
         data.insert_temp(expansion_id, projection.expansion);
     });
@@ -628,6 +622,120 @@ fn shortcut_footer_job(ui: &egui::Ui, shortcuts: &[&str]) -> egui::text::LayoutJ
         }
     }
     job
+}
+
+fn pod_status_footer_job(
+    ui: &egui::Ui,
+    projection: &DetailFrameProjection<'_>,
+) -> (String, egui::text::LayoutJob) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let muted = crate::ui::theme::MUTED_TEXT;
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    let mut plain = Vec::new();
+    for vital in projection
+        .visible_vitals
+        .iter()
+        .chain(&projection.overflow_vitals)
+    {
+        if !plain.is_empty() {
+            job.append("    ", 0.0, egui::TextFormat::simple(font.clone(), muted));
+        }
+        let value = vital_value_text(vital, &vital.value);
+        let item = format!("{} {value}", vital.label.to_uppercase());
+        plain.push(item.clone());
+        job.append(
+            &format!("{} ", vital.label.to_uppercase()),
+            0.0,
+            egui::TextFormat::simple(font.clone(), muted),
+        );
+        job.append(
+            &value,
+            0.0,
+            egui::TextFormat::simple(font.clone(), vital_color(ui.visuals(), vital.tone)),
+        );
+    }
+    if let DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) =
+        projection.freshness
+    {
+        job.append("    ", 0.0, egui::TextFormat::simple(font.clone(), muted));
+        let sync = format!("⟳ live · {last_sync_age}");
+        plain.push(sync.clone());
+        job.append(
+            &sync,
+            0.0,
+            egui::TextFormat::simple(font.clone(), crate::ui::theme::HEALTHY),
+        );
+    }
+    job.append("    ? keys", 0.0, egui::TextFormat::simple(font, muted));
+    plain.push("? keys".into());
+    (plain.join(" · "), job)
+}
+
+fn show_pod_status_footer(ui: &mut egui::Ui, projection: &DetailFrameProjection<'_>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 18.0;
+        let mut vitals = projection
+            .visible_vitals
+            .iter()
+            .chain(&projection.overflow_vitals);
+        if let Some(status) = vitals.next() {
+            let display = vital_display(status);
+            let response = egui::Frame::new()
+                .fill(egui::Color32::from_rgb(24, 68, 43))
+                .corner_radius(12.0)
+                .inner_margin(egui::Margin::symmetric(10, 3))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(vital_value_text(status, &display.visible))
+                            .monospace()
+                            .color(crate::ui::theme::HEALTHY),
+                    )
+                })
+                .inner;
+            response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
+            });
+        }
+        for vital in vitals {
+            let display = vital_display(vital);
+            let small = egui::FontId::new(10.0, egui::FontFamily::Monospace);
+            let value = egui::FontId::new(12.0, egui::FontFamily::Monospace);
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                &format!("{}  ", vital.label.to_uppercase()),
+                0.0,
+                egui::TextFormat::simple(small, crate::ui::theme::MUTED_TEXT),
+            );
+            job.append(
+                &vital_value_text(vital, &display.visible),
+                0.0,
+                egui::TextFormat::simple(value, vital_color(ui.visuals(), vital.tone)),
+            );
+            let label = ui.label(job);
+            label.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Label, true, display.accessible.clone())
+            });
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new("? keys")
+                    .monospace()
+                    .small()
+                    .color(crate::ui::theme::MUTED_TEXT),
+            );
+            if let DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) =
+                projection.freshness
+            {
+                ui.label(
+                    RichText::new(format!("⟳ live · {last_sync_age}"))
+                        .monospace()
+                        .small()
+                        .color(crate::ui::theme::HEALTHY),
+                );
+            }
+        });
+    });
 }
 
 const VITAL_VALUE_MAX_CHARS: usize = 24;
@@ -913,56 +1021,70 @@ fn normalize_vital_expansion(wide: bool, expansion: &mut DetailExpansionState) {
     }
 }
 
-fn freshness_text(freshness: DetailFreshness<'_>) -> String {
-    match freshness {
-        DetailFreshness::Loading => "Freshness · loading".into(),
-        DetailFreshness::Unavailable => "Freshness · unavailable".into(),
-        DetailFreshness::Gone => "Freshness · gone".into(),
-        DetailFreshness::Source(crate::ui::WindowFreshness::Live { last_sync_age }) => {
-            format!("Freshness · live ({last_sync_age})")
+fn sync_vital(freshness: DetailFreshness<'_>) -> Option<DetailVital> {
+    let (value, tone, hint) = match freshness {
+        DetailFreshness::Source(
+            crate::ui::WindowFreshness::Live { .. } | crate::ui::WindowFreshness::ReadyEmpty,
+        ) => return None,
+        DetailFreshness::Loading => (
+            "Connecting",
+            DetailVitalTone::Warning,
+            Some("Connecting to the resource feed".to_owned()),
+        ),
+        DetailFreshness::Unavailable => (
+            "Failed",
+            DetailVitalTone::Danger,
+            Some("Resource details are unavailable".to_owned()),
+        ),
+        DetailFreshness::Gone => (
+            "Gone",
+            DetailVitalTone::Danger,
+            Some("The resource no longer exists".to_owned()),
+        ),
+        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying {
+            last_sync_age,
+            retry_in,
+            attempt,
+        }) => (
+            "Stale",
+            DetailVitalTone::Warning,
+            Some(format!(
+                "Last synced {last_sync_age}; retry {attempt} in {retry_in}"
+            )),
+        ),
+        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting {
+            last_sync_age,
+            retry_in,
+            attempt,
+        }) => (
+            "Reconnecting",
+            DetailVitalTone::Warning,
+            Some(format!(
+                "Last synced {last_sync_age}; reconnect attempt {attempt} in {retry_in}"
+            )),
+        ),
+        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden {
+            user,
+            verb,
+            resource,
+            scope,
+        }) => (
+            "Access denied",
+            DetailVitalTone::Danger,
+            Some(format!("{user} cannot {verb} {resource} in {scope}")),
+        ),
+        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { message }) => {
+            ("Failed", DetailVitalTone::Danger, Some(message.clone()))
         }
-        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => {
-            "Freshness · stale".into()
-        }
-        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => {
-            "Freshness · reconnecting".into()
-        }
-        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => {
-            "Freshness · forbidden".into()
-        }
-        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => {
-            "Freshness · failed".into()
-        }
-        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => {
-            "Freshness · ready".into()
-        }
-    }
-}
-
-/// Live feeds read green; every recovery state keeps the muted tone so the
-/// badge never claims health it does not have.
-fn freshness_color(freshness: DetailFreshness<'_>) -> egui::Color32 {
-    match freshness {
-        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => {
-            crate::ui::theme::HEALTHY
-        }
-        DetailFreshness::Gone | DetailFreshness::Unavailable => crate::ui::theme::DANGER,
-        _ => crate::ui::theme::MUTED_TEXT,
-    }
-}
-
-fn compact_freshness_text(freshness: DetailFreshness<'_>) -> &'static str {
-    match freshness {
-        DetailFreshness::Loading => "Loading",
-        DetailFreshness::Unavailable => "Unavail.",
-        DetailFreshness::Gone => "Gone",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Live { .. }) => "Live",
-        DetailFreshness::Source(crate::ui::WindowFreshness::StaleRetrying { .. }) => "Stale",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Reconnecting { .. }) => "Reconn.",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Forbidden { .. }) => "Denied",
-        DetailFreshness::Source(crate::ui::WindowFreshness::Failed { .. }) => "Failed",
-        DetailFreshness::Source(crate::ui::WindowFreshness::ReadyEmpty) => "Ready",
-    }
+    };
+    let mut vital = DetailVital::new("Sync", value);
+    vital.tone = tone;
+    vital.shape = Some(match tone {
+        DetailVitalTone::Danger => super::presentation::DetailVitalShape::Cross,
+        _ => super::presentation::DetailVitalShape::Triangle,
+    });
+    vital.hint = hint;
+    Some(vital)
 }
 
 const fn uses_shared_body_scroll(tab: DetailTab) -> bool {
@@ -1001,6 +1123,14 @@ fn button_width(ui: &egui::Ui, label: &str) -> f32 {
 
 fn menu_button_width(ui: &egui::Ui, label: &str) -> f32 {
     button_width(ui, label) + ui.spacing().icon_width + ui.spacing().icon_spacing
+}
+
+fn shell_action_width(ui: &egui::Ui, container_count: usize) -> f32 {
+    match container_count {
+        0 => 0.0,
+        1 => button_width(ui, "Open shell"),
+        _ => menu_button_width(ui, "Open shell"),
+    }
 }
 
 /// The reference action-row overflow label: the `⋯` overflow marker and the
@@ -1142,66 +1272,30 @@ mod tests {
     }
 
     #[test]
-    fn every_freshness_state_has_one_stable_identity_label() {
+    fn healthy_freshness_is_hidden_and_exceptional_states_become_sync_vitals() {
         use crate::ui::WindowFreshness;
 
-        assert_eq!(
-            super::freshness_text(DetailFreshness::Loading),
-            "Freshness · loading"
-        );
-        assert_eq!(
-            super::freshness_text(DetailFreshness::Unavailable),
-            "Freshness · unavailable"
-        );
-        assert_eq!(
-            super::freshness_text(DetailFreshness::Gone),
-            "Freshness · gone"
-        );
-        assert_eq!(
-            super::freshness_text(DetailFreshness::Source(&WindowFreshness::Live {
+        assert!(
+            super::sync_vital(DetailFreshness::Source(&WindowFreshness::Live {
                 last_sync_age: "2s".into(),
-            })),
-            "Freshness · live (2s)"
+            }))
+            .is_none()
         );
+        assert!(super::sync_vital(DetailFreshness::Source(&WindowFreshness::ReadyEmpty)).is_none());
+
+        let loading = super::sync_vital(DetailFreshness::Loading).unwrap();
         assert_eq!(
-            super::freshness_text(DetailFreshness::Source(&WindowFreshness::StaleRetrying {
-                last_sync_age: "8s".into(),
-                attempt: 2,
-                retry_in: "1s".into(),
-            },)),
-            "Freshness · stale"
+            (loading.label, loading.value.as_str()),
+            ("Sync", "Connecting")
         );
-    }
-
-    #[test]
-    fn compact_long_freshness_labels_fit_the_reserved_narrow_budget() {
-        use crate::ui::WindowFreshness;
-
-        let states = [
-            DetailFreshness::Unavailable,
-            DetailFreshness::Source(&WindowFreshness::Reconnecting {
-                last_sync_age: "8s".into(),
-                attempt: 2,
-                retry_in: "1s".into(),
-            }),
-            DetailFreshness::Source(&WindowFreshness::Forbidden {
-                user: "alice".into(),
-                verb: "get".into(),
-                resource: "pods".into(),
-                scope: "default".into(),
-            }),
-        ];
-        for state in states {
-            let painted = super::compact_freshness_text(state);
-            assert!(
-                painted.chars().count() <= 8,
-                "compact freshness {painted:?} exceeds the 64px text budget"
-            );
-            assert!(
-                super::freshness_text(state).starts_with("Freshness · "),
-                "full accessible freshness must remain stable"
-            );
-        }
+        let stale = super::sync_vital(DetailFreshness::Source(&WindowFreshness::StaleRetrying {
+            last_sync_age: "8s".into(),
+            attempt: 2,
+            retry_in: "1s".into(),
+        }))
+        .unwrap();
+        assert_eq!((stale.label, stale.value.as_str()), ("Sync", "Stale"));
+        assert_eq!(stale.hint.as_deref(), Some("Last synced 8s; retry 2 in 1s"));
     }
 
     #[test]

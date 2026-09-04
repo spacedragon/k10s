@@ -119,12 +119,7 @@ fn column_bounds(ui: &egui::Ui) -> egui::Rect {
 /// Reference label column width for the `label · value` grids.
 pub(super) const KV_LABEL_WIDTH: f32 = 126.0;
 
-/// The copy affordance used everywhere in the detail. `⧉` (U+29C9), the
-/// glyph in the design mockup, is absent from every font egui bundles and
-/// paints as a missing-glyph box, so the console uses `⎘` (U+2398).
-pub(super) const COPY_GLYPH: &str = "⎘";
-
-/// Width reserved for one [`COPY_GLYPH`] button.
+/// Width reserved for one copy icon button.
 const COPY_WIDTH: f32 = 20.0;
 
 /// Reference section header: a small, letter-spaced muted title, an optional
@@ -235,7 +230,7 @@ pub(super) struct KvValue<'a> {
     /// `full` into the cell by middle elision.
     pub display: Option<String>,
     pub color: Option<egui::Color32>,
-    /// Whether to paint a [`COPY_GLYPH`] button after the value.
+    /// Whether to paint a copy icon button after the value.
     pub copy: bool,
 }
 
@@ -365,15 +360,89 @@ fn left_aligned_label(
 
 fn copy_button(ui: &mut egui::Ui, label: &str, value: &str) {
     let accessible = format!("Copy {label}");
-    let response = ui.add_sized(
-        [COPY_WIDTH, ui.spacing().interact_size.y],
-        egui::Button::new(RichText::new(COPY_GLYPH).color(crate::ui::theme::ACCENT))
-            .small()
-            .frame(false),
-    );
+    let button_height = ui.spacing().interact_size.y.min(18.0);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(COPY_WIDTH, button_height), egui::Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, accessible.clone()));
-    if response.on_hover_text(accessible).clicked() {
+
+    let feedback_id = response.id.with("copied_feedback");
+    let now = ui.input(|i| i.time);
+    let mut copied_until: Option<f64> = ui.data(|d| d.get_temp(feedback_id));
+
+    if response.clicked() {
         ui.ctx().copy_text(value.to_owned());
+        let until = now + 1.5;
+        ui.data_mut(|d| d.insert_temp(feedback_id, until));
+        copied_until = Some(until);
+    }
+
+    let is_copied = copied_until.is_some_and(|until| now < until);
+    if is_copied {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f32(1.5));
+    }
+
+    let tooltip = if is_copied {
+        "Copied to clipboard!"
+    } else {
+        &accessible
+    };
+    let response = response.on_hover_text(tooltip);
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        let bg_fill = if response.hovered() || response.is_pointer_button_down_on() {
+            visuals.bg_fill
+        } else {
+            ui.visuals().faint_bg_color
+        };
+        let bg_stroke = if response.hovered() || response.is_pointer_button_down_on() {
+            visuals.bg_stroke
+        } else {
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+        };
+        ui.painter()
+            .rect(rect, 3.0, bg_fill, bg_stroke, egui::StrokeKind::Inside);
+
+        let center = rect.center();
+        if is_copied {
+            let check_color = crate::ui::theme::HEALTHY;
+            let p1 = egui::pos2(center.x - 4.0, center.y + 0.5);
+            let p2 = egui::pos2(center.x - 1.0, center.y + 3.5);
+            let p3 = egui::pos2(center.x + 4.5, center.y - 2.5);
+            ui.painter()
+                .line_segment([p1, p2], egui::Stroke::new(1.5, check_color));
+            ui.painter()
+                .line_segment([p2, p3], egui::Stroke::new(1.5, check_color));
+        } else {
+            let icon_color = if response.hovered() {
+                ui.visuals().strong_text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let stroke = egui::Stroke::new(1.0, icon_color);
+
+            // Back sheet (top-right)
+            let back_rect = egui::Rect::from_min_size(
+                egui::pos2(center.x - 2.0, center.y - 5.0),
+                egui::vec2(6.5, 8.0),
+            );
+            ui.painter().rect(
+                back_rect,
+                1.0,
+                egui::Color32::TRANSPARENT,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+
+            // Front sheet (bottom-left)
+            let front_rect = egui::Rect::from_min_size(
+                egui::pos2(center.x - 4.5, center.y - 2.5),
+                egui::vec2(6.5, 8.0),
+            );
+            ui.painter()
+                .rect(front_rect, 1.0, bg_fill, stroke, egui::StrokeKind::Inside);
+        }
     }
 }
 

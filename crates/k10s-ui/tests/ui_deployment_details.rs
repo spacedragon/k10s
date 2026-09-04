@@ -182,42 +182,45 @@ fn open_integrated_deployment(
     );
     window.get_by_label("1 deployments");
     if verify_list_overflow {
-        window
-            .get_by_role_and_label(Role::Button, "More list controls")
-            .click();
-        harness.step();
-        let owner = integrated_deployment_window(harness).rect();
-        for item in ["switch to absolute", "Refresh list"] {
-            let rect = harness
-                .root()
-                .children_recursive()
-                .find(|node| {
-                    node.accesskit_node().role() == Role::Button
-                        && node
-                            .accesskit_node()
-                            .label()
-                            .is_some_and(|label| label.contains(item))
-                })
-                .unwrap_or_else(|| panic!("{item} in list overflow"))
-                .rect();
-            assert_rect_within(owner, rect, 1.0, item);
+        if let Some(more) = window.query_by_role_and_label(Role::Button, "More list controls") {
+            more.click();
+            harness.step();
+            let owner = integrated_deployment_window(harness).rect();
+            for item in ["switch to absolute", "Refresh list"] {
+                let rect = harness
+                    .root()
+                    .children_recursive()
+                    .find(|node| {
+                        node.accesskit_node().role() == Role::Button
+                            && node
+                                .accesskit_node()
+                                .label()
+                                .is_some_and(|label| label.contains(item))
+                    })
+                    .unwrap_or_else(|| panic!("{item} in list overflow"))
+                    .rect();
+                assert_rect_within(owner, rect, 1.0, item);
+            }
+            let columns = harness.root().children_recursive().find(|node| {
+                node.accesskit_node().role() == Role::Button
+                    && node
+                        .accesskit_node()
+                        .label()
+                        .is_some_and(|label| label.contains("Columns ▾"))
+            });
+            assert!(
+                columns.is_none(),
+                "Columns menu must not be present in list overflow"
+            );
+            harness.get_by_label_contains("Age shown as relative");
+            harness
+                .get_by_role_and_label(Role::Button, "More list controls")
+                .click();
+            harness.run_steps(1);
+        } else {
+            window.get_by_role_and_label(Role::Button, "↻");
+            window.get_by_role_and_label(Role::Button, "switch to absolute");
         }
-        let columns = harness.root().children_recursive().find(|node| {
-            node.accesskit_node().role() == Role::Button
-                && node
-                    .accesskit_node()
-                    .label()
-                    .is_some_and(|label| label.contains("Columns ▾"))
-        });
-        assert!(
-            columns.is_none(),
-            "Columns menu must not be present in list overflow"
-        );
-        harness.get_by_label_contains("Age shown as relative");
-        harness
-            .get_by_role_and_label(Role::Button, "More list controls")
-            .click();
-        harness.run_steps(1);
     }
     integrated_deployment_window(harness)
         .get_by_role_and_label(Role::Button, "Select resource checkout")

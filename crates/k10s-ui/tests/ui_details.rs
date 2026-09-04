@@ -466,19 +466,16 @@ fn detail_expansion_is_independent_per_window() {
     }
     harness.run_steps(4);
 
-    harness
-        .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_role_and_label(Role::Button, "Show more Pod vitals")
-        .click();
-    harness.run_steps(2);
-
-    harness.get_by_label("Node · worker-a");
-    assert!(
-        harness
-            .get_by_role_and_label(Role::Window, "Pod · default / web-frontend-7d9f8-00001")
-            .query_by_label("Node · worker-a")
-            .is_none()
-    );
+    for name in ["db-postgres-0", "web-frontend-7d9f8-00001"] {
+        let title = format!("Pod · default / {name}");
+        let window = harness.get_by_role_and_label(Role::Window, &title);
+        window.get_by_label("Node · worker-a");
+        assert!(
+            window
+                .query_by_role_and_label(Role::Button, "Show more Pod vitals")
+                .is_none()
+        );
+    }
 }
 
 #[test]
@@ -491,6 +488,15 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
         .feed
         .details
         .insert(pod_identity.clone(), pod);
+    harness.state_mut().feed.detail_authority.insert(
+        pod_identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
     harness
         .state_mut()
         .shell
@@ -513,15 +519,10 @@ fn width_aware_typed_vitals_use_exact_collapsed_contract() {
     for label in ["Status ● Running", "Ready · 1/1"] {
         detail.get_by_label(label);
     }
-    assert!(detail.query_by_label("Node · worker-a").is_none());
-    detail
-        .get_by_role_and_label(Role::Button, "Show more Pod vitals")
-        .click();
-    harness.run_steps(2);
-    harness.get_by_label("Restarts · 2");
-    harness.get_by_label("Age · 2h");
-    harness.get_by_label("Node · worker-a");
-    harness.get_by_label("Pod IP · 10.244.0.9");
+    detail.get_by_label("Restarts · 2");
+    detail.get_by_label("Age · 2h");
+    detail.get_by_label("Node · worker-a");
+    detail.get_by_label("Pod IP · 10.244.0.9");
     let detail = harness.get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0");
     assert!(
         detail
@@ -577,6 +578,15 @@ fn deployment_stub_exposes_width_aware_shared_frame_contract() {
         .feed
         .details
         .insert(identity.clone(), detail);
+    harness.state_mut().feed.detail_authority.insert(
+        identity.clone(),
+        DetailAuthority {
+            freshness: WindowFreshness::Live {
+                last_sync_age: "just now".into(),
+            },
+            lifecycle: DetailLifecycle::Present,
+        },
+    );
     harness
         .state_mut()
         .shell
@@ -658,7 +668,7 @@ fn detail_footers_expose_only_shortcuts_supported_by_each_kind() {
         .click();
     pod_harness.run_steps(3);
     let pod = common::workload_window(&pod_harness, "Pods");
-    pod.get_by_label("l logs · y yaml · e events · c copy name · Esc clear selection");
+    pod.get_by_label("? keys");
 
     let mut deployment_harness = harness();
     deployment_harness.state_mut().feed.details.insert(
@@ -720,7 +730,7 @@ fn detail_footer_exposes_owner_shortcut_only_for_verified_owner() {
     harness.run_steps(3);
     harness
         .get_by_role_and_label(Role::Window, "Pod · default / db-postgres-0")
-        .get_by_label("l logs · y yaml · e events · c copy name · o owner · Esc clear selection");
+        .get_by_label("? keys");
 }
 
 #[test]
@@ -1059,9 +1069,9 @@ fn dedicated_detail_uses_identity_bound_authority_not_arbitrary_source_windows()
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    detail.get_by_label("Freshness · stale");
+    detail.get_by_label("Sync ▲ Stale");
     detail
-        .get_by_role_and_label(Role::Button, "More detail actions")
+        .get_by_role_and_label(Role::Button, "Actions")
         .click();
     harness.run_steps(1);
     assert!(
@@ -1121,9 +1131,9 @@ fn dedicated_detail_without_identity_bound_authority_fails_closed() {
     harness.run_steps(4);
 
     let detail = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
-    detail.get_by_label("Freshness · unavailable");
+    detail.get_by_label("Sync ⨯ Failed");
     detail
-        .get_by_role_and_label(Role::Button, "More detail actions")
+        .get_by_role_and_label(Role::Button, "Actions")
         .click();
     harness.run_steps(1);
     assert!(
@@ -2480,14 +2490,9 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     let active_tab = window
         .get_by_role_and_label(Role::Button, "Tab YAML")
         .rect();
-    let more_tabs = window
-        .get_by_role_and_label(Role::Button, "More detail tabs")
-        .rect();
     let scale = window.get_by_role_and_label(Role::Button, "Scale…").rect();
     let delete = window.get_by_role_and_label(Role::Button, "Delete…").rect();
-    let more_actions = window
-        .get_by_role_and_label(Role::Button, "More detail actions")
-        .rect();
+    let more_actions = window.get_by_role_and_label(Role::Button, "Actions").rect();
     let tabs_row = window.get_by_label("Detail tabs row").rect();
     let actions_row = window.get_by_label("Detail actions row").rect();
     for (name, rect) in [
@@ -2502,7 +2507,6 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     }
     for (name, row, rect) in [
         ("active tab", tabs_row, active_tab),
-        ("more tabs", tabs_row, more_tabs),
         ("scale", actions_row, scale),
         ("more actions", actions_row, more_actions),
         ("delete", actions_row, delete),
@@ -2514,13 +2518,6 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     }
     let gap = 8.0;
     assert!(
-        tabs_row.width() >= active_tab.width() + more_tabs.width() + gap,
-        "tabs row {:?} cannot paint intrinsic controls {:?} + {:?}",
-        tabs_row,
-        active_tab,
-        more_tabs
-    );
-    assert!(
         actions_row.width() >= scale.width() + more_actions.width() + delete.width() + gap * 2.0,
         "actions row {:?} cannot paint intrinsic controls {:?} + {:?} + {:?}",
         actions_row,
@@ -2531,7 +2528,6 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     for pair in [
         (rollout, ready),
         (ready, more_vitals),
-        (active_tab, more_tabs),
         (scale, more_actions),
         (more_actions, delete),
     ] {
@@ -2542,7 +2538,6 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
     }
     for (name, rect) in [
         ("active tab", active_tab),
-        ("more tabs", more_tabs),
         ("scale", scale),
         ("more actions", more_actions),
         ("delete", delete),
@@ -2553,10 +2548,6 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
         );
     }
     window
-        .get_by_role_and_label(Role::Button, "More detail tabs")
-        .click();
-    harness.run_steps(1);
-    harness
         .get_by_role_and_label(Role::Button, "Tab Events")
         .click();
     harness.run_steps(2);
@@ -2570,7 +2561,7 @@ fn narrow_detail_keeps_critical_controls_and_exposes_displaced_items_in_menus() 
 
     let window = harness.get_by_role_and_label(Role::Window, "Deployment · default / web-frontend");
     window
-        .get_by_role_and_label(Role::Button, "More detail actions")
+        .get_by_role_and_label(Role::Button, "Actions")
         .click();
     harness.run_steps(1);
     harness
@@ -2672,14 +2663,9 @@ fn detail_vital_chips_are_bounded_with_label_and_value() {
     harness.run_steps(3);
 
     let window = common::workload_window(&harness, "Pods");
-    let strip = window.get_by_label("Detail vital strip").rect();
-    // The strip should contain vitals as bounded chips.
-    // Verify the strip has content by checking for known vitals.
+    assert!(window.query_by_label("Detail vital strip").is_none());
     let has_vitals = ["Status ● —", "Ready · —"]
         .iter()
         .any(|label| window.query_by_label(label).is_some());
-    assert!(
-        has_vitals,
-        "vital strip {strip:?} should contain at least one vital chip"
-    );
+    assert!(has_vitals, "Pod footer should contain at least one vital");
 }

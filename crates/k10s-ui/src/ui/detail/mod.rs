@@ -237,14 +237,7 @@ pub(super) fn show<I>(
 
     let mut body_queued = Vec::new();
     let mut runtime_actions = Vec::new();
-    show_external_shell_action(
-        ui,
-        window_id,
-        detail,
-        presentation,
-        streams,
-        resource_actions,
-    );
+    let shell_container_count = external_shell_container_count(ui, presentation);
     frame::show(
         ui,
         window_id,
@@ -258,6 +251,7 @@ pub(super) fn show<I>(
             let gvk = detail_identity_gvk(detail);
             if gvk.group.is_empty() && gvk.version == "v1" && gvk.kind == "Pod" {
                 pod::configure_frame(presentation, frame);
+                frame.actions.shell_container_count = shell_container_count;
             } else if gvk.group == "apps" && gvk.version == "v1" && gvk.kind == "Deployment" {
                 deployment::configure_frame(presentation, frame);
             }
@@ -311,6 +305,12 @@ pub(super) fn show<I>(
                         frame::DetailActionSegment::Scale => {
                             show_scale_action(ui, window_id, presentation, frame, view, dialogs)
                         }
+                        frame::DetailActionSegment::Shell => show_external_shell_action(
+                            ui,
+                            window_id,
+                            presentation,
+                            resource_actions,
+                        ),
                     }
                 }
                 return;
@@ -418,12 +418,10 @@ pub(super) fn show<I>(
     queued.extend(body_queued);
 }
 
-fn show_external_shell_action<I: RowIdentity>(
+fn show_external_shell_action(
     ui: &mut egui::Ui,
     window: WindowId,
-    detail: &DetailState<I>,
     presentation: &presentation::DetailPresentationInput<'_>,
-    streams: &mut tools::StreamStores,
     actions: &mut Vec<crate::ui::ResourceAction>,
 ) {
     let availability = ui.ctx().data(|data| {
@@ -441,68 +439,80 @@ fn show_external_shell_action<I: RowIdentity>(
     let Some(runtime) = pod::PodRuntimeProjection::from_view(identity, view) else {
         return;
     };
-    let selected = streams
-        .logs
-        .target_of(window)
-        .filter(|target| {
-            target.context == identity.context
-                && target.namespace == identity.namespace.as_deref().unwrap_or_default()
-                && target.pod == identity.name
-                && target.uid == identity.uid
-                && runtime.contains(&target.container)
-        })
-        .map(|target| target.container);
-    let Some(shell_target) = build_external_shell_target(
-        availability.unwrap_or_default(),
-        identity,
-        runtime.containers(),
-        selected.as_deref(),
-    ) else {
+    let availability = availability.unwrap_or_default();
+    let containers = runtime.containers();
+    let Some(first) = containers.first() else {
         return;
     };
-    let selected = shell_target.container.clone();
-    let Some(target) = stream_target(detail, &selected) else {
+    if build_external_shell_target(availability, identity, containers, Some(first)).is_none() {
         return;
-    };
+    }
 
-    ui.horizontal(|ui| {
-        if runtime.containers().len() > 1 {
-            let logs = streams.logs.ensure(window, target.clone());
-            egui::ComboBox::from_id_salt(("external-shell.container", window.0))
-                .selected_text(format!("Container: {}", logs.target().container))
-                .show_ui(ui, |ui| {
-                    for container in runtime.containers() {
-                        if ui
-                            .selectable_label(logs.target().container == *container, container)
-                            .clicked()
-                        {
-                            logs.select_container(container);
-                        }
-                    }
-                });
-        }
-        let container = streams
-            .logs
-            .target_of(window)
-            .filter(|candidate| runtime.contains(&candidate.container))
-            .map_or_else(|| selected.clone(), |candidate| candidate.container);
+    let mut open = |container: &str| {
+        let Some(target) =
+            build_external_shell_target(availability, identity, containers, Some(container))
+        else {
+            return;
+        };
+        actions.push(crate::ui::ResourceAction::OpenExternalShell { window, target });
+    };
+    if containers.len() == 1 {
         let button = ui
             .button("Open shell")
             .on_hover_text("Open an interactive kubectl shell in your system terminal");
         if button.clicked() {
-            actions.push(crate::ui::ResourceAction::OpenExternalShell {
-                window,
-                target: crate::ui::ExternalShellTarget {
-                    generation: shell_target.generation,
-                    namespace: shell_target.namespace.clone(),
-                    pod: shell_target.pod.clone(),
-                    uid: shell_target.uid.clone(),
-                    container,
-                    program: "/bin/sh".to_owned(),
-                },
-            });
+            open(first);
         }
+    } else {
+        let menu = ui.menu_button("Open shell", |ui| {
+            for container in containers {
+                let button = ui.button(container);
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("Open shell: {container}"),
+                    )
+                });
+                if button.clicked() {
+                    open(container);
+                    ui.close();
+                }
+            }
+        });
+        menu.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open shell")
+        });
+    }
+}
+
+fn external_shell_container_count(
+    ui: &egui::Ui,
+    presentation: &presentation::DetailPresentationInput<'_>,
+) -> usize {
+    if !presentation.mutations_allowed {
+        return 0;
+    }
+    let availability = ui.ctx().data(|data| {
+        data.get_temp::<crate::ui::ExternalShellAvailability>(egui::Id::new(
+            "k10s.external-shell-availability",
+        ))
     });
+    let presentation::DetailPrimary::Loaded(view) = presentation.primary else {
+        return 0;
+    };
+    let Some(runtime) = pod::PodRuntimeProjection::from_view(presentation.identity, view) else {
+        return 0;
+    };
+    usize::from(
+        build_external_shell_target(
+            availability.unwrap_or_default(),
+            presentation.identity,
+            runtime.containers(),
+            runtime.containers().first().map(String::as_str),
+        )
+        .is_some(),
+    ) * runtime.containers().len()
 }
 
 fn build_external_shell_target(
