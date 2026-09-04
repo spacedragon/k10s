@@ -106,10 +106,24 @@ fn sanitized_split_ratio(ratio: f32) -> f32 {
     }
 }
 
+impl Default for PersistedListView {
+    fn default() -> Self {
+        Self {
+            namespace_scope: NamespaceScope::ContextDefault,
+            search: String::new(),
+            filters: BTreeMap::new(),
+            sort: None,
+            split_ratio: 0.5,
+            detail_visible: true,
+            custom_kind: None,
+        }
+    }
+}
+
 impl PersistedListView {
     /// View settings extracted from a live list window; selection and detail
     /// state are dropped on purpose.
-    fn from_resource<I>(resource: &ResourceWindowState<I>) -> Self {
+    pub(crate) fn from_resource<I>(resource: &ResourceWindowState<I>) -> Self {
         Self {
             namespace_scope: resource.namespace_scope.clone(),
             search: resource.search.clone(),
@@ -123,7 +137,7 @@ impl PersistedListView {
 
     /// View settings extracted from a live Services window; selection,
     /// detail, and port drafts are dropped on purpose.
-    fn from_service<I>(service: &ServiceWindowState<I>) -> Self {
+    pub(crate) fn from_service<I>(service: &ServiceWindowState<I>) -> Self {
         Self {
             namespace_scope: service.namespace_scope.clone(),
             search: service.search.clone(),
@@ -138,7 +152,7 @@ impl PersistedListView {
 
     /// Rebuild a fresh list state from persisted view settings. Selection and
     /// detail start empty; the row re-resolves against live data on connect.
-    fn into_resource<I>(self) -> ResourceWindowState<I> {
+    pub(crate) fn into_resource<I>(self) -> ResourceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ResourceWindowState {
             namespace_scope: self.namespace_scope.into_live(),
@@ -154,7 +168,7 @@ impl PersistedListView {
 
     /// Rebuild fresh Services state from persisted view settings; selection,
     /// detail, and port drafts start empty.
-    fn into_service<I>(self) -> ServiceWindowState<I> {
+    pub(crate) fn into_service<I>(self) -> ServiceWindowState<I> {
         let split_ratio = sanitized_split_ratio(self.split_ratio);
         ServiceWindowState {
             namespace_scope: self.namespace_scope.into_live(),
@@ -414,7 +428,10 @@ impl<'de> Deserialize<'de> for LoadedWorkspaceSnapshot {
                         geometry: window.geometry,
                         z: window.z,
                         view: window.view.map(|view| PersistedListView {
-                            namespace_scope: view.namespace_scope,
+                            namespace_scope: match view.namespace_scope {
+                                NamespaceScope::ContextDefault => NamespaceScope::AllNamespaces,
+                                other => other,
+                            },
                             search: view.search,
                             filters: view.filters,
                             sort: view.sort,
@@ -677,6 +694,7 @@ where
             pending: None,
             layout_checkpoint: None,
             next_layout_revision: 0,
+            remembered_views: std::collections::HashMap::new(),
         };
 
         for window in &restorable {
@@ -725,6 +743,9 @@ where
                 z: window.z,
                 content,
             });
+            if let Some(view) = &window.view {
+                state.remembered_views.insert(kind, view.clone());
+            }
         }
 
         // Continue allocation strictly above everything the file claims, so

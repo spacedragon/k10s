@@ -399,8 +399,17 @@ pub(super) fn show_namespace_combobox<I>(
 ) {
     let selected = match scope {
         crate::workspace::NamespaceScope::Namespace(value) => value.as_str(),
-        crate::workspace::NamespaceScope::ContextDefault
-        | crate::workspace::NamespaceScope::AllNamespaces => "All namespaces",
+        crate::workspace::NamespaceScope::ContextDefault => {
+            if let NamespaceCatalogState::Ready(values) = catalog {
+                values
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("All namespaces")
+            } else {
+                "loading..."
+            }
+        }
+        crate::workspace::NamespaceScope::AllNamespaces => "All namespaces",
     };
     let missing = matches!(scope, crate::workspace::NamespaceScope::Namespace(value)
         if matches!(catalog, NamespaceCatalogState::Ready(values) if !values.contains(value)));
@@ -458,17 +467,19 @@ pub(super) fn show_namespace_combobox<I>(
                     if values.is_empty() {
                         ui.label("No namespaces found");
                     }
-                    for namespace in values
+                    for (idx, namespace) in values
                         .iter()
                         .filter(|value| value.to_lowercase().contains(&needle))
+                        .enumerate()
                     {
-                        if ui
-                            .selectable_label(
-                                matches!(scope, crate::workspace::NamespaceScope::Namespace(value) if value == namespace),
-                                namespace,
-                            )
-                            .clicked()
-                        {
+                        let is_active = match scope {
+                            crate::workspace::NamespaceScope::Namespace(value) => {
+                                value == namespace
+                            }
+                            crate::workspace::NamespaceScope::ContextDefault => idx == 0,
+                            crate::workspace::NamespaceScope::AllNamespaces => false,
+                        };
+                        if ui.selectable_label(is_active, namespace).clicked() {
                             queued.push(WorkspaceCommand::SetNamespaceScope(
                                 window_id,
                                 crate::workspace::NamespaceScope::Namespace(namespace.clone()),
@@ -797,43 +808,10 @@ pub(super) fn show<I>(
         return;
     };
 
-    let Some(rows) = feed
+    let rows_opt = feed
         .window_lists
         .get(&window_id)
-        .or_else(|| feed.lists.get(&kind))
-    else {
-        if let Some(freshness) = effective_freshness {
-            show_window_freshness(ui, window_id, freshness, resource_actions);
-        }
-        ui.horizontal(|ui| {
-            ui.add(Spinner::new());
-            ui.label(format!("Loading {title_lower}"));
-        });
-        return;
-    };
-
-    // The namespace restriction, status filter, and search text all filter
-    // authoritative rows locally; the match line below reports the result.
-    let needle = state.search.to_lowercase();
-    let status_filter = state.status_filter.as_deref();
-    let filtered: Vec<&ResourceListRow> = rows
-        .iter()
-        .filter(|row| {
-            (!namespaced
-                || state
-                    .namespace_scope
-                    .resolve(context_namespace)
-                    .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref()))
-                && status_filter.is_none_or(|wanted| {
-                    super::resource_table::resource_status(row).as_ref() == wanted
-                })
-                && super::resource_table::matches_search(row, &needle)
-        })
-        .collect();
-    let mut sorted = filtered;
-    if let Some(sort) = state.sort.as_ref() {
-        super::resource_table::sort_rows(&mut sorted, sort);
-    }
+        .or_else(|| feed.lists.get(&kind));
 
     // A window can be much narrower than the app canvas, so use this list's
     // local control budget rather than the global content width or a fixed
@@ -889,6 +867,8 @@ pub(super) fn show<I>(
             None => (available_width - fixed_estimate - 12.0).max(120.0),
         }
     };
+    let empty_rows: [ResourceListRow; 0] = [];
+    let rows_for_status = rows_opt.map_or(&empty_rows[..], |r| r.as_slice());
     let filter_row = ui.horizontal_wrapped(|ui| {
         if compact_controls {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -925,7 +905,7 @@ pub(super) fn show<I>(
             ui,
             window_id,
             &state.status_filter,
-            rows,
+            rows_for_status,
             compact_controls,
             queued,
         );
@@ -999,6 +979,57 @@ pub(super) fn show<I>(
         ui.data_mut(|data| data.insert_temp(fixed_width_id, fixed.max(0.0)));
     }
 
+    if namespaced {
+        show_namespace_catalog_status(ui, &feed.namespace_catalog, resource_actions);
+    }
+    // Non-live freshness keeps its recovery block; live/empty states are
+    // already in the toolbar, so only one separator is painted.
+    let recovery_shown = effective_freshness.is_some_and(|freshness| {
+        if matches!(
+            freshness,
+            WindowFreshness::Live { .. } | WindowFreshness::ReadyEmpty
+        ) {
+            false
+        } else {
+            show_window_freshness(ui, window_id, freshness, resource_actions);
+            true
+        }
+    });
+
+    let Some(rows) = rows_opt else {
+        if !recovery_shown {
+            ui.separator();
+        }
+        ui.horizontal(|ui| {
+            ui.add(Spinner::new());
+            ui.label(format!("Loading {title_lower}"));
+        });
+        return;
+    };
+
+    // The namespace restriction, status filter, and search text all filter
+    // authoritative rows locally; the match line below reports the result.
+    let needle = state.search.to_lowercase();
+    let status_filter = state.status_filter.as_deref();
+    let filtered: Vec<&ResourceListRow> = rows
+        .iter()
+        .filter(|row| {
+            (!namespaced
+                || state
+                    .namespace_scope
+                    .resolve(context_namespace)
+                    .is_none_or(|wanted| Some(wanted) == row.identity.namespace.as_deref()))
+                && status_filter.is_none_or(|wanted| {
+                    super::resource_table::resource_status(row).as_ref() == wanted
+                })
+                && super::resource_table::matches_search(row, &needle)
+        })
+        .collect();
+    let mut sorted = filtered;
+    if let Some(sort) = state.sort.as_ref() {
+        super::resource_table::sort_rows(&mut sorted, sort);
+    }
+
     // Compact match line: result count, selection, active sort, and the
     // relative/absolute age affordance.
     ui.horizontal_wrapped(|ui| {
@@ -1027,22 +1058,6 @@ pub(super) fn show<I>(
         }
     });
 
-    if namespaced {
-        show_namespace_catalog_status(ui, &feed.namespace_catalog, resource_actions);
-    }
-    // Non-live freshness keeps its recovery block; live/empty states are
-    // already in the toolbar, so only one separator is painted.
-    let recovery_shown = effective_freshness.is_some_and(|freshness| {
-        if matches!(
-            freshness,
-            WindowFreshness::Live { .. } | WindowFreshness::ReadyEmpty
-        ) {
-            false
-        } else {
-            show_window_freshness(ui, window_id, freshness, resource_actions);
-            true
-        }
-    });
     if !recovery_shown {
         if rows.is_empty() && effective_freshness.is_none() {
             show_window_freshness(

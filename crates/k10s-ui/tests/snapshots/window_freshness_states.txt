@@ -212,6 +212,7 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
+                Button label="Reset"
                 Label value="Live; synced 4s ago"
                   TextRun value="● Live · 4s ago"
               GenericContainer
@@ -295,6 +296,14 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
+                Button label="Reset"
+              Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
+                TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
+              Label value="Mutations disabled while this window is stale"
+                TextRun value="Mutations disabled while this window is stale"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 Label value="1 pods"
                   TextRun value="1 pods"
@@ -304,13 +313,6 @@ Window
                   Button label="switch to absolute"
                   Label value="Age shown as relative ("
                     TextRun value="Age shown as relative ("
-              Label value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
-                TextRun value="▲ Stale · last sync 37s ago · retry in 3s · attempt 2"
-              Label value="Mutations disabled while this window is stale"
-                TextRun value="Mutations disabled while this window is stale"
-              GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
               GenericContainer
                 GenericContainer
                   GenericContainer
@@ -390,15 +392,7 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
-              GenericContainer
-                Label value="0 statefulsets"
-                  TextRun value="0 statefulsets"
-                GenericContainer
-                  Label value=")"
-                    TextRun value=")"
-                  Button label="switch to absolute"
-                  Label value="Age shown as relative ("
-                    TextRun value="Age shown as relative ("
+                Button label="Reset"
               Label value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
                 TextRun value="■ Forbidden · user alice@example.com cannot list statefulsets.apps in --namespace=payments"
               Label value="Ask a cluster administrator to grant this permission, then retry."
@@ -408,6 +402,15 @@ Window
                   TextRun value="kubectl auth can-i list statefulsets.apps --as=alice@example.com --namespace=payments"
                 Button label="Copy auth can-i command"
                 Button label="Retry now"
+              GenericContainer
+                Label value="0 statefulsets"
+                  TextRun value="0 statefulsets"
+                GenericContainer
+                  Label value=")"
+                    TextRun value=")"
+                  Button label="switch to absolute"
+                  Label value="Age shown as relative ("
+                    TextRun value="Age shown as relative ("
               GenericContainer
                 Label value="No StatefulSets in this view"
                   TextRun value="No StatefulSets in this view"
@@ -440,6 +443,12 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
+                Button label="Reset"
+              Label value="⨯ Failed · watch ended unexpectedly"
+                TextRun value="⨯ Failed · watch ended unexpectedly"
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 Label value="0 daemonsets"
                   TextRun value="0 daemonsets"
@@ -449,11 +458,6 @@ Window
                   Button label="switch to absolute"
                   Label value="Age shown as relative ("
                     TextRun value="Age shown as relative ("
-              Label value="⨯ Failed · watch ended unexpectedly"
-                TextRun value="⨯ Failed · watch ended unexpectedly"
-              GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
               GenericContainer
                 Label value="No DaemonSets in this view"
                   TextRun value="No DaemonSets in this view"
@@ -486,6 +490,7 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
+                Button label="Reset"
                 Label value="◇ Ready · no resources"
                   TextRun value="◇ Ready · no "
                   TextRun value="resources"
@@ -530,6 +535,14 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status: all"
                 Button label="↻"
+                Button label="Reset"
+              Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
+                TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
+              Label value="Mutations are disabled; recovery controls unlock after reconnecting."
+                TextRun value="Mutations are disabled; recovery controls unlock after reconnecting."
+              GenericContainer
+                Button label="Retry now"
+                Button label="Full resync"
               GenericContainer
                 Label value="1 cronjobs"
                   TextRun value="1 cronjobs"
@@ -539,13 +552,6 @@ Window
                   Button label="switch to absolute"
                   Label value="Age shown as relative ("
                     TextRun value="Age shown as relative ("
-              Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
-                TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
-              Label value="Mutations are disabled; recovery controls unlock after reconnecting."
-                TextRun value="Mutations are disabled; recovery controls unlock after reconnecting."
-              GenericContainer
-                Button label="Retry now"
-                Button label="Full resync"
               GenericContainer
                 GenericContainer
                   GenericContainer

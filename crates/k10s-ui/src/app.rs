@@ -669,6 +669,21 @@ impl K10sApp {
                 .flatten()
                 .cloned(),
         );
+        if let Some((sub_ctx, subscription)) = &self.namespace_subscription
+            && Some(sub_ctx.as_str()) == selected_before.as_deref()
+            && matches!(self.namespace_catalog, NamespaceCatalogState::Loading)
+            && let Some(state) = self.client.resource_list(subscription.id())
+        {
+            let mut names: Vec<_> = state.rows().map(|row| row.identity.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            self.namespace_catalog = NamespaceCatalogState::Ready(names);
+        }
+        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog
+            && let Some(first) = names.first()
+        {
+            self.shell.resolve_context_default_namespaces(first);
+        }
         let mut feed = self.build_resource_feed();
         feed.render_time = response
             .as_ref()
@@ -2634,6 +2649,21 @@ impl K10sApp {
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
         let mut namespace_demanded = false;
+        if let Some((sub_ctx, subscription)) = &self.namespace_subscription
+            && sub_ctx == context
+            && matches!(self.namespace_catalog, NamespaceCatalogState::Loading)
+            && let Some(state) = self.client.resource_list(subscription.id())
+        {
+            let mut names: Vec<_> = state.rows().map(|row| row.identity.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            self.namespace_catalog = NamespaceCatalogState::Ready(names);
+        }
+        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog
+            && let Some(first) = names.first()
+        {
+            self.shell.resolve_context_default_namespaces(first);
+        }
         if self.shell.command_palette_open() {
             for (group, version, kind) in [
                 ("", "v1", "Pod"),
@@ -4849,7 +4879,8 @@ mod tests {
     };
     use crate::client::{ClientPhase, ConnectTarget, PendingRequest, Query, TransportError};
     use crate::workspace::{
-        NamespaceScope, WindowContent, WindowId, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
+        NamespaceScope, PersistedListView, PersistedWindow, PersistedWindowKind, WindowContent,
+        WindowGeom, WindowId, WindowKind, WorkloadKind, WorkspaceCommand, WorkspaceEvent,
     };
 
     #[test]
@@ -9289,12 +9320,13 @@ mod tests {
         let watches = resource_watches(&state);
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].gvk, GroupVersionKind::core("v1", "Pod"));
-        assert_eq!(watches[0].namespace.as_deref(), None);
+        assert_eq!(watches[0].namespace.as_deref(), Some("default"));
 
         app.web_activate_services();
         let watches = resource_watches(&state);
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[1].gvk, GroupVersionKind::core("v1", "Service"));
+        assert_eq!(watches[1].namespace.as_deref(), Some("default"));
     }
 
     #[test]
@@ -10042,7 +10074,28 @@ mod tests {
     #[test]
     fn all_namespaces_keeps_watch_when_context_namespace_changes() {
         let (mut app, state) = ready_app();
-        let window = app.web_activate_workload(WorkloadKind::Pods).unwrap();
+        let mut snapshot = app.workspace_snapshot();
+        snapshot.windows.push(PersistedWindow {
+            kind: PersistedWindowKind::Workload(WorkloadKind::Pods),
+            title: "Pods · all namespaces".into(),
+            geometry: WindowGeom::staggered(0, [800.0, 600.0]),
+            z: 1,
+            view: Some(PersistedListView {
+                namespace_scope: NamespaceScope::AllNamespaces,
+                ..Default::default()
+            }),
+            port_forward_view: None,
+        });
+        app.restore_workspace_snapshot(snapshot);
+        app.reconcile_selected_resource_streams();
+        let window = app
+            .shell
+            .workspace()
+            .windows()
+            .iter()
+            .find(|w| w.kind == WindowKind::Workload(WorkloadKind::Pods))
+            .unwrap()
+            .id;
         assert_eq!(resource_watches(&state)[0].namespace.as_deref(), None);
 
         let AppView::Ready { contexts, .. } = &mut app.view else {
@@ -11085,6 +11138,11 @@ mod tests {
         let window = app
             .web_activate_workload(WorkloadKind::Deployments)
             .unwrap();
+        if let Some((_, subscription)) = &app.namespace_subscription {
+            let ns_id = subscription.id().clone();
+            complete_namespace_snapshot(&mut app, &ns_id, 1, vec![namespace_row("default", 1)]);
+        }
+        app.reconcile_selected_resource_streams();
         let subscription = {
             let key = app.window_subscriptions.get(&window).unwrap();
             app.resource_subscriptions
@@ -11122,17 +11180,13 @@ mod tests {
 
         let mut harness = toolbar_test_harness_with_size(app, egui::vec2(640.0, 800.0));
         {
-            let window = harness.get_by_role_and_label(
-                egui::accesskit::Role::Window,
-                "Deployments · all namespaces",
-            );
+            let window = harness
+                .get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
             let search = window
                 .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-            let namespace = window.get_by_role_and_label(
-                egui::accesskit::Role::ComboBox,
-                "Namespace: All namespaces",
-            );
+            let namespace =
+                window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: default");
             let status =
                 window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
             let live = window.get_by_label("Live; synced just now");
@@ -11169,14 +11223,12 @@ mod tests {
     fn deployment_toolbar_matches_reference_layout_and_title() {
         let (app, _) = deployment_list_app();
         let harness = toolbar_test_harness(app);
-        let window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        let window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
         // The reference layout exposes primary controls directly when space permits:
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: All namespaces");
+        window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: default");
         window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
         if window
             .query_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
@@ -11215,10 +11267,7 @@ mod tests {
     fn deployment_window_title_tracks_namespace_scope() {
         let (app, window) = deployment_list_app();
         let harness = toolbar_test_harness(app);
-        harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
         let mut app = harness.into_state();
         app.web_set_namespace_scope(
@@ -11262,10 +11311,8 @@ mod tests {
         ));
 
         let mut harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("2 deployments · 1 selected");
         list_window
             .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
@@ -11283,10 +11330,8 @@ mod tests {
                 crate::workspace::AgeMode::Absolute,
             ));
         let mut harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window
             .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
             .click();
@@ -11301,6 +11346,11 @@ mod tests {
         let window = app
             .web_activate_workload(WorkloadKind::Deployments)
             .unwrap();
+        if let Some((_, subscription)) = &app.namespace_subscription {
+            let ns_id = subscription.id().clone();
+            complete_namespace_snapshot(&mut app, &ns_id, 1, vec![namespace_row("default", 1)]);
+        }
+        app.reconcile_selected_resource_streams();
         let subscription = {
             let key = app.window_subscriptions.get(&window).unwrap();
             app.resource_subscriptions
@@ -11322,10 +11372,8 @@ mod tests {
                 Some("Ready".into()),
             ));
         let harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("Select resource alpha");
         assert!(
             list_window.query_by_label("Select resource beta").is_none(),
@@ -11352,10 +11400,8 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SetStatusFilter(window, None));
         let harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · all namespaces",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("Select resource alpha");
         list_window.get_by_label("Select resource beta");
         list_window.get_by_label("2 deployments");
@@ -11368,7 +11414,7 @@ mod tests {
         let harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
-            "Deployments \u{00b7} all namespaces",
+            "Deployments \u{00b7} default",
         );
 
         // The selected row keeps its clean action affordance and reports the
@@ -11403,7 +11449,7 @@ mod tests {
         let harness = toolbar_test_harness(app);
         let list_window = harness.get_by_role_and_label(
             egui::accesskit::Role::Window,
-            "Deployments \u{00b7} all namespaces",
+            "Deployments \u{00b7} default",
         );
 
         // The status cell paints a tone glyph (\u{25cf} for a Ready row) but the

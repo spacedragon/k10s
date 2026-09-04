@@ -132,6 +132,8 @@ fn open_integrated_deployment(
     verify_list_overflow: bool,
 ) {
     let identity = detail.identity.clone();
+    harness.state_mut().feed.namespace_catalog =
+        k10s_ui::ui::NamespaceCatalogState::Ready(vec!["payments".into()]);
     harness
         .state_mut()
         .feed

@@ -178,6 +178,17 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              GenericContainer
+                TextInput label="Search pods" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace: not requested" value="Namespace"
+                GenericContainer
+                  GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               Label value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
                 TextRun value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."
@@ -197,7 +208,7 @@ Window
     Splitter
     Splitter
     Splitter
-  Window label="Pods · all namespaces"
+  Window label="Pods · payments"
     GenericContainer
       GenericContainer
         GenericContainer
@@ -207,6 +218,17 @@ Window
             Unknown
           GenericContainer
             GenericContainer
+              GenericContainer
+                TextInput label="Search pods" value=""
+                  TextRun value=""
+                GenericContainer
+                  GenericContainer
+                    GenericContainer
+                      ComboBox label="Namespace: not requested" value="Namespace"
+                GenericContainer
+                  GenericContainer
+                    ComboBox label="Status: all" value="Status"
+                Button label="More list controls"
               Label value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
                 TextRun value="[~] Reconnecting · last sync unknown · retry in pending · attempt 1"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."

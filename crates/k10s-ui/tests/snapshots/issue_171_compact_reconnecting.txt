@@ -188,9 +188,6 @@ Window
                   GenericContainer
                     ComboBox label="Status: all" value="Status"
                 Button label="More list controls"
-              GenericContainer
-                Label value="1 deployments"
-                  TextRun value="1 deployments"
               Label value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
                 TextRun value="[~] Reconnecting · last sync 42s ago · retry in 2s · attempt 3"
               Label value="Mutations are disabled; recovery controls unlock after reconnecting."
@@ -198,6 +195,9 @@ Window
               GenericContainer
                 Button label="Retry now"
                 Button label="Full resync"
+              GenericContainer
+                Label value="1 deployments"
+                  TextRun value="1 deployments"
               GenericContainer
                 GenericContainer
                   GenericContainer
