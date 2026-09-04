@@ -671,16 +671,12 @@ where
         if let Some(window) = self.window(id) {
             match &window.content {
                 WindowContent::Resource(resource) => {
-                    self.remembered_views.insert(
-                        window.kind,
-                        PersistedListView::from_resource(resource),
-                    );
+                    self.remembered_views
+                        .insert(window.kind, PersistedListView::from_resource(resource));
                 }
                 WindowContent::Services(service) => {
-                    self.remembered_views.insert(
-                        window.kind,
-                        PersistedListView::from_service(service),
-                    );
+                    self.remembered_views
+                        .insert(window.kind, PersistedListView::from_service(service));
                 }
                 _ => {}
             }
@@ -690,23 +686,19 @@ where
     pub fn resolve_context_default_namespaces(&mut self, first: &str) {
         for window in &mut self.windows {
             match &mut window.content {
-                WindowContent::Resource(resource) => {
-                    if resource.namespace_scope == NamespaceScope::ContextDefault {
-                        resource.namespace_scope = NamespaceScope::Namespace(first.to_string());
-                        self.remembered_views.insert(
-                            window.kind,
-                            PersistedListView::from_resource(resource),
-                        );
-                    }
+                WindowContent::Resource(resource)
+                    if resource.namespace_scope == NamespaceScope::ContextDefault =>
+                {
+                    resource.namespace_scope = NamespaceScope::Namespace(first.to_string());
+                    self.remembered_views
+                        .insert(window.kind, PersistedListView::from_resource(resource));
                 }
-                WindowContent::Services(service) => {
-                    if service.namespace_scope == NamespaceScope::ContextDefault {
-                        service.namespace_scope = NamespaceScope::Namespace(first.to_string());
-                        self.remembered_views.insert(
-                            window.kind,
-                            PersistedListView::from_service(service),
-                        );
-                    }
+                WindowContent::Services(service)
+                    if service.namespace_scope == NamespaceScope::ContextDefault =>
+                {
+                    service.namespace_scope = NamespaceScope::Namespace(first.to_string());
+                    self.remembered_views
+                        .insert(window.kind, PersistedListView::from_service(service));
                 }
                 _ => {}
             }

@@ -578,10 +578,10 @@ where
     ) -> bool {
         theme::apply(ui.ctx());
         self.command_palette.handle_global_shortcut(ui.ctx());
-        if let NamespaceCatalogState::Ready(names) = &feed.namespace_catalog {
-            if let Some(first) = names.first() {
-                self.resolve_context_default_namespaces(first);
-            }
+        if let NamespaceCatalogState::Ready(names) = &feed.namespace_catalog
+            && let Some(first) = names.first()
+        {
+            self.resolve_context_default_namespaces(first);
         }
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();

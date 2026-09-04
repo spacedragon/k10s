@@ -401,7 +401,10 @@ pub(super) fn show_namespace_combobox<I>(
         crate::workspace::NamespaceScope::Namespace(value) => value.as_str(),
         crate::workspace::NamespaceScope::ContextDefault => {
             if let NamespaceCatalogState::Ready(values) = catalog {
-                values.first().map(String::as_str).unwrap_or("All namespaces")
+                values
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("All namespaces")
             } else {
                 "loading..."
             }
@@ -470,17 +473,13 @@ pub(super) fn show_namespace_combobox<I>(
                         .enumerate()
                     {
                         let is_active = match scope {
-                            crate::workspace::NamespaceScope::Namespace(value) => value == namespace,
+                            crate::workspace::NamespaceScope::Namespace(value) => {
+                                value == namespace
+                            }
                             crate::workspace::NamespaceScope::ContextDefault => idx == 0,
                             crate::workspace::NamespaceScope::AllNamespaces => false,
                         };
-                        if ui
-                            .selectable_label(
-                                is_active,
-                                namespace,
-                            )
-                            .clicked()
-                        {
+                        if ui.selectable_label(is_active, namespace).clicked() {
                             queued.push(WorkspaceCommand::SetNamespaceScope(
                                 window_id,
                                 crate::workspace::NamespaceScope::Namespace(namespace.clone()),

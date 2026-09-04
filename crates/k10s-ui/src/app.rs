@@ -669,23 +669,20 @@ impl K10sApp {
                 .flatten()
                 .cloned(),
         );
-        if let Some((sub_ctx, subscription)) = &self.namespace_subscription {
-            if Some(sub_ctx.as_str()) == selected_before.as_deref()
-                && matches!(self.namespace_catalog, NamespaceCatalogState::Loading)
-            {
-                if let Some(state) = self.client.resource_list(subscription.id()) {
-                    let mut names: Vec<_> =
-                        state.rows().map(|row| row.identity.name.clone()).collect();
-                    names.sort();
-                    names.dedup();
-                    self.namespace_catalog = NamespaceCatalogState::Ready(names);
-                }
-            }
+        if let Some((sub_ctx, subscription)) = &self.namespace_subscription
+            && Some(sub_ctx.as_str()) == selected_before.as_deref()
+            && matches!(self.namespace_catalog, NamespaceCatalogState::Loading)
+            && let Some(state) = self.client.resource_list(subscription.id())
+        {
+            let mut names: Vec<_> = state.rows().map(|row| row.identity.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            self.namespace_catalog = NamespaceCatalogState::Ready(names);
         }
-        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog {
-            if let Some(first) = names.first() {
-                self.shell.resolve_context_default_namespaces(first);
-            }
+        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog
+            && let Some(first) = names.first()
+        {
+            self.shell.resolve_context_default_namespaces(first);
         }
         let mut feed = self.build_resource_feed();
         feed.render_time = response
@@ -2652,21 +2649,20 @@ impl K10sApp {
         let mut window_subscriptions = BTreeMap::new();
         let mut custom_open = false;
         let mut namespace_demanded = false;
-        if let Some((sub_ctx, subscription)) = &self.namespace_subscription {
-            if sub_ctx == context && matches!(self.namespace_catalog, NamespaceCatalogState::Loading) {
-                if let Some(state) = self.client.resource_list(subscription.id()) {
-                    let mut names: Vec<_> =
-                        state.rows().map(|row| row.identity.name.clone()).collect();
-                    names.sort();
-                    names.dedup();
-                    self.namespace_catalog = NamespaceCatalogState::Ready(names);
-                }
-            }
+        if let Some((sub_ctx, subscription)) = &self.namespace_subscription
+            && sub_ctx == context
+            && matches!(self.namespace_catalog, NamespaceCatalogState::Loading)
+            && let Some(state) = self.client.resource_list(subscription.id())
+        {
+            let mut names: Vec<_> = state.rows().map(|row| row.identity.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            self.namespace_catalog = NamespaceCatalogState::Ready(names);
         }
-        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog {
-            if let Some(first) = names.first() {
-                self.shell.resolve_context_default_namespaces(first);
-            }
+        if let NamespaceCatalogState::Ready(names) = &self.namespace_catalog
+            && let Some(first) = names.first()
+        {
+            self.shell.resolve_context_default_namespaces(first);
         }
         if self.shell.command_palette_open() {
             for (group, version, kind) in [
@@ -11144,12 +11140,7 @@ mod tests {
             .unwrap();
         if let Some((_, subscription)) = &app.namespace_subscription {
             let ns_id = subscription.id().clone();
-            complete_namespace_snapshot(
-                &mut app,
-                &ns_id,
-                1,
-                vec![namespace_row("default", 1)],
-            );
+            complete_namespace_snapshot(&mut app, &ns_id, 1, vec![namespace_row("default", 1)]);
         }
         app.reconcile_selected_resource_streams();
         let subscription = {
@@ -11189,17 +11180,13 @@ mod tests {
 
         let mut harness = toolbar_test_harness_with_size(app, egui::vec2(640.0, 800.0));
         {
-            let window = harness.get_by_role_and_label(
-                egui::accesskit::Role::Window,
-                "Deployments · default",
-            );
+            let window = harness
+                .get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
             let search = window
                 .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
-            let namespace = window.get_by_role_and_label(
-                egui::accesskit::Role::ComboBox,
-                "Namespace: default",
-            );
+            let namespace =
+                window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Namespace: default");
             let status =
                 window.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Status: all");
             let live = window.get_by_label("Live; synced just now");
@@ -11236,10 +11223,8 @@ mod tests {
     fn deployment_toolbar_matches_reference_layout_and_title() {
         let (app, _) = deployment_list_app();
         let harness = toolbar_test_harness(app);
-        let window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        let window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
         // The reference layout exposes primary controls directly when space permits:
         window.get_by_role_and_label(egui::accesskit::Role::TextInput, "Search deployments");
@@ -11282,10 +11267,7 @@ mod tests {
     fn deployment_window_title_tracks_namespace_scope() {
         let (app, window) = deployment_list_app();
         let harness = toolbar_test_harness(app);
-        harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
 
         let mut app = harness.into_state();
         app.web_set_namespace_scope(
@@ -11329,10 +11311,8 @@ mod tests {
         ));
 
         let mut harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("2 deployments · 1 selected");
         list_window
             .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
@@ -11350,10 +11330,8 @@ mod tests {
                 crate::workspace::AgeMode::Absolute,
             ));
         let mut harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window
             .get_by_role_and_label(egui::accesskit::Role::Button, "More list controls")
             .click();
@@ -11370,12 +11348,7 @@ mod tests {
             .unwrap();
         if let Some((_, subscription)) = &app.namespace_subscription {
             let ns_id = subscription.id().clone();
-            complete_namespace_snapshot(
-                &mut app,
-                &ns_id,
-                1,
-                vec![namespace_row("default", 1)],
-            );
+            complete_namespace_snapshot(&mut app, &ns_id, 1, vec![namespace_row("default", 1)]);
         }
         app.reconcile_selected_resource_streams();
         let subscription = {
@@ -11399,10 +11372,8 @@ mod tests {
                 Some("Ready".into()),
             ));
         let harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("Select resource alpha");
         assert!(
             list_window.query_by_label("Select resource beta").is_none(),
@@ -11429,10 +11400,8 @@ mod tests {
         app.shell
             .apply_workspace_command(WorkspaceCommand::SetStatusFilter(window, None));
         let harness = toolbar_test_harness(app);
-        let list_window = harness.get_by_role_and_label(
-            egui::accesskit::Role::Window,
-            "Deployments · default",
-        );
+        let list_window =
+            harness.get_by_role_and_label(egui::accesskit::Role::Window, "Deployments · default");
         list_window.get_by_label("Select resource alpha");
         list_window.get_by_label("Select resource beta");
         list_window.get_by_label("2 deployments");
