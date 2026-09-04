@@ -661,7 +661,11 @@ fn direct_toolbar_width(
     } else {
         200.0
     };
-    let namespace = if namespaced { 175.0 } else { 0.0 };
+    // The full `Namespace: All namespaces` selector is about 205 points with
+    // the current monospace theme. Budget its painted width so a borderline
+    // toolbar selects the compact layout instead of wrapping and oscillating
+    // between two measured search widths on consecutive frames.
+    let namespace = if namespaced { 210.0 } else { 0.0 };
     let custom_type = if custom_resource { 160.0 } else { 0.0 };
     let reset = if filters_active { 52.0 } else { 0.0 };
     let freshness = if shows_freshness { 115.0 } else { 0.0 };
@@ -872,7 +876,7 @@ pub(super) fn show<I>(
             + 16.0;
         (available_width - compact_fixed).max(80.0)
     } else {
-        let fixed_estimate = (if namespaced { 175.0 } else { 0.0 })
+        let fixed_estimate = (if namespaced { 210.0 } else { 0.0 })
             + 105.0 // status
             + (if kind == WorkloadKind::CustomResources { 160.0 } else { 0.0 })
             + 30.0 // refresh
