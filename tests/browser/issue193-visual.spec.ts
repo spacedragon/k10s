@@ -30,7 +30,11 @@ test('captures issue 193 redesigned list + detail at the reference wide geometry
   await connect(page);
   await page.locator('#k10s-canvas').click({ position: { x: 500, y: 350 } });
   await openDeploymentOverview(page);
-  await page.waitForTimeout(250);
+  // Let the canvas finish its responsive relayout before Playwright compares
+  // consecutive frames. The detail footer changes the available body height,
+  // and capturing during that transition leaves the filter row one frame
+  // behind the rest of the window.
+  await page.waitForTimeout(1_000);
   await page.screenshot({
     animations: 'disabled',
     fullPage: true,
