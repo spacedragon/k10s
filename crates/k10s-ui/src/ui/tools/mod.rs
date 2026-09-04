@@ -3,6 +3,7 @@
 
 pub mod logs;
 pub mod yaml;
+pub mod yaml_syntax;
 
 use crate::workspace::WindowId;
 
