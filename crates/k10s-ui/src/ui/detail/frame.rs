@@ -142,6 +142,16 @@ pub(super) fn show<I: RowIdentity>(
                             detail.identity.clone(),
                         ));
                     }
+                    if super::is_service_gvk(&identity.gvk) {
+                        let port_forward = ui.button("Port-forward…");
+                        port_forward.widget_info(|| {
+                            WidgetInfo::labeled(WidgetType::Button, true, "Port-forward service")
+                        });
+                        if port_forward.clicked() && detail.active_tab != DetailTab::Ports {
+                            queued
+                                .push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Ports));
+                        }
+                    }
                 }
             });
         });
