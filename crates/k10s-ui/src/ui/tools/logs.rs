@@ -685,6 +685,7 @@ pub(crate) fn show(
         };
         let scroll_output = log_scroll
             .id_salt(("logs.stream", window_id.0))
+            .auto_shrink([false, false])
             .stick_to_bottom(was_following)
             .show(ui, |ui| {
                 // An active Find filters the retained buffer; otherwise the
@@ -844,14 +845,20 @@ pub(crate) fn show_aggregate(
                 ui.ctx().copy_text(view.export_text());
             }
         });
+        let was_following = view.follows();
+        let scroll_id = ui.make_persistent_id(("logs.aggregate.stream", window_id.0));
+        if view.take_scroll_reset() {
+            egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
+        }
         let log_scroll = if view.wraps() {
             ScrollArea::vertical()
         } else {
             ScrollArea::both()
         };
-        log_scroll
+        let scroll_output = log_scroll
             .id_salt(("logs.aggregate.stream", window_id.0))
-            .stick_to_bottom(view.follows())
+            .auto_shrink([false, false])
+            .stick_to_bottom(was_following)
             .show(ui, |ui| {
                 let lines: Vec<&String> = if view.find().is_some() {
                     view.find_matches()
@@ -868,6 +875,14 @@ pub(crate) fn show_aggregate(
                     ));
                 }
             });
+        let max_offset =
+            (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
+        view.set_follow(normalize_bottom_state(
+            ui.ctx(),
+            scroll_output.id,
+            scroll_output.state,
+            max_offset,
+        ));
     }
     if open_requested {
         views.queue(
@@ -1005,5 +1020,78 @@ mod tests {
         let (appended, appended_max, _) = render_scroll(&ctx, id, 24, logs.follows());
         assert_eq!(appended.offset.y, appended_max);
         assert!(logs.follows());
+    }
+
+    #[test]
+    fn short_content_fills_available_height_so_horizontal_scrollbar_stays_at_bottom() {
+        use super::{LogsViews, WindowId, show, show_aggregate};
+
+        let ctx = Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))),
+            ..RawInput::default()
+        };
+        let mut views = LogsViews::default();
+        let window_id = WindowId(1);
+        let stream_target = target();
+
+        let view = views.ensure(window_id, stream_target.clone());
+        view.connect();
+        view.attach();
+        view.append("single short log line");
+
+        let mut remaining_y = None;
+        let mut out1 = ctx.run_ui(input.clone(), |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(400.0, 200.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    show(
+                        ui,
+                        window_id,
+                        &mut views,
+                        Some(stream_target.clone()),
+                        &["container".to_owned()],
+                        false,
+                    );
+                    remaining_y = Some(ui.available_size().y);
+                },
+            );
+        });
+        out1.textures_delta.clear();
+
+        // With auto_shrink([false, false]), the scroll area takes the entire
+        // remaining height down to the bottom of the container, leaving 0 remaining height.
+        assert_eq!(remaining_y, Some(0.0));
+
+        // Test aggregate logs as well
+        let aggregate_window_id = WindowId(2);
+        let mut agg_views = LogsViews::default();
+        let agg_view = agg_views
+            .ensure_aggregate(aggregate_window_id, &[stream_target.clone()])
+            .expect("aggregate view ensured");
+        agg_view.connect();
+        agg_view.attach();
+        agg_view.append("single aggregate log line");
+
+        let mut agg_remaining_y = None;
+        let mut out2 = ctx.run_ui(input, |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(400.0, 200.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    show_aggregate(
+                        ui,
+                        aggregate_window_id,
+                        &mut agg_views,
+                        &[stream_target.clone()],
+                    );
+                    agg_remaining_y = Some(ui.available_size().y);
+                },
+            );
+        });
+        out2.textures_delta.clear();
+
+        assert_eq!(agg_remaining_y, Some(0.0));
     }
 }
