@@ -520,7 +520,7 @@ impl KubeAdapter {
                 nodes = inventory.nodes;
                 continue;
             }
-            match read::list_infrastructure_resource(
+            match read::list_resource(
                 &client,
                 context,
                 &descriptor.gvk,

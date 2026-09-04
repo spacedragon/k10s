@@ -1353,7 +1353,8 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
         (
             "/api/v1/pods",
             r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"2"},"items":[
-              {"metadata":{"name":"api-pod","namespace":"default","uid":"uid-api-pod","creationTimestamp":"2026-08-27T00:00:00Z"},"status":{"phase":"Running"}}
+              {"metadata":{"name":"api-pod","namespace":"default","uid":"uid-api-pod","creationTimestamp":"2026-08-27T00:00:00Z"},"status":{"phase":"Running"}},
+              {"metadata":{"name":"crash-pod","namespace":"default","uid":"uid-crash-pod","creationTimestamp":"2026-08-27T00:00:00Z"},"status":{"phase":"Running","containerStatuses":[{"name":"c1","state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}
             ]}"#,
         ),
         (
@@ -1409,8 +1410,12 @@ async fn kube_adapter_serves_live_infrastructure_inventory() {
     let response = result.wire_payload();
     assert_eq!(response.context, "contract-mock");
     assert_eq!(response.totals.nodes, 1);
-    assert_eq!(response.totals.pods, 1);
+    assert_eq!(response.totals.pods, 2);
     assert_eq!(response.totals.workloads, 1);
+    assert_eq!(response.attention.len(), 1);
+    assert_eq!(response.attention[0].kind, "Pod");
+    assert_eq!(response.attention[0].name, "crash-pod");
+    assert_eq!(response.attention[0].status, "CrashLoopBackOff");
 
     for (path, _) in lists {
         assert_eq!(server.hit_count(path), 1, "overview must list {path}");
