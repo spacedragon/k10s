@@ -178,6 +178,11 @@ impl CatalogSnapshot {
                 "not ready",
                 "unavailable",
                 "crash",
+                "backoff",
+                "errimagepull",
+                "evicted",
+                "oomkilled",
+                "unknown",
             ]
             .iter()
             .any(|marker| value.contains(marker))
