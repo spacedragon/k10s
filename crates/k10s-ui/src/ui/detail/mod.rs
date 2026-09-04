@@ -570,19 +570,17 @@ fn show_generic_body<I: RowIdentity>(
         DetailTab::Events => events::show(ui, view.events_condition, &view.events),
         DetailTab::Ports => {}
         DetailTab::Yaml => {
-            if !view.capabilities.can_edit_yaml {
-                ui.label("This kind cannot be edited");
-            } else {
-                tools::yaml::show(
-                    ui,
-                    window_id,
-                    yaml,
-                    Some(presentation.identity),
-                    Some(view.manifest.as_str()),
-                    presentation.mutations_allowed,
-                    queued,
-                );
-            }
+            let mutations_allowed =
+                presentation.mutations_allowed && view.capabilities.can_edit_yaml;
+            tools::yaml::show(
+                ui,
+                window_id,
+                yaml,
+                Some(presentation.identity),
+                Some(view.manifest.as_str()),
+                mutations_allowed,
+                queued,
+            );
         }
         DetailTab::Logs => {
             if WorkloadKind::from_gvk(&presentation.identity.gvk) == Some(WorkloadKind::Pod) {

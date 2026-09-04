@@ -406,33 +406,39 @@ pub(crate) fn show<I>(
 
         match editor.phase() {
             YamlPhase::ReadOnly => {
-                ui.label(RichText::new("Read-only").weak());
-                ui.vertical(|ui| {
-                    ui.add(egui::Label::new(RichText::new(manifest).monospace()).wrap());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Read-only").weak());
+                    let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
+                    edit.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            "Edit YAML".to_owned(),
+                        )
+                    });
+                    if edit.clicked() {
+                        editor.begin_edit();
+                        queued.push(WorkspaceCommand::BeginYamlEdit(window_id));
+                    }
+                    if ui.button("Copy YAML").clicked() {
+                        ui.ctx().copy_text(manifest.to_owned());
+                    }
                 });
-                let edit = ui.add_enabled(mutations_allowed, egui::Button::new("Edit YAML"));
-                edit.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        true,
-                        "Edit YAML".to_owned(),
-                    )
-                });
-                if edit.clicked() {
-                    editor.begin_edit();
-                    queued.push(WorkspaceCommand::BeginYamlEdit(window_id));
+                if !mutations_allowed {
+                    ui.label("YAML validation and apply are disabled until this window is live");
                 }
+                ui.separator();
+                egui::ScrollArea::both()
+                    .id_salt(("k10s.yaml.readonly.scroll", window_id.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let job = super::yaml_syntax::highlight_yaml(ui.style(), manifest);
+                        ui.add(egui::Label::new(job).selectable(true));
+                    });
             }
             YamlPhase::Editing => {
-                let mut buffer = editor.buffer().to_owned();
-                ui.vertical(|ui| {
-                    ui.add_sized(
-                        [ui.available_width(), ui.available_height() - 40.0],
-                        TextEdit::multiline(&mut buffer).code_editor(),
-                    );
-                });
-                editor.set_buffer(buffer);
                 ui.horizontal(|ui| {
+                    ui.label(RichText::new("Editing").color(crate::ui::theme::ACCENT));
                     if ui
                         .add_enabled(mutations_allowed, egui::Button::new("Review changes"))
                         .clicked()
@@ -444,26 +450,33 @@ pub(crate) fn show<I>(
                         queued.push(WorkspaceCommand::DiscardYaml(window_id));
                     }
                 });
+                if !mutations_allowed {
+                    ui.label("YAML validation and apply are disabled until this window is live");
+                }
+                ui.separator();
+                let mut buffer = editor.buffer().to_owned();
+                let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                    let mut job = super::yaml_syntax::highlight_yaml(ui.style(), text.as_str());
+                    job.wrap.max_width = wrap_width;
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
+                egui::ScrollArea::vertical()
+                    .id_salt(("k10s.yaml.edit.scroll", window_id.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            [ui.available_width(), ui.available_height()],
+                            TextEdit::multiline(&mut buffer)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter),
+                        );
+                    });
+                editor.set_buffer(buffer);
             }
             YamlPhase::Reviewing => {
-                show_validation_panel(ui, editor);
-                ui.separator();
-                ui.vertical(|ui| {
-                    for line in editor.diff() {
-                        let (color, prefix) = match line.kind {
-                            DiffKind::Added => (Color32::from_rgb(0x2e, 0xa0, 0x43), "+"),
-                            DiffKind::Removed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "-"),
-                            DiffKind::Unchanged => (Color32::GRAY, " "),
-                        };
-                        ui.label(
-                            RichText::new(format!("{prefix} {}", line.text))
-                                .monospace()
-                                .color(color),
-                        );
-                    }
-                });
-                ui.separator();
                 ui.horizontal(|ui| {
+                    ui.label(RichText::new("Reviewing").color(crate::ui::theme::WARNING));
                     if editor.has_disruption_warning() {
                         let ack = ui.button("Acknowledge restart");
                         ack.widget_info(|| {
@@ -519,10 +532,30 @@ pub(crate) fn show<I>(
                         queued.push(WorkspaceCommand::DiscardYaml(window_id));
                     }
                 });
+                if !mutations_allowed {
+                    ui.label("YAML validation and apply are disabled until this window is live");
+                }
+                ui.separator();
+                show_validation_panel(ui, editor);
+                ui.separator();
+                egui::ScrollArea::both()
+                    .id_salt(("k10s.yaml.review.scroll", window_id.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for line in editor.diff() {
+                            let (color, prefix) = match line.kind {
+                                DiffKind::Added => (Color32::from_rgb(0x2e, 0xa0, 0x43), "+"),
+                                DiffKind::Removed => (Color32::from_rgb(0xc0, 0x39, 0x2b), "-"),
+                                DiffKind::Unchanged => (Color32::GRAY, " "),
+                            };
+                            ui.label(
+                                RichText::new(format!("{prefix} {}", line.text))
+                                    .monospace()
+                                    .color(color),
+                            );
+                        }
+                    });
             }
-        }
-        if !mutations_allowed {
-            ui.label("YAML validation and apply are disabled until this window is live");
         }
     }
     if let Some(action) = queued_action {

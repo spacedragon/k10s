@@ -33,19 +33,17 @@ pub(super) fn show<I>(
         DetailTab::Ports => ports_tab(ui, window_id, projection, presentation, queued),
         DetailTab::Events => super::events::show(ui, view.events_condition, &view.events),
         DetailTab::Yaml => {
-            if !view.capabilities.can_edit_yaml {
-                ui.label("This kind cannot be edited");
-            } else {
-                tools::yaml::show(
-                    ui,
-                    window_id,
-                    yaml,
-                    detail.identity.as_row_identity(),
-                    Some(view.manifest.as_str()),
-                    presentation.mutations_allowed,
-                    queued,
-                );
-            }
+            let mutations_allowed =
+                presentation.mutations_allowed && view.capabilities.can_edit_yaml;
+            tools::yaml::show(
+                ui,
+                window_id,
+                yaml,
+                detail.identity.as_row_identity(),
+                Some(view.manifest.as_str()),
+                mutations_allowed,
+                queued,
+            );
         }
         // Services never offer workload tabs; a stale command targeting one
         // of them renders nothing rather than generic content.
