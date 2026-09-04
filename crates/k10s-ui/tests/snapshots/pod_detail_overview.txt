@@ -184,7 +184,7 @@ Window
                 GenericContainer
                   GenericContainer
                     GenericContainer
-                      ComboBox label="Namespace: not requested" value="Namespace: Namespace"
+                      ComboBox label="Namespace: not requested" value="Namespace"
                 GenericContainer
                   GenericContainer
                     ComboBox label="Status: all" value="Status"
