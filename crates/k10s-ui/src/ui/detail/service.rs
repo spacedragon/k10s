@@ -78,18 +78,22 @@ fn overview_tab(
     };
     if super::overview::two_column(
         ui,
-        |column| service_operational(column, window_id, projection),
         |column| {
-            service_configuration(column, window_id, projection);
+            service_ports(column, window_id, projection);
+            service_dns(column, projection, presentation);
+        },
+        |column| {
+            service_routing(column, window_id, projection);
+            service_selectors(column, projection);
             service_identity(column, window_id, presentation);
         },
     ) {
         return;
     }
-    service_operational(ui, window_id, projection);
-    if service_configuration(ui, window_id, projection) {
-        ui.separator();
-    }
+    service_ports(ui, window_id, projection);
+    service_dns(ui, projection, presentation);
+    service_routing(ui, window_id, projection);
+    service_selectors(ui, projection);
     service_identity(ui, window_id, presentation);
 }
 
@@ -119,74 +123,148 @@ pub(super) fn show_unavailable(
     service_identity(ui, window_id, presentation);
 }
 
-fn service_operational(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
+fn service_ports(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
     ui.heading("PORTS");
     if projection.ports.is_empty() {
         ui.label("No declared ports");
-    } else {
-        for port in &projection.ports {
-            ui.label(crate::ui::port_detail_label(port));
-        }
+        return;
     }
-    ui.heading("STATUS");
-    Grid::new(("k10s.detail.service.overview.grid", window_id.0))
-        .num_columns(1)
+    Grid::new(("k10s.detail.service.ports", window_id.0))
+        .num_columns(5)
         .striped(true)
-        .min_col_width(240.0)
         .show(ui, |ui| {
-            overview_row(ui, "Type", &projection.service_type);
-            overview_row(
-                ui,
-                "Cluster IPs",
-                &if projection.cluster_ips.is_empty() {
-                    "—".to_owned()
-                } else {
-                    projection.cluster_ips.join(", ")
-                },
-            );
-            if let Some(value) = &projection.external_name {
-                overview_row(ui, "External name", value);
+            for header in ["NAME", "PORT", "TARGET PORT", "NODE PORT", "PROTOCOL"] {
+                ui.label(
+                    RichText::new(header)
+                        .small()
+                        .color(crate::ui::theme::MUTED_TEXT),
+                );
+            }
+            ui.end_row();
+            for port in &projection.ports {
+                ui.label(port.name.as_deref().unwrap_or("—"));
+                ui.label(port.service_port.to_string());
+                let target = match &port.target_port {
+                    k10s_protocol::TargetPort::Number { number } => number.to_string(),
+                    k10s_protocol::TargetPort::Name { name } => format!("{name} · named port"),
+                };
+                ui.label(target);
+                ui.label(
+                    port.node_port
+                        .map_or_else(|| "—".into(), |port| port.to_string()),
+                );
+                ui.label(format!("{:?}", port.protocol).to_uppercase());
+                ui.end_row();
             }
         });
 }
 
-fn service_configuration(
+fn service_dns(
     ui: &mut egui::Ui,
-    window_id: WindowId,
     projection: &ServiceProjection,
-) -> bool {
-    let mut painted = false;
-    let selector = projection
-        .selector
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if !selector.is_empty() {
-        ui.heading("SELECTORS");
-        super::overview::long_value(ui, ui.available_width(), "Selector", Some(&selector));
-        painted = true;
-    }
-    if projection.session_affinity.is_none()
-        && projection.external_traffic_policy.is_none()
-        && projection.internal_traffic_policy.is_none()
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+) {
+    ui.heading("DNS");
+    let primary_port = projection.ports.first().map(|p| p.service_port);
+    let port_suffix = primary_port.map_or_else(String::new, |port| format!(":{port}"));
+    let name = &presentation.identity.name;
+    let (cluster_dns, same_ns_dns, cross_ns_dns) = match presentation.identity.namespace.as_deref()
     {
-        return painted;
-    }
-    ui.heading("TRAFFIC & SESSION");
-    painted = true;
+        Some(ns) => (
+            format!("{name}.{ns}.svc.cluster.local{port_suffix}"),
+            format!("{name}{port_suffix}"),
+            format!("{name}.{ns}{port_suffix}"),
+        ),
+        None => (
+            format!("{name}.svc.cluster.local{port_suffix}"),
+            format!("{name}{port_suffix}"),
+            name.clone(),
+        ),
+    };
+    super::overview::kv_value_row(
+        ui,
+        "Cluster DNS",
+        super::overview::KvValue::new(&cluster_dns).copyable(),
+    );
+    super::overview::kv_value_row(
+        ui,
+        "Same namespace",
+        super::overview::KvValue::new(&same_ns_dns).copyable(),
+    );
+    super::overview::kv_value_row(
+        ui,
+        "Cross namespace",
+        super::overview::KvValue::new(&cross_ns_dns).copyable(),
+    );
+}
+
+fn service_routing(ui: &mut egui::Ui, window_id: WindowId, projection: &ServiceProjection) {
+    ui.heading("ROUTING");
     Grid::new(("k10s.detail.service.traffic", window_id.0)).show(ui, |ui| {
-        if let Some(value) = projection.session_affinity.as_deref() {
-            overview_row(ui, "Session affinity", nonempty(value));
-        }
+        overview_row(ui, "Type", nonempty(&projection.service_type));
+        overview_row(ui, "Cluster IP", &cluster_ip_display(projection));
+        overview_row(
+            ui,
+            "Session affinity",
+            projection
+                .session_affinity
+                .as_deref()
+                .map(nonempty)
+                .unwrap_or("None"),
+        );
+        overview_row(
+            ui,
+            "Internal policy",
+            projection
+                .internal_traffic_policy
+                .as_deref()
+                .map(nonempty)
+                .unwrap_or("Cluster"),
+        );
         if let Some(value) = projection.external_traffic_policy.as_deref() {
             overview_row(ui, "External policy", nonempty(value));
         }
-        if let Some(value) = projection.internal_traffic_policy.as_deref() {
-            overview_row(ui, "Internal policy", nonempty(value));
+        if let Some(value) = &projection.external_name {
+            overview_row(ui, "External name", value);
         }
+        overview_row(ui, "IP family", &ip_family_display(projection));
     });
-    painted
+}
+
+fn cluster_ip_display(projection: &ServiceProjection) -> String {
+    if projection.cluster_ips.is_empty() {
+        "—".into()
+    } else {
+        projection.cluster_ips.join(", ")
+    }
+}
+
+fn ip_family_display(projection: &ServiceProjection) -> String {
+    let ipv4 = projection
+        .cluster_ips
+        .iter()
+        .any(|ip| !ip.contains(':') && ip != "None");
+    let ipv6 = projection.cluster_ips.iter().any(|ip| ip.contains(':'));
+    match (ipv4, ipv6) {
+        (true, true) => "IPv4 / IPv6 · DualStack".into(),
+        (true, false) => "IPv4 · SingleStack".into(),
+        (false, true) => "IPv6 · SingleStack".into(),
+        (false, false) => "—".into(),
+    }
+}
+
+fn service_selectors(ui: &mut egui::Ui, projection: &ServiceProjection) {
+    ui.heading("SELECTOR");
+    if projection.selector.is_empty() {
+        ui.label("No selector");
+        return;
+    }
+    let selectors = projection
+        .selector
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    super::overview::metadata_chips(ui, &selectors, " ");
 }
 
 fn nonempty(value: &str) -> &str {
@@ -302,22 +380,36 @@ fn ports_tab<I: RowIdentity>(
                 "{} · {}:{} · {:?}",
                 session.local_addr, session.pod.name, session.pod_port, session.state
             ));
-            if ui.button("Copy address").clicked() {
-                ui.ctx().copy_text(session.local_addr.clone());
-            }
-            let stoppable = matches!(
-                session.state,
-                k10s_protocol::PortForwardSessionState::Starting
-                    | k10s_protocol::PortForwardSessionState::Active
-            );
-            if ui
-                .add_enabled(stoppable, egui::Button::new("Stop"))
-                .clicked()
-            {
-                queued.push(WorkspaceCommand::StopPortForward(
-                    session.id.as_str().to_owned(),
-                ));
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Copy address").clicked() {
+                    ui.ctx().copy_text(session.local_addr.clone());
+                }
+                let scheme = if port.service_port == 443
+                    || port.name.as_deref() == Some("https")
+                    || port.app_protocol.as_deref() == Some("https")
+                {
+                    "https"
+                } else {
+                    "http"
+                };
+                let url = format!("{scheme}://{}", session.local_addr);
+                if ui.button("Copy URL").clicked() {
+                    ui.ctx().copy_text(url);
+                }
+                let stoppable = matches!(
+                    session.state,
+                    k10s_protocol::PortForwardSessionState::Starting
+                        | k10s_protocol::PortForwardSessionState::Active
+                );
+                if ui
+                    .add_enabled(stoppable, egui::Button::new("Stop"))
+                    .clicked()
+                {
+                    queued.push(WorkspaceCommand::StopPortForward(
+                        session.id.as_str().to_owned(),
+                    ));
+                }
+            });
         } else if presentation.port_forward_capability {
             let start = ui.push_id(
                 (

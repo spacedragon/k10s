@@ -1304,7 +1304,7 @@ fn service_port_forward_controls_wait_for_authoritative_session_list() {
         harness.run_steps(4);
 
         harness.get_by_label(status);
-        for label in ["Start", "Stop", "Copy address"] {
+        for label in ["Start", "Stop", "Copy address", "Copy URL"] {
             assert!(
                 harness
                     .query_by_role_and_label(Role::Button, label)
@@ -1466,8 +1466,9 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Type ClusterIP");
-    window.get_by_label("Cluster IPs 10.96.0.10");
-    window.get_by_label("Selector: app=web");
+    window.get_by_label("Cluster IP 10.96.0.10");
+    window.get_by_label("app web");
+    window.get_by_label("IP family IPv4 · SingleStack");
     assert!(window.query_by_label("TRAFFIC & SESSION").is_none());
     assert!(
         window
@@ -1491,6 +1492,62 @@ fn overview_traffic_policy_fields_appear_only_when_present() {
     window.get_by_label("Session affinity ClientIP");
     window.get_by_label("External policy Local");
     window.get_by_label("Internal policy Cluster");
+}
+
+#[test]
+fn overview_dns_names_render_with_copyable_affordances() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(8);
+
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    harness.run_steps(4);
+    let window = harness.get_by_role_and_label(Role::Window, "Services");
+    for header in ["NAME", "PORT", "TARGET PORT", "NODE PORT", "PROTOCOL"] {
+        window.get_by_label(header);
+    }
+    window.get_by_label("http");
+    window.get_by_label("80");
+    window.get_by_label("8080");
+    window.get_by_label("TCP");
+    window.get_by_label("DNS");
+    window.get_by_label("Cluster DNS · web-frontend.default.svc.cluster.local:80");
+    window.get_by_label("Same namespace · web-frontend:80");
+    window.get_by_label("Cross namespace · web-frontend.default:80");
+    window.get_by_role_and_label(Role::Button, "Copy Cluster DNS");
+    window.get_by_role_and_label(Role::Button, "Copy Same namespace");
+    window.get_by_role_and_label(Role::Button, "Copy Cross namespace");
+}
+
+#[test]
+fn integrated_service_header_exposes_port_forward_shortcut() {
+    let mut harness = harness();
+    open_via_launcher(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Select service web-frontend")
+        .click();
+    harness.run_steps(8);
+    harness.state_mut().feed.details.insert(
+        service_identity("web-frontend"),
+        service_detail("web-frontend", false),
+    );
+    harness.run_steps(4);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Port-forward service")
+        .click();
+    harness.run_steps(4);
+    harness
+        .get_by_role_and_label(Role::Window, "Services")
+        .get_by_role_and_label(Role::Button, "Tab Ports");
 }
 
 #[test]
@@ -1581,11 +1638,10 @@ fn service_actual_route_renders_exact_1000_and_640_semantics_in_one_harness() {
     assert!((op.width() / config.width() - 1.35).abs() < 0.02);
     let narrow = harness.get_by_role_and_label(Role::Window, "Service · default / narrow");
     assert!(
-        narrow.get_by_label("PORTS").rect().top() < narrow.get_by_label("SELECTORS").rect().top()
+        narrow.get_by_label("PORTS").rect().top() < narrow.get_by_label("SELECTOR").rect().top()
     );
     assert!(
-        narrow.get_by_label("SELECTORS").rect().top()
-            < narrow.get_by_label("IDENTITY").rect().top()
+        narrow.get_by_label("SELECTOR").rect().top() < narrow.get_by_label("IDENTITY").rect().top()
     );
     narrow.get_by_role_and_label(Role::Button, "Tab Overview");
     let untyped = harness.get_by_role_and_label(Role::Window, "Service · default / untyped");
