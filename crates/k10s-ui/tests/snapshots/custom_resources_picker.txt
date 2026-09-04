@@ -43,106 +43,112 @@ Window
         GenericContainer
           GenericContainer
             GenericContainer
-              Label value="◈"
-                TextRun value="◈"
-              GenericContainer
-                Label value="k10s"
-                  TextRun value="k10s"
-                Label value="KUBERNETES CONSOLE"
-                  TextRun value="KUBERNETES CONSOLE"
+              Label value="⬡"
+              Label value="k10s"
+                TextRun value="k10s"
+            Label value="Kubernetes console"
+              TextRun value="Kubernetes console"
             TextInput label="Filter resources…" value=""
               TextRun value=""
             GenericContainer
               GenericContainer
                 Label value="CLUSTER"
                   TextRun value="CLUSTER"
-                Button label="Overview"
+                GenericContainer
+                  GenericContainer
+                    Button label="Overview"
                 GenericContainer
                   GenericContainer
                     Button label="Events"
-                  Label value="Loading Events inventory"
-                    TextRun value="…"
-                  Button label="Open another Events window"
+                    Label value="Loading Events inventory"
+                      TextRun value="…"
                 GenericContainer
                   GenericContainer
                     Button label="Namespaces"
-                  Button label="Open another Namespaces window"
-                Button label="Nodes"
                 GenericContainer
-                  Label value="▾"
-                    TextRun value="▾"
-                  Button label="Workloads"
-                  Label value="Loading Workloads inventory"
-                    TextRun value="…"
+                  GenericContainer
+                    Button label="Nodes"
+                GenericContainer
+                  GenericContainer
+                    Label value="▼"
+                      TextRun value="▼"
+                    Button label="Workloads"
+                    Label value="Loading Workloads inventory"
+                      TextRun value=""
                 GenericContainer
                   GenericContainer
                     GenericContainer
                       Button label="Deployments"
-                    Button label="Open another Deployments window"
+                      Button label="Open another Deployments window"
                   GenericContainer
                     GenericContainer
                       Button label="Pods"
-                    Button label="Open another Pods window"
+                      Button label="Open another Pods window"
                   GenericContainer
                     GenericContainer
                       Button label="StatefulSets"
-                    Button label="Open another StatefulSets window"
+                      Button label="Open another StatefulSets window"
                   GenericContainer
                     GenericContainer
                       Button label="DaemonSets"
-                    Button label="Open another DaemonSets window"
+                      Button label="Open another DaemonSets window"
                   GenericContainer
                     GenericContainer
                       Button label="Jobs"
-                    Button label="Open another Jobs window"
+                      Button label="Open another Jobs window"
                   GenericContainer
                     GenericContainer
                       Button label="CronJobs"
-                    Button label="Open another CronJobs window"
+                      Button label="Open another CronJobs window"
                   GenericContainer
                     GenericContainer
                       Button label="Custom Resources…"
-                    Label value="1 open Custom Resources… window"
-                      TextRun value="1"
-                    Button label="Open another Custom Resources… window"
+                      Label label="1" value="1 open Custom Resources… window"
+                      Button label="Open another Custom Resources… window"
                 GenericContainer
-                  Label value="▾"
-                    TextRun value="▾"
-                  Button label="Network"
-                  Label value="Loading Network inventory"
-                    TextRun value="…"
+                  GenericContainer
+                    Label value="▼"
+                      TextRun value="▼"
+                    Button label="Network"
+                    Label value="Loading Network inventory"
+                      TextRun value=""
                 GenericContainer
-                  Button label="Services"
+                  GenericContainer
+                    GenericContainer
+                      Button label="Services"
                   GenericContainer
                     GenericContainer
                       Button label="Ingresses"
-                    Button label="Open another Ingresses window"
+                      Button label="Open another Ingresses window"
                   GenericContainer
                     GenericContainer
                       Button label="Endpoints"
-                    Button label="Open another Endpoints window"
+                      Button label="Open another Endpoints window"
                   GenericContainer
                     GenericContainer
                       Button label="NetworkPolicies"
-                    Button label="Open another NetworkPolicies window"
+                      Button label="Open another NetworkPolicies window"
                 GenericContainer
-                  Label value="▸"
-                    TextRun value="▸"
-                  Button label="Config"
-                  Label value="Loading Config inventory"
-                    TextRun value="…"
+                  GenericContainer
+                    Label value="►"
+                      TextRun value="►"
+                    Button label="Config"
+                    Label value="Loading Config inventory"
+                      TextRun value="…"
                 GenericContainer
-                  Label value="▸"
-                    TextRun value="▸"
-                  Button label="Storage"
-                  Label value="Loading Storage inventory"
-                    TextRun value="…"
+                  GenericContainer
+                    Label value="►"
+                      TextRun value="►"
+                    Button label="Storage"
+                    Label value="Loading Storage inventory"
+                      TextRun value="…"
                 GenericContainer
-                  Label value="▸"
-                    TextRun value="▸"
-                  Button label="Access"
-                  Label value="Loading Access inventory"
-                    TextRun value="…"
+                  GenericContainer
+                    Label value="►"
+                      TextRun value="►"
+                    Button label="Access"
+                    Label value="Loading Access inventory"
+                      TextRun value="…"
         GenericContainer
           GenericContainer
   Window label="Overview"
