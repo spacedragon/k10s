@@ -413,17 +413,17 @@ pub(super) fn show_namespace_combobox<I>(
     } else {
         selected.to_owned()
     };
-    let selected_text = if compact {
+    let label_text = if compact {
         "Namespace".to_owned()
     } else {
-        full_selected_text.clone()
+        format!("Namespace: {full_selected_text}")
     };
     let enabled = matches!(catalog, NamespaceCatalogState::Ready(_));
     ui.add_enabled_ui(enabled, |ui| {
         // The label lives inside the control (`Namespace: all ▾`) instead of
         // floating next to it.
         let response = ComboBox::from_id_salt(("namespace", window_id.0))
-            .selected_text(format!("Namespace: {selected_text}"))
+            .selected_text(label_text)
             .width(70.0)
             .show_ui(ui, |ui| {
                 let search = scratch.namespace_search.entry(window_id).or_default();
@@ -870,7 +870,7 @@ pub(super) fn show<I>(
     let fixed_width_id = egui::Id::new(("k10s.resource.filters.fixed-width", window_id.0));
     let measured_fixed: Option<f32> = ui.data(|data| data.get_temp(fixed_width_id));
     let search_width = if compact_controls {
-        20.0
+        100.0
     } else {
         match measured_fixed {
             // The margin keeps a rounding error from wrapping the row.

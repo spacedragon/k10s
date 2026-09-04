@@ -41,10 +41,15 @@ pub fn workload_window_all<'n, T>(
 /// (`Namespace: all ▾`), so tests address it by that value prefix. Pass
 /// `harness.root()` or a window node.
 pub fn namespace_combobox<'n>(node: egui_kittest::Node<'n>) -> egui_kittest::Node<'n> {
+    use egui_kittest::kittest::NodeT as _;
     node.query_all_by_role(egui::accesskit::Role::ComboBox)
         .find(|node| {
-            node.value()
-                .is_some_and(|value| value.starts_with("Namespace: "))
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Namespace: "))
+                || node
+                    .value()
+                    .is_some_and(|value| value == "Namespace" || value.starts_with("Namespace: "))
         })
         .expect("the toolbar Namespace combobox")
 }
