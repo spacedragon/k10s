@@ -205,6 +205,10 @@ where
         &self.workspace
     }
 
+    pub fn resolve_context_default_namespaces(&mut self, first: &str) {
+        self.workspace.resolve_context_default_namespaces(first);
+    }
+
     /// Replace the selected context's bounded transport history for rendering.
     pub fn set_traffic_history(
         &mut self,
@@ -574,6 +578,11 @@ where
     ) -> bool {
         theme::apply(ui.ctx());
         self.command_palette.handle_global_shortcut(ui.ctx());
+        if let NamespaceCatalogState::Ready(names) = &feed.namespace_catalog {
+            if let Some(first) = names.first() {
+                self.resolve_context_default_namespaces(first);
+            }
+        }
 
         let mut queued = Vec::<WorkspaceCommand<I>>::new();
         let selected = selected_context

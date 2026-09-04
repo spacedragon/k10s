@@ -25,10 +25,7 @@ pub enum NamespaceScope {
 
 impl NamespaceScope {
     pub(crate) fn into_live(self) -> Self {
-        match self {
-            Self::ContextDefault => Self::AllNamespaces,
-            scope => scope,
-        }
+        self
     }
 
     #[must_use]
@@ -99,7 +96,7 @@ pub struct ResourceWindowState<I> {
 impl<I> Default for ResourceWindowState<I> {
     fn default() -> Self {
         Self {
-            namespace_scope: NamespaceScope::AllNamespaces,
+            namespace_scope: NamespaceScope::ContextDefault,
             search: String::new(),
             filters: BTreeMap::new(),
             status_filter: None,

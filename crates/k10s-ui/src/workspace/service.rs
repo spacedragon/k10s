@@ -38,7 +38,7 @@ pub struct ServiceWindowState<I> {
 impl<I> Default for ServiceWindowState<I> {
     fn default() -> Self {
         Self {
-            namespace_scope: NamespaceScope::AllNamespaces,
+            namespace_scope: NamespaceScope::ContextDefault,
             search: String::new(),
             sort: None,
             selection: None,

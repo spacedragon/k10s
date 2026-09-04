@@ -208,7 +208,7 @@ fn namespace_scope_change_is_guarded_and_clears_stale_detail_on_commit() {
     );
     assert!(matches!(out.as_slice(), [WorkspaceEvent::Blocked(_)]));
     let before = state.resource_state(window).unwrap();
-    assert_eq!(before.namespace_scope, NamespaceScope::AllNamespaces);
+    assert_eq!(before.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(before.selection.as_ref(), Some(&identity));
     events(
         &mut state,
@@ -365,7 +365,7 @@ fn services_window_opens_with_singleton_geometry_and_defaults() {
         WindowContent::Services(service) => service,
         other => panic!("expected a Services window, got {other:?}"),
     };
-    assert_eq!(service.namespace_scope, NamespaceScope::AllNamespaces);
+    assert_eq!(service.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(service.search, "");
     assert_eq!(service.sort, None);
     assert_eq!(service.selection, None);
@@ -476,7 +476,7 @@ fn list_window_commands_drive_the_services_window_independently() {
 
     // The workload window keeps fully independent state.
     let resource = state.resource_state(pods).unwrap();
-    assert_eq!(resource.namespace_scope, NamespaceScope::AllNamespaces);
+    assert_eq!(resource.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(resource.search, "");
     assert!(resource.sort.is_none());
     assert_eq!(resource.split_ratio, 0.5);
@@ -820,7 +820,7 @@ fn list_windows_have_independent_namespace_search_filters_and_sort() {
         first_state.namespace_scope,
         NamespaceScope::Namespace("payments".into())
     );
-    assert_eq!(second_state.namespace_scope, NamespaceScope::AllNamespaces);
+    assert_eq!(second_state.namespace_scope, NamespaceScope::ContextDefault);
     assert_eq!(first_state.search, "");
     assert_eq!(second_state.search, "fluentd");
     assert!(first_state.filters.is_empty());
@@ -1356,4 +1356,66 @@ fn non_destructive_updates_are_allowed_while_yaml_is_dirty() {
         other => panic!("expected a resource window, got {other:?}"),
     };
     assert!(resource.detail.as_ref().unwrap().yaml.dirty);
+}
+
+#[test]
+fn closing_and_reopening_workload_window_remembers_selected_namespace() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let window = open_pods(&mut state);
+    assert_eq!(
+        state.resource_state(window).unwrap().namespace_scope,
+        NamespaceScope::ContextDefault
+    );
+
+    events(
+        &mut state,
+        WorkspaceCommand::SetNamespaceScope(
+            window,
+            NamespaceScope::Namespace("kube-system".into()),
+        ),
+    );
+    assert_eq!(
+        state.resource_state(window).unwrap().namespace_scope,
+        NamespaceScope::Namespace("kube-system".into())
+    );
+
+    // Close window
+    events(&mut state, WorkspaceCommand::CloseWindow(window));
+    assert!(state.window(window).is_none());
+
+    // Reopen window: should remember previous namespace
+    let reopened = open_pods(&mut state);
+    assert_eq!(
+        state.resource_state(reopened).unwrap().namespace_scope,
+        NamespaceScope::Namespace("kube-system".into())
+    );
+}
+
+#[test]
+fn resolve_context_default_namespaces_updates_windows_and_remembered_views() {
+    let mut state = WorkspaceState::<TestIdentity>::new();
+    let pods = open_pods(&mut state);
+    let out = events(
+        &mut state,
+        WorkspaceCommand::ActivateLauncherItem(LauncherItem::Workload(WorkloadKind::Deployments)),
+    );
+    let deployments = opened(&out);
+    assert_eq!(
+        state.resource_state(pods).unwrap().namespace_scope,
+        NamespaceScope::ContextDefault
+    );
+    assert_eq!(
+        state.resource_state(deployments).unwrap().namespace_scope,
+        NamespaceScope::ContextDefault
+    );
+
+    state.resolve_context_default_namespaces("default");
+    assert_eq!(
+        state.resource_state(pods).unwrap().namespace_scope,
+        NamespaceScope::Namespace("default".into())
+    );
+    assert_eq!(
+        state.resource_state(deployments).unwrap().namespace_scope,
+        NamespaceScope::Namespace("default".into())
+    );
 }

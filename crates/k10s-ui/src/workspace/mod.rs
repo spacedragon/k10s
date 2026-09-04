@@ -182,6 +182,7 @@ pub struct WorkspaceState<I> {
     layout_checkpoint: Option<Vec<(WindowId, WindowGeom)>>,
     /// Monotonic live-render token; intentionally not persisted.
     next_layout_revision: u64,
+    pub(crate) remembered_views: HashMap<WindowKind, PersistedListView>,
 }
 
 impl<I> Default for WorkspaceState<I>
@@ -210,6 +211,7 @@ where
             pending: None,
             layout_checkpoint: None,
             next_layout_revision: 0,
+            remembered_views: HashMap::new(),
         };
         state.open_singleton(WindowKind::Overview);
         state
@@ -412,6 +414,7 @@ where
             WorkspaceCommand::SetSearch(id, search) => {
                 self.with_resource_mut(id, |resource| resource.search = search.clone());
                 self.with_service_mut(id, |service| service.search = search);
+                self.record_view(id);
                 Vec::new()
             }
             WorkspaceCommand::SetServicePortDraft(id, key, value) => {
@@ -424,11 +427,13 @@ where
                 self.with_resource_mut(id, |resource| {
                     resource.filters.insert(key, value);
                 });
+                self.record_view(id);
                 Vec::new()
             }
             WorkspaceCommand::SetSort(id, sort) => {
                 self.with_resource_mut(id, |resource| resource.sort = sort.clone());
                 self.with_service_mut(id, |service| service.sort = sort);
+                self.record_view(id);
                 Vec::new()
             }
             WorkspaceCommand::SetPortForwardSort(id, sort) => {
@@ -457,6 +462,7 @@ where
                 let clamped = ratio.clamp(0.0, 1.0);
                 self.with_resource_mut(id, move |resource| resource.split_ratio = clamped);
                 self.with_service_mut(id, move |service| service.split_ratio = clamped);
+                self.record_view(id);
                 Vec::new()
             }
             WorkspaceCommand::MaximizeDetailPane(id) => {
@@ -496,6 +502,7 @@ where
                 self.with_resource_mut(id, |resource| {
                     resource.custom_kind = kind;
                 });
+                self.record_view(id);
                 Vec::new()
             }
             WorkspaceCommand::SelectRow(id, identity) => self.select_row(id, identity),
@@ -660,6 +667,57 @@ where
         }
     }
 
+    fn record_view(&mut self, id: WindowId) {
+        if let Some(window) = self.window(id) {
+            match &window.content {
+                WindowContent::Resource(resource) => {
+                    self.remembered_views.insert(
+                        window.kind,
+                        PersistedListView::from_resource(resource),
+                    );
+                }
+                WindowContent::Services(service) => {
+                    self.remembered_views.insert(
+                        window.kind,
+                        PersistedListView::from_service(service),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn resolve_context_default_namespaces(&mut self, first: &str) {
+        for window in &mut self.windows {
+            match &mut window.content {
+                WindowContent::Resource(resource) => {
+                    if resource.namespace_scope == NamespaceScope::ContextDefault {
+                        resource.namespace_scope = NamespaceScope::Namespace(first.to_string());
+                        self.remembered_views.insert(
+                            window.kind,
+                            PersistedListView::from_resource(resource),
+                        );
+                    }
+                }
+                WindowContent::Services(service) => {
+                    if service.namespace_scope == NamespaceScope::ContextDefault {
+                        service.namespace_scope = NamespaceScope::Namespace(first.to_string());
+                        self.remembered_views.insert(
+                            window.kind,
+                            PersistedListView::from_service(service),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        for view in self.remembered_views.values_mut() {
+            if view.namespace_scope == NamespaceScope::ContextDefault {
+                view.namespace_scope = NamespaceScope::Namespace(first.to_string());
+            }
+        }
+    }
+
     fn open_singleton(&mut self, kind: WindowKind) -> WindowId {
         let size = match kind {
             WindowKind::Overview
@@ -672,22 +730,39 @@ where
         let content = match kind {
             // Services is a singleton list window with its own state shape;
             // every other singleton renders a generic resource list.
-            WindowKind::Services => WindowContent::Services(ServiceWindowState::default()),
+            WindowKind::Services => {
+                if let Some(saved) = self.remembered_views.get(&kind) {
+                    WindowContent::Services(saved.clone().into_service())
+                } else {
+                    WindowContent::Services(ServiceWindowState::default())
+                }
+            }
             WindowKind::PortForwards => {
                 WindowContent::PortForwards(PortForwardWindowState::default())
             }
-            _ => WindowContent::Resource(ResourceWindowState::default()),
+            _ => {
+                if let Some(saved) = self.remembered_views.get(&kind) {
+                    WindowContent::Resource(saved.clone().into_resource())
+                } else {
+                    WindowContent::Resource(ResourceWindowState::default())
+                }
+            }
         };
         self.push_window(kind, kind.title().to_owned(), size, content)
     }
 
     fn open_workload(&mut self, kind: WorkloadKind) -> WindowId {
         let window_kind = WindowKind::Workload(kind);
+        let content = if let Some(saved) = self.remembered_views.get(&window_kind) {
+            WindowContent::Resource(saved.clone().into_resource())
+        } else {
+            WindowContent::Resource(ResourceWindowState::default())
+        };
         self.push_window(
             window_kind,
             kind.title().to_owned(),
             [700.0, 480.0],
-            WindowContent::Resource(ResourceWindowState::default()),
+            content,
         )
     }
 
@@ -739,6 +814,7 @@ where
     }
 
     fn remove_window(&mut self, id: WindowId) {
+        self.record_view(id);
         self.windows.retain(|window| window.id != id);
         let owned: Vec<I> = self
             .yaml_owner
@@ -848,6 +924,7 @@ where
             state.selection = None;
             state.detail = None;
         });
+        self.record_view(id);
         Vec::new()
     }
 

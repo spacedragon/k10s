@@ -135,6 +135,11 @@ fn open_integrated_deployment(
     harness
         .state_mut()
         .feed
+        .namespace_catalog =
+        k10s_ui::ui::NamespaceCatalogState::Ready(vec!["payments".into()]);
+    harness
+        .state_mut()
+        .feed
         .lists
         .insert(WorkloadKind::Deployments, vec![deployment_row(NAME)]);
     harness
