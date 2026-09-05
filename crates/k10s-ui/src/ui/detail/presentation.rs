@@ -117,6 +117,10 @@ pub(crate) struct DetailFrameProjection<'a> {
     /// has resolved it. `None` renders the tab with no badge rather than a
     /// speculative zero.
     pub pod_count: Option<usize>,
+    /// Endpoint count for the `Endpoints` tab badge.
+    pub endpoint_count: Option<usize>,
+    /// Events count for the `Events` tab badge.
+    pub events_count: Option<usize>,
     /// Whether the footer may advertise `Ctrl+D delete`.
     pub delete_shortcut: bool,
     pub expansion: DetailExpansionState,
@@ -256,6 +260,11 @@ impl<'a> DetailPresentationInput<'a> {
             vital_expansion_label,
             vitals_in_footer: false,
             pod_count: None,
+            endpoint_count: None,
+            events_count: match self.primary {
+                DetailPrimary::Loaded(view) => Some(view.events.len()),
+                _ => None,
+            },
             delete_shortcut: super::delete_shortcut_available(self),
             expansion,
         }

@@ -34,7 +34,8 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
     if is_service_gvk(gvk) {
         return &[
             DetailTab::Overview,
-            DetailTab::Ports,
+            DetailTab::Endpoints,
+            DetailTab::Pods,
             DetailTab::Events,
             DetailTab::Yaml,
         ];
@@ -66,7 +67,7 @@ pub fn tabs_for_kind(gvk: &GroupVersionKind) -> &'static [DetailTab] {
 fn tab_label(tab: DetailTab) -> &'static str {
     match tab {
         DetailTab::Overview => "Overview",
-        DetailTab::Ports => "Ports",
+        DetailTab::Endpoints => "Endpoints",
         DetailTab::Pods => "Pods",
         DetailTab::Yaml => "YAML",
         DetailTab::Events => "Events",
@@ -143,7 +144,15 @@ fn shortcut_labels_for(
     const GENERIC_OWNER: &[&str] = &["y yaml", "e events", "c copy name", "o owner"];
 
     let tabs = tabs_for_kind(gvk);
-    if tabs.contains(&DetailTab::Logs) && WorkloadKind::from_gvk(gvk) == Some(WorkloadKind::Pod) {
+    if is_service_gvk(gvk) {
+        if has_verified_owner {
+            GENERIC_OWNER
+        } else {
+            GENERIC
+        }
+    } else if tabs.contains(&DetailTab::Logs)
+        && WorkloadKind::from_gvk(gvk) == Some(WorkloadKind::Pod)
+    {
         if has_verified_owner { POD_OWNER } else { POD }
     } else if tabs.contains(&DetailTab::Pods) {
         if has_verified_owner {
@@ -254,6 +263,8 @@ pub(super) fn show<I>(
                 frame.actions.shell_container_count = shell_container_count;
             } else if gvk.group == "apps" && gvk.version == "v1" && gvk.kind == "Deployment" {
                 deployment::configure_frame(presentation, frame);
+            } else if is_service_gvk(&gvk) {
+                service::configure_frame(presentation, frame, detail.active_tab);
             }
         },
         |ui, primary, actions, frame| {
@@ -290,7 +301,23 @@ pub(super) fn show<I>(
                 if presentation.gone {
                     return;
                 }
-                if !is_service_gvk(&detail_identity_gvk(detail)) {
+                if is_service_gvk(&detail_identity_gvk(detail)) {
+                    match segment {
+                        frame::DetailActionSegment::Delete => {
+                            show_delete_action(ui, window_id, presentation, frame, view, dialogs)
+                        }
+                        frame::DetailActionSegment::PortForward => {
+                            let btn = ui.button("Port-forward…");
+                            if btn.clicked() && detail.active_tab != DetailTab::Endpoints {
+                                body_queued.push(WorkspaceCommand::SetActiveTab(
+                                    window_id,
+                                    DetailTab::Endpoints,
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
                     match segment {
                         frame::DetailActionSegment::Delete => {
                             show_delete_action(ui, window_id, presentation, frame, view, dialogs)
@@ -311,6 +338,7 @@ pub(super) fn show<I>(
                             presentation,
                             resource_actions,
                         ),
+                        frame::DetailActionSegment::PortForward => {}
                     }
                 }
                 return;
@@ -578,7 +606,7 @@ fn show_generic_body<I: RowIdentity>(
             queued,
         ),
         DetailTab::Events => events::show(ui, view.events_condition, &view.events),
-        DetailTab::Ports => {}
+        DetailTab::Endpoints => {}
         DetailTab::Yaml => {
             let mutations_allowed =
                 presentation.mutations_allowed && view.capabilities.can_edit_yaml;

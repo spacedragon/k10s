@@ -63,6 +63,7 @@ impl Default for Fixture {
                         protocol: TransportProtocol::Tcp,
                         app_protocol: None,
                     }],
+                    ..Default::default()
                 }),
                 "2026-08-21T00:00:00Z",
             ),
@@ -96,6 +97,7 @@ impl Default for Fixture {
                             app_protocol: None,
                         },
                     ],
+                    ..Default::default()
                 }),
                 "2026-08-21T00:05:00Z",
             ),
@@ -904,6 +906,7 @@ fn udp_and_sctp_ports_render_readonly_without_start_controls() {
             protocol: TransportProtocol::Sctp,
             app_protocol: None,
         }],
+        ..Default::default()
     };
     sctp_projection
         .selector
@@ -941,19 +944,19 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
 
     let window = harness.get_by_role_and_label(Role::Window, "Services");
     window.get_by_label("Service · default / web-frontend");
-    for tab in ["Tab Overview", "Tab Ports", "Tab Events", "Tab YAML"] {
+    for tab in [
+        "Tab Overview",
+        "Tab Endpoints",
+        "Tab Pods",
+        "Tab Events",
+        "Tab YAML",
+    ] {
         window.get_by_role_and_label(Role::Button, tab);
     }
-    assert!(
-        window
-            .query_by_role_and_label(Role::Button, "Tab Pods")
-            .is_none(),
-        "services never offer workload tabs"
-    );
     // Before the backend response resolves, the pane shows its loading state.
     window.get_by_label("Loading details");
 
-    // The Ports tab renders structured labels from the detail projection.
+    // The Endpoints tab renders structured labels from the detail projection.
     harness.state_mut().feed.details.insert(
         service_identity("web-frontend"),
         service_detail("web-frontend", false),
@@ -961,7 +964,7 @@ fn selecting_a_service_shows_integrated_detail_with_service_tabs() {
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Window, "Services")
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Services");
@@ -1028,7 +1031,7 @@ fn desktop_capability_renders_start_and_opens_the_shared_service_target() {
     );
     harness.run_steps(4);
     harness
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
     harness.get_by_role_and_label(Role::Button, "Start").click();
@@ -1080,7 +1083,7 @@ fn mismatched_service_detail_renders_unavailable_and_cannot_open_start() {
     );
     assert!(window.query_by_label("PORTS").is_none());
     window
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
     let window = harness.get_by_role_and_label(Role::Window, "Services");
@@ -1131,7 +1134,7 @@ fn named_service_target_prefills_the_declared_service_port_in_the_shared_modal()
     );
     harness.run_steps(4);
     harness
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
     assert!(
@@ -1187,7 +1190,7 @@ fn terminal_only_port_forward_exposes_start_instead_of_stop() {
     )];
     harness.run_steps(4);
     harness
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
 
@@ -1228,7 +1231,7 @@ fn active_port_forward_is_not_shadowed_by_an_older_terminal_session() {
     ];
     harness.run_steps(4);
     harness
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
 
@@ -1299,7 +1302,7 @@ fn service_port_forward_controls_wait_for_authoritative_session_list() {
         )];
         harness.run_steps(4);
         harness
-            .get_by_role_and_label(Role::Button, "Tab Ports")
+            .get_by_role_and_label(Role::Button, "Tab Endpoints")
             .click();
         harness.run_steps(4);
 
@@ -1377,7 +1380,7 @@ fn port_forward_start_requires_live_loaded_service_authority() {
             .insert(window_id, freshness);
         harness.run_steps(4);
         harness
-            .get_by_role_and_label(Role::Button, "Tab Ports")
+            .get_by_role_and_label(Role::Button, "Tab Endpoints")
             .click();
         harness.run_steps(3);
         assert!(
@@ -1433,7 +1436,7 @@ fn stale_service_authority_disables_start_without_desktop_only_copy() {
     );
     harness.run_steps(4);
     harness
-        .get_by_role_and_label(Role::Button, "Tab Ports")
+        .get_by_role_and_label(Role::Button, "Tab Endpoints")
         .click();
     harness.run_steps(4);
 
@@ -1547,7 +1550,7 @@ fn integrated_service_header_exposes_port_forward_shortcut() {
     harness.run_steps(4);
     harness
         .get_by_role_and_label(Role::Window, "Services")
-        .get_by_role_and_label(Role::Button, "Tab Ports");
+        .get_by_role_and_label(Role::Button, "Tab Endpoints");
 }
 
 #[test]
@@ -1795,6 +1798,7 @@ fn service_detail(name: &str, policies: bool) -> ResourceDetailResponse {
                 protocol: TransportProtocol::Tcp,
                 app_protocol: None,
             }],
+            ..Default::default()
         })),
     }
 }

@@ -711,6 +711,54 @@ pub struct ServiceProjection {
     pub internal_traffic_policy: Option<String>,
     /// Every declared Service port, including non-forwardable ones.
     pub ports: Vec<ServicePort>,
+    /// Resolved endpoint addresses.
+    pub endpoints: Vec<ServiceEndpointProjection>,
+    /// Resolved discovery.k8s.io/v1 EndpointSlices.
+    pub slices: Vec<ServiceSliceProjection>,
+    /// Topology hints status if present.
+    pub topology_hints: Option<String>,
+}
+
+/// One resolved endpoint for a Service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceEndpointProjection {
+    /// Resolved IP address, or None if unscheduled / unassigned.
+    pub address: Option<String>,
+    /// Endpoint port number.
+    pub port: Option<u16>,
+    /// Target Pod name if backed by a Pod.
+    pub target_pod: Option<String>,
+    /// Node name where the endpoint / Pod is located.
+    pub node: Option<String>,
+    /// Topology zone where the node resides.
+    pub zone: Option<String>,
+    /// Whether the endpoint is ready to receive new traffic.
+    pub ready: bool,
+    /// Whether the endpoint is serving (may be true even during terminating).
+    pub serving: bool,
+    /// Whether the endpoint is currently terminating / draining.
+    pub terminating: bool,
+    /// Name of the EndpointSlice owning this endpoint, for grouping.
+    pub slice_name: Option<String>,
+}
+
+/// One discovery.k8s.io/v1 EndpointSlice backing a Service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSliceProjection {
+    /// EndpointSlice metadata name.
+    pub name: String,
+    /// Controller or generator managing this slice (e.g. "endpointslice-controller").
+    pub managed_by: Option<String>,
+    /// Address type: "IPv4", "IPv6", or "FQDN".
+    pub address_type: String,
+    /// Port descriptions in the slice (e.g. ["http-metrics 3100"]).
+    pub ports: Vec<String>,
+    /// Number of endpoints currently in this slice.
+    pub endpoint_count: usize,
+    /// Capacity / max endpoints (typically 100).
+    pub max_endpoints: usize,
+    /// Human-readable age (e.g. "31d").
+    pub age: Option<String>,
 }
 
 /// One declared Service port.

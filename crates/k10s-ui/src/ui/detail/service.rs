@@ -5,7 +5,7 @@
 //! This panel is deliberately action-free beyond YAML editing and bounded
 //! port-forward lifecycle controls: no Scale, Delete, logs, or exec.
 
-use egui::{Grid, RichText, WidgetType};
+use egui::{Grid, RichText};
 use k10s_protocol::{ResourceDetailResponse, ResourceIdentity, ServiceProjection};
 
 use crate::ui::tools;
@@ -30,7 +30,8 @@ pub(super) fn show<I>(
     let projection = projection_of(view, presentation.identity);
     match detail.active_tab {
         DetailTab::Overview => overview_tab(ui, window_id, projection, presentation),
-        DetailTab::Ports => ports_tab(ui, window_id, projection, presentation, queued),
+        DetailTab::Endpoints => endpoints_tab(ui, window_id, projection, presentation, queued),
+        DetailTab::Pods => pods_tab(ui, presentation, _resource_actions, queued),
         DetailTab::Events => super::events::show(ui, view.events_condition, &view.events),
         DetailTab::Yaml => {
             let mutations_allowed =
@@ -302,10 +303,122 @@ fn overview_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.end_row();
 }
 
-/// Ports tab: one structured line per declared port. UDP/SCTP remain
-/// read-only; TCP preserves live session controls and opens the shared start
-/// dialog when no active session owns the port.
-fn ports_tab<I: RowIdentity>(
+#[derive(Clone, Default)]
+struct EndpointsTabState {
+    filter: String,
+    unroutable_only: bool,
+    group_by_slice: bool,
+}
+
+pub(super) fn configure_frame(
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+    frame: &mut super::presentation::DetailFrameProjection<'_>,
+    active_tab: DetailTab,
+) {
+    if active_tab == DetailTab::Endpoints {
+        frame.vitals_in_footer = true;
+    }
+    let projection = match presentation.primary {
+        super::presentation::DetailPrimary::Loaded(view) => {
+            frame.actions.can_delete = view.capabilities.can_delete;
+            projection_of(view, presentation.identity)
+        }
+        _ => None,
+    };
+    if let Some(projection) = projection {
+        let total = projection.endpoints.len();
+        let routable = projection
+            .endpoints
+            .iter()
+            .filter(|ep| ep.ready && ep.address.is_some())
+            .count();
+        let draining = projection
+            .endpoints
+            .iter()
+            .filter(|ep| ep.terminating)
+            .count();
+        let slices_count = if projection.slices.is_empty() {
+            if total > 0 { 1 } else { 0 }
+        } else {
+            projection.slices.len()
+        };
+
+        if total > 0 {
+            frame.endpoint_count = Some(total);
+        }
+
+        let mut pods_set = std::collections::BTreeSet::new();
+        for ep in &projection.endpoints {
+            if let Some(pod) = &ep.target_pod {
+                pods_set.insert(pod.clone());
+            }
+        }
+        if !pods_set.is_empty() {
+            frame.pod_count = Some(pods_set.len());
+        }
+
+        let (status_val, status_tone) = if total == 0 {
+            (
+                "○ No endpoints".to_owned(),
+                super::presentation::DetailVitalTone::Neutral,
+            )
+        } else if routable < total {
+            (
+                format!("▲ {routable} of {total} routable"),
+                super::presentation::DetailVitalTone::Warning,
+            )
+        } else {
+            (
+                format!("● {total} endpoints ready"),
+                super::presentation::DetailVitalTone::Healthy,
+            )
+        };
+
+        frame.visible_vitals = vec![
+            super::presentation::DetailVital {
+                label: "Status",
+                value: status_val,
+                tone: status_tone,
+                shape: None,
+                hint: None,
+            },
+            super::presentation::DetailVital::new("Slices", slices_count.to_string()),
+            super::presentation::DetailVital::new(
+                "Address type",
+                projection
+                    .slices
+                    .first()
+                    .map_or("IPv4", |s| s.address_type.as_str()),
+            ),
+            super::presentation::DetailVital::new(
+                "Port",
+                projection.ports.first().map_or_else(
+                    || "—".into(),
+                    |p| {
+                        format!(
+                            "{}/{}",
+                            p.service_port,
+                            format!("{:?}", p.protocol).to_uppercase()
+                        )
+                    },
+                ),
+            ),
+        ];
+
+        if draining > 0 {
+            frame.visible_vitals.push(super::presentation::DetailVital {
+                label: "Draining",
+                value: draining.to_string(),
+                tone: super::presentation::DetailVitalTone::Warning,
+                shape: None,
+                hint: None,
+            });
+        }
+    }
+}
+
+/// Endpoints tab: interactive addresses, slices, and topology breakdown.
+fn endpoints_tab<I: RowIdentity>(
     ui: &mut egui::Ui,
     window_id: WindowId,
     projection: Option<&ServiceProjection>,
@@ -316,6 +429,290 @@ fn ports_tab<I: RowIdentity>(
         ui.label("No structured projection available");
         return;
     };
+
+    let state_id = egui::Id::new(("k10s.detail.service.endpoints_state", window_id.0));
+    let mut state = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<EndpointsTabState>(state_id))
+        .unwrap_or_default();
+
+    // 1. Sub-toolbar
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.filter)
+                .hint_text("⌕ Filter address, pod, node...")
+                .desired_width(220.0),
+        );
+        let unroutable_text = if state.unroutable_only {
+            RichText::new("▲ 仅看不可路由").color(crate::ui::theme::WARNING)
+        } else {
+            RichText::new("▲ 仅看不可路由")
+        };
+        if ui
+            .selectable_label(state.unroutable_only, unroutable_text)
+            .clicked()
+        {
+            state.unroutable_only = !state.unroutable_only;
+        }
+        if ui
+            .selectable_label(state.group_by_slice, "Group by slice")
+            .clicked()
+        {
+            state.group_by_slice = !state.group_by_slice;
+        }
+        if ui.button("⧉ 复制全部地址").clicked() {
+            let addrs: Vec<String> = projection
+                .endpoints
+                .iter()
+                .filter_map(|ep| {
+                    if ep.ready && ep.address.is_some() {
+                        let addr = ep.address.as_deref().unwrap_or_default();
+                        let port = ep.port.map_or(String::new(), |p| format!(":{p}"));
+                        Some(format!("{addr}{port}"))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ui.ctx().copy_text(addrs.join("\n"));
+        }
+        let _ = ui.button("↻");
+    });
+
+    render_port_forward_controls(ui, window_id, projection, presentation, queued);
+
+    ui.add_space(8.0);
+
+    let filter_lower = state.filter.to_lowercase();
+    let filtered_endpoints: Vec<&k10s_protocol::ServiceEndpointProjection> = projection
+        .endpoints
+        .iter()
+        .filter(|ep| {
+            if state.unroutable_only && ep.ready && ep.address.is_some() && !ep.terminating {
+                return false;
+            }
+            if !filter_lower.is_empty() {
+                let matches_addr = ep
+                    .address
+                    .as_deref()
+                    .is_some_and(|a| a.to_lowercase().contains(&filter_lower));
+                let matches_pod = ep
+                    .target_pod
+                    .as_deref()
+                    .is_some_and(|p| p.to_lowercase().contains(&filter_lower));
+                let matches_node = ep
+                    .node
+                    .as_deref()
+                    .is_some_and(|n| n.to_lowercase().contains(&filter_lower));
+                let matches_zone = ep
+                    .zone
+                    .as_deref()
+                    .is_some_and(|z| z.to_lowercase().contains(&filter_lower));
+                let matches_port = ep
+                    .port
+                    .is_some_and(|p| p.to_string().contains(&filter_lower));
+                if !matches_addr && !matches_pod && !matches_node && !matches_zone && !matches_port
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let total = projection.endpoints.len();
+    let routable = projection
+        .endpoints
+        .iter()
+        .filter(|ep| ep.ready && ep.address.is_some())
+        .count();
+
+    // 2. ADDRESSES section
+    ui.horizontal(|ui| {
+        ui.heading("ADDRESSES");
+        ui.label(
+            RichText::new(format!("{total} 个 · {routable} 可路由"))
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+    });
+
+    if filtered_endpoints.is_empty() {
+        if projection.endpoints.is_empty() {
+            ui.label("No endpoint addresses found");
+        } else {
+            ui.label("No addresses match filter");
+        }
+    } else {
+        Grid::new(("k10s.detail.service.endpoints_grid", window_id.0))
+            .num_columns(6)
+            .striped(true)
+            .show(ui, |ui| {
+                for header in [
+                    "ADDRESS",
+                    "PORT",
+                    "TARGET POD",
+                    "NODE",
+                    "ZONE",
+                    "CONDITIONS",
+                ] {
+                    ui.label(
+                        RichText::new(header)
+                            .small()
+                            .color(crate::ui::theme::MUTED_TEXT),
+                    );
+                }
+                ui.end_row();
+
+                let render_row =
+                    |ui: &mut egui::Ui, ep: &k10s_protocol::ServiceEndpointProjection| {
+                        ui.label(ep.address.as_deref().unwrap_or("—"));
+                        ui.label(ep.port.map_or_else(|| "—".into(), |p| p.to_string()));
+                        ui.label(ep.target_pod.as_deref().unwrap_or("—"));
+                        ui.label(ep.node.as_deref().unwrap_or("—"));
+                        ui.label(ep.zone.as_deref().unwrap_or("—"));
+                        if ep.ready && ep.serving && !ep.terminating {
+                            ui.label(
+                                RichText::new("● ready · serving").color(crate::ui::theme::HEALTHY),
+                            );
+                        } else if ep.terminating {
+                            ui.label(
+                                RichText::new("◐ terminating · 仍在 serving")
+                                    .color(crate::ui::theme::WARNING),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("✕ not ready · 无地址")
+                                    .color(crate::ui::theme::DANGER),
+                            );
+                        }
+                        ui.end_row();
+                    };
+
+                if state.group_by_slice {
+                    let mut grouped: std::collections::BTreeMap<
+                        &str,
+                        Vec<&k10s_protocol::ServiceEndpointProjection>,
+                    > = std::collections::BTreeMap::new();
+                    for ep in &filtered_endpoints {
+                        grouped
+                            .entry(ep.slice_name.as_deref().unwrap_or("default"))
+                            .or_default()
+                            .push(ep);
+                    }
+                    for (slice_name, eps) in grouped {
+                        ui.label(RichText::new(format!("Slice: {slice_name}")).strong());
+                        ui.end_row();
+                        for ep in eps {
+                            render_row(ui, ep);
+                        }
+                    }
+                } else {
+                    for ep in &filtered_endpoints {
+                        render_row(ui, ep);
+                    }
+                }
+            });
+
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("◐ 的地址仍会收到已建立连接的流量，但不再接受新连接。kube-proxy 在 Pod 完全消失后才移除。")
+                .small()
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+    }
+
+    ui.add_space(14.0);
+
+    // 3. SLICES section
+    ui.horizontal(|ui| {
+        ui.heading("SLICES");
+        ui.label(
+            RichText::new(format!("{}", projection.slices.len()))
+                .color(crate::ui::theme::MUTED_TEXT),
+        );
+    });
+    if projection.slices.is_empty() {
+        ui.label("No EndpointSlices");
+    } else {
+        Grid::new(("k10s.detail.service.slices_grid", window_id.0))
+            .num_columns(5)
+            .striped(true)
+            .show(ui, |ui| {
+                for header in ["NAME", "ADDRESS TYPE", "PORTS", "ENDPOINTS", "AGE"] {
+                    ui.label(
+                        RichText::new(header)
+                            .small()
+                            .color(crate::ui::theme::MUTED_TEXT),
+                    );
+                }
+                ui.end_row();
+                for slice in &projection.slices {
+                    let name_text = match &slice.managed_by {
+                        Some(managed) => format!("{} · 由 {managed} 生成", slice.name),
+                        None => slice.name.clone(),
+                    };
+                    ui.label(name_text);
+                    ui.label(&slice.address_type);
+                    ui.label(if slice.ports.is_empty() {
+                        "—".into()
+                    } else {
+                        slice.ports.join(", ")
+                    });
+                    ui.label(format!(
+                        "{} / {}",
+                        slice.endpoint_count, slice.max_endpoints
+                    ));
+                    ui.label(slice.age.as_deref().unwrap_or("—"));
+                    ui.end_row();
+                }
+            });
+    }
+
+    ui.add_space(14.0);
+
+    // 4. TOPOLOGY section
+    ui.heading("TOPOLOGY");
+    Grid::new(("k10s.detail.service.topology_grid", window_id.0)).show(ui, |ui| {
+        overview_row(
+            ui,
+            "Topology hints",
+            projection
+                .topology_hints
+                .as_deref()
+                .unwrap_or("未启用 · 流量不按 zone 优先"),
+        );
+        let policy = match projection.internal_traffic_policy.as_deref() {
+            Some("Local") => "Local · 仅转发至本节点端点",
+            _ => "Cluster · 任意节点均可转发",
+        };
+        overview_row(ui, "Internal policy", policy);
+    });
+
+    ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
+}
+
+fn pods_tab<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+    resource_actions: &mut Vec<crate::ui::ResourceAction>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
+    super::related::show(
+        ui,
+        presentation.identity,
+        presentation.relations,
+        resource_actions,
+        queued,
+    );
+}
+
+fn render_port_forward_controls<I: RowIdentity>(
+    ui: &mut egui::Ui,
+    window_id: WindowId,
+    projection: &ServiceProjection,
+    presentation: &super::presentation::DetailPresentationInput<'_>,
+    queued: &mut Vec<WorkspaceCommand<I>>,
+) {
     if projection.ports.is_empty() {
         ui.label("No declared ports");
         return;
@@ -336,7 +733,7 @@ fn ports_tab<I: RowIdentity>(
         let line = crate::ui::port_detail_label(port);
         let label = ui.label(RichText::new(line.clone()).strong());
         label.widget_info(|| {
-            egui::WidgetInfo::labeled(WidgetType::Label, true, format!("Port {line}"))
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("Port {line}"))
         });
         if port.protocol != k10s_protocol::TransportProtocol::Tcp {
             continue;

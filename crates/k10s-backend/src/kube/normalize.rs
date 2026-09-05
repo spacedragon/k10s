@@ -513,6 +513,13 @@ fn service_projection(service: &k8s_openapi::api::core::v1::Service) -> Resource
         external_traffic_policy: spec.and_then(|spec| spec.external_traffic_policy.clone()),
         internal_traffic_policy: spec.and_then(|spec| spec.internal_traffic_policy.clone()),
         ports,
+        endpoints: Vec::new(),
+        slices: Vec::new(),
+        topology_hints: service.metadata.annotations.as_ref().and_then(|ann| {
+            ann.get("service.kubernetes.io/topology-mode")
+                .or_else(|| ann.get("service.kubernetes.io/topology-aware-hints"))
+                .cloned()
+        }),
     })
 }
 

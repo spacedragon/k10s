@@ -12,6 +12,7 @@ pub(crate) mod config;
 mod create;
 mod deployment_projection;
 mod discovery;
+mod endpoints;
 mod events;
 mod infrastructure;
 mod logs;
@@ -796,6 +797,19 @@ impl KubeAdapter {
         record.events = events;
         record.events_condition = condition;
         record.manifest = read.manifest;
+        if reference.gvk.group.is_empty()
+            && reference.gvk.kind == "Service"
+            && let Some(crate::port::ResourceProjection::Service(ref mut proj)) = record.projection
+        {
+            endpoints::resolve_service_endpoints(
+                &client,
+                reference.namespace.as_deref(),
+                &reference.name,
+                &reference.uid,
+                proj,
+            )
+            .await;
+        }
         self.operations.refresh_scope(&reference.coalescing_key());
         Ok(QueryResult::ResourceDetail(record))
     }
