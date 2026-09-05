@@ -261,10 +261,7 @@ impl<'a> DetailPresentationInput<'a> {
             vitals_in_footer: false,
             pod_count: None,
             endpoint_count: None,
-            events_count: match self.primary {
-                DetailPrimary::Loaded(view) => Some(view.events.len()),
-                _ => None,
-            },
+            events_count: None,
             delete_shortcut: super::delete_shortcut_available(self),
             expansion,
         }

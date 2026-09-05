@@ -321,6 +321,9 @@ pub(super) fn configure_frame(
     let projection = match presentation.primary {
         super::presentation::DetailPrimary::Loaded(view) => {
             frame.actions.can_delete = view.capabilities.can_delete;
+            if !view.events.is_empty() {
+                frame.events_count = Some(view.events.len());
+            }
             projection_of(view, presentation.identity)
         }
         _ => None,
