@@ -487,12 +487,14 @@ pub(super) fn show<I: RowIdentity>(
                 },
             )
         });
-        content(
-            ui,
-            input.primary,
-            Some(DetailActionSegment::PortForward),
-            &mut projection,
-        );
+        if super::is_service_gvk(&projection.identity.gvk) {
+            content(
+                ui,
+                input.primary,
+                Some(DetailActionSegment::PortForward),
+                &mut projection,
+            );
+        }
         content(
             ui,
             input.primary,
