@@ -918,8 +918,41 @@ fn map_projection(projection: &ResourceProjection) -> WireProjection {
                 external_traffic_policy: service.external_traffic_policy.clone(),
                 internal_traffic_policy: service.internal_traffic_policy.clone(),
                 ports: service.ports.iter().map(map_service_port).collect(),
+                endpoints: service.endpoints.iter().map(map_service_endpoint).collect(),
+                slices: service.slices.iter().map(map_service_slice).collect(),
+                topology_hints: service.topology_hints.clone(),
             })
         }
+    }
+}
+
+fn map_service_endpoint(
+    endpoint: &crate::port::ServiceEndpointProjection,
+) -> k10s_protocol::ServiceEndpointProjection {
+    k10s_protocol::ServiceEndpointProjection {
+        address: endpoint.address.clone(),
+        port: endpoint.port,
+        target_pod: endpoint.target_pod.clone(),
+        node: endpoint.node.clone(),
+        zone: endpoint.zone.clone(),
+        ready: endpoint.ready,
+        serving: endpoint.serving,
+        terminating: endpoint.terminating,
+        slice_name: endpoint.slice_name.clone(),
+    }
+}
+
+fn map_service_slice(
+    slice: &crate::port::ServiceSliceProjection,
+) -> k10s_protocol::ServiceSliceProjection {
+    k10s_protocol::ServiceSliceProjection {
+        name: slice.name.clone(),
+        managed_by: slice.managed_by.clone(),
+        address_type: slice.address_type.clone(),
+        ports: slice.ports.clone(),
+        endpoint_count: slice.endpoint_count,
+        max_endpoints: slice.max_endpoints,
+        age: slice.age.clone(),
     }
 }
 

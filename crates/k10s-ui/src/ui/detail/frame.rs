@@ -27,6 +27,8 @@ pub(crate) enum DetailActionSegment {
     Scale,
     /// Native external-shell action rendered beside the overflow menu.
     Shell,
+    /// Service port-forward action rendered beside the overflow menu.
+    PortForward,
 }
 
 pub(crate) fn title(identity: &k10s_protocol::ResourceIdentity) -> String {
@@ -147,9 +149,11 @@ pub(super) fn show<I: RowIdentity>(
                         port_forward.widget_info(|| {
                             WidgetInfo::labeled(WidgetType::Button, true, "Port-forward service")
                         });
-                        if port_forward.clicked() && detail.active_tab != DetailTab::Ports {
-                            queued
-                                .push(WorkspaceCommand::SetActiveTab(window_id, DetailTab::Ports));
+                        if port_forward.clicked() && detail.active_tab != DetailTab::Endpoints {
+                            queued.push(WorkspaceCommand::SetActiveTab(
+                                window_id,
+                                DetailTab::Endpoints,
+                            ));
                         }
                     }
                 }
@@ -273,14 +277,14 @@ pub(super) fn show<I: RowIdentity>(
     let tabs_pure_width = tabs
         .iter()
         .map(|tab| {
+            let count = match *tab {
+                DetailTab::Pods => projection.pod_count,
+                DetailTab::Endpoints => projection.endpoint_count,
+                DetailTab::Events => projection.events_count,
+                _ => None,
+            };
             button_width(ui, super::tab_label(*tab))
-                + if *tab == DetailTab::Pods {
-                    projection
-                        .pod_count
-                        .map_or(0.0, |count| button_width(ui, &format!(" {count}")))
-                } else {
-                    0.0
-                }
+                + count.map_or(0.0, |count| button_width(ui, &format!(" {count}")))
         })
         .sum::<f32>()
         + gap * tabs.len().saturating_sub(1) as f32;
@@ -483,6 +487,14 @@ pub(super) fn show<I: RowIdentity>(
                 },
             )
         });
+        if super::is_service_gvk(&projection.identity.gvk) {
+            content(
+                ui,
+                input.primary,
+                Some(DetailActionSegment::PortForward),
+                &mut projection,
+            );
+        }
         content(
             ui,
             input.primary,
@@ -974,7 +986,13 @@ fn vital(ui: &mut egui::Ui, vital: &DetailVital, max_width: f32) {
 /// it links to.
 fn tab_text(ui: &egui::Ui, tab: DetailTab, projection: &DetailFrameProjection<'_>) -> WidgetText {
     let label = super::tab_label(tab);
-    let Some(count) = projection.pod_count.filter(|_| tab == DetailTab::Pods) else {
+    let count = match tab {
+        DetailTab::Pods => projection.pod_count,
+        DetailTab::Endpoints => projection.endpoint_count,
+        DetailTab::Events => projection.events_count,
+        _ => None,
+    };
+    let Some(count) = count else {
         return label.into();
     };
     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -985,10 +1003,15 @@ fn tab_text(ui: &egui::Ui, tab: DetailTab, projection: &DetailFrameProjection<'_
         0.0,
         egui::TextFormat::simple(font.clone(), ui.visuals().text_color()),
     );
+    let badge_color = if tab == DetailTab::Endpoints {
+        crate::ui::theme::ACCENT
+    } else {
+        crate::ui::theme::WARNING
+    };
     job.append(
         &format!(" {count}"),
         0.0,
-        egui::TextFormat::simple(font, crate::ui::theme::WARNING),
+        egui::TextFormat::simple(font, badge_color),
     );
     job.into()
 }
@@ -1294,7 +1317,7 @@ mod tests {
             assert!(super::uses_shared_body_scroll(tab));
         }
         for tab in [
-            DetailTab::Ports,
+            DetailTab::Endpoints,
             DetailTab::Pods,
             DetailTab::Yaml,
             DetailTab::Logs,

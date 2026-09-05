@@ -137,6 +137,9 @@ fn service_projection_serializes_as_a_tagged_resource_projection() {
             protocol: TransportProtocol::Tcp,
             app_protocol: None,
         }],
+        endpoints: Vec::new(),
+        slices: Vec::new(),
+        topology_hints: None,
     };
     let wrapped = ResourceProjection::Service(projection.clone());
     let encoded = round_trip(&wrapped);
@@ -163,6 +166,9 @@ fn service_projection_serializes_as_a_tagged_resource_projection() {
         external_traffic_policy: None,
         internal_traffic_policy: None,
         ports: Vec::new(),
+        endpoints: Vec::new(),
+        slices: Vec::new(),
+        topology_hints: None,
     });
     let encoded = serde_json::to_value(&external).unwrap();
     assert_eq!(encoded["externalName"], json!("example.com"));
@@ -212,6 +218,9 @@ fn populated_row_projections_flow_through_snapshot_pages_and_deltas() {
                 protocol: TransportProtocol::Tcp,
                 app_protocol: None,
             }],
+            endpoints: Vec::new(),
+            slices: Vec::new(),
+            topology_hints: None,
         })),
     };
 
@@ -265,6 +274,9 @@ fn populated_row_projections_flow_through_snapshot_pages_and_deltas() {
                         protocol: TransportProtocol::Tcp,
                         app_protocol: None,
                     }],
+                    endpoints: Vec::new(),
+                    slices: Vec::new(),
+                    topology_hints: None,
                 })
             );
         }
@@ -326,6 +338,9 @@ fn detail_responses_carry_populated_service_projections() {
         external_traffic_policy: None,
         internal_traffic_policy: None,
         ports: Vec::new(),
+        endpoints: Vec::new(),
+        slices: Vec::new(),
+        topology_hints: None,
     }));
     let encoded = round_trip(&response);
     assert_eq!(encoded["projection"]["serviceType"], json!("NodePort"));

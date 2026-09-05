@@ -441,7 +441,7 @@ pub struct ReplicaSetProjection {
 }
 
 /// Normalized core/v1 Service projection.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceProjection {
     /// Kubernetes Service type, such as `ClusterIP` or `NodePort`.
@@ -464,6 +464,71 @@ pub struct ServiceProjection {
     pub internal_traffic_policy: Option<String>,
     /// Every declared Service port, including non-forwardable ones.
     pub ports: Vec<ServicePort>,
+    /// Resolved endpoint addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<ServiceEndpointProjection>,
+    /// Resolved discovery.k8s.io/v1 EndpointSlices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slices: Vec<ServiceSliceProjection>,
+    /// Topology hints status if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_hints: Option<String>,
+}
+
+/// One resolved endpoint for a Service.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceEndpointProjection {
+    /// Resolved IP address, or None if unscheduled / unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Endpoint port number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Target Pod name if backed by a Pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pod: Option<String>,
+    /// Node name where the endpoint / Pod is located.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Topology zone where the node resides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// Whether the endpoint is ready to receive new traffic.
+    #[serde(default)]
+    pub ready: bool,
+    /// Whether the endpoint is serving (may be true even during terminating).
+    #[serde(default)]
+    pub serving: bool,
+    /// Whether the endpoint is currently terminating / draining.
+    #[serde(default)]
+    pub terminating: bool,
+    /// Name of the EndpointSlice owning this endpoint, for grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice_name: Option<String>,
+}
+
+/// One discovery.k8s.io/v1 EndpointSlice backing a Service.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSliceProjection {
+    /// EndpointSlice metadata name.
+    pub name: String,
+    /// Controller or generator managing this slice (e.g. "endpointslice-controller").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
+    /// Address type: "IPv4", "IPv6", or "FQDN".
+    pub address_type: String,
+    /// Port descriptions in the slice (e.g. ["http-metrics 3100"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
+    /// Number of endpoints currently in this slice.
+    pub endpoint_count: usize,
+    /// Capacity / max endpoints (typically 100).
+    pub max_endpoints: usize,
+    /// Human-readable age (e.g. "31d").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age: Option<String>,
 }
 
 /// One declared Service port.

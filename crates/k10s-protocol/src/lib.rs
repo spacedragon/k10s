@@ -71,8 +71,9 @@ pub use resource::{
     PodProjection, REQUEST_RESOURCE_RELATIONS, RelatedGroup, ReplicaSetProjection,
     ResourceCapabilities, ResourceConditionProjection, ResourceDetailResponse, ResourceIdentity,
     ResourceListRequest, ResourceListResponse, ResourceListRow, ResourceProjection,
-    ResourceRefRequest, ResourceRelationsResponse, ResourceScope, ServicePort, ServiceProjection,
-    StorageClassRow, StorageInventory, TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
+    ResourceRefRequest, ResourceRelationsResponse, ResourceScope, ServiceEndpointProjection,
+    ServicePort, ServiceProjection, ServiceSliceProjection, StorageClassRow, StorageInventory,
+    TargetPort, TransportProtocol, WorkloadHealth, WorkloadKind,
 };
 pub use route::{CONTROL_PATH, EXEC_PATH, LOGS_PATH};
 pub use stream::{

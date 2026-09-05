@@ -23,8 +23,9 @@ use crate::port::{
     DeploymentProjection, Gvk, KubernetesAccess, MetricsSample, OperationId, OwnerRef,
     PodContainerProjection, PodProjection, Query, QueryResult, RecordEvent, RelatedData,
     RelatedRecordGroup, ReplicaSetProjection, ResourceConditionProjection, ResourceListData,
-    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServicePort,
-    ServiceProjection, Subscribe, SubscriptionHandle, TargetPort, TransportProtocol,
+    ResourceProjection, ResourceRecord, ResourceRef, ResourceTypesData, ServiceEndpointProjection,
+    ServicePort, ServiceProjection, ServiceSliceProjection, Subscribe, SubscriptionHandle,
+    TargetPort, TransportProtocol,
 };
 use crate::port_forward::{
     PortForwardPortSelector, PortForwardRequest, PortForwardSeam, PortForwardStream,
@@ -2268,6 +2269,14 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             &[],
         )),
         record(seed(
+            2_815,
+            "Active",
+            Gvk::core("v1", "Namespace"),
+            None,
+            "observability",
+            &[],
+        )),
+        record(seed(
             2_820,
             "Ready",
             Gvk::new("networking.k8s.io", "v1", "Ingress"),
@@ -2375,7 +2384,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             external_name: None,
             session_affinity: None,
             external_traffic_policy: None,
-            internal_traffic_policy: None,
+            internal_traffic_policy: Some("Cluster".into()),
             ports: vec![ServicePort {
                 name: Some("http".into()),
                 service_port: 80,
@@ -2384,6 +2393,40 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 protocol: TransportProtocol::Tcp,
                 app_protocol: None,
             }],
+            endpoints: vec![
+                ServiceEndpointProjection {
+                    address: Some("10.244.0.5".into()),
+                    port: Some(8080),
+                    target_pod: Some("web-frontend-7d9f8-00001".into()),
+                    node: Some("node-worker-1".into()),
+                    zone: Some("us-east-1a".into()),
+                    ready: true,
+                    serving: true,
+                    terminating: false,
+                    slice_name: Some("web-frontend-4xk1a".into()),
+                },
+                ServiceEndpointProjection {
+                    address: Some("10.244.0.6".into()),
+                    port: Some(8080),
+                    target_pod: Some("web-frontend-7d9f8-00002".into()),
+                    node: Some("node-worker-2".into()),
+                    zone: Some("us-east-1b".into()),
+                    ready: true,
+                    serving: true,
+                    terminating: false,
+                    slice_name: Some("web-frontend-4xk1a".into()),
+                },
+            ],
+            slices: vec![ServiceSliceProjection {
+                name: "web-frontend-4xk1a".into(),
+                managed_by: Some("endpointslice-controller".into()),
+                address_type: "IPv4".into(),
+                ports: vec!["http 8080".into()],
+                endpoint_count: 2,
+                max_endpoints: 100,
+                age: Some("12d".into()),
+            }],
+            topology_hints: None,
         })),
         ..seed(
             3_600,
@@ -2402,7 +2445,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             external_name: None,
             session_affinity: Some("ClientIP".into()),
             external_traffic_policy: None,
-            internal_traffic_policy: None,
+            internal_traffic_policy: Some("Cluster".into()),
             ports: vec![
                 ServicePort {
                     name: Some("https".into()),
@@ -2421,6 +2464,27 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                     app_protocol: None,
                 },
             ],
+            endpoints: vec![ServiceEndpointProjection {
+                address: Some("10.244.1.15".into()),
+                port: Some(443),
+                target_pod: Some("api-server-5cc4d-qw8rt".into()),
+                node: Some("node-worker-3".into()),
+                zone: Some("us-east-1c".into()),
+                ready: true,
+                serving: true,
+                terminating: false,
+                slice_name: Some("api-server-99m1z".into()),
+            }],
+            slices: vec![ServiceSliceProjection {
+                name: "api-server-99m1z".into(),
+                managed_by: Some("endpointslice-controller".into()),
+                address_type: "IPv4".into(),
+                ports: vec!["https 443".into(), "metrics 9100".into()],
+                endpoint_count: 1,
+                max_endpoints: 100,
+                age: Some("5d".into()),
+            }],
+            topology_hints: None,
         })),
         ..seed(
             3_900,
@@ -2429,6 +2493,92 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
             Some("default"),
             "api-server",
             &[("app", "api")],
+        )
+    }));
+    records.push(record(RecordSeed {
+        projection: Some(ResourceProjection::Service(ServiceProjection {
+            service_type: "ClusterIP".into(),
+            cluster_ips: vec!["172.20.7.90".into()],
+            selector: BTreeMap::from([
+                ("app".to_owned(), "loki".to_owned()),
+                ("component".to_owned(), "write".to_owned()),
+            ]),
+            external_name: None,
+            session_affinity: None,
+            external_traffic_policy: None,
+            internal_traffic_policy: Some("Cluster".into()),
+            ports: vec![ServicePort {
+                name: Some("http-metrics".into()),
+                service_port: 3100,
+                target_port: TargetPort::Number(3100),
+                node_port: None,
+                protocol: TransportProtocol::Tcp,
+                app_protocol: Some("http".into()),
+            }],
+            endpoints: vec![
+                ServiceEndpointProjection {
+                    address: Some("10.12.4.11".into()),
+                    port: Some(3100),
+                    target_pod: Some("loki-write-0".into()),
+                    node: Some("ip-10-0-18-93".into()),
+                    zone: Some("us-east-1b".into()),
+                    ready: true,
+                    serving: true,
+                    terminating: false,
+                    slice_name: Some("loki-write-7xk2p".into()),
+                },
+                ServiceEndpointProjection {
+                    address: Some("10.12.7.31".into()),
+                    port: Some(3100),
+                    target_pod: Some("loki-write-1".into()),
+                    node: Some("ip-10-0-24-17".into()),
+                    zone: Some("us-east-1c".into()),
+                    ready: true,
+                    serving: true,
+                    terminating: false,
+                    slice_name: Some("loki-write-7xk2p".into()),
+                },
+                ServiceEndpointProjection {
+                    address: Some("10.12.9.77".into()),
+                    port: Some(3100),
+                    target_pod: Some("loki-write-3".into()),
+                    node: Some("ip-10-0-29-52".into()),
+                    zone: Some("us-east-1a".into()),
+                    ready: false,
+                    serving: true,
+                    terminating: true,
+                    slice_name: Some("loki-write-7xk2p".into()),
+                },
+                ServiceEndpointProjection {
+                    address: None,
+                    port: None,
+                    target_pod: Some("loki-write-2".into()),
+                    node: Some("未调度".into()),
+                    zone: None,
+                    ready: false,
+                    serving: false,
+                    terminating: false,
+                    slice_name: Some("loki-write-7xk2p".into()),
+                },
+            ],
+            slices: vec![ServiceSliceProjection {
+                name: "loki-write-7xk2p".into(),
+                managed_by: Some("endpointslice-controller".into()),
+                address_type: "IPv4".into(),
+                ports: vec!["http-metrics 3100".into()],
+                endpoint_count: 4,
+                max_endpoints: 100,
+                age: Some("31d".into()),
+            }],
+            topology_hints: Some("未启用 · 流量不按 zone 优先".into()),
+        })),
+        ..seed(
+            31 * 86_400,
+            "ClusterIP",
+            Gvk::core("v1", "Service"),
+            Some("observability"),
+            "loki-write",
+            &[("app", "loki"), ("component", "write")],
         )
     }));
 
@@ -2509,6 +2659,21 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
         "worker-7f498f8b6c-x2psq",
         &[("app", "worker")],
     )));
+    for (name, summary) in [
+        ("loki-write-0", "1/1 ready · Running"),
+        ("loki-write-1", "1/1 ready · Running"),
+        ("loki-write-2", "0/1 ready · ▲ Pending"),
+        ("loki-write-3", "1/1 ready · ◐ Terminating"),
+    ] {
+        records.push(record(seed(
+            5_300,
+            summary,
+            Gvk::core("v1", "Pod"),
+            Some("observability"),
+            name,
+            &[("app", "loki"), ("component", "write")],
+        )));
+    }
     records
 }
 
