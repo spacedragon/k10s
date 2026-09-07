@@ -7,6 +7,7 @@ scripts, or raw kubeconfig into tickets.
 
 | Symptom | Check / recovery |
 | --- | --- |
+| macOS says `k10s.app is damaged and can't be opened` | Clear Gatekeeper quarantine and sign ad-hoc: `xattr -cr /Applications/k10s.app && codesign --force --deep --sign - /Applications/k10s.app`. Caused by macOS Gatekeeper flagging downloaded unnotarized binaries. |
 | Startup says no kubeconfig | Set `KUBECONFIG`, create `~/.kube/config`, or pass `--kubeconfig`; verify current-context and referenced entries. There is no fake fallback. |
 | Startup rejects token | Non-loopback binds require one; check file readability and non-empty trimmed content. CLI file overrides env file, which overrides inline env. |
 | Port forward says local port is in use | Clear the local-port field or enter `0` to let the desktop choose an available loopback port. |

@@ -14,6 +14,31 @@ standard kubeconfig discovery. Deterministic fake mode remains available only
 through the explicit standalone `--fake` development/test flag; a missing or
 invalid kubeconfig never silently changes backend.
 
+## Installation
+
+Pre-built binaries and desktop packages are available on the [GitHub Releases](https://github.com/spacedragon/k10s/releases) page for macOS, Linux, and Windows.
+
+### macOS (Apple Silicon)
+
+Download `k10s_<version>_aarch64.dmg` from the Releases page, open it, and drag `k10s.app` into `/Applications`.
+
+> [!NOTE]
+> **macOS Gatekeeper ("k10s.app is damaged and can't be opened")**  
+> Because `k10s` is community-distributed without a commercial Apple Developer notarization profile, macOS Gatekeeper quarantines the downloaded bundle and may report the application as damaged.  
+> To resolve this, run the following in Terminal after installing:
+> ```bash
+> xattr -cr /Applications/k10s.app
+> codesign --force --deep --sign - /Applications/k10s.app
+> ```
+
+### Linux
+
+Desktop builds are distributed as `.deb`, `.AppImage`, and `.tar.gz` packages.
+
+### Windows
+
+Desktop installers are distributed as `.msi` and `.exe` (NSIS) installers.
+
 ## Workspace layout
 
 | Path | Purpose |
