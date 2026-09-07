@@ -447,9 +447,9 @@ fn endpoints_tab<I: RowIdentity>(
                 .desired_width(220.0),
         );
         let unroutable_text = if state.unroutable_only {
-            RichText::new("▲ 仅看不可路由").color(crate::ui::theme::WARNING)
+            RichText::new("▲ Unroutable only").color(crate::ui::theme::WARNING)
         } else {
-            RichText::new("▲ 仅看不可路由")
+            RichText::new("▲ Unroutable only")
         };
         if ui
             .selectable_label(state.unroutable_only, unroutable_text)
@@ -463,7 +463,7 @@ fn endpoints_tab<I: RowIdentity>(
         {
             state.group_by_slice = !state.group_by_slice;
         }
-        if ui.button("⧉ 复制全部地址").clicked() {
+        if ui.button("⧉ Copy all addresses").clicked() {
             let addrs: Vec<String> = projection
                 .endpoints
                 .iter()
@@ -534,7 +534,7 @@ fn endpoints_tab<I: RowIdentity>(
     ui.horizontal(|ui| {
         ui.heading("ADDRESSES");
         ui.label(
-            RichText::new(format!("{total} 个 · {routable} 可路由"))
+            RichText::new(format!("{total} total · {routable} routable"))
                 .color(crate::ui::theme::MUTED_TEXT),
         );
     });
@@ -579,12 +579,12 @@ fn endpoints_tab<I: RowIdentity>(
                             );
                         } else if ep.terminating {
                             ui.label(
-                                RichText::new("◐ terminating · 仍在 serving")
+                                RichText::new("◐ terminating · serving")
                                     .color(crate::ui::theme::WARNING),
                             );
                         } else {
                             ui.label(
-                                RichText::new("✕ not ready · 无地址")
+                                RichText::new("✕ not ready · unaddressed")
                                     .color(crate::ui::theme::DANGER),
                             );
                         }
@@ -618,7 +618,7 @@ fn endpoints_tab<I: RowIdentity>(
 
         ui.add_space(4.0);
         ui.label(
-            RichText::new("◐ 的地址仍会收到已建立连接的流量，但不再接受新连接。kube-proxy 在 Pod 完全消失后才移除。")
+            RichText::new("◐ Terminating endpoints still receive established traffic, but no new connections. kube-proxy keeps them until pod deletion.")
                 .small()
                 .color(crate::ui::theme::MUTED_TEXT),
         );
@@ -651,7 +651,7 @@ fn endpoints_tab<I: RowIdentity>(
                 ui.end_row();
                 for slice in &projection.slices {
                     let name_text = match &slice.managed_by {
-                        Some(managed) => format!("{} · 由 {managed} 生成", slice.name),
+                        Some(managed) => format!("{} · managed by {managed}", slice.name),
                         None => slice.name.clone(),
                     };
                     ui.label(name_text);
@@ -682,11 +682,11 @@ fn endpoints_tab<I: RowIdentity>(
             projection
                 .topology_hints
                 .as_deref()
-                .unwrap_or("未启用 · 流量不按 zone 优先"),
+                .unwrap_or("Disabled · zone routing not prioritized"),
         );
         let policy = match projection.internal_traffic_policy.as_deref() {
-            Some("Local") => "Local · 仅转发至本节点端点",
-            _ => "Cluster · 任意节点均可转发",
+            Some("Local") => "Local · node-local endpoints only",
+            _ => "Cluster · route across any cluster node",
         };
         overview_row(ui, "Internal policy", policy);
     });

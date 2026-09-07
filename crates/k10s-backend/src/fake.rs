@@ -2553,7 +2553,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                     address: None,
                     port: None,
                     target_pod: Some("loki-write-2".into()),
-                    node: Some("未调度".into()),
+                    node: Some("Unscheduled".into()),
                     zone: None,
                     ready: false,
                     serving: false,
@@ -2570,7 +2570,7 @@ fn build_dev_local_records() -> Vec<ResourceRecord> {
                 max_endpoints: 100,
                 age: Some("31d".into()),
             }],
-            topology_hints: Some("未启用 · 流量不按 zone 优先".into()),
+            topology_hints: Some("Disabled · zone routing not prioritized".into()),
         })),
         ..seed(
             31 * 86_400,
