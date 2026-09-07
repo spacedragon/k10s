@@ -3,6 +3,8 @@ use std::error::Error;
 use k10s_backend::BackendMode;
 use k10s_desktop::DesktopApp;
 
+mod system_fonts;
+
 fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
@@ -23,6 +25,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .with_inner_size([1280.0, 800.0]),
         ..eframe::NativeOptions::default()
     };
-    eframe::run_native(&title, options, Box::new(move |_| Ok(Box::new(app))))?;
+    eframe::run_native(
+        &title,
+        options,
+        Box::new(move |creation_context| {
+            let loaded_fonts = system_fonts::install_cjk_fallbacks(&creation_context.egui_ctx);
+            if loaded_fonts.is_empty() {
+                tracing::warn!("no system CJK font found; CJK text may be unavailable");
+            } else {
+                tracing::info!(fonts = ?loaded_fonts, "loaded system CJK font fallbacks");
+            }
+            Ok(Box::new(app))
+        }),
+    )?;
     Ok(())
 }
