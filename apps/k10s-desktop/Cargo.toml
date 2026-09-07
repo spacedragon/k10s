@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 eframe = { version = "=0.36.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+fontdb = "0.24.0"
 k10s-backend = { path = "../../crates/k10s-backend" }
 k10s-protocol = { path = "../../crates/k10s-protocol" }
 k10s-server = { path = "../../crates/k10s-server" }
