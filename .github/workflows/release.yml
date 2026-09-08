@@ -172,7 +172,7 @@ jobs:
             git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
             branch="release/v${{ steps.bump.outputs.version }}"
             git push --force origin "HEAD:refs/heads/${branch}"
-            pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
+            pr="$(gh pr list --head "$branch" --state open --repo "$GITHUB_REPOSITORY" --json number --jq '.[0].number' 2>/dev/null || true)"
             if [ -z "$pr" ]; then
               # gh < 2.36 (hosted runner images) does not support --json on
               # `pr create`; create without it and re-view the branch to
@@ -180,7 +180,7 @@ jobs:
               gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
                 --title "chore(release): v${{ steps.bump.outputs.version }}" \
                 --body "Automated version bump for the v${{ steps.bump.outputs.version }} release."
-              pr="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json number --jq .number)"
+              pr="$(gh pr list --head "$branch" --state open --repo "$GITHUB_REPOSITORY" --json number --jq '.[0].number')"
             fi
             merged=0
             for attempt in $(seq 1 90); do
