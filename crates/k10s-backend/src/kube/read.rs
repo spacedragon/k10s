@@ -97,7 +97,9 @@ pub(crate) async fn get_resource(
 /// place, binding the text to exactly the object that was read; any shape
 /// mismatch degrades to an empty manifest rather than a wrong one.
 fn render_manifest(object: &kube::core::DynamicObject) -> String {
-    serde_yaml::to_string(object).unwrap_or_default()
+    let mut rendered = object.clone();
+    rendered.metadata.managed_fields = None;
+    serde_yaml::to_string(&rendered).unwrap_or_default()
 }
 
 /// Sanitized GET failure detail: 404s become typed not-founds and raw

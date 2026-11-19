@@ -386,6 +386,12 @@ where
         &mut self.yaml
     }
 
+    /// Release the workspace dirty-YAML ownership guard for `window` after a
+    /// completed apply returns its editor to read-only.
+    pub fn clear_yaml_dirty(&mut self, window: WindowId) {
+        self.workspace.apply(WorkspaceCommand::DiscardYaml(window));
+    }
+
     /// Mutable access to the connected stream tool stores.
     pub fn stream_stores_mut(&mut self) -> &mut tools::StreamStores {
         &mut self.streams
@@ -761,6 +767,13 @@ where
 
         if !queued.is_empty() {
             for command in queued {
+                if let WorkspaceCommand::ResolveBlock(
+                    crate::workspace::BlockResolution::DiscardYaml { window },
+                ) = &command
+                    && let Some(editor) = self.yaml.get_mut(*window)
+                {
+                    editor.discard();
+                }
                 for event in self.workspace.apply(command) {
                     match event {
                         WorkspaceEvent::Opened(id) | WorkspaceEvent::Focused(id) => {

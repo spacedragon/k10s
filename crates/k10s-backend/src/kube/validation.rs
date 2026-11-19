@@ -82,9 +82,16 @@ impl KubeAdapter {
         // Kubernetes defaults field validation to Warn, which can silently
         // drop an unknown field while still accepting the dry-run. Tickets
         // are authoritative, so fail closed on every unknown/duplicate field.
-        let params = PatchParams::apply("k10s").dry_run().validation_strict();
+        // Force resolves field-manager ownership conflicts on existing objects
+        // created by other managers (kubectl, helm, controllers) while still
+        // enforcing metadata.resourceVersion optimistic concurrency.
+        let params = PatchParams::apply("k10s")
+            .force()
+            .dry_run()
+            .validation_strict();
+        let apply_object = parsed.apply_object();
         if let Err(error) = api
-            .patch(&parsed.name, &params, &Patch::Apply(&parsed.object))
+            .patch(&parsed.name, &params, &Patch::Apply(&apply_object))
             .await
         {
             if let Some(unavailable) = super::auth::context_unavailable(&error) {
