@@ -84,6 +84,9 @@ pub struct YamlEditor {
     ticket: Option<ValidationTicket>,
     diagnostics: Vec<YamlDiagnostic>,
     conflict_message: Option<String>,
+    error_message: Option<String>,
+    validating: bool,
+    applying: bool,
     disruption_acknowledged: bool,
 }
 
@@ -101,6 +104,9 @@ impl YamlEditor {
             ticket: None,
             diagnostics: Vec::new(),
             conflict_message: None,
+            error_message: None,
+            validating: false,
+            applying: false,
             disruption_acknowledged: false,
         }
     }
@@ -147,6 +153,24 @@ impl YamlEditor {
         self.conflict_message.as_deref()
     }
 
+    /// Message from the latest request or apply failure.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        self.error_message.as_deref()
+    }
+
+    /// Whether a validation dry-run is currently in flight.
+    #[must_use]
+    pub fn is_validating(&self) -> bool {
+        self.validating
+    }
+
+    /// Whether an apply mutation is currently in flight.
+    #[must_use]
+    pub fn is_applying(&self) -> bool {
+        self.applying
+    }
+
     /// Whether the validated change restarts existing pods and has not been
     /// acknowledged yet.
     #[must_use]
@@ -174,6 +198,8 @@ impl YamlEditor {
             return;
         }
         self.buffer = buffer.into();
+        self.validating = false;
+        self.error_message = None;
         self.invalidate_ticket();
     }
 
@@ -197,7 +223,7 @@ impl YamlEditor {
 
     /// Leave the review phase with the buffer intact.
     pub fn edit_again(&mut self) {
-        if self.phase == YamlPhase::Reviewing {
+        if self.phase == YamlPhase::Reviewing && !self.applying {
             self.phase = YamlPhase::Editing;
         }
     }
@@ -207,8 +233,63 @@ impl YamlEditor {
         self.buffer = self.original.clone();
         self.diff = Vec::new();
         self.invalidate_ticket();
+        self.diagnostics.clear();
+        self.conflict_message = None;
+        self.error_message = None;
+        self.validating = false;
+        self.applying = false;
         self.phase = YamlPhase::ReadOnly;
         self.disruption_acknowledged = false;
+    }
+
+    /// Mark validation as in flight while clearing previous validation errors.
+    pub fn begin_validation(&mut self) {
+        if self.phase != YamlPhase::Reviewing {
+            return;
+        }
+        self.validating = true;
+        self.diagnostics.clear();
+        self.conflict_message = None;
+        self.error_message = None;
+    }
+
+    /// Record a request-level validation failure while keeping the dirty buffer.
+    pub fn validation_failed(&mut self, message: impl Into<String>) {
+        self.validating = false;
+        self.invalidate_ticket();
+        self.diagnostics.clear();
+        self.conflict_message = None;
+        self.error_message = Some(message.into());
+    }
+
+    /// Mark an apply mutation as in flight.
+    pub fn begin_apply(&mut self) {
+        if self.phase != YamlPhase::Reviewing {
+            return;
+        }
+        self.applying = true;
+        self.error_message = None;
+    }
+
+    /// Complete a successful apply and return to read-only with the applied
+    /// text until the refreshed backend manifest arrives.
+    pub fn apply_succeeded(&mut self) {
+        self.original = self.buffer.clone();
+        self.diff.clear();
+        self.invalidate_ticket();
+        self.diagnostics.clear();
+        self.conflict_message = None;
+        self.error_message = None;
+        self.validating = false;
+        self.applying = false;
+        self.phase = YamlPhase::ReadOnly;
+    }
+
+    /// Record an apply failure while keeping the user's dirty buffer intact.
+    pub fn apply_failed(&mut self, message: impl Into<String>) {
+        self.applying = false;
+        self.invalidate_ticket();
+        self.error_message = Some(message.into());
     }
 
     /// Apply one backend validation outcome.
@@ -222,22 +303,29 @@ impl YamlEditor {
                 if ticket.target != self.target {
                     return;
                 }
+                self.validating = false;
                 let matches_buffer = ticket.buffer_hash == buffer_hash(&self.buffer);
                 self.ticket = matches_buffer.then(|| ticket.clone());
                 self.diagnostics = Vec::new();
                 self.conflict_message = None;
+                self.error_message = None;
                 self.disruption_acknowledged = false;
             }
             YamlOutcome::Invalid { diagnostics } => {
+                self.validating = false;
                 self.invalidate_ticket();
                 self.diagnostics = diagnostics.clone();
                 self.conflict_message = None;
+                self.error_message = None;
             }
             YamlOutcome::Conflict { message } => {
                 // Conflict preservation: the user's work stays; only the
                 // server-issued authority is dropped.
+                self.validating = false;
                 self.invalidate_ticket();
+                self.diagnostics = Vec::new();
                 self.conflict_message = Some(message.clone());
+                self.error_message = None;
             }
         }
     }
@@ -262,12 +350,17 @@ impl YamlEditor {
     /// Drop the ticket after transport loss. The dirty buffer is preserved:
     /// reconnection must never destroy unsaved user work.
     pub fn connection_lost(&mut self) {
+        self.validating = false;
+        self.applying = false;
         self.invalidate_ticket();
     }
 
     /// Whether every Apply gate currently passes.
     #[must_use]
     pub fn can_apply(&self) -> bool {
+        if self.validating || self.applying {
+            return false;
+        }
         let Some(ticket) = self.ticket() else {
             return false;
         };
@@ -396,8 +489,16 @@ pub(crate) fn show<I>(
         return;
     };
 
-    // Lazily open the editor so the read-only view always exists.
-    if editors.get(window_id).is_none() {
+    // Lazily open the editor, and keep read-only editors synced when the
+    // window switches to another resource or receives a newer manifest.
+    let needs_sync = match editors.get(window_id) {
+        None => true,
+        Some(editor) => {
+            editor.phase() == YamlPhase::ReadOnly
+                && (editor.target() != identity || editor.original != manifest)
+        }
+    };
+    if needs_sync {
         editors.open(window_id, identity.clone(), manifest);
     }
     let mut queued_action: Option<YamlAction> = None;
@@ -460,19 +561,22 @@ pub(crate) fn show<I>(
                     job.wrap.max_width = wrap_width;
                     ui.fonts_mut(|f| f.layout_job(job))
                 };
+                let available = ui.available_size();
                 egui::ScrollArea::vertical()
                     .id_salt(("k10s.yaml.edit.scroll", window_id.0))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_sized(
-                            [ui.available_width(), ui.available_height()],
+                        ui.add(
                             TextEdit::multiline(&mut buffer)
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
+                                .min_size(available)
                                 .layouter(&mut layouter),
                         );
                     });
-                editor.set_buffer(buffer);
+                if buffer != editor.buffer() {
+                    editor.set_buffer(buffer);
+                }
             }
             YamlPhase::Reviewing => {
                 ui.horizontal(|ui| {
@@ -509,25 +613,35 @@ pub(crate) fn show<I>(
                     if apply.clicked()
                         && let Some(request) = editor.take_apply_request()
                     {
+                        editor.begin_apply();
                         queued_action = Some(YamlAction::Apply {
                             window: window_id,
                             request,
                         });
                     }
+                    let validate_enabled =
+                        mutations_allowed && !editor.is_validating() && !editor.is_applying();
                     if ui
-                        .add_enabled(mutations_allowed, egui::Button::new("Validate"))
+                        .add_enabled(validate_enabled, egui::Button::new("Validate"))
                         .clicked()
                     {
+                        editor.begin_validation();
                         queued_action = Some(YamlAction::Validate {
                             window: window_id,
                             context: editor.target().context.clone(),
                             yaml: editor.buffer().to_owned(),
                         });
                     }
-                    if ui.button("Back to edit").clicked() {
+                    if ui
+                        .add_enabled(!editor.is_applying(), egui::Button::new("Back to edit"))
+                        .clicked()
+                    {
                         editor.edit_again();
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui
+                        .add_enabled(!editor.is_applying(), egui::Button::new("Discard"))
+                        .clicked()
+                    {
                         editor.discard();
                         queued.push(WorkspaceCommand::DiscardYaml(window_id));
                     }
@@ -565,6 +679,21 @@ pub(crate) fn show<I>(
 
 /// Ticket, diagnostics, and conflict status above the diff.
 fn show_validation_panel(ui: &mut egui::Ui, editor: &YamlEditor) {
+    if editor.is_validating() {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new());
+            ui.label("Validating…");
+        });
+    }
+    if editor.is_applying() {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new());
+            ui.label("Applying…");
+        });
+    }
+    if let Some(message) = editor.error_message() {
+        ui.label(RichText::new(message).color(Color32::from_rgb(0xc0, 0x39, 0x2b)));
+    }
     if let Some(message) = editor.conflict_message() {
         ui.label(
             RichText::new(format!("Conflict: {message}"))
@@ -591,9 +720,12 @@ fn show_validation_panel(ui: &mut egui::Ui, editor: &YamlEditor) {
                 .color(Color32::from_rgb(0xd3, 0x8b, 0x26)),
         );
     }
-    if editor.ticket().is_none()
+    if !editor.is_validating()
+        && !editor.is_applying()
+        && editor.ticket().is_none()
         && editor.diagnostics().is_empty()
         && editor.conflict_message().is_none()
+        && editor.error_message().is_none()
     {
         ui.label(RichText::new("Not validated").weak());
     }
@@ -659,6 +791,164 @@ mod tests {
                     text: "B".into()
                 },
             ]
+        );
+    }
+
+    fn resource_identity(group: &str, kind: &str, name: &str, uid: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            context: "dev".into(),
+            gvk: k10s_protocol::GroupVersionKind {
+                group: group.into(),
+                version: "v1".into(),
+                kind: kind.into(),
+            },
+            namespace: Some("default".into()),
+            name: name.into(),
+            uid: uid.into(),
+        }
+    }
+
+    #[test]
+    fn show_resyncs_read_only_editor_on_target_or_manifest_change_but_preserves_dirty_edits() {
+        use egui_kittest::Harness;
+
+        let window = WindowId(7);
+        let deploy = resource_identity("apps", "Deployment", "web", "uid-deploy");
+        let pod = resource_identity("", "Pod", "web-0", "uid-pod");
+        let deploy_v1 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  uid: uid-deploy\n  resourceVersion: \"1\"\nspec:\n  replicas: 2\n";
+        let deploy_v2 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  uid: uid-deploy\n  resourceVersion: \"2\"\nspec:\n  replicas: 3\n";
+        let pod_v1 = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web-0\n  uid: uid-pod\n  resourceVersion: \"10\"\nspec:\n  containers:\n    - name: web\n      image: nginx:1.25\n";
+
+        struct State {
+            editors: YamlEditors,
+            identity: ResourceIdentity,
+            manifest: String,
+        }
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 320.0))
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    let mut queued: Vec<WorkspaceCommand<ResourceIdentity>> = Vec::new();
+                    show(
+                        ui,
+                        window,
+                        &mut state.editors,
+                        Some(&state.identity),
+                        Some(&state.manifest),
+                        true,
+                        &mut queued,
+                    );
+                },
+                State {
+                    editors: YamlEditors::default(),
+                    identity: deploy.clone(),
+                    manifest: deploy_v1.into(),
+                },
+            );
+        harness.run();
+        assert_eq!(
+            harness.state().editors.get(window).unwrap().target(),
+            &deploy
+        );
+        assert_eq!(
+            harness.state().editors.get(window).unwrap().buffer(),
+            deploy_v1
+        );
+
+        // Read-only editor refreshes when the cluster emits a newer manifest.
+        harness.state_mut().manifest = deploy_v2.into();
+        harness.run();
+        assert_eq!(
+            harness.state().editors.get(window).unwrap().buffer(),
+            deploy_v2
+        );
+
+        // Read-only editor rebinds when the integrated detail pane selects a Pod.
+        harness.state_mut().identity = pod.clone();
+        harness.state_mut().manifest = pod_v1.into();
+        harness.run();
+        assert_eq!(harness.state().editors.get(window).unwrap().target(), &pod);
+        assert_eq!(
+            harness.state().editors.get(window).unwrap().buffer(),
+            pod_v1
+        );
+
+        // Once editing starts, newer manifests must not clobber local spec edits.
+        let edited_pod = pod_v1.replace("nginx:1.25", "nginx:1.26");
+        {
+            let editor = harness.state_mut().editors.get_mut(window).unwrap();
+            editor.begin_edit();
+            editor.set_buffer(edited_pod.clone());
+        }
+        harness.state_mut().manifest = pod_v1.replace("\"10\"", "\"11\"");
+        harness.run();
+        let editor = harness.state().editors.get(window).unwrap();
+        assert_eq!(editor.phase(), YamlPhase::Editing);
+        assert_eq!(editor.buffer(), edited_pod);
+    }
+
+    #[test]
+    fn editing_tall_deployment_manifest_keeps_ticket_intact_without_text_changes() {
+        use egui_kittest::Harness;
+
+        let window = WindowId(8);
+        let deploy = resource_identity("apps", "Deployment", "api", "uid-api");
+        let mut tall_manifest = String::from(
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: default\n  uid: uid-api\n  resourceVersion: \"42\"\n  labels:\n",
+        );
+        for index in 0..40 {
+            tall_manifest.push_str(&format!("    label-{index}: value-{index}\n"));
+        }
+        tall_manifest.push_str(
+            "spec:\n  replicas: 2\n  template:\n    spec:\n      containers:\n        - name: api\n          image: nginx:1.25\n",
+        );
+        let edited = tall_manifest.replace("replicas: 2", "replicas: 4");
+
+        let mut editors = YamlEditors::default();
+        let editor = editors.open(window, deploy.clone(), &tall_manifest);
+        editor.begin_edit();
+        editor.set_buffer(edited.clone());
+        editor.review();
+        editor.apply_outcome(&YamlOutcome::Valid {
+            ticket: ValidationTicket {
+                id: "ticket-tall".into(),
+                target: deploy.clone(),
+                resource_revision: BackendRevision::new(42),
+                buffer_hash: buffer_hash(&edited),
+                disruptive: false,
+            },
+        });
+        assert!(editor.can_apply());
+
+        // Returning to Edit without changing text and rendering a tall manifest
+        // in a constrained viewport must not invalidate the validation ticket.
+        editor.edit_again();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(480.0, 180.0))
+            .build_ui_state(
+                |ui, editors: &mut YamlEditors| {
+                    let mut queued: Vec<WorkspaceCommand<ResourceIdentity>> = Vec::new();
+                    show(
+                        ui,
+                        window,
+                        editors,
+                        Some(&deploy),
+                        Some(&tall_manifest),
+                        true,
+                        &mut queued,
+                    );
+                },
+                editors,
+            );
+        harness.run();
+
+        let editor = harness.state_mut().get_mut(window).unwrap();
+        assert_eq!(editor.buffer(), edited);
+        editor.review();
+        assert!(
+            editor.can_apply(),
+            "rendering Editing without modifying text should keep the validation ticket"
         );
     }
 }

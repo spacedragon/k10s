@@ -15,6 +15,20 @@ pub(crate) struct ParsedManifest {
     pub(crate) resource_version: String,
 }
 
+impl ParsedManifest {
+    /// Prepare the parsed object for Kubernetes Server-Side Apply by stripping
+    /// read-only server-managed fields (`metadata.managedFields` and top-level
+    /// `status`) while preserving `metadata.uid` and `metadata.resourceVersion`.
+    pub(crate) fn apply_object(&self) -> kube::core::DynamicObject {
+        let mut object = self.object.clone();
+        object.metadata.managed_fields = None;
+        if let Some(map) = object.data.as_object_mut() {
+            map.remove("status");
+        }
+        object
+    }
+}
+
 pub(crate) fn parse(input: &str) -> Result<ParsedManifest, Vec<YamlDiagnostic>> {
     let yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(input).map_err(|error| {
         vec![YamlDiagnostic {

@@ -248,11 +248,12 @@ impl KubeAdapter {
                 let operations = self.operations.clone();
                 let task_id = id.clone();
                 tokio::spawn(async move {
-                    let params = PatchParams::apply("k10s").validation_strict();
+                    let params = PatchParams::apply("k10s").force().validation_strict();
+                    let apply_object = parsed.apply_object();
                     finish(
                         &operations,
                         task_id.as_str(),
-                        api.patch(&target.name, &params, &Patch::Apply(&parsed.object))
+                        api.patch(&target.name, &params, &Patch::Apply(&apply_object))
                             .await
                             .map(|_| ()),
                     );

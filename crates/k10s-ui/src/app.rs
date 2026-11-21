@@ -165,6 +165,12 @@ pub struct K10sApp {
     pending_mutations: BTreeMap<RequestId, PendingMutation>,
     /// Exact-target delete dry-runs awaiting authoritative server results.
     pending_delete_preflights: BTreeMap<RequestId, PendingDeletePreflight>,
+    /// In-flight YAML validation dry-runs awaiting authoritative outcomes.
+    pending_yaml_validations: BTreeMap<RequestId, PendingYamlValidation>,
+    /// In-flight YAML apply submissions awaiting accepted operation IDs.
+    pending_yaml_applies: BTreeMap<RequestId, PendingYamlApply>,
+    /// Accepted YAML apply operations awaiting terminal backend status.
+    active_yaml_applies: Vec<ActiveYamlApply>,
     /// In-flight context switch awaiting the backend's verdict; local state
     /// moves only after it succeeds.
     pending_switch: Option<PendingSwitch>,
@@ -241,6 +247,28 @@ struct PendingDeletePreflight {
     window: WindowId,
     target: ResourceIdentity,
     propagation: k10s_protocol::DeletePropagation,
+}
+
+#[derive(Debug)]
+struct PendingYamlValidation {
+    request: PendingRequest,
+    window: WindowId,
+    target: ResourceIdentity,
+    buffer_hash: String,
+}
+
+#[derive(Debug)]
+struct PendingYamlApply {
+    request: PendingRequest,
+    window: WindowId,
+    target: ResourceIdentity,
+}
+
+#[derive(Debug)]
+struct ActiveYamlApply {
+    window: WindowId,
+    target: ResourceIdentity,
+    operation_id: k10s_protocol::OperationId,
 }
 
 /// A context switch sent to the backend whose response has not arrived.
@@ -413,6 +441,9 @@ impl K10sApp {
             types_request: None,
             pending_mutations: BTreeMap::new(),
             pending_delete_preflights: BTreeMap::new(),
+            pending_yaml_validations: BTreeMap::new(),
+            pending_yaml_applies: BTreeMap::new(),
+            active_yaml_applies: Vec::new(),
             pending_switch: None,
             failed_switch: None,
             details: BTreeMap::new(),
@@ -851,6 +882,10 @@ impl K10sApp {
         });
         let request_result = request_result.and_then(|()| {
             self.process_dialog_actions()
+                .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+        });
+        let request_result = request_result.and_then(|()| {
+            self.process_yaml_actions()
                 .map_err(|error| ClientError::Protocol(format!("{error:?}")))
         });
         if let Err(error) = request_result {
@@ -1393,7 +1428,7 @@ impl K10sApp {
                         };
                     match error {
                         ClientError::SequenceGap { .. } => {
-                            self.shell.yaml_editors_mut().connection_lost();
+                            self.reset_yaml_in_flight();
                             self.reset_port_forward_ui(Some("Server state changed; submit again"));
                             self.enter_resource_recovery();
                             self.recovering = true;
@@ -1501,6 +1536,53 @@ impl K10sApp {
                                     self.shell.dialogs_mut().active_mut(entry.window)
                             {
                                 dialog.operation_failed(server_error.safe_message.clone());
+                            }
+                        }
+                        ClientError::Server(ref server_error)
+                            if stream_request_id.as_ref().is_some_and(|id| {
+                                self.pending_yaml_validations.contains_key(id)
+                            }) =>
+                        {
+                            if let Some(entry) = stream_request_id
+                                .as_ref()
+                                .and_then(|id| self.pending_yaml_validations.remove(id))
+                            {
+                                let _ = self.client.take_failure(entry.request);
+                                if let Some(editor) =
+                                    self.shell.yaml_editors_mut().get_mut(entry.window)
+                                    && editor.target() == &entry.target
+                                    && editor.phase() != crate::ui::tools::YamlPhase::ReadOnly
+                                    && k10s_protocol::buffer_hash(editor.buffer())
+                                        == entry.buffer_hash
+                                {
+                                    if server_error.code == ErrorCode::Conflict {
+                                        editor.apply_outcome(
+                                            &k10s_protocol::YamlOutcome::Conflict {
+                                                message: server_error.safe_message.clone(),
+                                            },
+                                        );
+                                    } else {
+                                        editor.validation_failed(server_error.safe_message.clone());
+                                    }
+                                }
+                            }
+                        }
+                        ClientError::Server(ref server_error)
+                            if stream_request_id
+                                .as_ref()
+                                .is_some_and(|id| self.pending_yaml_applies.contains_key(id)) =>
+                        {
+                            if let Some(entry) = stream_request_id
+                                .as_ref()
+                                .and_then(|id| self.pending_yaml_applies.remove(id))
+                            {
+                                let _ = self.client.take_failure(entry.request);
+                                if let Some(editor) =
+                                    self.shell.yaml_editors_mut().get_mut(entry.window)
+                                    && editor.target() == &entry.target
+                                {
+                                    editor.apply_failed(server_error.safe_message.clone());
+                                }
                             }
                         }
                         ClientError::Server(ref server_error)
@@ -1790,8 +1872,8 @@ impl K10sApp {
                     // the identities in an early page nor identities removed
                     // from the new view can be projected safely page by page.
                     // Revoke server-issued authority at the accepted begin;
-                    // connection_lost deliberately preserves dirty buffers.
-                    self.shell.yaml_editors_mut().connection_lost();
+                    // reset_yaml_in_flight deliberately preserves dirty buffers.
+                    self.reset_yaml_in_flight();
                 }
                 if applied && server_rebuild_requested {
                     self.reset_port_forward_ui(Some("Server state changed; submit again"));
@@ -2289,7 +2371,7 @@ impl K10sApp {
         self.failed_switch = None;
         self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.teardown_stream_sessions();
-        self.shell.yaml_editors_mut().connection_lost();
+        self.reset_yaml_in_flight();
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
         // retry (the backend deduplicates by idempotency key).
@@ -2305,6 +2387,17 @@ impl K10sApp {
         }
         self.recovering = true;
         self.view = AppView::Connecting;
+    }
+
+    fn reset_yaml_in_flight(&mut self) {
+        for (_, entry) in std::mem::take(&mut self.pending_yaml_validations) {
+            let _ = self.client.cancel(&entry.request);
+        }
+        for (_, entry) in std::mem::take(&mut self.pending_yaml_applies) {
+            let _ = self.client.cancel(&entry.request);
+        }
+        self.active_yaml_applies.clear();
+        self.shell.yaml_editors_mut().connection_lost();
     }
 
     fn enter_resource_recovery(&mut self) {
@@ -3075,6 +3168,83 @@ impl K10sApp {
             .map_err(|error| ClientError::Protocol(format!("{error:?}")))
     }
 
+    /// Drain rendering-time YAML editor actions into validation queries and
+    /// ticketed apply commands.
+    fn process_yaml_actions(&mut self) -> Result<(), ClientError> {
+        for (_window, action) in self.shell.drain_yaml_actions() {
+            match action {
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context,
+                    yaml,
+                } => {
+                    let Some(target) = self
+                        .shell
+                        .yaml_editors_mut()
+                        .get(window)
+                        .map(|editor| editor.target().clone())
+                    else {
+                        continue;
+                    };
+                    if !self.mutation_authority_allows(&target) {
+                        if let Some(editor) = self.shell.yaml_editors_mut().get_mut(window) {
+                            editor.validation_failed(
+                                "window is not live; retry the list before validating",
+                            );
+                        }
+                        continue;
+                    }
+                    let superseded = self
+                        .pending_yaml_validations
+                        .iter()
+                        .filter_map(|(id, entry)| (entry.window == window).then_some(id.clone()))
+                        .collect::<Vec<_>>();
+                    for id in superseded {
+                        if let Some(entry) = self.pending_yaml_validations.remove(&id) {
+                            let _ = self.client.cancel(&entry.request);
+                        }
+                    }
+                    let buffer_hash = k10s_protocol::buffer_hash(&yaml);
+                    let request = self.client.begin(Query::YamlValidate { context, yaml })?;
+                    self.pending_yaml_validations.insert(
+                        request.id().clone(),
+                        PendingYamlValidation {
+                            request,
+                            window,
+                            target,
+                            buffer_hash,
+                        },
+                    );
+                }
+                crate::ui::tools::YamlAction::Apply { window, request } => {
+                    if !self.mutation_authority_allows(&request.target) {
+                        if let Some(editor) = self.shell.yaml_editors_mut().get_mut(window) {
+                            editor
+                                .apply_failed("window is not live; retry the list before applying");
+                        }
+                        continue;
+                    }
+                    let target = request.target.clone();
+                    let idempotency_key = format!("yaml-apply:{}", request.ticket_id);
+                    let pending = self.client.begin_command(Command::YamlApply {
+                        request,
+                        idempotency_key,
+                    })?;
+                    self.pending_yaml_applies.insert(
+                        pending.id().clone(),
+                        PendingYamlApply {
+                            request: pending,
+                            window,
+                            target,
+                        },
+                    );
+                }
+            }
+        }
+        self.flush_outbound()
+            .map_err(|error| ClientError::Protocol(format!("{error:?}")))
+    }
+
     /// Complete in-flight mutations by reporting the accepted operation (or
     /// a lost-response failure) back to the originating dialog.
     fn finish_mutations(&mut self) {
@@ -3100,7 +3270,145 @@ impl K10sApp {
         }
         self.finish_type_requests();
         self.finish_delete_preflights();
+        self.finish_yaml_requests();
         self.refresh_details();
+    }
+
+    fn finish_yaml_requests(&mut self) {
+        while let Some(id) = self
+            .pending_yaml_validations
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let Some(entry) = self.pending_yaml_validations.remove(&id) else {
+                unreachable!("key came from this map");
+            };
+            let result = self.client.take(entry.request.clone());
+            let failure = if result.is_none() {
+                self.client.take_failure(entry.request)
+            } else {
+                None
+            };
+            if let Some(editor) = self.shell.yaml_editors_mut().get_mut(entry.window)
+                && editor.target() == &entry.target
+                && editor.phase() != crate::ui::tools::YamlPhase::ReadOnly
+                && k10s_protocol::buffer_hash(editor.buffer()) == entry.buffer_hash
+            {
+                match result {
+                    Some(QueryResult::YamlValidate(outcome)) => {
+                        if let k10s_protocol::YamlOutcome::Valid { ticket } = outcome.as_ref()
+                            && ticket.target != entry.target
+                        {
+                            editor.validation_failed(
+                                "edited YAML targets a different resource; restore apiVersion, kind, metadata.name, metadata.namespace, and metadata.uid",
+                            );
+                        } else {
+                            editor.apply_outcome(&outcome);
+                        }
+                    }
+                    _ => match failure {
+                        Some(error) if error.code == ErrorCode::Conflict => {
+                            editor.apply_outcome(&k10s_protocol::YamlOutcome::Conflict {
+                                message: error.safe_message,
+                            });
+                        }
+                        Some(error) => editor.validation_failed(error.safe_message),
+                        None => editor.validation_failed("validation response lost; try again"),
+                    },
+                }
+            }
+        }
+
+        while let Some(id) = self
+            .pending_yaml_applies
+            .iter()
+            .find(|(_, entry)| !self.client.is_pending(&entry.request))
+            .map(|(id, _)| id.clone())
+        {
+            let Some(entry) = self.pending_yaml_applies.remove(&id) else {
+                unreachable!("key came from this map");
+            };
+            match self.client.take(entry.request.clone()) {
+                Some(QueryResult::Applied(accepted)) => {
+                    self.active_yaml_applies.push(ActiveYamlApply {
+                        window: entry.window,
+                        target: entry.target,
+                        operation_id: accepted.operation_id,
+                    });
+                }
+                _ => {
+                    let message = self.client.take_failure(entry.request).map_or_else(
+                        || "apply submission lost; re-validate and try again".to_owned(),
+                        |error| error.safe_message,
+                    );
+                    if let Some(editor) = self.shell.yaml_editors_mut().get_mut(entry.window)
+                        && editor.target() == &entry.target
+                    {
+                        editor.apply_failed(message);
+                    }
+                }
+            }
+        }
+
+        let mut remaining = Vec::with_capacity(self.active_yaml_applies.len());
+        let mut refreshed_targets = Vec::new();
+        for active in std::mem::take(&mut self.active_yaml_applies) {
+            let status = self
+                .client
+                .operation(&active.operation_id)
+                .map(crate::client::OperationView::status);
+            match status {
+                Some(k10s_protocol::OperationStatus::Succeeded) => {
+                    if let Some(editor) = self.shell.yaml_editors_mut().get_mut(active.window)
+                        && editor.target() == &active.target
+                    {
+                        editor.apply_succeeded();
+                    }
+                    self.shell.clear_yaml_dirty(active.window);
+                    refreshed_targets.push(active.target);
+                }
+                Some(k10s_protocol::OperationStatus::Failed) => {
+                    if let Some(editor) = self.shell.yaml_editors_mut().get_mut(active.window)
+                        && editor.target() == &active.target
+                    {
+                        editor.apply_failed(
+                            "apply failed on the cluster; review and re-validate before retrying",
+                        );
+                    }
+                }
+                Some(k10s_protocol::OperationStatus::Cancelled) => {
+                    if let Some(editor) = self.shell.yaml_editors_mut().get_mut(active.window)
+                        && editor.target() == &active.target
+                    {
+                        editor.apply_failed("apply cancelled; re-validate before retrying");
+                    }
+                }
+                Some(
+                    k10s_protocol::OperationStatus::OutcomeUnknown
+                    | k10s_protocol::OperationStatus::Unknown,
+                ) => {
+                    if let Some(editor) = self.shell.yaml_editors_mut().get_mut(active.window)
+                        && editor.target() == &active.target
+                    {
+                        editor.apply_failed("apply outcome unknown; refresh before retrying");
+                    }
+                }
+                None
+                | Some(
+                    k10s_protocol::OperationStatus::Pending
+                    | k10s_protocol::OperationStatus::Running,
+                ) => {
+                    remaining.push(active);
+                }
+            }
+        }
+        self.active_yaml_applies = remaining;
+        for target in refreshed_targets {
+            self.cancel_detail_request(&target);
+            self.details.remove(&target);
+            self.primary_details.remove(&target);
+        }
     }
 
     fn finish_delete_preflights(&mut self) {
@@ -11468,6 +11776,612 @@ mod tests {
                 .any(|run| run.as_deref() == Some("\u{25cf} Ready")),
             "a Ready status renders its healthy tone glyph, got {status_labels:?}"
         );
+    }
+
+    fn live_deployment_yaml_app() -> (
+        K10sApp,
+        Rc<RefCell<FactoryState>>,
+        WindowId,
+        ResourceIdentity,
+        String,
+    ) {
+        let (mut app, state) = ready_app();
+        let window = app
+            .web_activate_workload(WorkloadKind::Deployments)
+            .expect("deployment window opens");
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|entry| entry.live.id().clone())
+            .expect("deployment subscription exists");
+        let target = deployment_identity("web");
+        complete_resource_snapshot(
+            &mut app,
+            &subscription,
+            10,
+            vec![deployment_row(target.clone(), 10)],
+            true,
+        );
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::SelectRow(window, target.clone()));
+        let mut detail = deployment_detail_fixture(&target);
+        let manifest = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: default\n  uid: uid-web\n  resourceVersion: \"10\"\nspec:\n  replicas: 2\n".to_owned();
+        detail.manifest = manifest.clone();
+        app.details.insert(target.clone(), detail.clone());
+        app.primary_details
+            .insert(target.clone(), PrimaryDetailState::Loaded(detail));
+        app.shell
+            .apply_workspace_command(WorkspaceCommand::BeginYamlEdit(window));
+        state.borrow_mut().sent.clear();
+        (app, state, window, target, manifest)
+    }
+
+    #[test]
+    fn yaml_validate_and_apply_actions_round_trip_through_app_and_refresh_detail() {
+        let (mut app, state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 4");
+
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+
+        app.process_yaml_actions().unwrap();
+        let validate_frame = state
+            .borrow()
+            .sent
+            .iter()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .cloned()
+            .expect("process_yaml_actions sends yaml.validate");
+        let validate_req_id = validate_frame.request_id.clone().expect("request id");
+
+        let ticket = ValidationTicket {
+            id: "ticket-web-1".into(),
+            target: target.clone(),
+            resource_revision: BackendRevision::new(10),
+            buffer_hash: buffer_hash(&edited),
+            disruptive: true,
+        };
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(validate_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(YamlOutcome::Valid { ticket }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        let apply_request = {
+            let editor = app.shell.yaml_editors_mut().get_mut(window).unwrap();
+            assert!(!editor.is_validating());
+            assert!(editor.has_disruption_warning());
+            assert!(!editor.can_apply(), "disruptive change requires ack");
+            editor.acknowledge_disruption();
+            assert!(editor.can_apply());
+            let request = editor.take_apply_request().expect("apply request");
+            editor.begin_apply();
+            request
+        };
+        app.shell.yaml_editors_mut().queue(
+            window,
+            crate::ui::tools::YamlAction::Apply {
+                window,
+                request: apply_request,
+            },
+        );
+
+        state.borrow_mut().sent.clear();
+        app.process_yaml_actions().unwrap();
+        let apply_frame = state
+            .borrow()
+            .sent
+            .iter()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.apply"))
+            .cloned()
+            .expect("process_yaml_actions sends yaml.apply");
+        let apply_req_id = apply_frame.request_id.clone().expect("request id");
+
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(apply_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(k10s_protocol::OperationAccepted {
+                    operation_id: "op-yaml-1".into(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        state.borrow_mut().sent.clear();
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::OperationUpdate,
+                request_id: None,
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(k10s_protocol::OperationUpdate {
+                    operation_id: "op-yaml-1".into(),
+                    status: k10s_protocol::OperationStatus::Succeeded,
+                    progress: Some("applied".into()),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert_eq!(editor.phase(), crate::ui::tools::YamlPhase::ReadOnly);
+        assert!(!editor.is_applying());
+        assert_eq!(app.workspace().yaml_owner(&target), None);
+        assert!(
+            app.detail_requests.contains_key(&target),
+            "successful apply triggers a fresh ResourceDetail reload"
+        );
+    }
+
+    #[test]
+    fn yaml_validation_and_apply_server_errors_project_into_editor_without_killing_app() {
+        let (mut app, state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 5");
+
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+
+        // Validation Conflict projects into editor.conflict_message() without terminating app.
+        app.process_yaml_actions().unwrap();
+        let conflict_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("validate request id");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(conflict_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "the object resourceVersion no longer matches",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "corr-conflict",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert_eq!(
+                editor.conflict_message(),
+                Some("the object resourceVersion no longer matches")
+            );
+            assert_eq!(editor.buffer(), edited);
+        }
+
+        // Validation Unauthorized projects into editor.error_message() without terminating app.
+        {
+            let editors = app.shell.yaml_editors_mut();
+            editors.get_mut(window).unwrap().begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+        state.borrow_mut().sent.clear();
+        app.process_yaml_actions().unwrap();
+        let forbidden_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("second validate request id");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(forbidden_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Unauthorized,
+                    "forbidden by cluster RBAC",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "corr-forbidden",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert_eq!(editor.error_message(), Some("forbidden by cluster RBAC"));
+            assert_eq!(editor.buffer(), edited);
+        }
+
+        // Apply error also projects into editor.error_message() and preserves local edits.
+        let apply_request = {
+            let editor = app.shell.yaml_editors_mut().get_mut(window).unwrap();
+            editor.apply_outcome(&YamlOutcome::Valid {
+                ticket: ValidationTicket {
+                    id: "ticket-web-err".into(),
+                    target: target.clone(),
+                    resource_revision: BackendRevision::new(10),
+                    buffer_hash: buffer_hash(&edited),
+                    disruptive: false,
+                },
+            });
+            let req = editor.take_apply_request().expect("apply request");
+            editor.begin_apply();
+            req
+        };
+        app.shell.yaml_editors_mut().queue(
+            window,
+            crate::ui::tools::YamlAction::Apply {
+                window,
+                request: apply_request,
+            },
+        );
+        state.borrow_mut().sent.clear();
+        app.process_yaml_actions().unwrap();
+        let apply_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.apply"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("apply request id");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(apply_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "validation ticket expired",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "corr-apply-err",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.is_applying());
+        assert_eq!(editor.error_message(), Some("validation ticket expired"));
+        assert_eq!(editor.buffer(), edited);
+    }
+
+    #[test]
+    fn sequence_gap_and_resync_clear_in_flight_yaml_requests_without_clobbering_edits() {
+        // 1. SequenceGap clears pending/active YAML state and prevents finish_mutations
+        //    from overwriting the connection-lost editor state.
+        let (mut app, _state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 6");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+        app.process_yaml_actions().unwrap();
+        assert_eq!(app.pending_yaml_validations.len(), 1);
+        app.active_yaml_applies.push(super::ActiveYamlApply {
+            window,
+            target: target.clone(),
+            operation_id: "op-before-gap".into(),
+        });
+
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|entry| entry.live.id().clone())
+            .expect("deployment subscription exists");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription),
+                sequence: Some(99),
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("11".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: target.clone(),
+                        row: deployment_row(target.clone(), 11),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(app.pending_yaml_validations.is_empty());
+        assert!(app.pending_yaml_applies.is_empty());
+        assert!(app.active_yaml_applies.is_empty());
+        app.finish_mutations();
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert!(editor.error_message().is_none());
+            assert_eq!(editor.buffer(), edited);
+        }
+
+        // 2. Replacement snapshot cancels in-flight validation so a late Error frame
+        //    cannot terminate the app or apply a stale ticket.
+        let (mut app, state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 7");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+        app.process_yaml_actions().unwrap();
+        let late_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("validate request id");
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|entry| entry.live.id().clone())
+            .expect("deployment subscription exists");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::SnapshotBegin,
+                request_id: None,
+                subscription_id: Some(subscription),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(app.pending_yaml_validations.is_empty());
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(late_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "stale error after replacement snapshot",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "corr-late",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.is_validating());
+        assert!(editor.ticket().is_none());
+        assert_eq!(editor.buffer(), edited);
+    }
+
+    #[test]
+    fn yaml_validation_mismatched_target_clears_validating_and_reports_recoverable_error() {
+        let (mut app, state, window, target_a, manifest_a) = live_deployment_yaml_app();
+        let target_b = deployment_identity("other-deploy");
+        let pasted_b = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: other-deploy\n  namespace: default\n  uid: uid-other-deploy\n  resourceVersion: \"22\"\nspec:\n  replicas: 3\n".to_owned();
+
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target_a.clone(), &manifest_a);
+            editor.begin_edit();
+            editor.set_buffer(pasted_b.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target_a.context.clone(),
+                    yaml: pasted_b.clone(),
+                },
+            );
+        }
+
+        app.process_yaml_actions().unwrap();
+        let validate_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("validate request id");
+
+        // Backend validates pasted YAML for existing object B and returns Valid(ticket_b).
+        let ticket_b = ValidationTicket {
+            id: "ticket-other-deploy".into(),
+            target: target_b,
+            resource_revision: BackendRevision::new(22),
+            buffer_hash: buffer_hash(&pasted_b),
+            disruptive: false,
+        };
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(validate_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(YamlOutcome::Valid { ticket: ticket_b }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        // Editor must leave validating state, refuse the foreign ticket, show a
+        // clear recoverable error, and preserve the user's pasted buffer.
+        assert!(app.pending_yaml_validations.is_empty());
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert!(!editor.can_apply());
+            assert!(editor.ticket().is_none());
+            assert!(
+                editor
+                    .error_message()
+                    .is_some_and(|msg| msg.contains("different resource")),
+                "expected target-mismatch error, got {:?}",
+                editor.error_message()
+            );
+            assert_eq!(editor.buffer(), pasted_b);
+        }
+
+        // User can recover by fixing the buffer back to target A and re-validating.
+        let fixed_a = manifest_a.replace("replicas: 2", "replicas: 3");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.get_mut(window).unwrap();
+            editor.edit_again();
+            editor.set_buffer(fixed_a.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target_a.context.clone(),
+                    yaml: fixed_a.clone(),
+                },
+            );
+        }
+        state.borrow_mut().sent.clear();
+        app.process_yaml_actions().unwrap();
+        let retry_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("retry validate request id");
+        let ticket_a = ValidationTicket {
+            id: "ticket-web-recovered".into(),
+            target: target_a,
+            resource_revision: BackendRevision::new(10),
+            buffer_hash: buffer_hash(&fixed_a),
+            disruptive: false,
+        };
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(retry_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(YamlOutcome::Valid { ticket: ticket_a }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.is_validating());
+        assert!(editor.error_message().is_none());
+        assert!(editor.can_apply());
     }
 }
 
