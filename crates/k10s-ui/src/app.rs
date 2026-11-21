@@ -3297,7 +3297,15 @@ impl K10sApp {
             {
                 match result {
                     Some(QueryResult::YamlValidate(outcome)) => {
-                        editor.apply_outcome(&outcome);
+                        if let k10s_protocol::YamlOutcome::Valid { ticket } = outcome.as_ref()
+                            && ticket.target != entry.target
+                        {
+                            editor.validation_failed(
+                                "edited YAML targets a different resource; restore apiVersion, kind, metadata.name, metadata.namespace, and metadata.uid",
+                            );
+                        } else {
+                            editor.apply_outcome(&outcome);
+                        }
                     }
                     _ => match failure {
                         Some(error) if error.code == ErrorCode::Conflict => {
@@ -12246,6 +12254,134 @@ mod tests {
         assert!(!editor.is_validating());
         assert!(editor.ticket().is_none());
         assert_eq!(editor.buffer(), edited);
+    }
+
+    #[test]
+    fn yaml_validation_mismatched_target_clears_validating_and_reports_recoverable_error() {
+        let (mut app, state, window, target_a, manifest_a) = live_deployment_yaml_app();
+        let target_b = deployment_identity("other-deploy");
+        let pasted_b = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: other-deploy\n  namespace: default\n  uid: uid-other-deploy\n  resourceVersion: \"22\"\nspec:\n  replicas: 3\n".to_owned();
+
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target_a.clone(), &manifest_a);
+            editor.begin_edit();
+            editor.set_buffer(pasted_b.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target_a.context.clone(),
+                    yaml: pasted_b.clone(),
+                },
+            );
+        }
+
+        app.process_yaml_actions().unwrap();
+        let validate_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("validate request id");
+
+        // Backend validates pasted YAML for existing object B and returns Valid(ticket_b).
+        let ticket_b = ValidationTicket {
+            id: "ticket-other-deploy".into(),
+            target: target_b,
+            resource_revision: BackendRevision::new(22),
+            buffer_hash: buffer_hash(&pasted_b),
+            disruptive: false,
+        };
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(validate_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(YamlOutcome::Valid { ticket: ticket_b }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        // Editor must leave validating state, refuse the foreign ticket, show a
+        // clear recoverable error, and preserve the user's pasted buffer.
+        assert!(app.pending_yaml_validations.is_empty());
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert!(!editor.can_apply());
+            assert!(editor.ticket().is_none());
+            assert!(
+                editor
+                    .error_message()
+                    .is_some_and(|msg| msg.contains("different resource")),
+                "expected target-mismatch error, got {:?}",
+                editor.error_message()
+            );
+            assert_eq!(editor.buffer(), pasted_b);
+        }
+
+        // User can recover by fixing the buffer back to target A and re-validating.
+        let fixed_a = manifest_a.replace("replicas: 2", "replicas: 3");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.get_mut(window).unwrap();
+            editor.edit_again();
+            editor.set_buffer(fixed_a.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target_a.context.clone(),
+                    yaml: fixed_a.clone(),
+                },
+            );
+        }
+        state.borrow_mut().sent.clear();
+        app.process_yaml_actions().unwrap();
+        let retry_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("retry validate request id");
+        let ticket_a = ValidationTicket {
+            id: "ticket-web-recovered".into(),
+            target: target_a,
+            resource_revision: BackendRevision::new(10),
+            buffer_hash: buffer_hash(&fixed_a),
+            disruptive: false,
+        };
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Response,
+                request_id: Some(retry_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(YamlOutcome::Valid { ticket: ticket_a }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        app.finish_mutations();
+
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.is_validating());
+        assert!(editor.error_message().is_none());
+        assert!(editor.can_apply());
     }
 }
 
