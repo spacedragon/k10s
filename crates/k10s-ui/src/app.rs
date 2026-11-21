@@ -1428,7 +1428,7 @@ impl K10sApp {
                         };
                     match error {
                         ClientError::SequenceGap { .. } => {
-                            self.shell.yaml_editors_mut().connection_lost();
+                            self.reset_yaml_in_flight();
                             self.reset_port_forward_ui(Some("Server state changed; submit again"));
                             self.enter_resource_recovery();
                             self.recovering = true;
@@ -1872,8 +1872,8 @@ impl K10sApp {
                     // the identities in an early page nor identities removed
                     // from the new view can be projected safely page by page.
                     // Revoke server-issued authority at the accepted begin;
-                    // connection_lost deliberately preserves dirty buffers.
-                    self.shell.yaml_editors_mut().connection_lost();
+                    // reset_yaml_in_flight deliberately preserves dirty buffers.
+                    self.reset_yaml_in_flight();
                 }
                 if applied && server_rebuild_requested {
                     self.reset_port_forward_ui(Some("Server state changed; submit again"));
@@ -2371,10 +2371,7 @@ impl K10sApp {
         self.failed_switch = None;
         self.reset_port_forward_ui(Some("Connection lost; submit again"));
         self.teardown_stream_sessions();
-        self.pending_yaml_validations.clear();
-        self.pending_yaml_applies.clear();
-        self.active_yaml_applies.clear();
-        self.shell.yaml_editors_mut().connection_lost();
+        self.reset_yaml_in_flight();
         // Server-issued details are stale after recovery and every in-flight
         // mutation lost its response channel: dialogs reopen for a safe
         // retry (the backend deduplicates by idempotency key).
@@ -2390,6 +2387,17 @@ impl K10sApp {
         }
         self.recovering = true;
         self.view = AppView::Connecting;
+    }
+
+    fn reset_yaml_in_flight(&mut self) {
+        for (_, entry) in std::mem::take(&mut self.pending_yaml_validations) {
+            let _ = self.client.cancel(&entry.request);
+        }
+        for (_, entry) in std::mem::take(&mut self.pending_yaml_applies) {
+            let _ = self.client.cancel(&entry.request);
+        }
+        self.active_yaml_applies.clear();
+        self.shell.yaml_editors_mut().connection_lost();
     }
 
     fn enter_resource_recovery(&mut self) {
@@ -12096,6 +12104,147 @@ mod tests {
         let editor = app.shell.yaml_editors_mut().get(window).unwrap();
         assert!(!editor.is_applying());
         assert_eq!(editor.error_message(), Some("validation ticket expired"));
+        assert_eq!(editor.buffer(), edited);
+    }
+
+    #[test]
+    fn sequence_gap_and_resync_clear_in_flight_yaml_requests_without_clobbering_edits() {
+        // 1. SequenceGap clears pending/active YAML state and prevents finish_mutations
+        //    from overwriting the connection-lost editor state.
+        let (mut app, _state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 6");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+        app.process_yaml_actions().unwrap();
+        assert_eq!(app.pending_yaml_validations.len(), 1);
+        app.active_yaml_applies.push(super::ActiveYamlApply {
+            window,
+            target: target.clone(),
+            operation_id: "op-before-gap".into(),
+        });
+
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|entry| entry.live.id().clone())
+            .expect("deployment subscription exists");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Event,
+                request_id: None,
+                subscription_id: Some(subscription),
+                sequence: Some(99),
+                payload: serde_json::to_value(Event {
+                    event_kind: k10s_protocol::RESOURCE_EVENT_CHANGED.into(),
+                    revision: Some("11".into()),
+                    payload: serde_json::to_value(ResourceChanged {
+                        identity: target.clone(),
+                        row: deployment_row(target.clone(), 11),
+                    })
+                    .unwrap(),
+                })
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(app.pending_yaml_validations.is_empty());
+        assert!(app.pending_yaml_applies.is_empty());
+        assert!(app.active_yaml_applies.is_empty());
+        app.finish_mutations();
+        {
+            let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+            assert!(!editor.is_validating());
+            assert!(editor.error_message().is_none());
+            assert_eq!(editor.buffer(), edited);
+        }
+
+        // 2. Replacement snapshot cancels in-flight validation so a late Error frame
+        //    cannot terminate the app or apply a stale ticket.
+        let (mut app, state, window, target, manifest) = live_deployment_yaml_app();
+        let edited = manifest.replace("replicas: 2", "replicas: 7");
+        {
+            let editors = app.shell.yaml_editors_mut();
+            let editor = editors.open(window, target.clone(), &manifest);
+            editor.begin_edit();
+            editor.set_buffer(edited.clone());
+            editor.review();
+            editor.begin_validation();
+            editors.queue(
+                window,
+                crate::ui::tools::YamlAction::Validate {
+                    window,
+                    context: target.context.clone(),
+                    yaml: edited.clone(),
+                },
+            );
+        }
+        app.process_yaml_actions().unwrap();
+        let late_req_id = state
+            .borrow()
+            .sent
+            .iter()
+            .rev()
+            .find(|frame| request_kind(frame).as_deref() == Some("yaml.validate"))
+            .and_then(|frame| frame.request_id.clone())
+            .expect("validate request id");
+        let subscription = app
+            .window_subscriptions
+            .get(&window)
+            .and_then(|key| app.resource_subscriptions.get(key))
+            .map(|entry| entry.live.id().clone())
+            .expect("deployment subscription exists");
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::SnapshotBegin,
+                request_id: None,
+                subscription_id: Some(subscription),
+                sequence: None,
+                payload: serde_json::to_value(SnapshotBegin { total_chunks: 1 }).unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(app.pending_yaml_validations.is_empty());
+        app.handle_event(
+            server_message(&ServerFrame {
+                kind: ServerKind::Error,
+                request_id: Some(late_req_id),
+                subscription_id: None,
+                sequence: None,
+                payload: serde_json::to_value(ErrorFrame::new(
+                    ErrorCode::Conflict,
+                    "stale error after replacement snapshot",
+                    Retryability::Never,
+                    ErrorScope::Request,
+                    "corr-late",
+                ))
+                .unwrap(),
+            }),
+            0,
+            0,
+        )
+        .unwrap();
+        let editor = app.shell.yaml_editors_mut().get(window).unwrap();
+        assert!(!editor.is_validating());
+        assert!(editor.ticket().is_none());
         assert_eq!(editor.buffer(), edited);
     }
 }
